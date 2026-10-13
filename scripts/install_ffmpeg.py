@@ -22,10 +22,24 @@ FORMULA = "mwe-ffmpeg"
 SOURCE = ROOT / "Formula" / f"{FORMULA}.rb"
 
 
+def brew_bin():
+    candidates = [
+        shutil.which("brew"),
+        str(Path.home() / "homebrew/bin/brew"),
+        "/usr/local/bin/brew",
+        "/opt/homebrew/bin/brew",
+    ]
+    for c in candidates:
+        if c and Path(c).is_file():
+            return c
+    return "brew"
+
+
 def brew(*args, capture=False):
+    cmd = [brew_bin(), *args]
     if capture:
-        return subprocess.run(["brew", *args], text=True, capture_output=True)
-    return subprocess.run(["brew", *args], check=True)
+        return subprocess.run(cmd, text=True, capture_output=True)
+    return subprocess.run(cmd, check=True)
 
 
 def tap_formula_path():

@@ -46,9 +46,25 @@ fn main() {
         .out_dir(&cmake_out_dir)
         .define("BUILD_TESTING", "OFF")
         .define("BUILD_TESTS", "OFF")
-        .define("RUST_SHADER_FFI", "ON");
+        .define("RUST_SHADER_FFI", "ON")
+        .cxxflag("-D_LIBCPP_ENABLE_EXPERIMENTAL");
     if let Some(target) = env::var_os("OWE_MACOSX_DEPLOYMENT_TARGET") {
         config.define("CMAKE_OSX_DEPLOYMENT_TARGET", target);
+    }
+    println!("cargo:rerun-if-env-changed=CMAKE_PREFIX_PATH");
+    if let Some(prefix_path) = env::var_os("CMAKE_PREFIX_PATH") {
+        config.define("CMAKE_PREFIX_PATH", &prefix_path);
+        for path in env::split_paths(&prefix_path) {
+            let ft = path.join("opt/freetype");
+            if ft.exists() {
+                config.define("FREETYPE_DIR", &ft);
+                break;
+            }
+            if path.file_name().map_or(false, |n| n == "freetype") && path.exists() {
+                config.define("FREETYPE_DIR", &path);
+                break;
+            }
+        }
     }
     let dst = config.build_target("wescene-renderer").build();
     debug_assert_eq!(dst, cmake_out_dir);

@@ -14,7 +14,7 @@ settings:
     CODE_SIGN_STYLE: Manual
     ENABLE_HARDENED_RUNTIME: NO
     DEVELOPMENT_TEAM: ""
-    ARCHS: arm64
+    ARCHS: "$(ARCHS_STANDARD)"
     ONLY_ACTIVE_ARCH: YES
     ENABLE_DEBUG_DYLIB: NO
 targets:
@@ -90,6 +90,14 @@ targets:
           - "$(SRCROOT)/upstream/renderer/external/open-wallpaper-engine/src/Platform/Apple"
         LIBRARY_SEARCH_PATHS: &rendererLibraryPaths
           - "$(SRCROOT)/upstream/renderer/target/release"
+          - /Users/lukioff/homebrew/opt/mwe-ffmpeg/lib
+          - /Users/lukioff/homebrew/lib
+          - /Users/lukioff/homebrew/opt/quickjs-ng/lib
+          - /Users/lukioff/homebrew/opt/glslang/lib
+          - /usr/local/opt/mwe-ffmpeg/lib
+          - /usr/local/lib
+          - /usr/local/opt/quickjs-ng/lib
+          - /usr/local/opt/glslang/lib
           - /opt/homebrew/opt/mwe-ffmpeg/lib
           - /opt/homebrew/lib
           - /opt/homebrew/opt/quickjs-ng/lib
@@ -97,6 +105,12 @@ targets:
         OTHER_SWIFT_FLAGS: "-Xcc -fmodule-map-file=$(SRCROOT)/App/Bridge/Generated/WallpaperBridgeFFI.modulemap"
         LD_RUNPATH_SEARCH_PATHS:
           - "@executable_path/../Frameworks"
+          - /Users/lukioff/homebrew/opt/mwe-ffmpeg/lib
+          - /Users/lukioff/homebrew/lib
+          - /Users/lukioff/homebrew/opt/quickjs-ng/lib
+          - /usr/local/opt/mwe-ffmpeg/lib
+          - /usr/local/lib
+          - /usr/local/opt/quickjs-ng/lib
           - /opt/homebrew/opt/mwe-ffmpeg/lib
           - /opt/homebrew/lib
           - /opt/homebrew/opt/quickjs-ng/lib
@@ -166,6 +180,12 @@ targets:
         LD_RUNPATH_SEARCH_PATHS:
           - "@executable_path/../Frameworks"
           - "@executable_path/../../../../Frameworks"
+          - /Users/lukioff/homebrew/opt/mwe-ffmpeg/lib
+          - /Users/lukioff/homebrew/lib
+          - /Users/lukioff/homebrew/opt/quickjs-ng/lib
+          - /usr/local/opt/mwe-ffmpeg/lib
+          - /usr/local/lib
+          - /usr/local/opt/quickjs-ng/lib
           - /opt/homebrew/opt/mwe-ffmpeg/lib
           - /opt/homebrew/lib
           - /opt/homebrew/opt/quickjs-ng/lib

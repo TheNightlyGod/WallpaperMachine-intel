@@ -74,7 +74,7 @@ struct SteamCMDProcessRunner: SteamCMDProcessRunning {
         func drain() {
             // Bound each drain so a noisy child cannot starve cancellation or the total deadline.
             for _ in 0..<32 {
-                let count = Darwin.read(descriptors[0], &buffer, buffer.count)
+                let count = buffer.withUnsafeMutableBytes { Darwin.read(descriptors[0], $0.baseAddress, $0.count) }
                 guard count > 0 else { break }
                 lastOutput = .now
                 onOutput(Data(buffer.prefix(count)))

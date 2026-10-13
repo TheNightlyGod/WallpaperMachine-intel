@@ -1472,7 +1472,7 @@ private struct NetworkTerminalRunner: SteamCMDProcessRunning {
         var buffer = [UInt8](repeating: 0, count: 8192)
         func drain() throws {
             for _ in 0..<32 {
-                let count = Darwin.read(master, &buffer, buffer.count)
+                let count = buffer.withUnsafeMutableBytes { Darwin.read(master, $0.baseAddress, $0.count) }
                 if count > 0 {
                     onOutput(Data(buffer.prefix(count)))
                 } else if count == 0 || errno == EAGAIN || errno == EWOULDBLOCK || errno == EIO {

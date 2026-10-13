@@ -20,6 +20,7 @@ class MweFfmpeg < Formula
   keg_only "it is a project-specific FFmpeg build and must not shadow Homebrew's ffmpeg"
 
   depends_on "pkgconf" => :build
+  depends_on "nasm" => :build if Hardware::CPU.intel?
   depends_on "dav1d"
   depends_on :macos
 

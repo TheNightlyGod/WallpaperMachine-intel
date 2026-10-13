@@ -10,7 +10,11 @@ enum AppUpdateConfiguration {
     /// The drag-to-install disk image `scripts/package.py` produces and the Build workflow
     /// publishes. Renaming the product moves both sides of this contract at once.
     static func assetName(for version: SemanticVersion) -> String {
+#if arch(x86_64)
+        "\(productName)-\(version.display)-x86_64.dmg"
+#else
         "\(productName)-\(version.display)-arm64.dmg"
+#endif
     }
 
     static var repositoryURL: URL {
@@ -297,8 +301,14 @@ enum GitHubReleaseParser {
         let candidates = release.assets.filter { asset in
             asset.isDiskImage && asset.name.lowercased().contains(AppUpdateConfiguration.productName.lowercased())
         }
+        let archMatch: GitHubReleaseAsset?
+        #if arch(x86_64)
+        archMatch = candidates.first { $0.name.lowercased().contains("x86_64") }
+        #else
+        archMatch = candidates.first { $0.name.lowercased().contains("arm64") }
+        #endif
         return candidates.first { $0.name.lowercased() == expected }
-            ?? candidates.first { $0.name.lowercased().contains("arm64") }
+            ?? archMatch
             ?? candidates.first
     }
 

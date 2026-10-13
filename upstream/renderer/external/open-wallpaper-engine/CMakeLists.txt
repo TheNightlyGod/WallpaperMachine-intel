@@ -3,6 +3,7 @@ project(wescene-renderer)
 
 if(APPLE)
     enable_language(OBJCXX)
+    add_compile_definitions(_LIBCPP_ENABLE_EXPERIMENTAL)
 endif()
 
 set(CMAKE_CXX_STANDARD 20)
