@@ -30,10 +30,14 @@ enum SteamCMDArchitecture {
     static let arm64: UInt32 = 0x0100_000c
     static let x86_64: UInt32 = 0x0100_0007
 
-    /// Selects only arm64 slices; an image without one fails with EBADARCH instead of being
-    /// translated. Subtype ANY keeps arm64e system tools such as tar and codesign launchable.
+    /// Selects only native slices (x86_64 or arm64); an image without one fails with EBADARCH instead of being
+    /// translated. Subtype ANY keeps system tools such as tar and codesign launchable.
     static func requireNative(_ attributes: inout posix_spawnattr_t?) -> Int32 {
+#if arch(x86_64)
+        var types = [cpu_type_t(bitPattern: x86_64)]
+#else
         var types = [cpu_type_t(bitPattern: arm64)]
+#endif
         var subtypes = [cpu_subtype_t(-1)]  // CPU_SUBTYPE_ANY
         var count = 0
         return posix_spawnattr_setarchpref_np(&attributes, 1, &types, &subtypes, &count)
@@ -127,10 +131,13 @@ struct SteamCMDRuntimeService: SteamCMDRuntimeProviding, SteamCMDRuntimeApprovin
             field(String(metadata.st_mode))
             let type = metadata.st_mode & S_IFMT
             if type == S_IFLNK {
-                var link = [UInt8](repeating: 0, count: Int(PATH_MAX) + 1)
-                let count = readlinkat(parent, name, &link, link.count)
-                guard count > 0, count < link.count,
-                      let target = String(bytes: link.prefix(count), encoding: .utf8) else { throw approvalFailure() }
+                var link = [CChar](repeating: 0, count: Int(PATH_MAX) + 1)
+                let count = link.withUnsafeMutableBufferPointer { buffer in
+                    readlinkat(parent, name, buffer.baseAddress, buffer.count)
+                }
+                guard count > 0, count < link.count else { throw approvalFailure() }
+                link[count] = 0
+                guard let target = String(validatingCString: link) else { throw approvalFailure() }
                 field(target)
                 // Framework links carry no executable bytes. Never mutate or follow them;
                 // their contained regular-file targets are independently hashed and cleared.
@@ -170,7 +177,7 @@ struct SteamCMDRuntimeService: SteamCMDRuntimeProviding, SteamCMDRuntimeApprovin
                 var bytes: Int64 = 0
                 while true {
                     try Task.checkCancellation()
-                    let count = Darwin.read(descriptor, &buffer, buffer.count)
+                    let count = buffer.withUnsafeMutableBytes { Darwin.read(descriptor, $0.baseAddress, $0.count) }
                     if count < 0, errno == EINTR { continue }
                     guard count >= 0 else { throw approvalFailure() }
                     if count == 0 { break }
@@ -251,7 +258,8 @@ struct SteamCMDRuntimeService: SteamCMDRuntimeProviding, SteamCMDRuntimeApprovin
               metadata.st_uid == getuid(), metadata.st_nlink == 1,
               metadata.st_mode & 0o7777 == 0o600, metadata.st_size == expected.count else { throw approvalFailure() }
         var contents = [UInt8](repeating: 0, count: expected.count)
-        guard Darwin.read(file, &contents, contents.count) == contents.count, contents == expected else { throw approvalFailure() }
+        let readCount = contents.withUnsafeMutableBytes { Darwin.read(file, $0.baseAddress, $0.count) }
+        guard readCount == expected.count, contents == expected else { throw approvalFailure() }
         return true
     }
 
@@ -295,7 +303,13 @@ struct SteamCMDRuntimeService: SteamCMDRuntimeProviding, SteamCMDRuntimeApprovin
               FileManager.default.isExecutableFile(atPath: binary.path) else {
             throw issue(.invalidSelection, "\(binary.path) is not a macOS Mach-O SteamCMD executable.")
         }
-        guard images.contains(where: { $0.cpu == SteamCMDArchitecture.arm64 }) else {
+        guard images.contains(where: {
+#if arch(x86_64)
+            $0.cpu == SteamCMDArchitecture.x86_64
+#else
+            $0.cpu == SteamCMDArchitecture.arm64
+#endif
+        }) else {
             throw appleSiliconIssue(binary)
         }
         return SteamCMDRuntime(rootURL: root, executableURL: binary)
@@ -380,10 +394,14 @@ struct SteamCMDRuntimeService: SteamCMDRuntimeProviding, SteamCMDRuntimeApprovin
         }
         // Any image without arm64 code could only ever run translated, so the whole copy is
         // treated as an Intel build that a native reinstall replaces.
-        if let intel = binaries.keys.sorted(by: { $0.path < $1.path }).first(where: { binary in
+        if let missingNative = binaries.keys.sorted(by: { $0.path < $1.path }).first(where: { binary in
+#if arch(x86_64)
+            !(binaries[binary] ?? []).contains { $0.cpu == SteamCMDArchitecture.x86_64 }
+#else
             !(binaries[binary] ?? []).contains { $0.cpu == SteamCMDArchitecture.arm64 }
+#endif
         }) {
-            throw appleSiliconIssue(intel)
+            throw appleSiliconIssue(missingNative)
         }
         let frameworkBinary = canonicalURL(framework.appendingPathComponent("Breakpad"))
         guard let frameworkImages = binaries[frameworkBinary] else { throw issue(.incompleteRuntime, "Breakpad.framework has no valid Mach-O binary.") }

@@ -99,8 +99,15 @@ def resolve_libraries(roots, seeds, prefix):
         for dependency in dependencies(file):
             if dependency.startswith(str(prefix)):
                 add(Path(dependency))
-            elif dependency.startswith("@rpath/") and Path(dependency).name not in libraries and "libswift" not in dependency:
-                relocated.append(f"{file}: {dependency}")
+            elif dependency.startswith("@rpath/"):
+                dep_name = Path(dependency).name
+                candidate = file.parent / dep_name
+                if not candidate.is_file():
+                    candidate = prefix / "lib" / dep_name
+                if candidate.is_file():
+                    add(candidate)
+                elif dep_name not in libraries and "libswift" not in dependency:
+                    relocated.append(f"{file}: {dependency}")
     if relocated:
         raise PackagingError(f"{FRESH_BUILD}\n  " + "\n  ".join(relocated))
     return libraries

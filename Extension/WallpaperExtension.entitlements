@@ -9,6 +9,8 @@
     <key>com.apple.security.temporary-exception.files.absolute-path.read-only</key>
     <array>
         <string>/opt/homebrew/</string>
+        <string>/usr/local/</string>
+        <string>/Users/lukioff/homebrew/</string>
     </array>
     <key>com.apple.security.temporary-exception.files.home-relative-path.read-write</key>
     <array>

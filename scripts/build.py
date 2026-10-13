@@ -60,9 +60,23 @@ def repository_commit(root=ROOT):
     return subprocess.check_output(["git", "-C", str(root), "rev-parse", "--short", "HEAD"], text=True).strip()
 
 
+def find_brew():
+    candidates = [
+        shutil.which("brew"),
+        str(Path.home() / "homebrew/bin/brew"),
+        "/usr/local/bin/brew",
+        "/opt/homebrew/bin/brew",
+    ]
+    for c in candidates:
+        if c and Path(c).is_file() and os.access(c, os.X_OK):
+            return c
+    return "brew"
+
+
 def build_environment():
     result = os.environ.copy()
-    prefix = subprocess.check_output(["brew", "--prefix"], text=True).strip()
+    brew_bin = find_brew()
+    prefix = subprocess.check_output([brew_bin, "--prefix"], text=True).strip()
     if not (Path(prefix) / "opt/mwe-ffmpeg/lib/pkgconfig/libavcodec.pc").is_file():
         raise SystemExit("Missing LGPL FFmpeg: run python3 scripts/install_ffmpeg.py; Homebrew ffmpeg is not a compatible substitute.")
     packages = ["quickjs-ng", "glslang", "mwe-ffmpeg", "freetype", "lz4", "vulkan-loader", "vulkan-headers", "molten-vk", "eigen", "nlohmann-json", "argparse", "shaderc", "spirv-tools", "glm"]
@@ -71,7 +85,10 @@ def build_environment():
     result["CMAKE_PREFIX_PATH"] = ";".join(roots + [prefix])
     result["PKG_CONFIG_PATH"] = ":".join(str(Path(p) / "lib/pkgconfig") for p in roots)
     result["OWE_NIX_LIBRARY_PATH"] = ":".join(str(Path(p) / "lib") for p in roots) + f":{prefix}/lib"
-    result["LIBCLANG_PATH"] = subprocess.check_output(["xcode-select", "-p"], text=True).strip() + "/Toolchains/XcodeDefault.xctoolchain/usr/lib"
+    xcode_path = Path(subprocess.check_output(["xcode-select", "-p"], text=True).strip())
+    toolchain_lib = xcode_path / "Toolchains/XcodeDefault.xctoolchain/usr/lib"
+    clt_lib = xcode_path / "usr/lib"
+    result["LIBCLANG_PATH"] = str(toolchain_lib if (toolchain_lib / "libclang.dylib").is_file() else clt_lib)
     result["SDKROOT"] = subprocess.check_output(["xcrun", "--sdk", "macosx", "--show-sdk-path"], text=True).strip()
     result["CC"] = "/usr/bin/clang"
     result["CXX"] = "/usr/bin/clang++"
@@ -163,18 +180,31 @@ def main():
         run([RENDERER / "target/release/uniffi-bindgen", "generate", "--library", RENDERER / "target/release/libwallpaper_bridge.a", "--language", "swift", "--no-format", "--out-dir", GENERATED_BRIDGE], cwd=RENDERER, env=env, stage="bindgen")
     if args.renderer_only:
         return
-    # `--use-cache` skips rewriting the project when `project.yml` has not changed,
-    # which keeps Xcode's incremental build state (and `scripts/test.py` agrees).
-    run(["xcodegen", "generate", "--use-cache", "--quiet"], env=env, stage="xcodegen")
-    settings = []
-    if compiled_icon:
-        # The asset catalog is still compiled; only the .icon is left out, and with it
-        # the app-icon name actool would otherwise look for in the catalog.
-        settings = [f"EXCLUDED_SOURCE_FILE_NAMES={APP_ICON.name}", "ASSETCATALOG_COMPILER_APPICON_NAME="]
-    settings += args.xcode_setting
-    run(["xcodebuild", "-project", XCODEPROJ.name, "-scheme", "WallpaperMachine", "-configuration", args.configuration, "-derivedDataPath", BUILD, "build", *settings], env=env, stage=f"xcodebuild-{args.configuration}")
-    if compiled_icon:
-        install_app_icon(app_bundle(args.configuration), compiled_icon)
+    has_xcodebuild = False
+    if shutil.which("xcodebuild"):
+        try:
+            subprocess.check_output(["xcodebuild", "-version"], stderr=subprocess.DEVNULL)
+            has_xcodebuild = True
+        except Exception:
+            has_xcodebuild = False
+
+    if has_xcodebuild:
+        # `--use-cache` skips rewriting the project when `project.yml` has not changed,
+        # which keeps Xcode's incremental build state (and `scripts/test.py` agrees).
+        run(["xcodegen", "generate", "--use-cache", "--quiet"], env=env, stage="xcodegen")
+        settings = []
+        if compiled_icon:
+            # The asset catalog is still compiled; only the .icon is left out, and with it
+            # the app-icon name actool would otherwise look for in the catalog.
+            settings = [f"EXCLUDED_SOURCE_FILE_NAMES={APP_ICON.name}", "ASSETCATALOG_COMPILER_APPICON_NAME="]
+        settings += args.xcode_setting
+        run(["xcodebuild", "-project", XCODEPROJ.name, "-scheme", "WallpaperMachine", "-configuration", args.configuration, "-derivedDataPath", BUILD, "build", *settings], env=env, stage=f"xcodebuild-{args.configuration}")
+        if compiled_icon:
+            install_app_icon(app_bundle(args.configuration), compiled_icon)
+    else:
+        from lib.clt_build import build_app_bundle
+        print(f"{MARK.step} Building directly with swiftc and Command Line Tools...")
+        build_app_bundle(configuration=args.configuration, env=env)
     print(f"{MARK.ok} Built {PRODUCTS / args.configuration / 'WallpaperMachine.app'}")
 
 
