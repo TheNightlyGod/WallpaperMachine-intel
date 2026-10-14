@@ -23,11 +23,12 @@ import tempfile
 import time
 import unicodedata
 
+from lib import bundle_contract
 from lib.paths import ROOT
 
 APPLICATION = "WallpaperMachine.app"
 APPLICATIONS_LINK = "Applications"
-BUNDLE_IDENTIFIER = "app.wallpapermachine"
+BUNDLE_IDENTIFIER = bundle_contract.APP_IDENTIFIER
 
 # Finder window frame in points, as `bwsp` WindowBounds stores it: the title bar is
 # inside this height. The background image is exactly this size, so the content area
@@ -388,12 +389,16 @@ def build(app, image, name, icon=None, background=BACKGROUND):
     return image
 
 
-def verify(image, version):
+def verify(image, version, contract=bundle_contract.verify_bundle):
     """Mount `image` read-only and prove it installs `version` of this app.
 
     The checks are the ones a user relies on: the bundle is this app at that version,
-    its signature survived the round trip, the Applications link is there to drag
-    onto, and the window layout and its background travelled with it.
+    its signature survived the round trip, the signed entitlements and Info.plist keys
+    are the ones the extension and the permission prompts need (`contract`, called with
+    the mounted app, returns its warnings), the Applications link is there to drag onto,
+    and the window layout and its background travelled with it.
+
+    Returns the contract's warnings.
     """
     image = Path(image)
     with tempfile.TemporaryDirectory(prefix="dmg-verify-") as scratch:
@@ -412,6 +417,10 @@ def verify(image, version):
             if values.get("CFBundleShortVersionString") != version:
                 raise DiskImageError(f"{image.name} holds version {values.get('CFBundleShortVersionString')}, not {version}")
             _run(["/usr/bin/codesign", "--verify", "--deep", "--strict", app], f"{APPLICATION} in {image.name} fails codesign")
+            try:
+                warnings = contract(app)
+            except bundle_contract.BundleContractError as error:
+                raise DiskImageError(f"{image.name}: {error}") from error
             link = mount / APPLICATIONS_LINK
             if not link.is_symlink() or os.readlink(link) != "/Applications":
                 raise DiskImageError(f"{image.name} has no {APPLICATIONS_LINK} link to /Applications")
@@ -420,3 +429,4 @@ def verify(image, version):
                 raise DiskImageError(f"{image.name} lacks its window layout: {', '.join(absent)}")
         finally:
             _detach(mount)
+    return warnings

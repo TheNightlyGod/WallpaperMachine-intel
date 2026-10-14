@@ -140,14 +140,248 @@ final class WebWallpaperLocalRequestTests: XCTestCase {
     XCTAssertEqual(bytes["text"] as? String, #"{"answer":42}"#)
   }
 
-  private func loadedPage() async throws -> WebWallpaperPage {
-    let page = WebWallpaperPage(projectURL: project, entryFile: "index.html")
+  // MARK: - subframes
+
+  /// A frame the page embeds is a separate global with its own `fetch`, so the
+  /// fixes have to be in it too; the host API must not be.
+  func testAFileFetchInsideAnIframeIsReportedAsServed() async throws {
+    try writeFramedPage(frameBody: """
+      const response = await fetch("settings.json");
+      report({ ok: response.ok, status: response.status,
+        type: response.headers.get("Content-Type"), body: await response.text(),
+        missing: await fetch("missing.json").then(() => "resolved", () => "rejected") });
+      """)
+    let page = try await loadedPage(entry: "framed.html")
+    defer { page.stop() }
+    let reports = try await receivedReports(page, count: 1)
+    XCTAssertEqual(reports[0]["ok"] as? Bool, true, "\(reports[0])")
+    XCTAssertEqual(reports[0]["status"] as? Int, 200)
+    XCTAssertEqual(reports[0]["type"] as? String, "application/json")
+    XCTAssertEqual(reports[0]["body"] as? String, #"{"answer":42}"#, "the body must reach the frame unchanged")
+    XCTAssertEqual(reports[0]["missing"] as? String, "rejected", "a missing file must still fail in a frame")
+  }
+
+  func testStreamingWasmInsideAnIframeStarts() async throws {
+    // (module (func (export "f") (result i32) i32.const 42))
+    try Data([
+      0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7F,
+      0x03, 0x02, 0x01, 0x00, 0x07, 0x05, 0x01, 0x01, 0x66, 0x00, 0x00, 0x0A, 0x06, 0x01, 0x04,
+      0x00, 0x41, 0x2A, 0x0B,
+    ]).write(to: project.appendingPathComponent("answer.wasm"))
+    try writeFramedPage(frameBody: """
+      const streamed = await WebAssembly.instantiateStreaming(fetch("answer.wasm"), {});
+      report({ answer: streamed.instance.exports.f() });
+      """)
+    let page = try await loadedPage(entry: "framed.html")
+    defer { page.stop() }
+    let reports = try await receivedReports(page, count: 1)
+    XCTAssertEqual(reports[0]["answer"] as? Int, 42, "\(reports[0])")
+  }
+
+  func testXhrInsideASrcdocFrameSeesStatus200() async throws {
+    try #"""
+      <!doctype html><html><body><script>
+      window.__reports = [];
+      window.addEventListener("message", event => window.__reports.push(event.data));
+      const frame = document.createElement("iframe");
+      frame.srcdoc = `<!doctype html><script>
+        const request = new XMLHttpRequest();
+        request.open("GET", "settings.json", false);
+        request.send();
+        const missing = new XMLHttpRequest();
+        missing.open("GET", "missing.json", false);
+        try { missing.send(); } catch (_) {}
+        parent.postMessage({ status: request.status, statusText: request.statusText,
+          text: request.responseText, missing: missing.status }, "*");
+      <\/script>`;
+      document.body.appendChild(frame);
+      </script></body></html>
+      """#.write(to: project.appendingPathComponent("framed.html"), atomically: true, encoding: .utf8)
+    let page = try await loadedPage(entry: "framed.html")
+    defer { page.stop() }
+    let reports = try await receivedReports(page, count: 1)
+    XCTAssertEqual(reports[0]["status"] as? Int, 200, "\(reports[0])")
+    XCTAssertEqual(reports[0]["statusText"] as? String, "OK")
+    XCTAssertEqual(reports[0]["text"] as? String, #"{"answer":42}"#)
+    XCTAssertEqual(reports[0]["missing"] as? Int, 0, "a missing file keeps WebKit's status in a frame")
+  }
+
+  func testSubframesDoNotReceiveTheAuthorApi() async throws {
+    try writeFramedPage(frameBody: """
+      report({
+        host: typeof window.__mweWallpaperHost,
+        audio: typeof window.wallpaperRegisterAudioListener,
+        media: typeof window.wallpaperRegisterMediaStatusListener,
+        random: typeof window.wallpaperRequestRandomFileForProperty,
+        listener: "wallpaperPropertyListener" in window,
+        compat: window.__mweFileCompat === true,
+      });
+      """)
+    let page = try await loadedPage(entry: "framed.html")
+    defer { page.stop() }
+    let reports = try await receivedReports(page, count: 1)
+    XCTAssertEqual(reports[0]["compat"] as? Bool, true, "the file fixes are in the frame: \(reports[0])")
+    for key in ["host", "audio", "media", "random"] {
+      XCTAssertEqual(reports[0][key] as? String, "undefined", "\(key) must stay in the main frame")
+    }
+    XCTAssertEqual(reports[0]["listener"] as? Bool, false)
+    let main = try await evaluate(page, """
+      return {
+        host: typeof window.__mweWallpaperHost,
+        audio: typeof window.wallpaperRegisterAudioListener,
+        listener: "wallpaperPropertyListener" in window,
+      };
+      """)
+    XCTAssertEqual(main["host"] as? String, "object")
+    XCTAssertEqual(main["audio"] as? String, "function")
+    XCTAssertEqual(main["listener"] as? Bool, true)
+  }
+
+  /// WebKit registers a message handler with every frame, so a frame can reach
+  /// the channel without any help from the host script. The host must still
+  /// treat only the wallpaper's own document as the one asking.
+  func testAFrameCannotSubscribeToAudioThroughTheHostChannel() async throws {
+    try writeFramedPage(frameBody: """
+      let reachable = true;
+      try {
+        window.webkit.messageHandlers.\(WebWallpaperProtocol.messageHandlerName).postMessage({ type: "audioSubscribed" });
+      } catch (error) { reachable = false; }
+      report({ reachable });
+      """)
+    let page = WebWallpaperPage(projectURL: project, entryFile: "framed.html")
+    var audio: [Bool] = []
+    var media: [WebWallpaperPage.MediaDemand] = []
+    page.onAudioDemandChanged = { audio.append($0) }
+    page.onMediaDemandChanged = { media.append($0) }
+    page.setAudioResponseEnabled(true)
     page.load()
+    defer { page.stop() }
+    try await waitUntilLoaded(page)
+    let reports = try await receivedReports(page, count: 1)
+    XCTAssertEqual(reports[0]["reachable"] as? Bool, true, "the channel is there for the frame to misuse")
+    // Messages from one web process arrive in order: once the main frame's own
+    // subscription has been seen, the frame's earlier one has been dealt with.
+    _ = try await evaluate(page, "window.wallpaperRegisterMediaStatusListener(() => {}); return {};")
+    try await poll { media.last?.listening == true }
+    XCTAssertEqual(audio, [], "a frame must not open the audio capture for the wallpaper")
+  }
+
+  func testAFrameWithoutASourceSeesTheFixesToo() async throws {
+    try """
+      <!doctype html><html><body><script>
+      window.__reports = [];
+      const frame = document.createElement("iframe");
+      document.body.appendChild(frame);
+      const request = new frame.contentWindow.XMLHttpRequest();
+      request.open("GET", "settings.json", false);
+      request.send();
+      window.__reports.push({ status: request.status, compat: frame.contentWindow.__mweFileCompat === true });
+      </script></body></html>
+      """.write(to: project.appendingPathComponent("framed.html"), atomically: true, encoding: .utf8)
+    let page = try await loadedPage(entry: "framed.html")
+    defer { page.stop() }
+    let reports = try await receivedReports(page, count: 1)
+    XCTAssertEqual(reports[0]["compat"] as? Bool, true, "\(reports[0])")
+    XCTAssertEqual(reports[0]["status"] as? Int, 200)
+  }
+
+  // MARK: - the compat script on its own
+
+  /// The same document can be handed the script twice (a frame that is
+  /// re-created, a navigation that keeps the global); wrapping twice would stack
+  /// a second layer on every request.
+  func testInjectingTheFixesTwiceWrapsOnlyOnce() async throws {
+    let page = try await loadedPage()
+    defer { page.stop() }
+    let result = try await page.webView.callAsyncJavaScript(
+      """
+      const fetchBefore = window.fetch;
+      const statusBefore = Object.getOwnPropertyDescriptor(XMLHttpRequest.prototype, "status").get;
+      (0, eval)(source);
+      return {
+        fetch: window.fetch === fetchBefore,
+        status: Object.getOwnPropertyDescriptor(XMLHttpRequest.prototype, "status").get === statusBefore,
+        hidden: !Object.keys(window).includes("__mweFileCompat"),
+      };
+      """, arguments: ["source": WebWallpaperProtocol.compatScript], in: nil, contentWorld: .page)
+    let state = try XCTUnwrap(result as? [String: Any])
+    XCTAssertEqual(state["fetch"] as? Bool, true)
+    XCTAssertEqual(state["status"] as? Bool, true)
+    XCTAssertEqual(state["hidden"] as? Bool, true, "the guard must not show up when a page lists its globals")
+  }
+
+  /// A page served over http(s) cannot read a project file, so a remote page a
+  /// wallpaper embeds keeps the browser's own request functions.
+  func testRemoteDocumentsKeepTheirOwnRequestFunctions() async throws {
+    let configuration = WKWebViewConfiguration()
+    configuration.userContentController.addUserScript(
+      WKUserScript(source: WebWallpaperProtocol.compatScript, injectionTime: .atDocumentStart, forMainFrameOnly: false))
+    let webView = WKWebView(frame: .zero, configuration: configuration)
+    webView.loadHTMLString("<!doctype html><html><body></body></html>", baseURL: URL(string: "https://example.invalid/")!)
+    let deadline = Date().addingTimeInterval(10)
+    while webView.isLoading && Date() < deadline { try await Task.sleep(for: .milliseconds(10)) }
+    let value = try await webView.callAsyncJavaScript(
+      """
+      const native = f => Function.prototype.toString.call(f).includes("[native code]");
+      return {
+        protocol: location.protocol,
+        fetch: native(window.fetch),
+        status: native(Object.getOwnPropertyDescriptor(XMLHttpRequest.prototype, "status").get),
+      };
+      """, arguments: [:], in: nil, contentWorld: .page)
+    let state = try XCTUnwrap(value as? [String: Any])
+    XCTAssertEqual(state["protocol"] as? String, "https:")
+    XCTAssertEqual(state["fetch"] as? Bool, true)
+    XCTAssertEqual(state["status"] as? Bool, true)
+  }
+
+  private func writeFramedPage(frameBody: String) throws {
+    try """
+      <!doctype html><html><body><iframe src="frame.html"></iframe><script>
+      window.__reports = [];
+      window.addEventListener("message", event => window.__reports.push(event.data));
+      </script></body></html>
+      """.write(to: project.appendingPathComponent("framed.html"), atomically: true, encoding: .utf8)
+    try """
+      <!doctype html><html><body><script>
+      const report = data => parent.postMessage(data, "*");
+      (async () => {
+      \(frameBody)
+      })().catch(error => report({ error: String(error) }));
+      </script></body></html>
+      """.write(to: project.appendingPathComponent("frame.html"), atomically: true, encoding: .utf8)
+  }
+
+  private func receivedReports(_ page: WebWallpaperPage, count: Int) async throws -> [[String: Any]] {
+    let deadline = Date().addingTimeInterval(10)
+    while Date() < deadline {
+      let value = try await page.webView.callAsyncJavaScript(
+        "return window.__reports", arguments: [:], in: nil, contentWorld: .page)
+      if let reports = value as? [[String: Any]], reports.count >= count { return reports }
+      try await Task.sleep(for: .milliseconds(20))
+    }
+    XCTFail("The page did not report \(count) result(s)")
+    throw CancellationError()
+  }
+
+  private func poll(timeout: TimeInterval = 10, _ condition: () -> Bool) async throws {
+    let deadline = Date().addingTimeInterval(timeout)
+    while !condition() && Date() < deadline { try await Task.sleep(for: .milliseconds(10)) }
+    XCTAssertTrue(condition(), "The page did not reach the requested state")
+  }
+
+  private func loadedPage(entry: String = "index.html") async throws -> WebWallpaperPage {
+    let page = WebWallpaperPage(projectURL: project, entryFile: entry)
+    page.load()
+    try await waitUntilLoaded(page)
+    XCTAssertNil(page.webView.window, "No desktop window is needed")
+    return page
+  }
+
+  private func waitUntilLoaded(_ page: WebWallpaperPage) async throws {
     let deadline = Date().addingTimeInterval(10)
     while !page.isLoaded && Date() < deadline { try await Task.sleep(for: .milliseconds(50)) }
     XCTAssertTrue(page.isLoaded)
-    XCTAssertNil(page.webView.window, "No desktop window is needed")
-    return page
   }
 
   private func evaluate(_ page: WebWallpaperPage, _ script: String) async throws -> [String: Any] {

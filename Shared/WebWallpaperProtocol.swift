@@ -26,9 +26,48 @@ enum WebWallpaperProtocol {
     /// tagged object, so there is exactly one place that has to distrust the page.
     static let messageHandlerName = "mweWallpaper"
 
-    static let hostScript = """
+    /// What a page's document-start script needs to know before any page script
+    /// runs. The frame-rate limit has to be known by the page's very first
+    /// `requestAnimationFrame` call and the render scale by its very first read
+    /// of `devicePixelRatio`, so both are baked into the script of each document
+    /// instead of being delivered once the document has loaded.
+    struct Seed: Equatable {
+        /// Wraps `requestAnimationFrame` so the limit can be enforced (desktop
+        /// and preview pages). The screen saver keeps the native function.
+        var framePacing = false
+        /// Callbacks per second, or 0 for none; `frameLimit(forFPS:)` derives it.
+        var frameLimit = 0
+        /// Multiplies `window.devicePixelRatio`; see `clampedRenderScale`. At 1
+        /// the page keeps WebKit's own property.
+        var renderScale = 1.0
+    }
+
+    /// The range a web page's internal render scale is held to. The bridge
+    /// allows 0.25 for a scene, but page text and interface drawn at a quarter
+    /// of the pixel density are not a usable quality tier, so half is the floor.
+    static let renderScaleRange: ClosedRange<Double> = 0.5...1
+
+    /// `scale` held to `renderScaleRange`; a value that is not a number is no
+    /// scale at all and means full resolution, because guessing low would leave
+    /// a page blurry for good.
+    static func clampedRenderScale(_ scale: Double) -> Double {
+        guard scale.isFinite else { return renderScaleRange.upperBound }
+        return min(max(scale, renderScaleRange.lowerBound), renderScaleRange.upperBound)
+    }
+
+    /// The file-request fixes, and nothing else. They are the one part of the page
+    /// host that every frame of a page gets, the main frame and the subframes it
+    /// embeds, so this source reaches for no seed, no author API and no message
+    /// handler: a subframe never sees `wallpaperPropertyListener` or the channel to
+    /// the host. It is idempotent per document. `userScripts(seed:)` injects it.
+    static let compatScript = """
     (() => {
-      if (window.__mweWallpaperHost) return;
+      if (window.__mweFileCompat) return;
+      Object.defineProperty(window, "__mweFileCompat", { value: true });
+      // A document served over http(s) cannot read a project file, so there is
+      // nothing for the fixes to do there, and a remote page a wallpaper embeds
+      // keeps its own fetch and XMLHttpRequest exactly as the browser made them.
+      if (location.protocol === "http:" || location.protocol === "https:") return;
       // WebKit resolves fetch() of a project file with status 0, ok === false and
       // no headers. Wallpaper Engine's Chromium host answers like a server: 200 OK
       // with a Content-Type from the extension. Loaders that check response.ok,
@@ -117,19 +156,149 @@ enum WebWallpaperProtocol {
           statusText: { ...statusText, get() { return isServedFile(this) ? "OK" : statusText.get.call(this); } },
         });
       }
+    })()
+    """
+
+    /// The host script of one document, for the main frame only: the author API,
+    /// the message channel, the frame-rate limit and the render scale. Only
+    /// numbers and booleans are interpolated into it.
+    static func makeHostScript(seed: Seed) -> String {
+        """
+        \(hostScriptSource)({ framePacing: \(seed.framePacing), frameLimit: \(seed.frameLimit), \
+        renderScale: \(clampedRenderScale(seed.renderScale)) })
+        """
+    }
+
+    /// A function expression taking the seed; `makeHostScript` calls it.
+    private static let hostScriptSource = """
+    (seed => {
+      if (window.__mweWallpaperHost) return;
+      // Frame-rate limit. WebKit gives a page no frame-rate control, so a limit
+      // below the ceiling is enforced on requestAnimationFrame itself: callbacks
+      // are held back to the limit and run on the native frame that follows, with
+      // that frame's timestamp. Only the main frame's requestAnimationFrame is
+      // paced; timers, video frame callbacks, CSS, workers and subframes are not.
+      // At the ceiling or above, or with no limit, the wrapper hands every call
+      // straight to the native function. The wrappers are in place before any page
+      // script runs, so a library that stores requestAnimationFrame at load holds
+      // the paced one.
+      const createFramePacer = \(framePacerSource);
+      let pacer = null;
+      if (seed.framePacing && typeof window.requestAnimationFrame === "function"
+          && typeof window.cancelAnimationFrame === "function") {
+        const nativeRequest = window.requestAnimationFrame.bind(window);
+        const nativeCancel = window.cancelAnimationFrame.bind(window);
+        pacer = createFramePacer(nativeRequest, nativeCancel, error => {
+          try { window.reportError(error); } catch (unavailable) { setTimeout(() => { throw error; }, 0); }
+        });
+        pacer.setLimit(seed.frameLimit);
+        const pacedRequest = function requestAnimationFrame(callback) {
+          return typeof callback === "function" && pacer.isPacing()
+            ? pacer.request(callback) : nativeRequest(...arguments);
+        };
+        // A handle is cancelled where it was issued: paced ids sit above every native one.
+        const pacedCancel = function cancelAnimationFrame(handle) {
+          const id = typeof handle === "number" || typeof handle === "string" ? Number(handle) : NaN;
+          if (pacer.owns(id)) { pacer.cancel(id); return; }
+          return nativeCancel(...arguments);
+        };
+        const replace = (names, wrapper) => {
+          for (const name of names) if (typeof window[name] === "function") window[name] = wrapper;
+        };
+        replace(["requestAnimationFrame", "webkitRequestAnimationFrame"], pacedRequest);
+        replace(["cancelAnimationFrame", "webkitCancelAnimationFrame", "webkitCancelRequestAnimationFrame"], pacedCancel);
+      }
+      // Internal render scale. A page sizes its canvases and WebGL buffers from
+      // window.devicePixelRatio, so multiplying that number by the scale gives it
+      // fewer pixels to draw, and WebKit stretches the result over the same area.
+      // The scaled property is an accessor installed only while the scale is below
+      // 1, and returning to 1 puts WebKit's own descriptor back unchanged. A live
+      // change raises one resize event, which is what resize-aware pages listen for
+      // to rebuild their buffers; the value the document starts with raises none.
+      // Pages that read the ratio once keep full resolution until they reload,
+      // media queries on resolution and subframes are not touched, and a page that
+      // assigned the property itself keeps its own value. The getter and the event
+      // use what is captured here, whatever the page does to its globals later.
+      const nativeRatio = Object.getOwnPropertyDescriptor(window, "devicePixelRatio");
+      const nativeDispatch = EventTarget.prototype.dispatchEvent;
+      const NativeEvent = Event;
+      let renderScale = 1;
+      let scaledRatio = null;
+      let resizePending = false;
+      const setScale = value => {
+        if (!nativeRatio || !nativeRatio.configurable || typeof nativeRatio.get !== "function") return false;
+        const next = Number.isFinite(value) ? Math.min(1, Math.max(0.5, value)) : 1;
+        if (next === renderScale) return false;
+        renderScale = next;
+        if (next < 1 && !scaledRatio) {
+          scaledRatio = Object.getOwnPropertyDescriptor({
+            get devicePixelRatio() { return nativeRatio.get.call(window) * renderScale; },
+          }, "devicePixelRatio").get;
+          Object.defineProperty(window, "devicePixelRatio", {
+            configurable: true, enumerable: nativeRatio.enumerable, get: scaledRatio, set: nativeRatio.set,
+          });
+        } else if (next === 1 && scaledRatio) {
+          const current = Object.getOwnPropertyDescriptor(window, "devicePixelRatio");
+          if (current && current.get === scaledRatio) Object.defineProperty(window, "devicePixelRatio", nativeRatio);
+          scaledRatio = null;
+        }
+        return true;
+      };
+      setScale(seed.renderScale);
       const post = message => {
         try { window.webkit.messageHandlers.\(WebWallpaperProtocol.messageHandlerName).postMessage(message); }
         catch (error) { console.error("wallpaper host channel unavailable", error); }
       };
       let listener = null;
-      let lastUser = null, lastGeneral = null, lastPaused = null;
+      let lastPaused = null;
       // What the host has told this document about each watched directory, so a
       // listener registered after the files arrived still sees them.
       const directories = new Map();
+      // True only when the listener has the function and it returned without throwing.
       const call = (name, ...args) => {
         if (listener && typeof listener[name] === "function") {
-          try { listener[name](...args); } catch (error) { console.error("wallpaperPropertyListener." + name + " failed", error); }
+          try { listener[name](...args); return true; } catch (error) { console.error("wallpaperPropertyListener." + name + " failed", error); }
         }
+        return false;
+      };
+      // Wallpaper Engine runs applyUserProperties once at load with every
+      // property and afterwards only with the properties whose values changed;
+      // applyGeneralProperties follows the same rule. The host resends the whole
+      // set on every apply (and the screen saver on every reconcile), so the
+      // difference is computed here, per listener. `latest` is always the full
+      // set, for replay to a listener that registers later; `delivered` is what
+      // the current listener last accepted, as canonical strings so that the key
+      // order of the host's JSON never reads as a change. A listener that lacks
+      // the function, or throws, leaves `delivered` as it was, so the next
+      // apply is measured against the last values the page really took in.
+      const canonical = value => {
+        if (value === null || typeof value !== "object") return String(JSON.stringify(value));
+        if (Array.isArray(value)) return "[" + value.map(canonical).join(",") + "]";
+        return "{" + Object.keys(value).sort().map(key => JSON.stringify(key) + ":" + canonical(value[key])).join(",") + "}";
+      };
+      const propertySets = {
+        applyUserProperties: { latest: null, delivered: null },
+        applyGeneralProperties: { latest: null, delivered: null },
+      };
+      // `restaged` names properties the host restaged: the value reads the same but
+      // the bytes behind it are new (a file reselected after it was edited, or
+      // another folder's file of the same name), so they count as changed once.
+      const deliverProperties = (name, properties, restaged) => {
+        const set = propertySets[name];
+        set.latest = properties;
+        if (!listener || typeof listener[name] !== "function") return;
+        const source = properties !== null && typeof properties === "object" ? properties : {};
+        const snapshot = new Map(Object.keys(source).map(key => [key, canonical(source[key])]));
+        const again = new Set(Array.isArray(restaged) ? restaged : []);
+        let payload = properties;
+        if (set.delivered) {
+          const changed = Object.keys(source).filter(key => again.has(key) || set.delivered.get(key) !== snapshot.get(key));
+          if (changed.length === 0) return;
+          payload = Object.fromEntries(changed.map(key => [key, source[key]]));
+        }
+        if (call(name, payload)) set.delivered = snapshot;
+        // A restaged property the handler failed to take in is still owed to it.
+        else if (set.delivered) for (const key of again) set.delivered.delete(key);
       };
       // Wallpaper Engine only calls a listener that exists when the page has
       // loaded. Replaying the last values to a late listener is strictly more
@@ -139,8 +308,11 @@ enum WebWallpaperProtocol {
         get() { return listener; },
         set(value) {
           listener = value;
-          if (lastGeneral) call("applyGeneralProperties", lastGeneral);
-          if (lastUser) call("applyUserProperties", lastUser);
+          // A new or re-assigned listener starts from nothing: it gets the whole set.
+          for (const name of ["applyGeneralProperties", "applyUserProperties"]) {
+            propertySets[name].delivered = null;
+            if (propertySets[name].latest) deliverProperties(name, propertySets[name].latest);
+          }
           if (lastPaused !== null) call("setPaused", lastPaused);
           for (const [property, files] of directories) {
             if (files.length) call("userDirectoryFilesAddedOrChanged", property, files.slice());
@@ -205,8 +377,16 @@ enum WebWallpaperProtocol {
       };
 
       window.__mweWallpaperHost = Object.freeze({
-        applyUserProperties(properties) { lastUser = properties; call("applyUserProperties", properties); },
-        applyGeneralProperties(properties) { lastGeneral = properties; call("applyGeneralProperties", properties); },
+        applyUserProperties(properties, restaged) { deliverProperties("applyUserProperties", properties, restaged); },
+        applyGeneralProperties(properties) { deliverProperties("applyGeneralProperties", properties); },
+        // Takes effect on the next frame, and only where the seed asked for pacing.
+        setFrameLimit(limit) { if (pacer) pacer.setLimit(limit); },
+        // Changes made in one turn of the page share one resize event.
+        setRenderScale(scale) {
+          if (!setScale(scale) || resizePending) return;
+          resizePending = true;
+          queueMicrotask(() => { resizePending = false; nativeDispatch.call(window, new NativeEvent("resize")); });
+        },
         setPaused(paused) { lastPaused = !!paused; call("setPaused", lastPaused); },
         deliverAudio(bins) {
           if (!audioListener) return false;
@@ -242,6 +422,6 @@ enum WebWallpaperProtocol {
           call("userDirectoryFilesRemoved", property, files);
         },
       });
-    })();
+    })
     """
 }

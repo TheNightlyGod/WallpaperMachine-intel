@@ -327,7 +327,9 @@ artifact.
    library needs a newer macOS than the deployment target. Packaging proves the
    disk image, not the build tree: it mounts the image read-only and requires
    `app.wallpapermachine` at the bundle's version, a passing
-   `codesign --verify --deep --strict`, the `Applications` link and the window
+   `codesign --verify --deep --strict`, the signed entitlements and Info.plist
+   keys the lock screen extension and the permission prompts need ([bundle
+   contract](build.md#bundle-contract)), the `Applications` link and the window
    layout, then writes the `.sha256` sidecar
    ([build.md](build.md#packaging-and-installing));
 6. matches the image to the tag: it must be named

@@ -168,5 +168,6 @@ private final class PreviewFixtureSurface: WallpaperPreviewSurface {
     func start() async throws { if becomesReady { onReady?() } }
     func setPaused(_ paused: Bool) throws { self.paused = paused }
     func setMuted(_ muted: Bool) throws { self.muted = muted }
+    func applyProperties(_ json: String) throws {}
     func stop() { stops += 1 }
 }

@@ -28,6 +28,9 @@ final class LockScreenIdleExit {
     self.exit = exit
   }
 
+  /// Connections accepted and not yet closed, readable from any queue.
+  nonisolated var openConnections: Int { connections.withLock { $0 } }
+
   /// Call before the connection resumes, on any queue.
   nonisolated func connectionOpened() {
     connections.withLock { $0 += 1 }

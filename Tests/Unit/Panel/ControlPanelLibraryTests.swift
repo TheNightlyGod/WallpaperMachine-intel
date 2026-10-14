@@ -510,6 +510,86 @@ final class ControlPanelLibraryTests: ControlPanelTestCase {
     }
   }
 
+  /// An installed Workshop wallpaper can be downloaded again from its inspector, and from the
+  /// compatibility card when a check found something its files cannot supply. A wallpaper that
+  /// did not come from the Workshop, cannot run on macOS, or already has a download gets neither.
+  func testReinstallIsOfferedOnlyForAnInstalledWorkshopWallpaperWithNoDownloadUnderWay() async throws {
+    try await withPanel { panel in
+      try await panel.finishWelcome()
+      panel.show()
+      try await panel.waitJS("powerProbe.received.length >= 1")
+      let result = try await panel.js("""
+        const base = window.powerProbe.received.at(-1);
+        const wallpaper = (id, kind = 'Video') => ({ id, title: 'W' + id, kind, size: 100, preview: null, active: false, supported: true, tags: [] });
+        const wallpapers = [wallpaper('111'), wallpaper('handmade'), wallpaper('222', 'Application'), wallpaper('333'), wallpaper('444')];
+        const download = id => ({ id, wallpaperID: id, title: 'W' + id, status: '', preview: null, thumbnail: null, account: '', phase: null, progress: null, pending: true, queued: true, paused: false, cancelled: false, error: null });
+        const request = id => ({ id, wallpaperID: id, title: 'W' + id, preview: null, thumbnail: null, account: '', rememberSession: true, stage: 'setup', paused: false });
+        const compat = (id, status = 'unavailable') => ({ wallpaperID: id, displayID: 'primary', checking: false, checks: [{ id: 'entry', title: 'Entry file', status, detail: 'Missing' }] });
+        const show = (id, extra = {}) => {
+          window.wallpaperUI.receive(Object.assign({}, base, { page: 'installed', wallpapers, selectedID: id, targetDisplayID: 'primary', downloads: [], downloadRequests: [], wallpaperCompatibility: compat(id) }, extra));
+          return { inspector: !!document.querySelector('#inspector .inspector-actions [data-action="workshopReinstall"][data-id="' + id + '"]'),
+                   card: !!document.querySelector('#inspector .compat [data-action="workshopReinstall"][data-id="' + id + '"]') };
+        };
+        return { workshop: show('111'), warningOnly: show('111', { wallpaperCompatibility: compat('111', 'warning') }),
+                 handmade: show('handmade'), application: show('222'),
+                 downloading: show('333', { downloads: [download('333')] }),
+                 waiting: show('444', { downloadRequests: [request('444')] }) };
+        """) as? [String: Any]
+      func offered(_ key: String) -> [Bool]? {
+        (result?[key] as? [String: Bool]).map { [$0["inspector"] ?? false, $0["card"] ?? false] }
+      }
+      XCTAssertEqual(offered("workshop"), [true, true], "Both places offer it when a check found something missing")
+      XCTAssertEqual(offered("warningOnly"), [true, false], "A warning alone is not what a fresh copy repairs")
+      XCTAssertEqual(offered("handmade"), [false, false], "Only the Workshop has a copy to download again")
+      XCTAssertEqual(offered("application"), [false, false], "Application wallpapers cannot run on macOS")
+      XCTAssertEqual(offered("downloading"), [false, false], "A download under way is where the user looks")
+      XCTAssertEqual(offered("waiting"), [false, false], "A request waiting for setup is continued, not repeated")
+    }
+  }
+
+  /// The card offers a fresh copy only for what a fresh copy repairs: the installed files. A real
+  /// report for a healthy web wallpaper always carries an unavailable lock-screen check, and a scene
+  /// without shared resources reports those as unavailable; neither is damage in the wallpaper.
+  func testCompatibilityCardOffersReinstallOnlyWhenTheInstalledFilesAreWhatIsUnavailable() async throws {
+    try await withPanel { panel in
+      try await panel.finishWelcome()
+      panel.show()
+      try await panel.waitJS("powerProbe.received.length >= 1")
+      let result = try await panel.js("""
+        const base = window.powerProbe.received.at(-1);
+        const kinds = { web: 'Web', scene: 'Scene', video: 'Video', unknown: 'Unknown' };
+        const ids = { healthyWeb: ['9001', 'web'], sceneWithoutSharedResources: ['9002', 'scene'], videoWithoutNativeAdmission: ['9003', 'video'],
+                      entryMissing: ['9004', 'video'], manifestMissing: ['9005', 'scene'], unknownType: ['9006', 'unknown'] };
+        const wallpapers = Object.values(ids).map(([id, kind]) => ({ id, title: 'W' + id, kind: kinds[kind], size: 100, preview: null, active: false, supported: true, tags: [] }));
+        const check = (id, status) => ({ id, status, title: id, detail: id });
+        const show = (key, checks) => {
+          const id = ids[key][0];
+          window.wallpaperUI.receive(Object.assign({}, base, { page: 'installed', wallpapers, selectedID: id, targetDisplayID: 'primary', downloads: [], downloadRequests: [],
+            wallpaperCompatibility: { wallpaperID: id, displayID: 'primary', checking: false, checks } }));
+          return { inspector: !!document.querySelector('#inspector .inspector-actions [data-action="workshopReinstall"][data-id="' + id + '"]'),
+                   card: !!document.querySelector('#inspector .compat [data-action="workshopReinstall"][data-id="' + id + '"]') };
+        };
+        return {
+          healthyWeb: show('healthyWeb', [check('target', 'ok'), check('lockScreen', 'unavailable'), check('project', 'ok'), check('entry', 'ok'), check('webRuntime', 'unknown')]),
+          sceneWithoutSharedResources: show('sceneWithoutSharedResources', [check('target', 'ok'), check('lockScreen', 'warning'), check('project', 'ok'), check('entry', 'ok'), check('sharedResources', 'unavailable'), check('sceneCapability', 'unknown')]),
+          videoWithoutNativeAdmission: show('videoWithoutNativeAdmission', [check('target', 'ok'), check('lockScreen', 'warning'), check('project', 'ok'), check('entry', 'ok'), check('nativeVideo', 'unavailable')]),
+          entryMissing: show('entryMissing', [check('target', 'ok'), check('lockScreen', 'warning'), check('project', 'ok'), check('entry', 'unavailable'), check('nativeVideo', 'unavailable')]),
+          manifestMissing: show('manifestMissing', [check('target', 'ok'), check('lockScreen', 'warning'), check('project', 'unavailable')]),
+          unknownType: show('unknownType', [check('target', 'ok'), check('lockScreen', 'unavailable'), check('project', 'unavailable'), check('entry', 'ok'), check('capability', 'unavailable')]),
+        };
+        """) as? [String: Any]
+      func offered(_ key: String) -> [Bool]? {
+        (result?[key] as? [String: Bool]).map { [$0["inspector"] ?? false, $0["card"] ?? false] }
+      }
+      XCTAssertEqual(offered("healthyWeb"), [true, false], "A web wallpaper's lock screen is never supported; nothing is damaged")
+      XCTAssertEqual(offered("sceneWithoutSharedResources"), [true, false], "Missing shared resources are fetched separately, not by a fresh copy")
+      XCTAssertEqual(offered("videoWithoutNativeAdmission"), [true, false], "Native video admission depends on the target, not on the files")
+      XCTAssertEqual(offered("entryMissing"), [true, true], "A missing entry file is what a fresh copy repairs")
+      XCTAssertEqual(offered("manifestMissing"), [true, true], "A missing manifest is what a fresh copy repairs")
+      XCTAssertEqual(offered("unknownType"), [true, false], "A fresh copy does not teach macOS a type it has no renderer for")
+    }
+  }
+
   func testRejectedDownloadAccountStaysVisibleAndLateErrorsDoNotLeakIntoReopenedDialog() async throws {
     try await withPanel { panel in
       try await panel.finishWelcome()
@@ -728,4 +808,375 @@ final class ControlPanelLibraryTests: ControlPanelTestCase {
       "A failure that happens again after recovery must surface instead of staying hidden")
     await workshop.steamCMDSetup.shutdown()
   }
+
+  // MARK: Still covers and hover animation
+
+  private func png(width: Int, height: Int) throws -> Data {
+    let output = NSMutableData()
+    let destination = try XCTUnwrap(
+      CGImageDestinationCreateWithData(output, UTType.png.identifier as CFString, 1, nil))
+    let context = try XCTUnwrap(
+      CGContext(
+        data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+        space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+    context.setFillColor(CGColor(red: 0.2, green: 0.5, blue: 0.8, alpha: 1))
+    context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+    CGImageDestinationAddImage(destination, try XCTUnwrap(context.makeImage()), nil)
+    XCTAssertTrue(CGImageDestinationFinalize(destination))
+    return output as Data
+  }
+
+  /// Library folders `a` and `b` with an animated preview, `c` with a picture, and `d` with none.
+  private func installPreviews(_ panel: PanelFixture) throws {
+    let gif = try Self.gif(frames: 3, brightness: 0.6)
+    var entries: [BridgeWallpaperEntry] = []
+    for (id, file, bytes) in [("a", "preview.gif", gif), ("b", "preview.gif", gif), ("c", "preview.png", try png(width: 64, height: 64))] {
+      let path = panel.library.appendingPathComponent("\(id)/\(file)")
+      try FileManager.default.createDirectory(at: path.deletingLastPathComponent(), withIntermediateDirectories: true)
+      try bytes.write(to: path)
+      entries.append(
+        BridgeWallpaperEntry(
+          id: id, title: id.uppercased(), kind: .video, supported: true, active: false, selected: false,
+          previewPath: path.path))
+    }
+    entries.append(
+      BridgeWallpaperEntry(
+        id: "d", title: "D", kind: .video, supported: true, active: false, selected: false, previewPath: nil))
+    panel.store.librarySnapshot.wallpapers = entries
+  }
+
+  /// The addresses the snapshot gives the covers of `installPreviews`' wallpapers `ids`.
+  private func coverAddresses(_ panel: PanelFixture, _ ids: [String]) throws -> [String] {
+    try ids.map { id in
+      let file = panel.library.appendingPathComponent("\(id)/preview.\(id == "c" ? "png" : "gif")")
+      return "mwe-ui://library-thumbnail/\(id)?v=\(try XCTUnwrap(LibraryPreviewFetcher.coverStamp(of: file)))"
+    }
+  }
+
+  func testSnapshotOffersACoverForEveryPreviewAndAnimationOnlyToThoseThatCanMove() async throws {
+    try await withPanel { panel in
+      func entry(_ id: String, _ file: String?) -> BridgeWallpaperEntry {
+        BridgeWallpaperEntry(
+          id: id, title: id, kind: .video, supported: true, active: false, selected: false,
+          previewPath: file.map { panel.library.appendingPathComponent("\(id)/\($0)").path })
+      }
+      let previews: [(String, String?)] = [
+        ("gif", "preview.gif"), ("webp", "preview.WEBP"), ("apng", "preview.apng"), ("png", "preview.png"),
+        ("jpg", "preview.jpg"), ("none", nil),
+      ]
+      for (id, file) in previews {
+        guard let file else { continue }
+        let path = panel.library.appendingPathComponent("\(id)/\(file)")
+        try FileManager.default.createDirectory(at: path.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("\(id) preview".utf8).write(to: path)
+      }
+      panel.store.librarySnapshot.wallpapers = previews.map { entry($0.0, $0.1) }
+
+      // The preview files' stamps are read in the background: until they are, a tile has no cover
+      // address and says so, so the page shows nothing rather than the full-size preview.
+      let pending = try XCTUnwrap(panel.controller.snapshot()["wallpapers"] as? [[String: Any]])
+      for (id, file) in previews {
+        let tile = try XCTUnwrap(pending.first { $0["id"] as? String == id }, id)
+        XCTAssertTrue(tile["thumbnail"] is NSNull, id)
+        XCTAssertEqual(tile["coverPending"] as? Bool, file != nil, id)
+      }
+      await panel.controller.libraryCovers.settled()
+
+      let wallpapers = try XCTUnwrap(panel.controller.snapshot()["wallpapers"] as? [[String: Any]])
+      func tile(_ id: String) throws -> [String: Any] {
+        try XCTUnwrap(wallpapers.first { $0["id"] as? String == id }, id)
+      }
+
+      for (id, file) in previews where file != nil {
+        let tile = try tile(id)
+        XCTAssertEqual(tile["preview"] as? String, "mwe-ui://preview/\(id)", id)
+        let source = panel.library.appendingPathComponent("\(id)/\(file!)")
+        let stamp = try XCTUnwrap(LibraryPreviewFetcher.coverStamp(of: source), id)
+        let cover = try XCTUnwrap(tile["thumbnail"] as? String, id)
+        XCTAssertEqual(cover, "mwe-ui://library-thumbnail/\(id)?v=\(stamp)")
+        XCTAssertEqual(tile["coverPending"] as? Bool, false, id)
+        let route = panel.controller.assets.route(try XCTUnwrap(URL(string: cover)))
+        XCTAssertEqual(route, .libraryThumbnail(URL(fileURLWithPath: source.path)), id)
+      }
+      for id in ["gif", "webp", "apng"] {
+        XCTAssertEqual(try tile(id)["animated"] as? String, "mwe-ui://preview/\(id)", "\(id) can move")
+      }
+      for id in ["png", "jpg", "none"] {
+        XCTAssertTrue(try tile(id)["animated"] is NSNull, "\(id) is a still picture")
+      }
+      let none = try tile("none")
+      XCTAssertTrue(none["preview"] is NSNull)
+      XCTAssertTrue(none["thumbnail"] is NSNull)
+      XCTAssertEqual(none["coverPending"] as? Bool, false, "A wallpaper without a preview waits for no cover")
+      XCTAssertNil(panel.controller.assets.route(try XCTUnwrap(URL(string: "mwe-ui://library-thumbnail/none"))))
+    }
+  }
+
+  func testInstalledTilesShowCoversAndOnlyThePointedAtTileAnimates() async throws {
+    try await withPanel { panel in
+      try installPreviews(panel)
+      try await panel.finishWelcome()
+      panel.show()
+      // A windowless page reports itself hidden, and a hidden page animates nothing.
+      _ = try await panel.js("Object.defineProperty(document, 'hidden', { configurable: true, get: () => false })")
+      try await panel.waitJS("document.querySelectorAll('#wallpaper-grid .wallpaper-tile').length === 4")
+      let waitFor = """
+        const grid = document.getElementById('wallpaper-grid');
+        const tile = id => grid.querySelector(`.wallpaper-tile[data-key="${id}"]`);
+        const select = id => tile(id).querySelector('.tile-select');
+        const liveIDs = () => [...grid.querySelectorAll('img.tile-live')].map(image => image.closest('.wallpaper-tile').dataset.key);
+        const playingIDs = () => [...grid.querySelectorAll('.wallpaper-tile.playing')].map(node => node.dataset.key);
+        const waitFor = async (predicate, what) => {
+          const deadline = Date.now() + 8000;
+          while (!predicate()) {
+            if (Date.now() > deadline) throw new Error(`Timed out: ${what}; live=${liveIDs()} playing=${playingIDs()}`);
+            await new Promise(resolve => setTimeout(resolve, 20));
+          }
+        };
+        const point = (type, id, from) => select(id).dispatchEvent(new PointerEvent(type, { bubbles: true, relatedTarget: from ? select(from) : null }));
+        """
+      let result = try await panel.js(waitFor + """
+        await waitFor(() => ['a', 'b', 'c'].every(id => tile(id).querySelector('img.tile-still')?.complete && tile(id).querySelector('img.tile-still').naturalWidth > 0), 'covers to load');
+        const covers = ['a', 'b', 'c'].map(id => tile(id).querySelector('img.tile-still').getAttribute('src'));
+        const restingLive = liveIDs().length;
+
+        point('pointerover', 'a');
+        const beforeDwell = liveIDs().length;
+        await waitFor(() => playingIDs().join() === 'a', 'the pointed-at tile to play');
+        const aSource = tile('a').querySelector('img.tile-live').getAttribute('src');
+
+        // Moving to the next tile stops the first at once and starts the second after the dwell.
+        point('pointerout', 'a', 'b');
+        const afterLeave = liveIDs().length;
+        point('pointerover', 'b');
+        await waitFor(() => playingIDs().join() === 'b', 'the next tile to play');
+        const onlyB = liveIDs().join();
+
+        // A picture has nothing to animate.
+        point('pointerout', 'b', 'c');
+        point('pointerover', 'c');
+        await new Promise(resolve => setTimeout(resolve, 350));
+        const pictureLive = liveIDs().length;
+
+        // Sweeping across tiles without stopping starts nothing.
+        point('pointerout', 'c', 'a'); point('pointerover', 'a');
+        point('pointerout', 'a', 'b'); point('pointerover', 'b');
+        point('pointerout', 'b');
+        await new Promise(resolve => setTimeout(resolve, 350));
+        const afterSweep = liveIDs().length;
+
+        // A held button (a selection drag) never starts one either.
+        select('a').dispatchEvent(new PointerEvent('pointerover', { bubbles: true, buttons: 1 }));
+        await new Promise(resolve => setTimeout(resolve, 350));
+        const afterDrag = liveIDs().length;
+        point('pointerout', 'a');
+
+        // The tile still plays while the pointer moves between its own controls.
+        point('pointerover', 'a');
+        await waitFor(() => playingIDs().join() === 'a', 'a to play again');
+        grid.querySelector('.wallpaper-tile[data-key="a"] .tile-favorite').dispatchEvent(new PointerEvent('pointerover', { bubbles: true, relatedTarget: select('a') }));
+        select('a').dispatchEvent(new PointerEvent('pointerout', { bubbles: true, relatedTarget: grid.querySelector('.wallpaper-tile[data-key="a"] .tile-favorite') }));
+        await new Promise(resolve => setTimeout(resolve, 350));
+        const whileOnFavorite = playingIDs().join();
+
+        // Keyboard focus animates a tile like the pointer does; a focus that is not keyboard focus (a
+        // click) does not. WebKit decides :focus-visible from real input, so the answer is stated here.
+        const matches = Element.prototype.matches;
+        const focusIn = (id, visible) => {
+          Element.prototype.matches = function(selector) { return selector === ':focus-visible' ? visible : matches.call(this, selector); };
+          try { select(id).dispatchEvent(new FocusEvent('focusin', { bubbles: true })); } finally { Element.prototype.matches = matches; }
+        };
+        point('pointerout', 'a');
+        focusIn('b', false);
+        await new Promise(resolve => setTimeout(resolve, 350));
+        const clickFocus = liveIDs().length;
+        focusIn('b', true);
+        await waitFor(() => playingIDs().join() === 'b', 'the focused tile to play');
+        point('pointerover', 'a');
+        await waitFor(() => playingIDs().join() === 'a', 'the pointer to take over from focus');
+        point('pointerout', 'a');
+        await waitFor(() => playingIDs().join() === 'b', 'the focused tile to play again');
+        select('b').dispatchEvent(new FocusEvent('focusout', { bubbles: true, relatedTarget: select('c') }));
+        const afterFocusOut = liveIDs().length;
+
+        // Losing window focus releases it, and so does hiding the page.
+        point('pointerover', 'a');
+        await waitFor(() => playingIDs().join() === 'a', 'a to play before the blur');
+        window.dispatchEvent(new Event('blur'));
+        const afterBlur = liveIDs().length;
+        point('pointerover', 'b');
+        await waitFor(() => playingIDs().join() === 'b', 'b to play');
+        Object.defineProperty(document, 'hidden', { configurable: true, get: () => true });
+        document.dispatchEvent(new Event('visibilitychange'));
+        const afterHide = liveIDs().length;
+        Object.defineProperty(document, 'hidden', { configurable: true, get: () => false });
+        return { covers, restingLive, beforeDwell, aSource, afterLeave, onlyB, pictureLive, afterSweep, afterDrag, whileOnFavorite, clickFocus, afterFocusOut, afterBlur, afterHide };
+        """) as? [String: Any]
+
+      XCTAssertEqual(
+        result?["covers"] as? [String],
+        try coverAddresses(panel, ["a", "b", "c"]),
+        "Installed tiles show the cover, not the preview file")
+      XCTAssertEqual(result?["restingLive"] as? Int, 0, "No tile animates at rest")
+      XCTAssertEqual(result?["beforeDwell"] as? Int, 0, "The pointer must settle before anything loads")
+      XCTAssertEqual(result?["aSource"] as? String, "mwe-ui://preview/a")
+      XCTAssertEqual(result?["afterLeave"] as? Int, 0, "Leaving a tile releases its animation at once")
+      XCTAssertEqual(result?["onlyB"] as? String, "b")
+      XCTAssertEqual(result?["pictureLive"] as? Int, 0, "A single picture is never animated")
+      XCTAssertEqual(result?["afterSweep"] as? Int, 0, "Sweeping across the grid starts no animation")
+      XCTAssertEqual(result?["afterDrag"] as? Int, 0, "Dragging with a button held starts no animation")
+      XCTAssertEqual(result?["whileOnFavorite"] as? String, "a", "Moving between a tile's own controls keeps it playing")
+      XCTAssertEqual(result?["clickFocus"] as? Int, 0, "A focus that is not keyboard focus starts no animation")
+      XCTAssertEqual(result?["afterFocusOut"] as? Int, 0, "Moving focus away releases the animation")
+      XCTAssertEqual(result?["afterBlur"] as? Int, 0, "A window that lost focus plays nothing")
+      XCTAssertEqual(result?["afterHide"] as? Int, 0, "A hidden page plays nothing")
+
+      // Only the covers were made: no original animation and no marker beside them.
+      let cache = try FileManager.default.contentsOfDirectory(atPath: ClientPaths.libraryThumbnailCacheURL.path)
+      XCTAssertEqual(cache.filter { $0.hasSuffix(".jpg") }.count, 3)
+      XCTAssertEqual(cache.filter { !$0.hasSuffix(".jpg") }, [])
+
+      // Leaving the page while a tile plays releases it; coming back shows a resting grid.
+      _ = try await panel.js(waitFor + """
+        const hover = (id) => select(id).dispatchEvent(new PointerEvent('pointerover', { bubbles: true }));
+        hover('a');
+        await waitFor(() => playingIDs().join() === 'a', 'a to play before leaving');
+        """)
+      panel.navigation.selection = .settings
+      try await panel.waitJS("powerProbe.received.at(-1)?.page === 'settings'")
+      try await panel.expectJS("return document.querySelectorAll('img.tile-live').length", equals: 0)
+      panel.navigation.selection = .wallpaper
+      try await panel.waitJS("powerProbe.received.at(-1)?.page === 'installed' && document.querySelectorAll('#wallpaper-grid .wallpaper-tile').length === 4")
+      try await panel.expectJS("return document.querySelectorAll('img.tile-live, .wallpaper-tile.playing').length", equals: 0)
+    }
+  }
+
+  func testTileFallsBackToThePreviewFileWhenItsCoverCannotBeMade() async throws {
+    try await withPanel { panel in
+      // A file where the cache folder's parent should be: no cover can be written.
+      let cache = panel.root.appendingPathComponent("Cache")
+      try? FileManager.default.removeItem(at: cache)
+      try Data().write(to: cache)
+      try installPreviews(panel)
+      try await panel.finishWelcome()
+      panel.show()
+      try await panel.waitJS("document.querySelectorAll('#wallpaper-grid .wallpaper-tile').length === 4")
+      try await panel.waitJS("""
+        ['a', 'c'].every(id => {
+          const still = document.querySelector(`#wallpaper-grid .wallpaper-tile[data-key="${id}"] img.tile-still`);
+          return still?.getAttribute('src') === `mwe-ui://preview/${id}` && still.complete && still.naturalWidth > 0;
+        })
+        """)
+      // The next snapshot keeps showing the preview file instead of asking for the cover again.
+      panel.store.librarySnapshot.wallpapers[3].title = "D renamed"
+      try await panel.waitJS("document.querySelector('#wallpaper-grid .wallpaper-tile[data-key=\"d\"]')?.textContent.includes('D renamed')")
+      try await panel.expectJS(
+        "return document.querySelector('#wallpaper-grid .wallpaper-tile[data-key=\"a\"] img.tile-still').getAttribute('src')",
+        equals: "mwe-ui://preview/a")
+    }
+  }
+
+  /// The page has nothing to show a tile with while its cover's stamp is being read, and must not
+  /// reach for the full-size preview the cover stands for.
+  func testATileWhoseCoverIsStillPendingShowsNoImageUntilItsStampArrives() async throws {
+    try await withPanel { panel in
+      try await panel.finishWelcome()
+      panel.show()
+      try await panel.waitJS("powerProbe.received.length >= 1")
+      let result = try await panel.js("""
+        const base = window.powerProbe.received.at(-1);
+        const wallpaper = extra => Object.assign({ id: 'w', title: 'W', kind: 'Video', preview: 'mwe-ui://preview/w', thumbnail: null, coverPending: false, animated: null, active: false, supported: true, tags: [], approved: false, size: 1, addedAt: null, energy: null, updateAvailable: false, updatedAt: null }, extra);
+        const show = extra => {
+          window.wallpaperUI.receive(Object.assign({}, base, { page: 'installed', wallpapers: [wallpaper(extra)] }));
+          return [...document.querySelectorAll('#wallpaper-grid img.tile-still')].map(image => image.getAttribute('src'));
+        };
+        return { pending: show({ coverPending: true }), stamped: show({ thumbnail: 'mwe-ui://library-thumbnail/w?v=7' }), noPreview: show({ preview: null }) };
+        """) as? [String: Any]
+      XCTAssertEqual(result?["pending"] as? [String], [], "No cover yet means no image, not the preview file")
+      XCTAssertEqual(result?["stamped"] as? [String], ["mwe-ui://library-thumbnail/w?v=7"])
+      XCTAssertEqual(result?["noPreview"] as? [String], [])
+    }
+  }
+
+  /// A rescan follows every Workshop download, import and delete. One that replaced no preview
+  /// must leave every tile's image as it was: the same address, and the same node in the page.
+  func testARescanThatReplacedNoPreviewLeavesEveryCoverAlone() async throws {
+    try await withPanel { panel in
+      let ids = try await showInstalledCovers(panel)
+      let covers = try coverAddresses(panel, ids)
+      let stamps = panel.controller.libraryCovers.stamps
+      let changes = panel.controller.libraryCovers.contentRevision
+      _ = try await panel.js("for (const image of document.querySelectorAll('#wallpaper-grid img.tile-still')) image.sameNode = true;")
+
+      try await rescan(panel)
+      await panel.controller.libraryCovers.settled()
+      try await panel.quiet()
+
+      XCTAssertEqual(panel.controller.libraryCovers.stamps, stamps)
+      XCTAssertEqual(panel.controller.libraryCovers.contentRevision, changes, "Nothing changed, so nothing was announced")
+      let page = try await panel.js(Self.coverStates) as? [String: Any]
+      XCTAssertEqual(page?["sources"] as? [String], covers)
+      XCTAssertEqual(page?["sameNodes"] as? [Bool], [true, true, true], "No tile's image was thrown away and made again")
+    }
+  }
+
+  func testAPreviewThatWasReplacedGetsANewCoverAndTheOthersKeepTheirs() async throws {
+    try await withPanel { panel in
+      let ids = try await showInstalledCovers(panel)
+      let before = try coverAddresses(panel, ids)
+      _ = try await panel.js("for (const image of document.querySelectorAll('#wallpaper-grid img.tile-still')) image.sameNode = true;")
+
+      // An update replaced a's preview with a different picture.
+      try Self.gif(frames: 5, brightness: 0.3).write(to: panel.library.appendingPathComponent("a/preview.gif"))
+      try await rescan(panel)
+      let after = try coverAddresses(panel, ids)
+      XCTAssertNotEqual(after[0], before[0])
+      XCTAssertEqual(Array(after.dropFirst()), Array(before.dropFirst()))
+      try await panel.waitJS("""
+        (() => {
+          const still = document.querySelector('#wallpaper-grid .wallpaper-tile[data-key="a"] img.tile-still');
+          return still?.getAttribute('src') === '\(after[0])' && still.complete && still.naturalWidth > 0;
+        })()
+        """)
+
+      let page = try await panel.js(Self.coverStates) as? [String: Any]
+      XCTAssertEqual(page?["sources"] as? [String], after)
+      XCTAssertEqual(page?["sameNodes"] as? [Bool], [false, true, true], "Only the replaced preview's tile was redone")
+    }
+  }
+
+  /// The Installed grid with the covers of `installPreviews` loaded; returns the wallpaper ids.
+  private func showInstalledCovers(_ panel: PanelFixture) async throws -> [String] {
+    try installPreviews(panel)
+    try await panel.finishWelcome()
+    panel.show()
+    try await panel.waitJS("document.querySelectorAll('#wallpaper-grid .wallpaper-tile').length === 4")
+    try await panel.waitJS("""
+      ['a', 'b', 'c'].every(id => {
+        const still = document.querySelector(`#wallpaper-grid .wallpaper-tile[data-key="${id}"] img.tile-still`);
+        return still?.complete && still.naturalWidth > 0;
+      })
+      """)
+    return ["a", "b", "c"]
+  }
+
+  /// The renderer rescanning the library: the same wallpapers come back, with a new refresh
+  /// revision. Returns once the page has been given the rescanned library.
+  private func rescan(_ panel: PanelFixture) async throws {
+    let store = panel.store
+    panel.bridge.bundleProvider = {
+      BridgeSnapshotBundle(
+        app: store.appSnapshot, library: store.librarySnapshot, wallpaperOptions: store.wallpaperOptionsSnapshot,
+        monitorInformation: store.monitorInformationSnapshot, settings: store.settingsSnapshot)
+    }
+    let delivered = try await panel.js("return window.powerProbe.received.at(-1).libraryRevision") as? String
+    try await store.refreshLibraryAsync()
+    try await panel.waitJS("window.powerProbe.received.at(-1).libraryRevision !== \(delivered.map { "'\($0)'" } ?? "undefined")")
+  }
+
+  private static let coverStates = """
+    const stills = ['a', 'b', 'c'].map(id => document.querySelector(`#wallpaper-grid .wallpaper-tile[data-key="${id}"] img.tile-still`));
+    return { sources: stills.map(image => image.getAttribute('src')), sameNodes: stills.map(image => image.sameNode === true) };
+    """
+
 }

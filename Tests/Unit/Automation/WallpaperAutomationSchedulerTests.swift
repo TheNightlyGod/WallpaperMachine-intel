@@ -37,7 +37,7 @@ final class WallpaperAutomationSchedulerTests: XCTestCase {
     private func scheduler() -> WallpaperAutomationScheduler {
         WallpaperAutomationScheduler(store: rules, focus: focus, displays: { Array(self.states.keys) }, targetDisplay: { self.targetDisplay },
             canRun: { _ in self.running }, capture: { self.states[$0]! }, queue: { display, action in
-                try await self.queue.run(slot: BridgeStore.activationSlot(displayId: display), action)
+                try await self.queue.run(slot: BridgeStore.activationSlot(displayId: display), origin: .automation, action)
             }, apply: { target, display in
                 self.changes.append((display, target))
                 if self.failures.contains(target.id) { throw AutomationError(message: "Fixture unavailable") }
@@ -242,6 +242,47 @@ final class WallpaperAutomationSchedulerTests: XCTestCase {
         await blocker.value; await manual.value; await settle()
         XCTAssertTrue(changes.isEmpty)
         XCTAssertEqual(states["primary"]?.wallpaperID, "manual")
+    }
+
+    func testARuleThatFindsAManualCommandWaitingGivesWayAndDoesNotRetry() async throws {
+        var release: CheckedContinuation<Void, Never>?
+        let blocker = Task { await queue.run { await withCheckedContinuation { release = $0 } } }
+        await settle()
+        let manual = Task {
+            await queue.run(slot: BridgeStore.activationSlot(displayId: "primary")) { states["primary"]?.wallpaperID = "manual" }
+        }
+        await settle()
+        try rules.update("primary") { $0.mode = .appearance; $0.light = target("automatic") }
+        let scheduler = scheduler(); scheduler.start(); defer { scheduler.stop() }; await settle()
+        try XCTUnwrap(release).resume()
+        await blocker.value; await manual.value; await settle()
+
+        scheduler.evaluate(); await settle()
+        XCTAssertTrue(changes.isEmpty, "The rule's event is spent, not queued again behind the user's choice")
+        XCTAssertEqual(states["primary"]?.wallpaperID, "manual")
+        XCTAssertNil(rules.errors["primary"], "Giving way is not a failure to report")
+    }
+
+    func testARuleThatFindsAManualCommandRunningGivesWayAndDoesNotReplaceIt() async throws {
+        var release: CheckedContinuation<Void, Never>?
+        let manual = Task {
+            await queue.run(slot: BridgeStore.activationSlot(displayId: "primary")) {
+                await withCheckedContinuation { release = $0 }
+                states["primary"]?.wallpaperID = "manual"
+            }
+        }
+        await settle()
+        XCTAssertTrue(queue.isBusy)
+        try rules.update("primary") { $0.mode = .appearance; $0.light = target("automatic") }
+        let scheduler = scheduler(); scheduler.start(); defer { scheduler.stop() }; await settle()
+        XCTAssertTrue(queue.waiting.isEmpty, "The rule does not queue up behind the user's command")
+        try XCTUnwrap(release).resume()
+        await manual.value; await settle()
+
+        scheduler.evaluate(); await settle()
+        XCTAssertTrue(changes.isEmpty, "The rule's event is spent, not applied over the user's choice")
+        XCTAssertEqual(states["primary"]?.wallpaperID, "manual")
+        XCTAssertNil(rules.errors["primary"], "Giving way is not a failure to report")
     }
 
     func testRapidSpaceChangesDiscardQueuedChoicesForDesktopsAlreadyLeft() async throws {

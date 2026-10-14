@@ -25,6 +25,14 @@ enum PlaylistOrder: String, Codable, CaseIterable, Sendable {
     case shuffle
 }
 
+/// What makes a rotating display move on to its next wallpaper.
+enum PlaylistTrigger: String, Codable, CaseIterable, Sendable {
+    /// Every `DisplayPlaylist.interval` minutes.
+    case interval
+    /// Each time the Mac is unlocked, and not on a timer.
+    case unlock
+}
+
 /// One display's playlist. Every field has a default, so a display nobody configured is `off`
 /// and a playlist saved by an older build decodes with the fields it lacks filled in.
 struct DisplayPlaylist: Codable, Equatable, Sendable {
@@ -37,7 +45,10 @@ struct DisplayPlaylist: Codable, Equatable, Sendable {
     var mode: PlaylistMode = .off
     var source: PlaylistSource = .all
     var order: PlaylistOrder = .sequential
+    /// What a rotation waits for. A build that does not know a stored trigger rotates on the interval.
+    var trigger: PlaylistTrigger = .interval
     /// Minutes between changes; one of `intervals` or a custom value in `intervalRange`.
+    /// An `unlock` rotation keeps it, so choosing a time again shows the last one.
     var interval = 30
     var wallpaperIDs: [String] = []
     var collectionID: String?
@@ -57,6 +68,7 @@ struct DisplayPlaylist: Codable, Equatable, Sendable {
         mode = (try? container.decodeIfPresent(PlaylistMode.self, forKey: .mode)) ?? fallback.mode
         source = (try? container.decodeIfPresent(PlaylistSource.self, forKey: .source)) ?? fallback.source
         order = (try? container.decodeIfPresent(PlaylistOrder.self, forKey: .order)) ?? fallback.order
+        trigger = (try? container.decodeIfPresent(PlaylistTrigger.self, forKey: .trigger)) ?? fallback.trigger
         let interval = (try? container.decodeIfPresent(Int.self, forKey: .interval)) ?? fallback.interval
         self.interval = Self.intervalRange.contains(interval) ? interval : fallback.interval
         wallpaperIDs = (try? container.decodeIfPresent([String].self, forKey: .wallpaperIDs)) ?? []
@@ -69,6 +81,9 @@ struct DisplayPlaylist: Codable, Equatable, Sendable {
         nightStart = Self.minuteOfDay((try? container.decodeIfPresent(Int.self, forKey: .nightStart)) ?? nil)
             ?? fallback.nightStart
     }
+
+    /// Whether this playlist changes wallpaper on a timer, and so has a next change to date.
+    var hasTimer: Bool { mode == .rotate && trigger == .interval }
 
     /// A minute of the day, or nil when `value` is missing or outside 0..<1440.
     static func minuteOfDay(_ value: Int?) -> Int? {

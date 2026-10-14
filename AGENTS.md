@@ -55,13 +55,14 @@ use `rg -u` only when those are the target.
   or cite them as durable evidence, and keep secrets, private assets, screenshots and
   traces out of Git. Only `scripts/test.py` prunes its own output; everything else stays
   until deleted. Keep a task's ad-hoc output (investigations, probe output, CI downloads,
-  drafts) in one `artifacts/<task>/` folder. Before finishing, list what the task left
-  in `artifacts/` (including renderer/Rust check runs) with sizes and ask the user
-  whether to delete it; delete only on a yes. For wider cleanup, show
-  `python3 scripts/clean.py --dry-run` and run `python3 scripts/clean.py` (keeps built
-  apps) only after the user agrees. `--all` deletes the delivered app;
-  `--user-assets`/`--managed-user-assets` delete live user wallpaper data (the latter
-  irreversibly): only on explicit request.
+  drafts) in one `artifacts/<task>/` folder. Before finishing, delete what this task
+  left in `artifacts/` (including its renderer/Rust check runs) without asking, and say
+  in one line what was removed; keep only output the final reply cites, and name it.
+  Never delete another task's output: other agents may be running in parallel. For
+  wider cleanup, show `python3 scripts/clean.py --dry-run` and run
+  `python3 scripts/clean.py` (keeps built apps) only after the user agrees. `--all`
+  deletes the delivered app; `--user-assets`/`--managed-user-assets` delete live user
+  wallpaper data (the latter irreversibly): only on explicit request.
 - Agent files: commit policy, never state. Team agent rules live only in `AGENTS.md`
   and `docs/`. Agent tool dirs (`.agents/`, `.claude/`, `.commandcode/`, `.conductor/`,
   `.omo/`, `.omp/`, `.pi/`) and `CLAUDE.local.md` are Git-ignored, machine-local state

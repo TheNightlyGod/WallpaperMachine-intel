@@ -635,8 +635,9 @@ void CustomShaderPass::prepare(Scene& scene, const Device& device, RenderingReso
             pipeline.multisample.alphaToCoverageEnable = VK_TRUE;
         }
         if (m_desc.with_depth) {
-            pipeline.depth.depthTestEnable  = material->depth_test ? VK_TRUE : VK_FALSE;
-            pipeline.depth.depthWriteEnable = material->depth_write ? VK_TRUE : VK_FALSE;
+            const auto depth = ResolveSceneDepthState(*material, m_desc.with_depth);
+            pipeline.depth.depthTestEnable  = depth.test ? VK_TRUE : VK_FALSE;
+            pipeline.depth.depthWriteEnable = depth.write ? VK_TRUE : VK_FALSE;
             pipeline.depth.depthCompareOp   = VK_COMPARE_OP_LESS_OR_EQUAL;
             switch (material->cull_mode) {
             case CullMode::Front: pipeline.raster.cullMode = VK_CULL_MODE_FRONT_BIT; break;

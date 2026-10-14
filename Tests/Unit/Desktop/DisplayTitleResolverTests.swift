@@ -52,4 +52,35 @@ final class DisplayTitleResolverTests: XCTestCase {
             XCTAssertEqual(names[(CFUUIDCreateString(nil, uuid) as String).uppercased()], screen.localizedName)
         }
     }
+
+    func testDisplayGeometryHasNoShapeForADisplayThatIsNotAttached() {
+        // Neither a selector nor a title naming a live id, nor an id no screen has.
+        XCTAssertNil(DisplayGeometry.aspectRatio(displayID: "primary", title: "Vendor 1 - Model 2"))
+        XCTAssertNil(DisplayGeometry.aspectRatio(displayID: "identity:{not json", title: ""))
+        XCTAssertNil(DisplayGeometry.aspectRatio(displayID: "4000000000", title: "Vendor 1 - Model 2 (4000000000 - Primary)"))
+        XCTAssertNil(DisplayGeometry.screen(displayID: "4000000000", title: ""))
+    }
+
+    func testDisplayGeometryReadsTheShapeOfEachAttachedScreenByIdOrTitleSuffix() throws {
+        for screen in NSScreen.screens {
+            guard let id = SystemDesktopPictureWorkspace.id(screen) else { continue }
+            let expected = DisplayGeometry.aspectRatio(of: screen.frame.size)
+            XCTAssertEqual(DisplayGeometry.aspectRatio(displayID: id, title: ""), expected)
+            // `primary` and identity selectors reach the screen through the title's live id.
+            XCTAssertEqual(DisplayGeometry.aspectRatio(displayID: "primary", title: "Vendor 1 - Model 2 (\(id) - Primary)"), expected)
+            XCTAssertTrue(DisplayGeometry.screen(displayID: id, title: "") === screen)
+        }
+    }
+
+    func testDisplayGeometryShapesStayInTheRangeAWindowCanShow() {
+        XCTAssertEqual(try XCTUnwrap(DisplayGeometry.aspectRatio(of: CGSize(width: 1920, height: 1080))), 16.0 / 9, accuracy: 0.0001)
+        XCTAssertEqual(try XCTUnwrap(DisplayGeometry.aspectRatio(of: CGSize(width: 1080, height: 1920))), 9.0 / 16, accuracy: 0.0001)
+        XCTAssertEqual(DisplayGeometry.aspectRatio(of: CGSize(width: 10_000, height: 100)), 4)
+        XCTAssertEqual(DisplayGeometry.aspectRatio(of: CGSize(width: 100, height: 10_000)), 0.25)
+        for size in [CGSize.zero, CGSize(width: 100, height: 0), CGSize(width: 0, height: 100),
+                     CGSize(width: -5, height: 10), CGSize(width: CGFloat.nan, height: 10), CGSize(width: 10, height: CGFloat.infinity)] {
+            XCTAssertNil(DisplayGeometry.aspectRatio(of: size), "\(size)")
+        }
+    }
 }
+

@@ -26,6 +26,7 @@ const PRESET_NOTES = {
 const PREFERENCES = [
   ['launchAtLogin', 'power', 'Launch at login', 'Wallpapers come back on their own after a restart.'],
   ['keepWindowsOnWallpaperClick', 'mousePointerClick', 'Keep windows in place when clicking the wallpaper', 'Turns off macOS’s “Click wallpaper to reveal desktop” so clicks reach interactive wallpapers.'],
+  ['telemetry', 'activity', 'Send performance data', 'Sends load times, frame rate, energy use and your Mac’s model once a day, to find what makes wallpapers slow. No names, files or account details.'],
 ];
 const BATTERY_MODES = [['keepRunning', 'Keep running'], ['reducedQuality', 'Reduced quality'], ['pause', 'Pause']];
 const TIPS = [
@@ -42,6 +43,8 @@ export function createWelcome(helpers) {
   let open = false;
   let decided = false;
   let step = 0;
+  // Whether the Preferences page, with the performance data switch, has been on screen.
+  let preferencesShown = false;
   let state = null;
   // What the guide found when it opened, so Skip can put back the choices that apply at once.
   let initial = null;
@@ -99,11 +102,13 @@ export function createWelcome(helpers) {
     decided = true;
     signIn.secret = null;
     render(state);
-    if (state?.welcomeSeen === false) run(send('welcomeSeen'));
+    // Native counts the performance data question as asked only if its switch was on screen.
+    if (state?.welcomeSeen === false) run(send('welcomeSeen', { preferencesShown }));
   }
   function go(next) {
     if (navigationBusy()) return;
     step = Math.max(0, Math.min(STEPS.length - 1, next));
+    if (step === stepIndex('preferences')) preferencesShown = true;
     error = '';
     render(state);
   }
@@ -327,15 +332,19 @@ export function createWelcome(helpers) {
     const settings = state.settings;
     const unavailable = !settings;
     const toggle = ([key, glyph, title, note]) => {
-      const off = unavailable || pending.has('preferences') || (key === 'launchAtLogin' && !settings?.launchAtLoginAvailable);
+      const off = unavailable || pending.has('preferences') || (key === 'launchAtLogin' && !settings?.launchAtLoginAvailable)
+        || (key === 'telemetry' && !settings?.telemetryAvailable);
       const value = prefs.has(key) ? prefs.get(key) : Boolean(settings?.[key]);
-      const extra = key === 'launchAtLogin' && settings && !settings.launchAtLoginAvailable ? ` ${t('Move the app to Applications to enable.')}` : '';
+      // Switched off in System Settings, the login item stays off until the user allows it there.
+      const extra = key !== 'launchAtLogin' || !settings ? ''
+        : !settings.launchAtLoginAvailable ? ` ${t('Move the app to Applications to enable.')}`
+        : settings.launchAtLoginNeedsApproval ? ` ${t('Allow WallpaperMachine in System Settings → General → Login Items to launch it at login.')}` : '';
       return `<label class="welcome-pref" data-key="pref-${key}"><span class="dialog-guide-icon">${icon(glyph, 18)}</span><span class="welcome-pref-body"><span class="welcome-pref-title">${e(t(title))}</span><span class="welcome-pref-note">${e(t(note))}${e(extra)}</span></span><span class="settings-switch"><input type="checkbox" role="switch" data-pref="${key}" aria-label="${e(t(title))}"${value ? ' checked' : ''}${off ? ' disabled' : ''}><span aria-hidden="true"></span></span></label>`;
     };
     const battery = prefs.has('batteryMode') ? prefs.get('batteryMode') : (settings?.batteryMode || 'keepRunning');
     const batteryOff = unavailable || pending.has('preferences');
     const batteryRow = `<label class="welcome-pref" data-key="pref-batteryMode"><span class="dialog-guide-icon">${icon('batteryCharging', 18)}</span><span class="welcome-pref-body"><span class="welcome-pref-title">${e(t('On battery'))}</span><span class="welcome-pref-note">${e(t('Keep wallpapers running, lower their quality, or pause them while on battery.'))}</span><select data-pref="batteryMode" aria-label="${e(t('On battery'))}"${batteryOff ? ' disabled' : ''}>${BATTERY_MODES.map(([id, label]) => `<option value="${id}"${battery === id ? ' selected' : ''}>${e(t(label))}</option>`).join('')}</select></span></label>`;
-    const rows = `${toggle(PREFERENCES[0])}${batteryRow}${toggle(PREFERENCES[1])}`;
+    const rows = `${toggle(PREFERENCES[0])}${batteryRow}${toggle(PREFERENCES[1])}${toggle(PREFERENCES[2])}`;
     return `${head(t('A few preferences'), t('You can change these later in Settings.'))}${unavailable ? `<p class="notice">${e(t('Settings are unavailable right now. You can set these later in Settings.'))}</p>` : ''}<div class="welcome-prefs">${rows}${lockScreenRow(settings)}</div>${settings?.lockScreenError ? `<p class="notice error" role="alert">${e(settings.lockScreenError)}</p>` : ''}${error ? `<p class="notice error" role="alert">${e(error)}</p>` : ''}`;
   }
 

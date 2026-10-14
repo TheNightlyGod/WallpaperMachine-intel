@@ -26,6 +26,30 @@ final class DownloaderSessionTests: DownloaderTestCase {
     try assertNoStaging(in: root)
   }
 
+  func testSavedSignInAndStagingStayOutOfBackupsButTheLibraryDoesNot() async throws {
+    let root = try makeSessionRuntime()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let session = root.appendingPathComponent("SteamSession")
+    let probe = StagingBackupProbe()
+    let first = startDownload(in: root, runtimeProvider: probe)
+    try await authenticate(first)
+    try await assertImported(first, in: root, itemID: "123456")
+    XCTAssertEqual(probe.excludedAtLaunch, [true], "partial downloads must be skipped from the first byte")
+    XCTAssertEqual(first.savedAccount, "localtest")
+    XCTAssertTrue(session.isKeptOutOfBackups, "a new sign-in must not reach a backup")
+
+    // Signing in as someone else replaces the saved directory with a new one.
+    let other = startDownload(in: root, username: "another_account", itemID: "234567", runtimeProvider: probe)
+    try await authenticate(other)
+    try await assertImported(other, in: root, itemID: "234567")
+    XCTAssertEqual(other.savedAccount, "another_account")
+    XCTAssertTrue(session.isKeptOutOfBackups, "a replaced sign-in must not become backed up")
+    XCTAssertEqual(probe.excludedAtLaunch, [true, true])
+    XCTAssertFalse(root.appendingPathComponent("Library").isKeptOutOfBackups, "installed wallpapers stay in the backup")
+    XCTAssertFalse(root.appendingPathComponent("Library/234567").isKeptOutOfBackups)
+    try assertNoStaging(in: root)
+  }
+
   func testSwitchingAccountsNeverRestoresPreviousAccountsCredentials() async throws {
     let root = try makeSessionRuntime()
     defer { try? FileManager.default.removeItem(at: root) }

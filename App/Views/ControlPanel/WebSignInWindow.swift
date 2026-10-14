@@ -82,6 +82,7 @@ final class WebSignInWindowController: NSWindowController, NSWindowDelegate, WKN
         window.isReleasedWhenClosed = false
         window.contentMinSize = NSSize(width: 380, height: 520)
         window.contentView = webView
+        ControlPanelWindow.moveToActiveSpace(window)
         window.center()
         super.init(window: window)
         window.delegate = self

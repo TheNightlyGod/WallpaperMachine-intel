@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use wallpaper_core::project::ScalingMode;
+use wallpaper_core::project::{ScalingMode, SceneFraming};
 
 use super::app::SerializedSelector;
 use crate::project::PropertyValue;
@@ -106,6 +106,10 @@ pub struct MonitorRender {
     /// cap below that refresh and is omitted when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frame_rate: Option<u32>,
+    /// Where the wallpaper sits inside the room this display leaves around it.
+    /// Absent when centred, so a file nobody positioned never carries the key.
+    #[serde(default, skip_serializing_if = "FramingCfg::is_default")]
+    pub framing: FramingCfg,
 }
 
 #[derive(Deserialize)]
@@ -122,6 +126,8 @@ struct MonitorRenderRaw {
     frame_rate: Option<Option<u32>>,
     #[serde(default)]
     fps: Option<u32>,
+    #[serde(default)]
+    framing: FramingCfg,
 }
 
 impl From<MonitorRenderRaw> for MonitorRender {
@@ -131,6 +137,7 @@ impl From<MonitorRenderRaw> for MonitorRender {
             scaling_mode: raw.scaling_mode,
             scaling_factor: raw.scaling_factor,
             frame_rate: super::frame_rate_from_legacy(raw.frame_rate, raw.fps),
+            framing: raw.framing,
         }
     }
 }
@@ -142,6 +149,7 @@ impl Default for MonitorRender {
             scaling_mode: default_scaling_mode(),
             scaling_factor: default_scaling_factor(),
             frame_rate: None,
+            framing: FramingCfg::default(),
         }
     }
 }
@@ -163,6 +171,93 @@ impl MonitorRender {
     #[must_use]
     pub fn fps_on(&self, refresh_hz: u32) -> u32 {
         super::resolve_frame_rate(self.frame_rate, refresh_hz)
+    }
+}
+
+/// Where a wallpaper sits on one display when that display leaves room around
+/// it: a Fit or Original size wallpaper smaller than the display, or a Fill or
+/// zoomed one larger than it.
+///
+/// Each axis is a fraction, `0.0` (left, top) to `1.0` (right, bottom), of the
+/// room the wallpaper could move through, so a position means the same on
+/// every resolution and survives a display being swapped for another size.
+/// `0.5` on both axes is the centred layout every wallpaper had before this
+/// existed.
+///
+/// A hand-edited file may hold anything, and a wallpaper file that fails to
+/// parse is set aside as corrupted with every other setting in it. So an axis
+/// out of range is clamped, and one that is not a number, or a `framing` that
+/// is not an object, is read as centred; none of them is an error.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct FramingCfg {
+    pub pan_x: f64,
+    pub pan_y: f64,
+}
+
+impl FramingCfg {
+    const CENTERED: Self = Self {
+        pan_x: CENTERED_AXIS,
+        pan_y: CENTERED_AXIS,
+    };
+
+    /// Whether this is the centred layout, which is stored as no key at all.
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        *self == Self::CENTERED
+    }
+
+    /// The same position with each axis a finite fraction between 0 and 1: an
+    /// out-of-range axis is pulled to the nearest edge and a non-finite one
+    /// falls back to the middle.
+    #[must_use]
+    pub fn normalized(self) -> Self {
+        Self {
+            pan_x: normalize_axis(self.pan_x),
+            pan_y: normalize_axis(self.pan_y),
+        }
+    }
+
+    /// The position the engine is handed, always a valid framing.
+    #[must_use]
+    pub fn to_scene(self) -> SceneFraming {
+        let Self { pan_x, pan_y } = self.normalized();
+        SceneFraming { pan_x, pan_y }
+    }
+}
+
+impl Default for FramingCfg {
+    fn default() -> Self {
+        Self::CENTERED
+    }
+}
+
+impl<'de> Deserialize<'de> for FramingCfg {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        let axis = |key: &str| {
+            value
+                .get(key)
+                .and_then(Value::as_f64)
+                .map_or(CENTERED_AXIS, normalize_axis)
+        };
+        Ok(Self {
+            pan_x: axis("pan_x"),
+            pan_y: axis("pan_y"),
+        })
+    }
+}
+
+/// The middle of the room on one axis.
+const CENTERED_AXIS: f64 = 0.5;
+
+fn normalize_axis(pan: f64) -> f64 {
+    if pan.is_finite() {
+        pan.clamp(0.0, 1.0)
+    } else {
+        CENTERED_AXIS
     }
 }
 
@@ -219,6 +314,149 @@ mod tests {
             assert_eq!(wallpaper.parse_scaling_mode(), expected);
             assert_eq!(display.parse_scaling_mode(), expected);
         }
+    }
+
+    #[test]
+    fn a_display_nobody_positioned_is_centred_and_writes_no_framing_key() {
+        let missing: MonitorRender = serde_json::from_str("{}").unwrap();
+        assert_eq!(missing.framing, FramingCfg::default());
+        assert!(missing.framing.is_default());
+        assert_eq!(missing.framing.to_scene(), SceneFraming::default());
+
+        let saved = serde_json::to_value(MonitorRender::default()).unwrap();
+        assert!(saved.get("framing").is_none(), "{saved}");
+
+        // Positioning back to the middle is the same as never positioning: the
+        // file goes back to what an older build would write and read.
+        let recentred: MonitorRender =
+            serde_json::from_str(r#"{"framing":{"pan_x":0.5,"pan_y":0.5}}"#).unwrap();
+        let saved = serde_json::to_value(recentred).unwrap();
+        assert!(saved.get("framing").is_none(), "{saved}");
+    }
+
+    #[test]
+    fn a_saved_position_round_trips_and_reaches_the_engine() {
+        let positioned = MonitorRender {
+            framing: FramingCfg {
+                pan_x: 0.2,
+                pan_y: 0.8,
+            },
+            ..MonitorRender::default()
+        };
+        let json = serde_json::to_string(&positioned).unwrap();
+        let loaded: MonitorRender = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded, positioned);
+        assert!(!loaded.framing.is_default());
+        assert_eq!(
+            loaded.framing.to_scene(),
+            SceneFraming {
+                pan_x: 0.2,
+                pan_y: 0.8
+            }
+        );
+
+        // One axis moved: the other stays in the middle rather than defaulting
+        // to an edge.
+        let horizontal: MonitorRender =
+            serde_json::from_str(r#"{"framing":{"pan_x":0.25}}"#).unwrap();
+        assert_eq!(
+            horizontal.framing,
+            FramingCfg {
+                pan_x: 0.25,
+                pan_y: 0.5
+            }
+        );
+    }
+
+    /// A wallpaper file that fails to parse is set aside as corrupted with all
+    /// its other settings, so a bad position must degrade to a usable one
+    /// instead of being an error.
+    #[test]
+    fn a_hand_edited_position_degrades_instead_of_discarding_the_wallpaper() {
+        let centred = FramingCfg::default();
+        for (json, expected) in [
+            // Out of range is pulled to the nearest edge.
+            (
+                r#"{"pan_x":7.0,"pan_y":-3}"#,
+                FramingCfg {
+                    pan_x: 1.0,
+                    pan_y: 0.0,
+                },
+            ),
+            // Whole numbers are numbers.
+            (
+                r#"{"pan_x":1,"pan_y":0}"#,
+                FramingCfg {
+                    pan_x: 1.0,
+                    pan_y: 0.0,
+                },
+            ),
+            // Not a number is not a position: that axis is centred, the other
+            // axis keeps what it says.
+            (
+                r#"{"pan_x":"left","pan_y":0.25}"#,
+                FramingCfg {
+                    pan_x: 0.5,
+                    pan_y: 0.25,
+                },
+            ),
+            (r#"{"pan_x":null,"pan_y":true}"#, centred),
+            (r#"{"pan_x":[0.1],"pan_y":{"a":1}}"#, centred),
+            // A framing that is not an object at all.
+            ("5", centred),
+            ("null", centred),
+            (r#""left""#, centred),
+            ("[0.1,0.2]", centred),
+        ] {
+            let render: MonitorRender =
+                serde_json::from_str(&format!(r#"{{"scaling_mode":"fit","framing":{json}}}"#))
+                    .unwrap_or_else(|error| panic!("framing {json} must load: {error}"));
+            assert_eq!(render.framing, expected, "framing {json}");
+            assert_eq!(render.parse_scaling_mode(), ScalingMode::Fit, "{json}");
+            assert!(render.framing.to_scene().is_valid(), "{json}");
+        }
+
+        let wallpaper: WallpaperConfig = serde_json::from_str(
+            r#"{"workshop_id":"1","type":"scene","audio":{"volume":0.3},
+                "monitors":[{"scaling_mode":"fit","framing":{"pan_x":"left","pan_y":9}}]}"#,
+        )
+        .unwrap();
+        assert!((wallpaper.audio.volume - 0.3).abs() <= f32::EPSILON);
+        assert_eq!(wallpaper.monitors[0].parse_scaling_mode(), ScalingMode::Fit);
+        assert_eq!(
+            wallpaper.monitors[0].framing,
+            FramingCfg {
+                pan_x: 0.5,
+                pan_y: 1.0
+            }
+        );
+    }
+
+    #[test]
+    fn the_engine_is_never_handed_a_position_it_would_refuse() {
+        for (pan_x, pan_y) in [
+            (f64::NAN, 0.5),
+            (0.5, f64::INFINITY),
+            (f64::NEG_INFINITY, 2.0),
+            (-0.01, 1.01),
+        ] {
+            let scene = FramingCfg { pan_x, pan_y }.to_scene();
+            scene
+                .validate()
+                .unwrap_or_else(|error| panic!("{pan_x},{pan_y} reached the engine: {error}"));
+        }
+        assert_eq!(
+            FramingCfg {
+                pan_x: f64::NAN,
+                pan_y: 2.0
+            }
+            .to_scene(),
+            SceneFraming {
+                pan_x: 0.5,
+                pan_y: 1.0
+            }
+        );
+        assert_eq!(FramingCfg::default().to_scene(), SceneFraming::default());
     }
 
     #[test]

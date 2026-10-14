@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Observation
 
@@ -54,6 +55,7 @@ final class WorkshopDownload: Identifiable {
   var bytesReceived: Int64? { isQueued ? nil : worker.bytesReceived }
   var bytesExpected: Int64? { isQueued ? nil : worker.bytesExpected }
   var bytesPerSecond: Double? { isQueued ? nil : worker.bytesPerSecond }
+  var secondsRemaining: Int? { isQueued ? nil : worker.secondsRemaining }
 
   /// A job that only signs in and downloads nothing.
   var isSignIn: Bool { id == WorkshopDownloadManager.signInID }
@@ -104,6 +106,8 @@ final class WorkshopDownloadManager: SteamCMDDownloadActivity {
   @ObservationIgnored private let networkMonitorFactory: (@MainActor () -> any ProcessNetworkMonitoring)?
   @ObservationIgnored private var isShuttingDown = false
   @ObservationIgnored private var persistenceDirectory: URL?
+  @ObservationIgnored private let wakeCenter: NotificationCenter
+  @ObservationIgnored private var wakeObserver: NSObjectProtocol?
 
   private struct SavedDownload: Codable {
     let id: String
@@ -146,6 +150,8 @@ final class WorkshopDownloadManager: SteamCMDDownloadActivity {
     }
     do {
       try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+      // Checkpoints below this folder are partial downloads of several gigabytes.
+      ClientPaths.excludeFromBackup(directory)
       try JSONEncoder().encode(saved).write(to: directory.appendingPathComponent("queue.json"), options: .atomic)
       return true
     } catch {
@@ -157,6 +163,12 @@ final class WorkshopDownloadManager: SteamCMDDownloadActivity {
   var activeCount: Int { downloads.lazy.filter { $0.occupiesSlot }.count }
   var queuedCount: Int { downloads.lazy.filter { $0.isQueued }.count }
   var isRunning: Bool { downloads.contains { $0.isPending } }
+  /// The bytes received and expected of each download that is moving or waiting its turn, for the
+  /// menu bar's one line about them. A job being paused is already out of it, while it still
+  /// holds its slot, and so is the sign-in that downloads nothing.
+  var inProgressTransfers: [(received: Int64?, expected: Int64?)] {
+    downloads.filter { $0.isPending && !$0.isPaused && !$0.isSignIn }.map { ($0.bytesReceived, $0.bytesExpected) }
+  }
   /// How many transfers may run side by side right now.
   var slotLimit: Int { sessionConflictDetected ? 1 : maximumConcurrentDownloads }
   var suggestedAccount: String? { downloads.last(where: { $0.isPending })?.account ?? savedAccount }
@@ -165,17 +177,34 @@ final class WorkshopDownloadManager: SteamCMDDownloadActivity {
   }
 
   init(
-    sessionDirectory: URL = ClientPaths.supportURL.appendingPathComponent(
-      "SteamSession", isDirectory: true),
+    sessionDirectory: URL = ClientPaths.steamSessionURL(),
     runtimeProvider: any SteamCMDRuntimeProviding = SteamCMDRuntimeService(),
     maximumConcurrentDownloads: Int = WorkshopDownloadManager.defaultConcurrentDownloads,
-    networkMonitorFactory: (@MainActor () -> any ProcessNetworkMonitoring)? = nil
+    networkMonitorFactory: (@MainActor () -> any ProcessNetworkMonitoring)? = nil,
+    wakeCenter: NotificationCenter = NSWorkspace.shared.notificationCenter
   ) {
     self.sessionDirectory = sessionDirectory
     self.runtimeProvider = runtimeProvider
     self.networkMonitorFactory = networkMonitorFactory
+    self.wakeCenter = wakeCenter
     self.maximumConcurrentDownloads = Self.clampedConcurrentDownloads(maximumConcurrentDownloads)
     savedAccount = WorkshopDownloader.readSavedAccount(at: sessionDirectory)
+    // A connection often dies with the sleep; each running transfer checks that bytes still arrive.
+    wakeObserver = wakeCenter.addObserver(
+      forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+    ) { [weak self] _ in
+      MainActor.assumeIsolated { self?.systemDidWake() }
+    }
+  }
+
+  /// A manager that is dropped without `shutdown()` (every test builds one) must not leave its
+  /// observer on the shared workspace center for the rest of the process.
+  deinit {
+    if let wakeObserver { wakeCenter.removeObserver(wakeObserver) }
+  }
+
+  private func systemDidWake() {
+    for job in downloads where job.occupiesSlot { job.worker.noteSystemResume() }
   }
 
   func download(for itemID: String?) -> WorkshopDownload? {
@@ -297,6 +326,8 @@ final class WorkshopDownloadManager: SteamCMDDownloadActivity {
 
   func shutdown() async {
     isShuttingDown = true
+    if let wakeObserver { wakeCenter.removeObserver(wakeObserver) }
+    wakeObserver = nil
     // Stop every child before awaiting any one. Download bytes survive; sign-in prompts do not.
     for job in downloads where job.isPending {
       if job.isSignIn { cancel(job) } else { pause(job) }

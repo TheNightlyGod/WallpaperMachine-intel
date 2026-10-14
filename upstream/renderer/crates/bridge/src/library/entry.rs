@@ -58,6 +58,7 @@ mod tests {
             preview_file: None,
             entry_file: None,
             properties: Vec::new(),
+            localization: std::sync::Arc::default(),
         }
     }
 

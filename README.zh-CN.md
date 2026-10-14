@@ -68,26 +68,26 @@
 
 ## 应用一览
 
-一个窗口，四个标签页：发现、pixiv、已安装和设置。网站在一个演示壁纸库上运行着同一套界面，你可以[在浏览器中试用](https://www.wallpapermachine.app/zh/#app)。关闭窗口后，应用会继续在菜单栏中运行，你可以在那里暂停、恢复，或切换到上一张、下一张壁纸。
+一个窗口，四个标签页：发现、pixiv、已安装和设置。网站在一个演示壁纸库上运行着同一套界面，你可以[在浏览器中试用](https://www.wallpapermachine.app/zh/#app)。关闭窗口后，应用会继续在菜单栏中运行，你可以在那里暂停、恢复、静音，或切换到上一张、下一张或随机一张壁纸；有多台显示器时，每台显示器都可以单独操作。
 
 | 功能 | 作用 |
 | --- | --- |
 | [**应用壁纸**](docs/features/control-panel.md#selection-versus-apply) | 场景、视频或[网页](docs/features/web-wallpapers.md)壁纸：按下播放，它就成为你的桌面。单击壁纸只是选中它。 |
-| [**预览**](docs/features/wallpaper-properties.md#live-preview) | 在单独的窗口中试看已安装的场景、视频或网页壁纸，使用当前选项和独立的播放控制，再决定是否更换桌面。 |
+| [**预览**](docs/features/wallpaper-properties.md#live-preview) | 在单独的窗口中试看已安装的场景、视频或网页壁纸，使用当前选项和独立的播放控制，再决定是否更换桌面。滑块、颜色和开关会随你的调整即时显示。 |
 | [**创意工坊**](docs/features/workshop-downloads.md) | 实时的 Steam 创意工坊，浏览无需登录，还有[合集、每位作者的壁纸和你的订阅](docs/features/workshop-downloads.md#collections-authors-and-subscriptions)。下载在应用内进行，可同时下载多个，需要拥有 Wallpaper Engine 的 Steam 账户。已有壁纸的[更新](docs/features/workshop-downloads.md#updates)每天检查一次，一键安装。 |
 | [**pixiv**](docs/features/pixiv.md) | pixiv 的插画排行榜和标签搜索。作品的任意一页都能保存为静态壁纸；登录 pixiv 后可查看仅限会员的作品，账户允许的话还能查看 R-18 作品。 |
-| [**壁纸选项**](docs/features/wallpaper-properties.md#properties) | 作者提供的每一个选项，在你应用修改时保存；[命名的属性预设](docs/features/wallpaper-properties.md#property-presets)可以保留多个版本，并能导出或导入。 |
+| [**壁纸选项**](docs/features/wallpaper-properties.md#properties) | 作者提供的每一个选项，在你应用修改时保存；[命名的属性预设](docs/features/wallpaper-properties.md#property-presets)可以保留多个版本，并能导出或导入。设置中的一个可选开关能让桌面[在你调整时即时显示这些修改](docs/features/wallpaper-properties.md#showing-edits-on-the-desktop)。 |
 | [**音乐**](docs/features/audio-response.md) | 打开“音频响应”，为声音制作的壁纸就会随 Mac 播放的声音律动。打开“[媒体集成](docs/features/media-integration.md)”，带音乐显示的壁纸会显示正在播放的歌曲。 |
-| [**播放列表**](docs/features/playlists.md) | 让每台显示器轮流播放全部壁纸、收藏、它自己的列表或一个[本地合集](docs/features/control-panel.md#local-collections)。可以调整列表顺序、保存命名的播放方案，或在白天和夜晚的壁纸之间切换。应用失败的壁纸会被暂时跳过。 |
-| [**显示器**](docs/features/control-panel.md#target-display) | 每台显示器都可以有自己的壁纸，也可以镜像另一台，缩放、帧率和音量各自独立。[复制或交换壁纸，并保存多屏壁纸方案](docs/features/display-layouts.md)，之后可从设置或“快捷指令”恢复各显示器的壁纸选择。 |
-| [**电池**](docs/features/performance.md#playback) | 使用电池时，继续运行、降到你选择的渲染比例和帧率，或者暂停。只需一个选择，在你选定之前保持关闭。其余播放与画质选项在[性能](docs/features/performance.md)中。 |
+| [**播放列表**](docs/features/playlists.md) | 让每台显示器轮流播放全部壁纸、收藏、它自己的列表或一个[本地合集](docs/features/control-panel.md#local-collections)，可按时间间隔更换，也可在每次解锁 Mac 时更换。可以调整列表顺序、保存命名的播放方案，或在白天和夜晚的壁纸之间切换。应用失败的壁纸会被暂时跳过。 |
+| [**显示器**](docs/features/control-panel.md#target-display) | 每台显示器都可以有自己的壁纸，也可以镜像另一台，缩放、位置、帧率和音量各自独立。[一次把同一张壁纸应用到所有显示器，复制或交换壁纸，并保存多屏壁纸方案](docs/features/display-layouts.md)，之后可从设置或“快捷指令”恢复各显示器的壁纸选择。 |
+| [**电池**](docs/features/performance.md#playback) | 使用电池时，继续运行、降到你选择的渲染比例和帧率，或者暂停。低电量模式、Mac 过热和电量低时，也可以同样降低画质而不是暂停。在你选定之前保持关闭。其余播放与画质选项在[性能](docs/features/performance.md)中。 |
 | [**能耗**](docs/features/performance.md#energy-use) | “设置 → 性能”会显示应用消耗的功率；在笔记本电脑上，还会显示它每小时消耗的电量占满电的比例。在那里更改设置，它会对比前后的差异。每张已安装的壁纸在测量后都会有自己的能耗评级。 |
 | [**原生体验**](docs/features/appearance.md) | 和 macOS 的其他部分一样，支持浅色、深色和你的强调色，界面提供 [English、简体中文、繁體中文和日本語](docs/features/control-panel.md#language)。 |
 | [**导入**](docs/features/control-panel.md#downloads-and-import) | 带入你已有的 Wallpaper Engine 文件夹，或你自己的视频和图片。把它们拖到程序坞图标上，或使用“导入”；应用会复制它们，原文件保持不动。 |
 | [**备份你的设置**](docs/features/backup-restore.md#local-backup-and-restore) | 导出设置和保留的文件，还可以包含整个壁纸库；在下次启动时执行可撤回的恢复之前，先预览冲突。登录信息和密码只留在这台 Mac 上。 |
 | [**图片摆放**](docs/features/wallpaper-properties.md#image-placement) | 在每台显示器上分别拖动、定位和缩放导入的图片和保存的 pixiv 页面，不改动原图。 |
-| [**看不见就暂停**](docs/architecture.md#desktop-wallpaper-windows-and-private-api-handling) | 被遮住的显示器会停止播放自己的壁纸，睡眠或锁屏时所有壁纸都会暂停。[播放规则](docs/features/performance.md#playback)还能在其他应用播放声音时、你选择的应用正在运行或位于前台时、低电量模式下、Mac 过热时或专注模式期间暂停或静音壁纸。你自己按下的暂停，始终由你决定。 |
-| [**自动化**](docs/features/automation.md) | 按星期和时间的计划、根据本地日出日落计算、按浅色或深色外观选择、实验性的[桌面空间选择](docs/features/spaces.md)，以及临时的专注模式壁纸或播放列表。键盘快捷键、“快捷指令”、Siri、“聚焦”和链接都能控制播放，并应用壁纸、已存播放列表或属性预设。 |
+| [**看不见就暂停**](docs/architecture.md#desktop-wallpaper-windows-and-private-api-handling) | 被遮住的显示器会停止播放自己的壁纸，睡眠或锁屏时所有壁纸都会暂停。[播放规则](docs/features/performance.md#playback)还能在其他应用播放声音时、你选择的应用正在运行或位于前台时、电池电量低时、低电量模式下、Mac 过热时或专注模式期间暂停或静音壁纸。有多台显示器时，还可以只让你正在使用的那台继续播放。你自己按下的暂停，始终由你决定。 |
+| [**自动化**](docs/features/automation.md) | 按星期和时间的计划、根据本地日出日落计算、按浅色或深色外观选择、实验性的[桌面空间选择](docs/features/spaces.md)，以及临时的专注模式壁纸或播放列表。键盘快捷键、“快捷指令”、Siri、“聚焦”和链接都能控制播放、让所有壁纸静音、随机选一张壁纸，并应用壁纸、已存播放列表或属性预设。 |
 | [**锁定屏幕**](docs/features/lock-screen.md) | 视频和场景壁纸也能让锁屏动起来。实验性功能，默认关闭。 |
 | [**屏幕保护程序**](docs/features/lock-screen.md#use-wallpaper-as-screen-saver) | 把每台显示器当前应用的场景、视频、网页或静态壁纸用作它的屏幕保护程序。与锁屏动画相互独立；在 macOS 26 及更高版本上为实验性功能。 |
 
@@ -98,7 +98,7 @@
   ```sh
   gh attestation verify WallpaperMachine-*-arm64.dmg --repo WallpaperMachine/WallpaperMachine
   ```
-- **没有统计分析，没有追踪。** 应用只在你需要时联网：Steam 用于创意工坊，pixiv 在你打开它时使用，GitHub 用于检查更新。登录信息和密码保存在你的 Mac 上。
+- **没有追踪。** 应用只在你需要时联网：Steam 用于创意工坊，pixiv 在你打开它时使用，GitHub 用于检查更新；只有在你打开[发送性能数据](docs/features/telemetry.md)后，才会每天发送一份小报告，内容是加载耗时、帧率和你的 Mac 型号。报告不包含名称、文件或账户信息，关闭后会删除已发送的数据。登录信息和密码保存在你的 Mac 上。
 - **可校验的更新。** 内置更新程序只安装 SHA-256 与发布版本一致的磁盘映像；无法验证的会被[拒绝，绝不会未经校验就安装](docs/features/updates.md#downloading)。
 - **持续维护。** 新版本发布频繁，每一版都以英文和简体中文写进[更新日志](CHANGELOG.md)。
 - **问题有处可报。** 任意壁纸详情中的**无法正常使用？在 GitHub 上反馈**会打开一个预先填好的 [issue](https://github.com/WallpaperMachine/WallpaperMachine/issues)；[诊断报告](docs/features/diagnostics.md)会在你分享之前移除你的个人文件夹路径、Mac 用户名和 Steam 账户名。
@@ -110,7 +110,7 @@
 | **Swift 外壳** | AppKit 应用。控制面板是 `WKWebView` 中的 HTML（[`WebUI/`](WebUI)），[网页壁纸](docs/features/web-wallpapers.md)在各自的 web view 中运行。 |
 | **Rust 核心** | 内置的渲染器（[`upstream/renderer`](upstream/renderer)）：负责显示器、壁纸窗口、视频解码和音频捕获，通过 uniffi 桥接到 Swift。 |
 | **C++ 场景引擎** | Open Wallpaper Engine，静态链接进 Rust 核心，负责绘制场景壁纸。 |
-| **Metal（经由 MoltenVK）** | 场景通过 Vulkan 在 Metal 上渲染。原生 Metal 场景渲染器和 AVFoundation 视频可在[设置 → 性能](docs/features/performance.md)中选择开启。 |
+| **Metal** | 场景直接用原生 Metal 渲染，原生渲染器无法绘制的场景会回退为经由 MoltenVK 在 Metal 上运行的 Vulkan。AVFoundation 视频可在[设置 → 性能](docs/features/performance.md)中选择开启，场景渲染器也可在那里改为兼容模式。 |
 | **锁定屏幕** | 一个沙盒化的 ExtensionKit 扩展（[`Extension/`](Extension)）。 |
 
 各部分如何协作：[docs/architecture.md](docs/architecture.md)。每个文件放在哪里：[docs/repository-layout.md](docs/repository-layout.md)。

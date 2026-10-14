@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
 use kameo::{
     actor::{ActorRef, Spawn, WeakActorRef},
@@ -9,13 +9,21 @@ use kameo::{
 use crate::engine::messages::{DisplayRecordCountForTest, SequenceForTest};
 use crate::{
     DisplaySelector, EngineError, WallpaperAssignment,
-    display::state::{DisplayKey, DisplayStateModel},
+    display::{
+        RefreshPlan, RefreshReportLog, plan_refresh,
+        state::{DisplayKey, DisplayStateModel},
+    },
     engine::{
-        EngineSnapshotPublisher, FirstFrameCallback,
+        EngineSnapshotPublisher, FirstFrameCallback, PropertyPreview,
         messages::{self, Ping},
         runtime::{RuntimeRefreshJob, RuntimeRefreshMode, SceneRuntime},
         state::{DisplayRuntimeRecord, EngineState},
+        surface_recovery::{
+            Decision, LADDER, RecoveryOutcome, RecoveryReason, RecoveryStep, SETTLE_INTERVAL,
+            SETTLE_LIMIT, Settled, WINDOW, is_healthy, settle,
+        },
     },
+    log_context::LoadScope,
     owe::backend::OweBackend,
     render::RendererSurfaceCounters,
     project::{SceneDescSliceExt, SceneHandle},
@@ -35,12 +43,15 @@ pub struct EngineActor {
     refresh_running: bool,
     #[allow(dead_code)]
     refresh_pending: bool,
+    refresh_report_log: RefreshReportLog,
     #[cfg(test)]
     pub test_sequence: u64,
     #[cfg(test)]
     fail_next_refresh_displays: bool,
     #[cfg(test)]
     pointer_notifications: Vec<(Arc<()>, bool)>,
+    #[cfg(test)]
+    render_failure_notifications: Vec<Arc<()>>,
 }
 
 #[derive(Clone)]
@@ -126,12 +137,15 @@ impl EngineActor {
             display_callback: None,
             refresh_running: false,
             refresh_pending: false,
+            refresh_report_log: RefreshReportLog::default(),
             #[cfg(test)]
             test_sequence: 0,
             #[cfg(test)]
             fail_next_refresh_displays: false,
             #[cfg(test)]
             pointer_notifications: Vec::new(),
+            #[cfg(test)]
+            render_failure_notifications: Vec::new(),
         }
     }
 
@@ -163,7 +177,29 @@ impl EngineActor {
     pub fn refresh_displays_now(&mut self) -> Result<(), EngineError> {
         let primary = crate::DisplayDesc::primary()?;
         let displays = crate::DisplayDesc::all()?;
-        self.reconcile_display_descriptors(primary, displays)
+        self.apply_display_report(primary, displays)
+    }
+
+    /// Applies one platform display report. A display that reports no pixels
+    /// yet is left out (see [`plan_refresh`]) instead of failing the refresh
+    /// for the others; the display watcher refreshes again when it settles.
+    pub(crate) fn apply_display_report(
+        &mut self,
+        primary: crate::DisplayDesc,
+        all: Vec<crate::DisplayDesc>,
+    ) -> Result<(), EngineError> {
+        let plan = plan_refresh(primary, all);
+        if let Some(message) = self.refresh_report_log.message_for(&plan) {
+            log::warn!("{message}");
+        }
+        match plan {
+            RefreshPlan::Skip { .. } => Ok(()),
+            RefreshPlan::Apply {
+                primary,
+                displays,
+                transitional,
+            } => self.reconcile_display_descriptors_keeping(primary, displays, &transitional),
+        }
     }
 
     pub fn reconcile_display_descriptors(
@@ -171,8 +207,17 @@ impl EngineActor {
         primary: crate::DisplayDesc,
         displays: Vec<crate::DisplayDesc>,
     ) -> Result<(), EngineError> {
+        self.reconcile_display_descriptors_keeping(primary, displays, &[])
+    }
+
+    pub fn reconcile_display_descriptors_keeping(
+        &mut self,
+        primary: crate::DisplayDesc,
+        displays: Vec<crate::DisplayDesc>,
+        transitional: &[crate::DisplayDesc],
+    ) -> Result<(), EngineError> {
         self.update_display_state(|model| {
-            model.refresh_connected(primary, displays)?;
+            model.refresh_connected_keeping(primary, displays, transitional)?;
             Ok(())
         })
     }
@@ -239,6 +284,28 @@ impl EngineActor {
         factor: f64,
     ) -> Result<(), EngineError> {
         self.with_scene_mut(handle, |scene| scene.set_scaling_factor(factor))
+    }
+
+    pub fn set_framing(
+        &mut self,
+        handle: SceneHandle,
+        framing: crate::project::SceneFraming,
+    ) -> Result<(), EngineError> {
+        self.with_scene_mut(handle, |scene| scene.set_framing(framing))
+    }
+
+    /// Moves the picture for a drag in progress. Nothing about the scene's
+    /// state changes, so unlike [`Self::set_framing`] there is no runtime state
+    /// to record and no snapshot to publish.
+    pub fn preview_framing(
+        &mut self,
+        handle: SceneHandle,
+        framing: crate::project::SceneFraming,
+    ) -> Result<(), EngineError> {
+        let runtime = self.state.scene_mut(handle)?;
+        let result = runtime.preview_framing(framing);
+        self.signal_pending_pointer_sample();
+        result
     }
 
     pub fn set_fps(&mut self, handle: SceneHandle, fps: u32) -> Result<(), EngineError> {
@@ -381,6 +448,23 @@ impl EngineActor {
 
     pub fn reset_property_override(&mut self, handle: SceneHandle) -> Result<(), EngineError> {
         self.with_scene_mut(handle, |scene| scene.set_property_override_json(None))
+    }
+
+    /// Shows a property document while an edit is under way. Nothing about the
+    /// scene's state changes, so unlike [`Self::set_property_override`] there
+    /// is no runtime state to record and no snapshot to publish.
+    ///
+    /// The scene is looked at now, in this actor's turn, so a reconcile that was
+    /// handled first has already put its wallpaper on the handle.
+    pub fn preview_property_override(
+        &mut self,
+        handle: SceneHandle,
+        expected_scene_path: &str,
+        flat_json: &str,
+    ) -> Result<PropertyPreview, EngineError> {
+        self.state
+            .scene_mut(handle)?
+            .preview_property_override_json(expected_scene_path, flat_json)
     }
 
     pub fn update_display_state(
@@ -637,6 +721,322 @@ impl EngineActor {
         Ok(())
     }
 
+    /// A renderer reported that its scene, which had drawn, failed a frame and
+    /// stopped. Spends one rung of that renderer's budget and schedules it; a
+    /// report from a renderer that has since been replaced is ignored.
+    fn handle_render_failure(&mut self, handle: SceneHandle, instance: &Arc<()>) {
+        let Ok(runtime) = self.state.scene_mut(handle) else {
+            return;
+        };
+        if !runtime.owns_renderer(instance) {
+            return;
+        }
+        let (display, load) = (runtime.display_id(), runtime.load_id());
+        let recovery = runtime.surface_recovery_mut();
+        let was_exhausted = recovery.exhausted();
+        let decision = recovery.on_failure(Instant::now());
+        let _scope = LoadScope::enter(load);
+        self.apply_recovery_decision(
+            handle,
+            instance,
+            display,
+            was_exhausted,
+            decision,
+            "stopped drawing after a failed frame",
+        );
+    }
+
+    /// Does what the ladder decided: schedules the next attempt, leaves it to
+    /// the one already on its way, or says once that the budget is spent.
+    fn apply_recovery_decision(
+        &self,
+        handle: SceneHandle,
+        instance: &Arc<()>,
+        display: u32,
+        was_exhausted: bool,
+        decision: Decision,
+        cause: &str,
+    ) {
+        match decision {
+            Decision::Attempt { step, delay, number } => {
+                log::warn!(
+                    "[wallpaper-core engine] display {display} {cause}; trying {} in {delay:?} \
+                     (attempt {number}/{})",
+                    step.describe(),
+                    LADDER.len()
+                );
+                self.schedule_recovery(handle, instance.clone(), step, delay, number);
+            }
+            Decision::Pending => log::debug!(
+                "[wallpaper-core engine] display {display} {cause}; an attempt is already on its way"
+            ),
+            Decision::GiveUp => {
+                if !was_exhausted {
+                    log::error!(
+                        "[wallpaper-core engine] display {display} stopped drawing; recovery gave \
+                         up after {} attempts in {} s",
+                        LADDER.len(),
+                        WINDOW.as_secs()
+                    );
+                }
+            }
+        }
+    }
+
+    /// Delivers one attempt to this actor after `delay`. Holds only a weak
+    /// reference while it waits, so a pending attempt never keeps a stopped
+    /// engine alive.
+    fn schedule_recovery(
+        &self,
+        handle: SceneHandle,
+        renderer_instance: Arc<()>,
+        step: RecoveryStep,
+        delay: std::time::Duration,
+        number: usize,
+    ) {
+        let actor = self.weak_self.clone();
+        tokio::spawn(async move {
+            if !delay.is_zero() {
+                tokio::time::sleep(delay).await;
+            }
+            let Some(actor) = actor.upgrade() else {
+                return;
+            };
+            let attempt = messages::RecoverSurfaceAttempt { handle, renderer_instance, step, number };
+            let _ = actor.tell(attempt).send().await;
+        });
+    }
+
+    /// Recovery asked for from outside the renderer's own report. The next
+    /// rung of the display's ladder runs now rather than after its delay.
+    fn recover_requested(
+        &mut self,
+        display_id: u32,
+        reason: RecoveryReason,
+    ) -> Result<RecoveryOutcome, EngineError> {
+        let found = self.state.display_records.iter().find_map(|record| {
+            let runtime = record.runtime.as_ref()?;
+            (runtime.display_id() == display_id).then_some(record.handle).flatten()
+        });
+        let Some(handle) = found else {
+            return Ok(RecoveryOutcome::NoScene);
+        };
+        let Ok(runtime) = self.state.scene_mut(handle) else {
+            return Ok(RecoveryOutcome::NoScene);
+        };
+        let load = runtime.load_id();
+        let recovery = runtime.surface_recovery_mut();
+        let was_exhausted = recovery.exhausted();
+        match recovery.on_forced(Instant::now()) {
+            Decision::Pending => Ok(RecoveryOutcome::InProgress),
+            Decision::GiveUp => {
+                if !was_exhausted {
+                    let _scope = LoadScope::enter(load);
+                    log::error!(
+                        "[wallpaper-core engine] display {display_id} stopped drawing; recovery \
+                         gave up after {} attempts in {} s",
+                        LADDER.len(),
+                        WINDOW.as_secs()
+                    );
+                }
+                Ok(RecoveryOutcome::GaveUp)
+            }
+            Decision::Attempt { step, number, .. } => {
+                self.attempt_recovery(handle, None, step, number, reason)
+            }
+        }
+    }
+
+    /// Runs one recovery attempt on the scene at `handle` and says what came of
+    /// it. `expected` is the renderer the attempt was scheduled for, when it was
+    /// scheduled: a scene that has been replaced since is left alone.
+    ///
+    /// A failed attempt leaves the surface stopped with nothing left to report
+    /// it, since a stopped surface fails no more frames, so the next rung is
+    /// scheduled from here.
+    fn attempt_recovery(
+        &mut self,
+        handle: SceneHandle,
+        expected: Option<&Arc<()>>,
+        step: RecoveryStep,
+        number: usize,
+        reason: RecoveryReason,
+    ) -> Result<RecoveryOutcome, EngineError> {
+        let backend = self.backend;
+        let Ok(runtime) = self.state.scene_mut(handle) else {
+            return Ok(RecoveryOutcome::NoScene);
+        };
+        if expected.is_some_and(|instance| !runtime.owns_renderer(instance)) {
+            return Ok(RecoveryOutcome::NoScene);
+        }
+        let display = runtime.display_id();
+        // Something else (a display change that rebuilt the surface) may have
+        // started it drawing again while this waited; rebuilding it now would
+        // only interrupt it. Only a failure the renderer reported can be
+        // answered that way: a stall check is called because the surface looks
+        // fine to the renderer.
+        if reason == RecoveryReason::RenderFailure && is_healthy(runtime.surface_health()) {
+            runtime.surface_recovery_mut().mark_done();
+            let _scope = LoadScope::enter(runtime.load_id());
+            log::info!(
+                "[wallpaper-core engine] display {display} is drawing again; skipping {}",
+                step.describe()
+            );
+            return Ok(RecoveryOutcome::AlreadyHealthy);
+        }
+        let result = runtime.recover_surface(backend, step);
+        // A rebuild is a new renderer, with its own number in the log.
+        let (load, instance) = (runtime.load_id(), runtime.renderer_instance());
+        let recovery = runtime.surface_recovery_mut();
+        let _scope = LoadScope::enter(load);
+        match result {
+            Ok(RecoveryStep::Rebuild) => {
+                // The new renderer is a new scene with no first frame yet, and
+                // a scene reports a failed frame only once it has presented
+                // one. If this rebuild fails its first draw nothing calls
+                // back, so the attempt stays pending and the engine looks at
+                // the renderer itself until it has drawn or stopped.
+                log::info!(
+                    "[wallpaper-core engine] display {display} renderer rebuilt (attempt \
+                     {number}/{}); waiting for it to draw",
+                    LADDER.len()
+                );
+                self.schedule_settle(handle, instance, number, Instant::now());
+                self.publish_snapshot();
+                Ok(RecoveryOutcome::Recovered { step: RecoveryStep::Rebuild, attempt: number })
+            }
+            Ok(used) => {
+                // The compiled scene is the one that had drawn, so a repeat of
+                // the failure is reported by the renderer as usual.
+                recovery.mark_done();
+                log::info!(
+                    "[wallpaper-core engine] display {display} renderer recovered by {} \
+                     (attempt {number}/{})",
+                    used.describe(),
+                    LADDER.len()
+                );
+                self.publish_snapshot();
+                Ok(RecoveryOutcome::Recovered { step: used, attempt: number })
+            }
+            Err(error) => {
+                recovery.mark_done();
+                log::warn!(
+                    "[wallpaper-core engine] display {display} recovery by {} failed \
+                     (attempt {number}/{}): {error}",
+                    step.describe(),
+                    LADDER.len()
+                );
+                let was_exhausted = recovery.exhausted();
+                let decision = recovery.on_failure(Instant::now());
+                self.apply_recovery_decision(
+                    handle,
+                    &instance,
+                    display,
+                    was_exhausted,
+                    decision,
+                    "is still stopped",
+                );
+                self.publish_snapshot();
+                Err(error)
+            }
+        }
+    }
+
+    /// Looks again, after [`SETTLE_INTERVAL`], at the renderer a rebuild
+    /// attempt opened. Holds only a weak reference while it waits, like
+    /// [`Self::schedule_recovery`].
+    fn schedule_settle(
+        &self,
+        handle: SceneHandle,
+        renderer_instance: Arc<()>,
+        number: usize,
+        rebuilt_at: Instant,
+    ) {
+        let actor = self.weak_self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(SETTLE_INTERVAL).await;
+            let Some(actor) = actor.upgrade() else {
+                return;
+            };
+            let look = messages::SettleRecoveredSurface {
+                handle,
+                renderer_instance,
+                number,
+                rebuilt_at,
+            };
+            let _ = actor.tell(look).send().await;
+        });
+    }
+
+    /// One look at a renderer that recovery rebuilt, until it has drawn.
+    ///
+    /// The attempt that built it is still pending, so nothing else starts a
+    /// second one beside it. Drawing ends the attempt as a success. A renderer
+    /// that stopped before it drew ends it as a failure and feeds the ladder
+    /// the failure it never reported, which schedules the next rung or gives
+    /// up. One that has done neither is looked at again, until
+    /// [`SETTLE_LIMIT`]; then nothing says it failed, so it is left alone and
+    /// the attempt ends.
+    fn settle_recovered_surface(
+        &mut self,
+        handle: SceneHandle,
+        instance: &Arc<()>,
+        number: usize,
+        rebuilt_at: Instant,
+    ) {
+        let Ok(runtime) = self.state.scene_mut(handle) else {
+            return;
+        };
+        if !runtime.owns_renderer(instance) {
+            return;
+        }
+        let (display, load) = (runtime.display_id(), runtime.load_id());
+        let waited = rebuilt_at.elapsed();
+        let settled = settle(runtime.surface_health(), waited);
+        let recovery = runtime.surface_recovery_mut();
+        let _scope = LoadScope::enter(load);
+        match settled {
+            Settled::Waiting => self.schedule_settle(handle, instance.clone(), number, rebuilt_at),
+            Settled::Drawing => {
+                recovery.mark_done();
+                log::info!(
+                    "[wallpaper-core engine] display {display} renderer recovered by {} \
+                     (attempt {number}/{})",
+                    RecoveryStep::Rebuild.describe(),
+                    LADDER.len()
+                );
+            }
+            Settled::Unconfirmed => {
+                recovery.mark_done();
+                log::warn!(
+                    "[wallpaper-core engine] display {display} renderer rebuilt (attempt \
+                     {number}/{}) has not drawn after {} s and has not failed; leaving it as it is",
+                    LADDER.len(),
+                    SETTLE_LIMIT.as_secs()
+                );
+            }
+            Settled::Stopped(reason) => {
+                recovery.mark_done();
+                let was_exhausted = recovery.exhausted();
+                let decision = recovery.on_failure(Instant::now());
+                log::warn!(
+                    "[wallpaper-core engine] display {display} renderer rebuilt (attempt \
+                     {number}/{}) stopped before it drew ({})",
+                    LADDER.len(),
+                    reason.as_str()
+                );
+                self.apply_recovery_decision(
+                    handle,
+                    instance,
+                    display,
+                    was_exhausted,
+                    decision,
+                    "is still stopped",
+                );
+            }
+        }
+    }
+
     pub fn restore_failed_runtime_refresh(
         &mut self,
         key: &DisplayKey,
@@ -773,6 +1173,30 @@ impl Message<messages::SetScalingFactor> for EngineActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         self.with_snapshot_update(|actor| actor.set_scaling_factor(msg.handle, msg.factor))
+    }
+}
+
+impl Message<messages::SetFraming> for EngineActor {
+    type Reply = Result<(), EngineError>;
+
+    async fn handle(
+        &mut self,
+        msg: messages::SetFraming,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.with_snapshot_update(|actor| actor.set_framing(msg.handle, msg.framing))
+    }
+}
+
+impl Message<messages::PreviewFraming> for EngineActor {
+    type Reply = Result<(), EngineError>;
+
+    async fn handle(
+        &mut self,
+        msg: messages::PreviewFraming,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.preview_framing(msg.handle, msg.framing)
     }
 }
 
@@ -1002,6 +1426,18 @@ impl Message<messages::ResetPropertyOverride> for EngineActor {
     }
 }
 
+impl Message<messages::PreviewPropertyOverride> for EngineActor {
+    type Reply = Result<PropertyPreview, EngineError>;
+
+    async fn handle(
+        &mut self,
+        msg: messages::PreviewPropertyOverride,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.preview_property_override(msg.handle, &msg.expected_scene_path, &msg.flat_json)
+    }
+}
+
 impl Message<messages::CloseAllScenes> for EngineActor {
     type Reply = Result<(), EngineError>;
 
@@ -1041,6 +1477,73 @@ impl Message<messages::NativeAudioRequirementChanged> for EngineActor {
         if changed {
             self.publish_snapshot();
         }
+    }
+}
+
+impl Message<messages::NativeRenderFailed> for EngineActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        msg: messages::NativeRenderFailed,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) {
+        #[cfg(test)]
+        self.render_failure_notifications.push(msg.renderer_instance.clone());
+        self.handle_render_failure(msg.handle, &msg.renderer_instance);
+    }
+}
+
+/// Sent to ourselves by the failure ladder, so it replies with nothing: an
+/// error reply to a `tell` would be treated as a panic and stop the engine.
+impl Message<messages::RecoverSurfaceAttempt> for EngineActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        msg: messages::RecoverSurfaceAttempt,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) {
+        // Everything worth saying about the outcome was logged where it
+        // happened, and a failed attempt has already scheduled the next one.
+        let _ = self.attempt_recovery(
+            msg.handle,
+            Some(&msg.renderer_instance),
+            msg.step,
+            msg.number,
+            RecoveryReason::RenderFailure,
+        );
+    }
+}
+
+/// Sent to ourselves while a rebuilt renderer has not yet drawn, so it replies
+/// with nothing for the same reason.
+impl Message<messages::SettleRecoveredSurface> for EngineActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        msg: messages::SettleRecoveredSurface,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) {
+        self.settle_recovered_surface(
+            msg.handle,
+            &msg.renderer_instance,
+            msg.number,
+            msg.rebuilt_at,
+        );
+    }
+}
+
+impl Message<messages::RecoverSurface> for EngineActor {
+    type Reply = Result<RecoveryOutcome, EngineError>;
+
+    async fn handle(
+        &mut self,
+        msg: messages::RecoverSurface,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.recover_requested(msg.display_id, msg.reason)
     }
 }
 
@@ -1144,6 +1647,15 @@ impl Message<messages::TakePointerNotificationsForTest> for EngineActor {
 }
 
 #[cfg(test)]
+impl Message<messages::TakeRenderFailuresForTest> for EngineActor {
+    type Reply = Vec<Arc<()>>;
+
+    async fn handle(&mut self, _msg: messages::TakeRenderFailuresForTest, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
+        std::mem::take(&mut self.render_failure_notifications)
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
@@ -1154,7 +1666,7 @@ mod tests {
             snapshot::EngineSnapshotPublisher,
             state::{EngineState, StoredSceneRuntimeState},
         },
-        project::{ScalingMode, SceneDesc, SceneTemplate},
+        project::{ScalingMode, SceneDesc, SceneFraming, SceneTemplate},
     };
 
     #[test]
@@ -1231,5 +1743,61 @@ mod tests {
             "expected descriptor scaling factor 1.0, got {}",
             runtime_state.scaling_factor
         );
+    }
+
+    #[test]
+    fn runtime_refresh_job_for_new_wallpaper_uses_descriptor_framing() {
+        let display = DisplayDesc::new(1, 0, 0, 1920, 1080, 1.0);
+        let previous_framing = SceneFraming {
+            pan_x: 0.1,
+            pan_y: 0.9,
+        };
+        let next_framing = SceneFraming {
+            pan_x: 0.8,
+            pan_y: 0.2,
+        };
+        let previous_desc = SceneDesc::builder(display.clone(), "/tmp/previous/project.json")
+            .assets_path("/tmp/assets")
+            .framing(previous_framing)
+            .build()
+            .expect("previous scene should build");
+        let next_template = SceneTemplate::builder("/tmp/next/project.json")
+            .assets_path("/tmp/assets")
+            .framing(next_framing)
+            .build()
+            .expect("next scene should build");
+        let mut state = EngineState::with_display_model(DisplayStateModel {
+            records: vec![DisplayRecord {
+                key: DisplayKey::Primary,
+                live_display: Some(display),
+                assignment: Some(WallpaperAssignment::Direct(next_template)),
+                window_active: true,
+                runtime_open: false,
+                primary_inheritance_consumed: false,
+            }],
+        });
+        // The user had moved the previous wallpaper at runtime, away from both
+        // descriptors' positions.
+        let mut previous_state =
+            SceneRuntimeState::try_from(&previous_desc).expect("previous state should build");
+        previous_state.framing = SceneFraming {
+            pan_x: 0.5,
+            pan_y: 0.5,
+        };
+        state.display_records[0].last_runtime_state = Some(StoredSceneRuntimeState::new(
+            previous_desc,
+            previous_state,
+        ));
+        let record = &state.display_records[0];
+        let next_desc = record
+            .scene_desc()
+            .expect("next scene should build")
+            .expect("assigned scene should exist");
+
+        let runtime_state = record
+            .runtime_state_for_desc(&next_desc)
+            .expect("runtime state should build");
+
+        assert_eq!(runtime_state.framing, next_framing);
     }
 }

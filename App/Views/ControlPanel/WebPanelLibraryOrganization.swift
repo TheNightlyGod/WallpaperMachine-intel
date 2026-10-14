@@ -17,7 +17,7 @@ extension WebPanelController {
         let null = NSNull()
         return [
             "mode": playlist.mode.rawValue, "source": playlist.source.rawValue,
-            "order": playlist.order.rawValue, "interval": playlist.interval,
+            "order": playlist.order.rawValue, "trigger": playlist.trigger.rawValue, "interval": playlist.interval,
             "wallpaperIDs": playlist.wallpaperIDs,
             "collectionID": playlist.collectionID as Any? ?? null,
             "planID": playlist.planID as Any? ?? null,

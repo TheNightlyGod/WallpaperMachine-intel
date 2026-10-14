@@ -59,7 +59,9 @@ class RustGateTests(unittest.TestCase):
         self.assertIn("skipping local corpus", output)
         self.assertIn("requires an external wallpaper asset corpus", output)
         self.assertIn("requires an explicitly authorized desktop run", output)
-        self.assertEqual(len(report["explicit_exclusions"]), 6)
+        self.assertEqual(len(report["explicit_exclusions"]), 9)
+        for case in ("layer_swap_revert", "layer_swap_finish", "announces_layers"):
+            self.assertIn(f"tests::general::platform::case_wallpaper_window_{case}", report["explicit_exclusions"])
         self.assertTrue(all(r["skips"] for r in report["results"]))
         for env in environments:
             self.assertTrue(all(name not in env for name in check_rust.OPT_INS))

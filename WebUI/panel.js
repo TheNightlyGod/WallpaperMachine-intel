@@ -1,4 +1,4 @@
-import { renderSettings, revealSettingsSection, performanceLimitedFps, showEnergyUsage, milliwatts, energyLevelLabel } from './settings.js';
+import { renderSettings, revealSettingsSection, performanceLimitedFps, showEnergyUsage, milliwatts, energyLevelLabel, batteryShare } from './settings.js';
 import { createWelcome, SIGN_IN_ID } from './welcome.js';
 import { glyphs } from './icons.js';
 import { t, applyStaticText, setLanguage, language } from './i18n.js';
@@ -9,6 +9,7 @@ import { createCollections } from './collections.js';
 import { createPresets } from './presets.js';
 import { createPlacement } from './placement.js';
 import { createCompatibility } from './compatibility.js';
+import { createLetterbox } from './letterbox.js';
 
 const $ = (id) => document.getElementById(id);
 const escapeHTML = (value) => String(value ?? '').replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
@@ -50,7 +51,7 @@ const installed = { text: '', sort: 'title', descending: false, tags: [], exclud
 // What Discover lists. An author's wallpapers and a collection's items are opened from a tile
 // rather than chosen here, and come back to the list they were opened from.
 const workshopSources = [['browse', 'Wallpapers', 'image'], ['collections', 'Collections', 'layers'], ['subscriptions', 'Your subscriptions', 'bookmark']];
-const workshopSorts = [['toprated', 'Highest rated'], ['trend-today', 'Most popular today'], ['trend', 'Trending this week'], ['trend-month', 'Most popular this month'], ['trend-year', 'Most popular this year'], ['totaluniquesubscribers', 'Most subscribed'], ['mostrecent', 'Newest'], ['textsearch', 'Relevance']];
+const workshopSorts = [['toprated', 'Highest rated'], ['trend-today', 'Most popular today'], ['trend', 'Trending this week'], ['trend-month', 'Most popular this month'], ['trend-year', 'Most popular this year'], ['totaluniquesubscribers', 'Most subscribed'], ['mostrecent', 'Newest'], ['lastupdated', 'Recently updated'], ['textsearch', 'Relevance']];
 // Installed sort keys with the direction each one starts in: names read A→Z, while favorites,
 // size and date are asked for to see the biggest / newest / starred first.
 const installedSorts = [['title', 'Name', false], ['type', 'Type', false], ['favorites', 'Favorites', true], ['size', 'File size', true], ['added', 'Date added', true]];
@@ -109,6 +110,11 @@ function button(label, action, args = {}, options = {}) {
   const attributes = Object.entries(args).map(([key, value]) => `data-${key.replace(/ID$/, 'Id').replace(/[A-Z]/g, c => `-${c.toLowerCase()}`)}="${escapeHTML(typeof value === 'object' ? JSON.stringify(value) : value)}"`).join(' ');
   return `<button type="button" data-action="${action}" ${attributes} class="${options.className || ''}"${disabled(options.disabled || busy(action, args))}${options.title ? ` title="${escapeHTML(options.title)}" aria-label="${escapeHTML(options.title)}"` : ''}${options.expanded !== undefined ? ` aria-expanded="${options.expanded ? 'true' : 'false'}"` : ''}${options.controls ? ` aria-controls="${escapeHTML(options.controls)}"` : ''}>${options.icon ? icon(options.icon) : ''}${label ? `<span class="button-label">${escapeHTML(label)}</span>` : ''}</button>`;
 }
+// A control's frame in the page, for a native menu that opens next to it.
+function elementRect(element) {
+  const box = element?.getBoundingClientRect?.() || { x: 0, y: 0, width: 0, height: 0 };
+  return { x: box.x, y: box.y, width: box.width, height: box.height };
+}
 function selectOptions(values, current) { return values.map((entry) => { const [value, label] = Array.isArray(entry) ? entry : [entry, entry]; return `<option value="${escapeHTML(value)}"${String(current) === String(value) ? ' selected' : ''}>${escapeHTML(label)}</option>`; }).join(''); }
 function safeLink(url) { if (!url) return ''; try { const parsed = new URL(url); return parsed.protocol === 'https:' ? parsed.href : ''; } catch { return ''; } }
 function safeImage(url) { if (!url) return ''; try { const parsed = new URL(url); return ['https:', 'mwe-ui:'].includes(parsed.protocol) ? parsed.href : ''; } catch { return ''; } }
@@ -122,7 +128,14 @@ function speed(value) {
   return `${(value / 1000 ** exponent).toLocaleString(undefined, { maximumFractionDigits: 1 })} ${units[exponent]}`;
 }
 function rate(value) { const pace = speed(value); return pace ? t('Network speed: {speed}', { speed: pace }) : ''; }
-function transfer(item, { includePercent = true } = {}) { const percent = Number.isFinite(item?.progress) ? `${Math.round(clamp(item.progress) * 100)}%` : ''; const received = bytes(item?.bytesReceived); const expected = bytes(item?.bytesExpected); const amount = received && expected ? t('{received} of {expected}', { received, expected }) : received; return [includePercent ? percent : '', amount, rate(item?.bytesPerSecond)].filter(Boolean).join(' · '); }
+// Seconds under a minute and a half, minutes under an hour and a half, then hours with one decimal.
+function duration(seconds) {
+  if (!Number.isFinite(seconds) || seconds <= 0) return '';
+  const [value, unit] = seconds < 90 ? [Math.round(seconds), 'second'] : seconds < 5400 ? [Math.round(seconds / 60), 'minute'] : [Math.round(seconds / 360) / 10, 'hour'];
+  try { return new Intl.NumberFormat(language(), { style: 'unit', unit, unitDisplay: 'short', maximumFractionDigits: 1 }).format(value); } catch { return ''; }
+}
+function timeLeft(seconds) { const time = duration(seconds); return time ? t('{time} left', { time }) : ''; }
+function transfer(item, { includePercent = true } = {}) { const percent = Number.isFinite(item?.progress) ? `${Math.round(clamp(item.progress) * 100)}%` : ''; const received = bytes(item?.bytesReceived); const expected = bytes(item?.bytesExpected); const amount = received && expected ? t('{received} of {expected}', { received, expected }) : received; return [includePercent ? percent : '', amount, rate(item?.bytesPerSecond), timeLeft(item?.secondsRemaining)].filter(Boolean).join(' · '); }
 
 // Keyed reconciliation keeps loaded preview images, open disclosures and active fields alive.
 function morph(parent, html) {
@@ -168,7 +181,7 @@ async function send(action, args = {}) {
   if (!bridge) { localError = t('The native connection is unavailable. Open this panel in WallpaperMachine, then reconnect.'); renderError(); throw new Error(localError); }
   const key = actionKey(action, args);
   if (pending.has(key)) {
-    if (['property', 'wallpaperSetting', 'displayConfig', 'workshopSearch', 'pixivSearch', 'navigate', 'target'].includes(action)) {
+    if (['property', 'wallpaperSetting', 'displayConfig', 'displayPosition', 'workshopSearch', 'pixivSearch', 'navigate', 'target'].includes(action)) {
       // The earlier request reported its own failure; this newer value is still sent.
       await inFlight.get(key)?.catch(() => {});
       return send(action, args);
@@ -221,18 +234,20 @@ function receive(snapshot) {
   if (selectionAnchor && !selection.has(selectionAnchor)) selectionAnchor = null;
   // Page-side choices that name something in the snapshot (a collection on show, a picked
   // preset, a placement being dragged) follow what the snapshot still has.
-  collections.sync(snapshot); presets.sync(snapshot); placement.sync(snapshot); compatibilityCard.sync(snapshot);
+  collections.sync(snapshot); presets.sync(snapshot); placement.sync(snapshot); compatibilityCard.sync(snapshot); letterbox.sync(snapshot);
   window.appTheme.apply(snapshot.theme);
   // Every string is translated where it is drawn, so a language change only needs the
   // static markup refreshed before the render below redraws the rest.
   const shown = language();
   if (snapshot.language?.effective && setLanguage(snapshot.language.effective) !== shown) applyStaticText();
   if (!workshopDraft) workshopDraft = { text: snapshot.workshop?.text || '', sort: snapshot.workshop?.sort || 'trend-year', tags: [...(snapshot.workshop?.tags || [])], excludedTags: [...(snapshot.workshop?.excludedTags || defaultExcludedTags)] };
+  viewState.begin(snapshot);
   // The first-run guide opens from the first snapshot that reports it unseen and closes for
   // good once the user finishes or leaves it; a snapshot that arrives before native has
   // stored that choice cannot reopen it.
   if (snapshot.welcomeSeen === false) welcome.openIfUndecided();
   render();
+  viewState.applyScroll();
 }
 window.wallpaperUI = { receive, energy: showEnergyUsage };
 // A sentence for screen readers about something that changed without moving focus; the text is
@@ -244,13 +259,22 @@ function renderError() {
   $('error-banner').hidden = !error;
   if (error) morph($('error-banner'), `<p>${escapeHTML(error)}</p>${!state || !window.webkit?.messageHandlers?.native ? button(t('Reconnect'), 'ready', {}, { icon: 'refresh' }) : ''}${button('', 'dismissError', {}, { icon: 'close', title: t('Dismiss error'), className: 'quiet icon-button' })}`);
 }
+// Wallpapers the app left out of this session because it quit unexpectedly twice while loading
+// them. Native words each message; Try again opens that wallpaper and lifts the hold. A failed
+// retry reaches the error banner above and the row stays.
+function renderHeld() {
+  const held = Array.isArray(state?.held) ? state.held : [];
+  $('held-banner').hidden = !held.length;
+  if (held.length) morph($('held-banner'), held.map(item => `<div class="held-row" ${keyAttr(`held-${item.id}`)}><p>${escapeHTML(item.message)}</p>${button(t('Try again'), 'releaseHeld', { id: item.id }, { icon: 'refresh' })}</div>`).join(''));
+}
 function render() {
   renderError();
+  renderHeld();
   if (!state) return;
   const discover = state.page === 'discover';
   const settings = state.page === 'settings';
   const pixivPage = state.page === 'pixiv';
-  if (!discover) retireLivePreviews(new Set());
+  if (livePage !== state.page) { releaseLivePreviews(); livePage = state.page; }
   document.querySelectorAll('.tabs [data-page]').forEach(tab => { if (tab.dataset.page === state.page) tab.setAttribute('aria-current', 'page'); else tab.removeAttribute('aria-current'); });
   document.documentElement.style.setProperty('--window-controls-inset', `${Math.max(0, Number(state.windowControlsInset) || 0)}px`);
   morph($('app-identity'), `<span class="app-brand-mark">${icon('wallpaperMachine', 22)}</span><span class="app-title"><span class="app-name">WallpaperMachine</span></span>`);
@@ -274,6 +298,7 @@ function render() {
     }
   }
   renderActivity(); renderPopover(); renderDialog(); welcome.render(state); surfaceAuthRequests(); supportPrompt.render(state);
+  viewState.touch();
 }
 const filtersCollapsed = () => Boolean(state?.filtersCollapsed?.[state.page]);
 // Active filters on a page: every required tag plus every box that differs from the page's
@@ -313,7 +338,7 @@ function renderToolbar(discover) {
   const source = discover ? workshopSource() : null;
   const searchable = !discover || source.searchable !== false;
   const sortPicker = searchable ? `<label class="sr-only" for="browser-sort">${escapeHTML(t('Sort wallpapers'))}</label><select id="browser-sort" data-change="sort">${selectOptions((discover ? workshopSorts : installedSorts).map(([key, label]) => [key, t(label)]), discover ? workshopDraft.sort : installed.sort)}</select>` : '';
-  morph($('browser-toolbar'), `${discover ? sourceTabs(source) : ''}${filterButton(filterCount(discover))}${discover ? sourceBar(source) : ''}${searchable ? `<form class="search-form" data-form="search" ${keyAttr(discover ? 'workshop-search' : 'installed-search')}>${icon('search')}<label class="sr-only" for="wallpaper-search">${escapeHTML(discover ? t('Search Steam Workshop') : t('Search installed wallpapers'))}</label><input id="wallpaper-search" type="search" autocomplete="off" placeholder="${escapeHTML(discover ? t('Search Workshop') : t('Search wallpapers'))}" value="${escapeHTML(search)}" data-input="search">${discover ? `<button type="submit" title="${escapeHTML(t('Search Workshop'))}">${escapeHTML(t('Search'))}</button>` : ''}</form>` : ''}<div class="toolbar-tools">${sortPicker}${discover ? `${button('', 'refreshWorkshop', {}, { icon: 'refresh', title: t('Refresh Workshop'), disabled: state.workshop.loading })}` : `${button('', 'toggleSortDirection', {}, { icon: installed.descending ? 'sortDescending' : 'sortAscending', title: installed.descending ? t('{sort}, descending. Click to sort ascending', { sort: sortLabel }) : t('{sort}, ascending. Click to sort descending', { sort: sortLabel }), className: 'icon-button sort-direction' })}${button(selecting ? t('Done') : t('Select'), 'toggleSelecting', {}, { icon: selecting ? 'close' : 'check', title: selecting ? t('Leave selection mode') : t('Select wallpapers to move to Trash. Holding a tile and dragging across others selects them too.'), className: selecting ? 'selecting' : '' })}${button('', 'refresh', {}, { icon: 'refresh', title: t('Refresh library'), disabled: state.libraryLoading })}${button(t('Import'), 'openImport', {}, { icon: 'plus', className: 'import-button', title: t('Import wallpapers'), disabled: state.import?.busy })}`}</div>`);
+  morph($('browser-toolbar'), `${discover ? sourceTabs(source) : ''}${filterButton(filterCount(discover))}${discover ? sourceBar(source) : ''}${searchable ? `<form class="search-form" data-form="search" ${keyAttr(discover ? 'workshop-search' : 'installed-search')}>${icon('search')}<label class="sr-only" for="wallpaper-search">${escapeHTML(discover ? t('Search Steam Workshop') : t('Search installed wallpapers'))}</label><input id="wallpaper-search" type="search" autocomplete="off" placeholder="${escapeHTML(discover ? (source.key === 'browse' ? t('Search Workshop or paste a link') : t('Search Workshop')) : t('Search wallpapers'))}" value="${escapeHTML(search)}" data-input="search">${discover ? `<button type="submit" title="${escapeHTML(t('Search Workshop'))}">${escapeHTML(t('Search'))}</button>` : ''}</form>` : ''}<div class="toolbar-tools">${sortPicker}${discover ? `${button('', 'refreshWorkshop', {}, { icon: 'refresh', title: t('Refresh Workshop'), disabled: state.workshop.loading })}` : `${button('', 'toggleSortDirection', {}, { icon: installed.descending ? 'sortDescending' : 'sortAscending', title: installed.descending ? t('{sort}, descending. Click to sort ascending', { sort: sortLabel }) : t('{sort}, ascending. Click to sort descending', { sort: sortLabel }), className: 'icon-button sort-direction' })}${button(selecting ? t('Done') : t('Select'), 'toggleSelecting', {}, { icon: selecting ? 'close' : 'check', title: selecting ? t('Leave selection mode') : t('Select wallpapers to move to Trash. Holding a tile and dragging across others selects them too.'), className: selecting ? 'selecting' : '' })}${button('', 'refresh', {}, { icon: 'refresh', title: t('Refresh library'), disabled: state.libraryLoading })}${button(t('Import'), 'openImport', {}, { icon: 'plus', className: 'import-button', title: t('Import wallpapers'), disabled: state.import?.busy })}`}</div>`);
 }
 const filterGroup = (key, title, body, open, count = 0) => `<details class="filter-group"${open ? ' open' : ''} ${keyAttr(key)}><summary><span class="filter-group-title">${escapeHTML(t(title))}${filterCountPill(count)}</span>${icon('chevronRight', 13)}</summary><div class="filter-options">${body}</div></details>`;
 const filterHeading = (count, clearAction) => `<div class="filter-heading"><h3>${escapeHTML(t('Filters'))}${filterCountPill(count)}</h3>${button(t('Clear'), clearAction, {}, { className: 'link', disabled: !count })}</div>`;
@@ -384,6 +409,85 @@ function visibleWallpapers() {
   const target = (state.displays || []).find(display => display.id === state.targetDisplayID);
   return (state.wallpapers || []).filter(item => collections.matches(item) && (!installed.text || `${item.title} ${(item.tags || []).join(' ')}`.toLocaleLowerCase().includes(installed.text.toLocaleLowerCase())) && matchesInstalledFilters(item, target)).sort(compareInstalled);
 }
+// Installed's filters and each library page's scroll offset outlive the window. The page
+// reports them to native as they change (nothing comes back), and native hands them over with
+// the reply to a new page's first `ready`, so a reopened panel resumes where it was closed.
+// Native keeps them in memory only, so a fresh launch starts clean. Property drafts are left out:
+// one restored against a library that changed in between could be delivered stale.
+const viewState = (() => {
+  const pages = ['installed', 'discover', 'pixiv']; // The pages that draw into #wallpaper-grid.
+  const scroll = {};
+  let armed = false, dirty = false, timer = 0, dueAt = 0, pendingScroll = null, seenFilters = '', seenText = '';
+  const grid = () => $('wallpaper-grid');
+  const onLibrary = () => Boolean(state) && pages.includes(state.page) && !$('library-page').hidden;
+  // Native refuses text past 200 characters; no text is a more honest restore than a cut one.
+  const filters = () => ({ text: installed.text.length <= 200 ? installed.text : '', sort: installed.sort, descending: installed.descending, tags: installed.tags, excludedTags: installed.excludedTags });
+  function flush() {
+    clearTimeout(timer); timer = 0;
+    if (!dirty) return;
+    dirty = false;
+    if (onLibrary()) scroll[state.page] = Math.max(0, Math.round(grid().scrollTop));
+    const bridge = window.webkit?.messageHandlers?.native;
+    if (bridge) Promise.resolve(bridge.postMessage({ action: 'viewState', installed: filters(), scroll })).catch(() => {});
+  }
+  // The earliest deadline wins, so a burst of scrolling or typing reports at most once per delay.
+  function schedule(delay) {
+    if (!armed) return;
+    dirty = true;
+    const due = Date.now() + delay;
+    if (timer && due >= dueAt) return;
+    clearTimeout(timer); dueAt = due; timer = setTimeout(flush, delay);
+  }
+  // A required tag that nothing in the library carries any more would leave the grid empty.
+  // Excluded tags stay: they only hide, and a wallpaper imported later should stay hidden.
+  function dropStaleTags(snapshot) {
+    if (!installed.tags.length || snapshot.libraryLoading || !snapshot.wallpapers?.length) return;
+    const target = (snapshot.displays || []).find(display => display.id === snapshot.targetDisplayID);
+    const carried = new Set();
+    for (const item of snapshot.wallpapers) for (const tag of installedTags(item, target)) carried.add(tag);
+    installed.tags = installed.tags.filter(tag => carried.has(tag.toLowerCase()));
+  }
+  // Runs on the first full snapshot, with `state` already set: later snapshots, and a second
+  // `ready` from Reconnect, never overwrite what the person has done since.
+  function begin(snapshot) {
+    if (armed) return;
+    armed = true;
+    const saved = snapshot.restoreViewState;
+    if (saved?.installed) {
+      const filter = saved.installed;
+      installed.text = String(filter.text ?? '');
+      if (installedSorts.some(([key]) => key === filter.sort)) installed.sort = filter.sort;
+      installed.descending = Boolean(filter.descending);
+      installed.tags = uniqueTags((filter.tags || []).map(String));
+      installed.excludedTags = uniqueTags((filter.excludedTags || []).map(String));
+      dropStaleTags(snapshot);
+      Object.assign(scroll, saved.scroll);
+      pendingScroll = Number.isFinite(saved.scroll?.[snapshot.page]) ? saved.scroll[snapshot.page] : null;
+    }
+    seenFilters = JSON.stringify(filters()); seenText = installed.text;
+  }
+  // After the render that drew the restored grid; the offset is clamped to what the grid holds.
+  function applyScroll() {
+    if (pendingScroll === null) return;
+    const offset = pendingScroll; pendingScroll = null;
+    if (!onLibrary()) return;
+    const element = grid();
+    element.scrollTop = Math.min(offset, Math.max(0, element.scrollHeight - element.clientHeight));
+  }
+  // Typing reports once it pauses; a click on a box or the sort menu reports at once, so closing
+  // the window right after it keeps the choice.
+  function touch() {
+    if (!armed) return;
+    const key = JSON.stringify(filters());
+    if (key === seenFilters) return;
+    schedule(installed.text === seenText ? 0 : 400);
+    seenFilters = key; seenText = installed.text;
+  }
+  grid().addEventListener('scroll', () => schedule(400), { passive: true });
+  document.addEventListener('visibilitychange', () => { if (document.hidden) flush(); });
+  window.addEventListener('pagehide', flush);
+  return { begin, applyScroll, touch };
+})();
 function emptyRecovery(discover) {
   // A source Steam does not search ignores the search text, so only filters can hide its items.
   const draft = discover && workshopSource().searchable === false ? { ...filterDraft(discover), text: '' } : filterDraft(discover);
@@ -422,6 +526,24 @@ function emptyRecovery(discover) {
   };
   return { description: t('The Workshop returned no results.'), actions: button(t('Refresh Workshop'), 'refreshWorkshop', {}, { icon: 'refresh' }) };
 }
+// A tile's still. Discover shows the Workshop thumbnail; Installed shows the cover the native cache
+// keeps for the preview file (libraryStill), so a GIF preview is not decoded at full size for a tile.
+function tileStillMarkup(item, discover) {
+  const still = discover ? { source: safeImage(item.thumbnail || item.preview), key: item.thumbnail || item.preview, fallback: '' } : libraryStill(item);
+  if (!still.source) return '';
+  return `<img ${keyAttr(still.key)} class="tile-still" src="${escapeHTML(still.source)}" alt=""${discover ? '' : ' loading="lazy"'} decoding="async"${still.source.startsWith('mwe-ui:') ? ' crossorigin="anonymous"' : ''}${still.fallback ? ` data-fallback="${escapeHTML(still.fallback)}"` : ''} referrerpolicy="no-referrer">`;
+}
+// Covers the native cache could not make, by cover address. The preview file itself stands in for
+// them once; a cover address carries a stamp of the preview file, so they retry when it is replaced.
+const brokenCovers = new Set();
+function libraryStill(item) {
+  const cover = safeImage(item.thumbnail), file = safeImage(item.preview);
+  // The stamp is still being read: show nothing yet, never the full-size preview the cover stands for.
+  if (!cover && item.coverPending) return { source: '', key: item.preview, fallback: '' };
+  if (!cover) return { source: file, key: item.preview, fallback: '' };
+  if (brokenCovers.has(cover) && file) return { source: file, key: item.preview, fallback: '' };
+  return { source: cover, key: item.thumbnail, fallback: file };
+}
 function renderGrid(discover) {
   const workshop = state.workshop;
   const items = discover ? workshop.items || [] : visibleWallpapers();
@@ -441,12 +563,13 @@ function renderGrid(discover) {
   // Signed in, subscriptions say whose list it is, offer to download what the library lacks as
   // the list's main action, and the way to sign out again.
   const subscriptionBar = discover && workshopSource().key === 'subscriptions' && workshop.steamSignedIn ? `<div class="selection-bar subscription-bar"><span class="steam-session">${icon('circleCheck', 14)}<span>${escapeHTML(t('Signed in to Steam'))}</span></span>${workshop.loaded ? `<span>${escapeHTML(t('{count} subscribed', { count: Number(workshop.totalCount).toLocaleString() }))}</span>` : ''}${button(t('Download the ones not in your library'), 'workshopDownloadSubscribed', {}, { icon: 'download', className: 'primary', title: t('Downloads every wallpaper you subscribe to that isn’t in your library yet'), disabled: busy('workshopDownloadSubscribed') || (workshop.loaded && !Number(workshop.totalCount)) })}${button(t('Sign out of Steam'), 'steamWebSignOut', {}, { className: 'link', title: t('Forgets the Steam session this app read your subscriptions with') })}${steamPageLink}</div>` : '';
-  morph($('browser-summary'), loading ? escapeHTML(discover ? t('Searching Steam Workshop…') : t('Loading your library…')) : subscriptionBar || (discover ? `<div class="selection-bar"><span>${escapeHTML(workshop.loaded ? t('{count} results', { count: Number(workshop.totalCount).toLocaleString() }) : t('Steam Workshop'))}</span>${steamPageLink}</div>` : selection.size ? `<div class="selection-bar"><span class="selection-count">${escapeHTML(t('{count} selected', { count: selection.size.toLocaleString() }))}</span>${button(t('Select all'), 'selectAllVisible', {}, { className: 'link', disabled: items.every(item => selection.has(item.id)) })}${button(t('Clear'), 'clearSelection', {}, { className: 'link' })}${button(selection.size === 1 ? t('Add to playlist') : t('Add {count} to playlist', { count: selection.size.toLocaleString() }), 'addSelectedToPlaylist', {}, { icon: 'listPlus', title: t('Adds them to the list of the target display’s playlist'), disabled: !target?.enabled || target.mode === 'mirror' || busy('playlistAdd') })}${collections.selectionTools()}${button(selection.size === 1 ? t('Move to Trash') : t('Move {count} to Trash', { count: selection.size.toLocaleString() }), 'deleteSelected', {}, { icon: 'trash', className: 'danger', disabled: state.busy || busy('deleteMany') })}${sweepTip}</div>` : `<div class="selection-bar"><span>${escapeHTML(count)}</span>${updateAll}${items.length && selecting ? `${sweepTip ? '' : `<span class="muted">${escapeHTML(t('Click or drag across tiles to select them.'))}</span>`}${button(t('Select all'), 'selectAllVisible', {}, { className: 'link' })}${sweepTip}` : ''}</div>`));
+  morph($('browser-summary'), loading ? escapeHTML(discover ? t('Searching Steam Workshop…') : t('Loading your library…')) : subscriptionBar || (discover ? `<div class="selection-bar"><span>${escapeHTML(workshop.loaded && workshop.lookup ? t('Showing the item from your link. Filters don’t apply to it.') : workshop.loaded && workshop.degraded ? t('Steam changed its Workshop page, so this list may be incomplete.') : workshop.loaded ? t('{count} results', { count: Number(workshop.totalCount).toLocaleString() }) : t('Steam Workshop'))}</span>${steamPageLink}</div>` : selection.size ? `<div class="selection-bar"><span class="selection-count">${escapeHTML(t('{count} selected', { count: selection.size.toLocaleString() }))}</span>${button(t('Select all'), 'selectAllVisible', {}, { className: 'link', disabled: items.every(item => selection.has(item.id)) })}${button(t('Clear'), 'clearSelection', {}, { className: 'link' })}${button(selection.size === 1 ? t('Add to playlist') : t('Add {count} to playlist', { count: selection.size.toLocaleString() }), 'addSelectedToPlaylist', {}, { icon: 'listPlus', title: t('Adds them to the list of the target display’s playlist'), disabled: !target?.enabled || target.mode === 'mirror' || busy('playlistAdd') })}${collections.selectionTools()}${button(selection.size === 1 ? t('Move to Trash') : t('Move {count} to Trash', { count: selection.size.toLocaleString() }), 'deleteSelected', {}, { icon: 'trash', className: 'danger', disabled: state.busy || busy('deleteMany') })}${sweepTip}</div>` : `<div class="selection-bar"><span>${escapeHTML(count)}</span>${updateAll}${items.length && selecting ? `${sweepTip ? '' : `<span class="muted">${escapeHTML(t('Click or drag across tiles to select them.'))}</span>`}${button(t('Select all'), 'selectAllVisible', {}, { className: 'link' })}${sweepTip}` : ''}</div>`));
   $('wallpaper-grid').classList.toggle('selecting', !discover && (selecting || selection.size > 0));
-  // Animations belong to Discover. An installed wallpaper keeps its Workshop id, so a live entry
-  // left over from Discover would mark its Installed tile as playing and hide that tile's still.
-  retireLivePreviews(new Set(discover ? items.map(item => item.id) : []));
-  morph($('wallpaper-grid'), items.map(item => `<article class="wallpaper-tile${selection.has(item.id) ? ' checked' : ''}${!discover && sweepArmingID() === item.id ? ' arming' : ''}${live.get(item.id)?.playing ? ' playing' : ''}" ${keyAttr(item.id)}><button type="button" class="tile-select" data-action="${discover ? 'workshopSelect' : 'select'}" data-id="${escapeHTML(item.id)}" aria-pressed="${item.id === selectedID}" aria-label="${escapeHTML(item.title)}, ${escapeHTML(kindLabel(item))}${tileMarkNames(item, discover).map(name => `, ${escapeHTML(t(tileMarkGlyphs[name][1]))}`).join('')}${item.id === selectedID ? `, ${escapeHTML(t('selected'))}` : ''}"><span class="tile-placeholder">${icon('image', 28)}</span>${discover && ['loading', 'ready'].includes(live.get(item.id)?.status) ? `<img ${keyAttr(`live-${item.id}`)} class="tile-live" src="${escapeHTML(safeImage(item.animated))}" alt="" decoding="async" crossorigin="anonymous" referrerpolicy="no-referrer">` : ''}${safeImage(item.thumbnail || item.preview) ? `<img ${keyAttr(item.thumbnail || item.preview)} class="tile-still" src="${escapeHTML(safeImage(item.thumbnail || item.preview))}" alt=""${discover ? '' : ' loading="lazy"'} decoding="async"${safeImage(item.thumbnail || item.preview).startsWith('mwe-ui:') ? ' crossorigin="anonymous"' : ''} referrerpolicy="no-referrer">` : ''}<span class="tile-caption"><span class="tile-title">${escapeHTML(item.title)}</span><span class="tile-kind">${escapeHTML(kindLabel(item))}</span></span></button>${tileMarksMarkup(item, discover)}${discover ? (item.collection ? '' : tileDownloadMarkup(item)) : tileApplyMarkup(item)}${!discover ? `<button type="button" class="tile-check" data-action="toggleSelect" data-id="${escapeHTML(item.id)}" aria-pressed="${selection.has(item.id)}" aria-label="${escapeHTML(selection.has(item.id) ? t('Deselect: {title}', { title: item.title }) : t('Select: {title}', { title: item.title }))}" title="${escapeHTML(t('Click to select, or drag from here across other tiles to select them too.'))}">${icon('check', 14)}</button><button type="button" class="tile-favorite" data-action="favorite" data-id="${escapeHTML(item.id)}" aria-pressed="${state.favorites.includes(item.id)}" aria-label="${escapeHTML(state.favorites.includes(item.id) ? t('Remove favorite: {title}', { title: item.title }) : t('Add favorite: {title}', { title: item.title }))}"${disabled(busy('favorite', { id: item.id }))}>${icon('heart', 14)}</button>${target?.wallpaperID === item.id ? `<span class="active-badge">${escapeHTML(t('Active'))}</span>` : item.active ? `<span class="active-badge">${escapeHTML(t('Other display'))}</span>` : ''}` : ''}</article>`).join(''));
+  // Discover animates every tile on screen; Installed only the one under the pointer or keyboard
+  // focus. An installed wallpaper keeps its Workshop id, so a live entry left over from Discover
+  // would mark its Installed tile as playing and hide that tile's still: render() retires them.
+  retireLivePreviews(new Set(discover ? items.map(item => item.id) : installedLiveKeep(items)));
+  morph($('wallpaper-grid'), items.map(item => `<article class="wallpaper-tile${selection.has(item.id) ? ' checked' : ''}${!discover && sweepArmingID() === item.id ? ' arming' : ''}${live.get(item.id)?.playing ? ' playing' : ''}" ${keyAttr(item.id)}><button type="button" class="tile-select" data-action="${discover ? 'workshopSelect' : 'select'}" data-id="${escapeHTML(item.id)}" aria-pressed="${item.id === selectedID}" aria-label="${escapeHTML(item.title)}, ${escapeHTML(kindLabel(item))}${tileMarkNames(item, discover).map(name => `, ${escapeHTML(t(tileMarkGlyphs[name][1]))}`).join('')}${item.id === selectedID ? `, ${escapeHTML(t('selected'))}` : ''}"><span class="tile-placeholder">${icon('image', 28)}</span>${['loading', 'ready'].includes(live.get(item.id)?.status) ? `<img ${keyAttr(`live-${item.id}`)} class="tile-live" src="${escapeHTML(safeImage(item.animated))}" alt="" decoding="async" crossorigin="anonymous" referrerpolicy="no-referrer">` : ''}${tileStillMarkup(item, discover)}<span class="tile-caption"><span class="tile-title">${escapeHTML(item.title)}</span><span class="tile-kind">${escapeHTML(kindLabel(item))}</span></span></button>${tileMarksMarkup(item, discover)}${discover ? (item.collection ? '' : tileDownloadMarkup(item)) : tileApplyMarkup(item)}${!discover ? `<button type="button" class="tile-check" data-action="toggleSelect" data-id="${escapeHTML(item.id)}" aria-pressed="${selection.has(item.id)}" aria-label="${escapeHTML(selection.has(item.id) ? t('Deselect: {title}', { title: item.title }) : t('Select: {title}', { title: item.title }))}" title="${escapeHTML(t('Click to select, or drag from here across other tiles to select them too.'))}">${icon('check', 14)}</button><button type="button" class="tile-favorite" data-action="favorite" data-id="${escapeHTML(item.id)}" aria-pressed="${state.favorites.includes(item.id)}" aria-label="${escapeHTML(state.favorites.includes(item.id) ? t('Remove favorite: {title}', { title: item.title }) : t('Add favorite: {title}', { title: item.title }))}"${disabled(busy('favorite', { id: item.id }))}>${icon('heart', 14)}</button>${target?.wallpaperID === item.id ? `<span class="active-badge">${escapeHTML(t('Active'))}</span>` : item.active ? `<span class="active-badge">${escapeHTML(t('Other display'))}</span>` : ''}` : ''}</article>`).join(''));
   const empty = $('browser-empty'); empty.hidden = items.length > 0;
   $('wallpaper-grid').hidden = !items.length;
   const signInFirst = discover && workshopSource().key === 'subscriptions' && !workshop.steamSignedIn;
@@ -564,14 +687,18 @@ function issueLink(item, failure = '') {
 }
 
 // The background recorder's rating, with the conditions it was measured under: a rating
-// taken on two displays with no limit says little about one display at 30 fps.
+// taken on two displays with no limit says little about one display at 30 fps. Native
+// sends the battery share only on a Mac with a battery.
 function energyRating(energy) {
   const level = energyLevelLabel(energy?.level);
   if (!level || !Number.isFinite(Number(energy.milliwatts))) return '';
   const displays = Number(energy.displays) === 1 ? t('1 display') : t('{count} displays', { count: Number(energy.displays) || 0 });
   const rate = energy.frameRateCap != null && Number.isFinite(Number(energy.frameRateCap)) ? t('{fps} fps', { fps: Number(energy.frameRateCap) }) : t('each display’s own frame rate');
   const scale = `${Math.round(Number(energy.renderScale) * 100)}%`;
-  return t('{level}, about {power}. Measured while it played alone on {displays} at {rate}, {scale} render scale, with this window closed.', { level, power: milliwatts(energy.milliwatts), displays, rate, scale });
+  const values = { level, power: milliwatts(energy.milliwatts), displays, rate, scale };
+  const battery = batteryShare(energy.batteryPercentPerHour);
+  if (battery) return t('{level}, about {power}. {battery} Measured while it played alone on {displays} at {rate}, {scale} render scale, with this window closed.', { ...values, battery });
+  return t('{level}, about {power}. Measured while it played alone on {displays} at {rate}, {scale} render scale, with this window closed.', values);
 }
 
 // The author's other wallpapers, unless they are what is on show already.
@@ -579,6 +706,12 @@ function moreByAuthor(item) {
   const source = workshopSource();
   if (!/^\d{17}$/.test(item.creatorID || '') || (source.key === 'creator' && source.id === item.creatorID)) return '';
   return button(t('More by this author'), 'workshopCreator', { id: item.creatorID, name: item.creator }, { className: 'link inspector-author' });
+}
+// An installed Workshop wallpaper (its id is the Workshop's number) can be downloaded again to repair
+// or refresh it, unless it cannot run on macOS or a download for it is under way or waiting for setup.
+function canReinstall(item) {
+  return /^\d+$/.test(item.id) && item.kind !== 'Application'
+    && !state.downloads.some(download => download.id === item.id && download.pending) && !requestByID(item.id);
 }
 function renderInspector(discover) {
   const item = discover ? state.workshop.items.find(item => item.id === state.workshop.selectedID) : state.wallpapers.find(item => item.id === state.selectedID);
@@ -589,6 +722,10 @@ function renderInspector(discover) {
   const download = state.downloads.find(download => download.id === item.id);
   const request = requestByID(item.id);
   const percent = Number.isFinite(download?.progress) ? Math.round(clamp(download.progress) * 100) : null;
+  // Download and apply needs a wallpaper that can run and a target display that can show one of its own.
+  // Why a downloaded wallpaper was not applied is moot once the target display shows it.
+  const applyNote = target?.wallpaperID === item.id ? '' : state.applyNotes?.[item.id] || '';
+  const canDownloadAndApply = discover && !item.collection && item.kind !== 'Application' && target?.enabled && target.mode !== 'mirror';
   const downloadAction = discover && item.collection
     ? button(t('Open collection'), 'workshopCollection', { id: item.id, title: item.title }, { icon: 'layers', className: 'primary' })
     : request
@@ -597,7 +734,7 @@ function renderInspector(discover) {
       ? button(t('Resume download'), 'downloadResume', { id: item.id }, { icon: 'play', className: 'primary' })
     : download?.pending
       ? `${download.prompt || download.challenge ? button(t('Finish sign-in'), 'continueSetup', { id: item.id }, { icon: 'shield', className: 'primary' }) : button(download.queued ? t('Waiting to download') : percent === null ? t('Downloading') : t('Downloading {percent}%', { percent }), 'openDownloads', {}, { icon: 'download', className: 'primary' })}${button(download.queued ? t('Remove from queue') : t('Cancel'), 'downloadCancel', { id: item.id }, { className: 'quiet' })}`
-      : button(download?.error ? t('Download again') : t('Download'), 'requestDownload', { id: item.id }, { icon: 'download', className: 'primary' });
+      : `${button(download?.error ? t('Download again') : t('Download'), 'requestDownload', { id: item.id }, { icon: 'download', className: 'primary' })}${canDownloadAndApply ? button(t('Download and apply'), 'requestDownloadAndApply', { id: item.id }, { icon: 'play', className: 'wide inspector-apply-download' }) : ''}`;
   const options = !discover && state.options?.id === item.id ? state.options : null;
   // An illustration saved from the pixiv tab is a web wallpaper only in how it is shown; its id names the artwork.
   const pixivArtwork = !discover && /^pixiv-(\d+)-p\d+$/.exec(item.id)?.[1];
@@ -617,14 +754,21 @@ function renderInspector(discover) {
   const playlistIDs = state.playlists?.[state.targetDisplayID]?.wallpaperIDs || [];
   const inPlaylist = playlistIDs.includes(item.id);
   const playlistToggle = !discover && isInstalled && item.supported !== false ? button('', inPlaylist ? 'playlistRemove' : 'playlistAdd', { id: item.id }, { icon: inPlaylist ? 'listMinus' : 'listPlus', title: inPlaylist ? t('Remove from this display’s playlist') : t('Add to this display’s playlist'), className: `icon-button${inPlaylist ? ' playlist-selected' : ''}`, disabled: !target?.enabled || target.mode === 'mirror' }) : '';
-  const secondary = `${discover ? button(t('View on Steam Workshop'), 'openExternal', { url: `https://steamcommunity.com/sharedfiles/filedetails/?id=${encodeURIComponent(item.id)}` }, { icon: 'external', className: 'wide', title: t('View on Steam Workshop') }) : isInstalled ? button(t('Show in Finder'), 'reveal', { id: item.id }, { icon: 'folder', className: 'wide', title: t('Show in Finder') }) : ''}${!discover && isInstalled ? button('', 'favorite', { id: item.id }, { icon: 'heart', title: state.favorites.includes(item.id) ? t('Remove from favorites') : t('Add to favorites'), className: `icon-button${state.favorites.includes(item.id) ? ' favorite-selected' : ''}` }) : ''}${playlistToggle}${!discover && isInstalled ? button('', 'delete', { id: item.id }, { icon: 'trash', className: 'icon-button danger', title: t('Move wallpaper to Trash') }) : ''}`;
+  // One step for every display, offered only where there is more than one display to put it on.
+  // A mirror follows its source and a disabled display shows nothing, so neither counts.
+  const sharedDisplays = state.displays.filter(display => display.enabled && display.mode !== 'mirror');
+  const applyAll = isInstalled && !discover && item.supported !== false && !['Application', 'Unknown'].includes(item.kind) && sharedDisplays.length >= 2
+    ? button(t('Apply to all displays'), 'activateAll', { id: item.id }, { icon: 'monitor', className: 'wide inspector-apply-all', disabled: sharedDisplays.every(display => display.wallpaperID === item.id) }) : '';
+  const secondary = `${applyAll}${discover ? button(t('View on Steam Workshop'), 'openExternal', { url: `https://steamcommunity.com/sharedfiles/filedetails/?id=${encodeURIComponent(item.id)}` }, { icon: 'external', className: 'wide', title: t('View on Steam Workshop') }) : isInstalled ? button(t('Show in Finder'), 'reveal', { id: item.id }, { icon: 'folder', className: 'wide', title: t('Show in Finder') }) : ''}${!discover && isInstalled ? button('', 'favorite', { id: item.id }, { icon: 'heart', title: state.favorites.includes(item.id) ? t('Remove from favorites') : t('Add to favorites'), className: `icon-button${state.favorites.includes(item.id) ? ' favorite-selected' : ''}` }) : ''}${/^\d+$/.test(item.id) ? button('', 'shareWallpaper', { id: item.id }, { icon: 'share', className: 'icon-button', title: t('Share…') }) : ''}${playlistToggle}${!discover && isInstalled && canReinstall(item) ? button('', 'workshopReinstall', { id: item.id }, { icon: 'refresh', className: 'icon-button', title: t('Reinstall from Workshop…') }) : ''}${!discover && isInstalled ? button('', 'delete', { id: item.id }, { icon: 'trash', className: 'icon-button danger', title: t('Move wallpaper to Trash') }) : ''}`;
   // An installed Workshop wallpaper whose author has changed it since: one click downloads the
   // new version, which replaces this one once it has arrived whole.
   const updating = isInstalled && download?.pending;
   const updateNotice = !discover && isInstalled && (item.updateAvailable || updating) ? `<div class="notice inspector-update" role="status"><p>${escapeHTML(updating ? (download.queued ? t('The update is waiting to download.') : percent === null ? t('Downloading the update…') : t('Downloading the update… {percent}%', { percent })) : Number.isFinite(item.updatedAt) ? t('Its author updated it on the Workshop on {date}.', { date: new Date(item.updatedAt).toLocaleDateString(language()) }) : t('Its author updated it on the Workshop.'))}</p><div class="actions">${updating ? button(t('Show in downloads'), 'openDownloads', {}, { className: 'link' }) : request ? button(t('Continue setup'), 'continueSetup', { id: request.id }, { icon: 'shield', className: 'primary' }) : button(t('Update'), 'workshopUpdate', { id: item.id }, { icon: 'download', className: 'primary', disabled: busy('workshopUpdate', { id: item.id }) })}</div></div>` : '';
   const showInLibrary = discover && isInstalled && !(download && !download.pending && !download.error) ? button(t('Show in library'), 'showInstalled', { id: item.id }, { icon: 'image', className: 'link' }) : '';
-  const activateLabel = target?.wallpaperID === item.id ? t('Reapply wallpaper') : t('Apply wallpaper');
-  const activation = isInstalled ? button('', 'activate', { id: item.id }, { icon: 'play', title: activateLabel, className: 'primary inspector-play', disabled: !canActivate }) : '';
+  // Applying what the display already shows does nothing, so that button restarts it instead.
+  const reapplies = target?.wallpaperID === item.id;
+  const activateLabel = reapplies ? t('Reapply wallpaper') : t('Apply wallpaper');
+  const activation = isInstalled ? button('', reapplies ? 'reapplyWallpaper' : 'activate', { id: item.id }, { icon: 'play', title: activateLabel, className: 'primary inspector-play', disabled: !canActivate }) : '';
   const previewAction = isInstalled && state.previewAvailable && !['Application', 'Unknown'].includes(item.kind)
     ? button(t('Preview wallpaper'), 'previewWallpaper', { id: item.id }, { icon: 'eye', className: 'wide', title: t('Open a live preview without changing your desktop') }) : '';
   morph($('inspector'), `<div class="inspector-layout" ${keyAttr(`inspector-${item.id}-${discover}`)}><div class="inspector-scroll"><div class="inspector-heading">
@@ -634,6 +778,8 @@ function renderInspector(discover) {
     <div class="actions inspector-actions">${!isInstalled ? downloadAction : ''}${previewAction}${secondary}</div>${tags(item.tags)}
     ${!isInstalled && download?.pending && !download.queued ? `<progress class="inspector-progress" max="1"${Number.isFinite(download.progress) ? ` value="${clamp(download.progress)}"` : ''} aria-label="${escapeHTML(t('{title} download progress', { title: item.title }))}"></progress><p class="muted"><small>${escapeHTML(download.status)}${transfer(download, { includePercent: false }) ? ` · ${transfer(download, { includePercent: false })}` : ''}</small></p>` : ''}
     ${request ? `<p class="muted"><small>${escapeHTML(stageHint(request.stage))}</small></p>` : ''}
+    ${(request || download?.pending) && (request || download).applyOnArrival ? `<p class="muted inspector-apply-intent"><small>${escapeHTML(t('Will apply when the download finishes.'))}</small></p>` : ''}
+    ${applyNote ? `<div class="notice inspector-apply-note" role="status"><p>${escapeHTML(applyNote)}</p></div>` : ''}
     ${updateNotice}
     ${failureNotice}
     ${!discover ? hostStatusMarkup(item.id) : ''}
@@ -641,7 +787,7 @@ function renderInspector(discover) {
     ${download || request ? button(t('Show in downloads'), 'openDownloads', {}, { className: 'link' }) : ''}
     ${compatibility ? `<p class="inspector-compatibility muted"><small>${escapeHTML(compatibility)}</small></p>` : ''}${artworkLink}${reportLink}
     ${item.kind === 'Scene' && !state.settings.sceneAssetsReady ? `<div class="notice warning">${escapeHTML(t('Shared scene resources are required before playback.'))} ${button(t('Get shared resources'), 'requestAssets', {}, { className: 'link' })}</div>` : ''}${showInLibrary}
-    </div>${discover ? (item.summary ? `<section class="inspector-section"><p>${escapeHTML(item.summary)}</p></section>` : '') : `${isInstalled ? compatibilityCard.section(item, target) : ''}${isInstalled && packagedStill(item.id) ? placement.section(item) : ''}${options ? renderOptions(options) : `<section class="inspector-section"><p class="muted">${escapeHTML(t('Loading wallpaper options…'))}</p></section>`}${isInstalled ? collections.inspectorSection(item) : ''}`}
+    </div>${discover ? (item.summary ? `<section class="inspector-section"><p>${escapeHTML(item.summary)}</p></section>` : '') : `${isInstalled ? compatibilityCard.section(item, target) : ''}${isInstalled && item.kind === 'Video' ? letterbox.section(item, target) : ''}${isInstalled && packagedStill(item.id) ? placement.section(item) : ''}${options ? renderOptions(options, isInstalled ? collections.inspectorSection(item) : '') : `<section class="inspector-section"><p class="muted">${escapeHTML(t('Loading wallpaper options…'))}</p></section>${isInstalled ? collections.inspectorSection(item) : ''}`}`}
     </div>${options ? renderInspectorSave(options) : ''}</div>`);
   for (const image of $('inspector').querySelectorAll('img[data-label-height]')) image.style.height = `${Number(image.dataset.labelHeight)}px`;
   placement.layout();
@@ -711,20 +857,139 @@ function renderAudioAndMedia(options, lock) {
     + (control ? note(t('Output controls are separate from system-audio response.')) + status(volumeStatus) + status(muteStatus) : '')
     + '</div></details>';
 }
-function renderOptions(options) {
+// Where a scene or video sits on one display: the room the display leaves around it (bars) or the
+// overflow it crops is split by a fraction per axis. Native saves the position the moment a
+// slider settles and the wallpaper follows without restarting, so unlike the scale factor beside it
+// this is not a draft and Apply does not wait for it. The percentages are only for reading;
+// native takes fractions. The sliders stay enabled while a command runs: their changes queue, and
+// a disabled slider would drop the keyboard focus the next arrow key needs. A still image page is
+// kind Web and keeps its own Position on screen, and a web wallpaper has nothing to move.
+function positionRows(options, display, index) {
+  if (!['Scene', 'Video'].includes(options.kind) || !options.supported) return '';
+  const fraction = (value) => Number.isFinite(Number(value)) ? Math.min(1, Math.max(0, Number(value))) : 0.5;
+  const x = fraction(display.panX), y = fraction(display.panY);
+  const slider = (axis, label, value) => `<div class="field" ${keyAttr(`position-${axis}`)}><label for="position-${axis}-${index}">${escapeHTML(label)}</label><div class="range-field"><input id="position-${axis}-${index}" type="range" min="0" max="100" step="1" value="${Math.round(value * 100)}" data-change="displayPosition" data-axis="${axis}" data-id="${escapeHTML(options.id)}" data-display-id="${escapeHTML(display.id)}"><output>${Math.round(value * 100)}%</output></div></div>`;
+  const note = display.nativePlayer
+    ? `${escapeHTML(t('This video is drawn by the native video player, which keeps it centered. Choose Compatibility for Video playback in Performance settings to move it.'))} ${button(t('Open Performance'), 'openPerformance', {}, { className: 'link' })}`
+    : escapeHTML(t('Choose which part of the wallpaper stays in view when it is larger than the display, or where it sits when it is smaller. Nothing moves when it already fits the display exactly.'));
+  return `<div class="position-rows" ${keyAttr(`position-${display.id}`)}>${slider('x', t('Horizontal position'), x)}${slider('y', t('Vertical position'), y)}<div class="actions">${button(t('Center'), 'displayPositionReset', { id: options.id, displayID: display.id }, { className: 'link', icon: 'refresh', disabled: x === 0.5 && y === 0.5, title: t('Center the wallpaper on the display') })}</div><p class="muted field-note"><small>${note}</small></p></div>`;
+}
+// A Position slider also shows the wallpaper at the thumb while the person drags it, and a property's
+// slider or colour picker does the same with its value. The page sends the newest value at most every
+// PREVIEW_MS and one step at a time, native keeps nothing from it and does not reply with a snapshot,
+// and a step that fails is ignored: the release sends the value that counts through `send`, which
+// saves it and reports its own errors. Only a pointer drag previews (a key press or VoiceOver
+// action fires its change at once), and the release waits for the step still on its way so that step
+// cannot land after it. A drag that ends where it began fires no change, so the pointer coming up,
+// being cancelled or leaving the window settles it with the value last shown; otherwise the
+// wallpaper would stay at the last step.
+//
+// `describe(element)` gives the step an input event stands for, or nothing: its `value`, the
+// `message` that shows a value, the `commit` that saves one, and `unpointed` for a control whose
+// drag the page cannot see because it happens in a panel of its own (a colour picker). That one
+// waits a task before its first step, so a single pick, whose change event follows at once, shows
+// nothing before it is saved.
+function dragPreview({ action, pointerOn, describe }) {
+  const PREVIEW_MS = 100;
+  let pointerDown = false, drag = null;
+  function preview(message) {
+    const bridge = window.webkit?.messageHandlers?.native;
+    if (!bridge) return Promise.resolve();
+    try { return Promise.resolve(bridge.postMessage({ action, ...message })).then(() => {}, () => {}); } catch { return Promise.resolve(); }
+  }
+  function pump(current) {
+    if (drag !== current || current.inFlight || current.timer || current.value === current.shown) return;
+    const wait = current.sentAt + PREVIEW_MS - performance.now();
+    if (wait > 0) { current.timer = setTimeout(() => { current.timer = 0; pump(current); }, wait); return; }
+    current.shown = current.value; current.sentAt = performance.now();
+    current.inFlight = preview(current.message(current.value)).then(() => { current.inFlight = null; pump(current); });
+  }
+  // Ends the drag in progress. The promise settles once the step already sent has been answered.
+  function end() {
+    const current = drag; drag = null;
+    if (!current) return Promise.resolve();
+    clearTimeout(current.timer); current.timer = 0;
+    return current.inFlight || Promise.resolve();
+  }
+  function settle() {
+    if (drag) run(drag.commit(drag.value));
+  }
+  function release() { if (!pointerDown) return; pointerDown = false; setTimeout(settle, 0); }
+  document.addEventListener('pointerdown', event => { pointerDown = Boolean(event.target.closest?.(pointerOn)); });
+  for (const type of ['pointerup', 'pointercancel']) document.addEventListener(type, release);
+  // The button came up outside the window, where no pointerup reached the page.
+  document.addEventListener('pointermove', event => { if (pointerDown && !(event.buttons & 1)) release(); });
+  window.addEventListener('blur', () => { pointerDown = false; settle(); });
+  return {
+    end,
+    input(element) {
+      const step = describe(element);
+      if (!step || (!pointerDown && !step.unpointed)) return;
+      if (drag?.element !== element) {
+        clearTimeout(drag?.timer);
+        drag = { element, shown: NaN, inFlight: null, timer: 0, sentAt: -Infinity };
+        if (step.unpointed) drag.timer = setTimeout(() => { const current = drag; if (current?.element === element) { current.timer = 0; pump(current); } }, 0);
+      }
+      Object.assign(drag, { value: step.value, message: step.message, commit: step.commit });
+      pump(drag);
+    },
+  };
+}
+const positionDrag = dragPreview({
+  action: 'displayPositionPreview',
+  pointerOn: 'input[data-change="displayPosition"]',
+  describe(element) {
+    const axis = element.dataset.axis;
+    if (axis !== 'x' && axis !== 'y') return null;
+    const { id, displayId: displayID } = element.dataset;
+    return {
+      value: Number(element.value) / 100,
+      message: value => ({ id, displayID, [axis]: value }),
+      commit: value => commitPosition(id, displayID, axis, value),
+    };
+  },
+});
+async function commitPosition(id, displayID, axis, fraction) {
+  await positionDrag.end();
+  return send('displayPosition', { id, displayID, [axis]: fraction });
+}
+const propertyDrag = dragPreview({
+  action: 'propertyPreview',
+  pointerOn: 'input[type="range"][data-change="property"]',
+  describe(element) {
+    if (element.type !== 'range' && element.type !== 'color') return null;
+    const value = element.type === 'range' ? Number(element.value) : element.value;
+    if (typeof value === 'number' && !Number.isFinite(value)) return null;
+    const { id, propertyId } = element.dataset;
+    return {
+      value,
+      unpointed: element.type === 'color',
+      message: value => ({ id, propertyID: propertyId, value }),
+      commit: value => commitPropertyValue(id, propertyId, value),
+    };
+  },
+});
+// Displays and collections sit above the properties, which can run very long; Displays
+// opens by itself once the wallpaper is on a display.
+function renderOptions(options, collectionsSection = '') {
   const id = options.id;
   const lock = state.busy || busy('apply', { id }) || busy('revert', { id });
   const properties = (options.properties || []).map(property => renderProperty(id, property, lock)).join('');
   // Presets count unsent page drafts as dirty too, as the Apply changes footer does.
-  const dirty = Boolean(options.dirty) || [...drafts.keys()].some(key => key.startsWith(`${id}\u0000`));
+  const unsent = [...drafts.keys()].some(key => key.startsWith(`${id}\u0000`));
+  const dirty = Boolean(options.dirty) || unsent;
+  // A chosen file or folder is saved as it is picked and keeps its own Clear, so only the rest can be restored.
+  // A value behind a rule that hides its row can be too, though the page is not given the row.
+  const restorable = unsent || Boolean(options.hiddenModified) || (options.properties || []).some(property => property.dirty && property.kind !== 'file' && property.kind !== 'directory');
+  const restoreAll = button(t('Restore all defaults'), 'restoreAllProperties', { id }, { className: 'link', icon: 'refresh', title: t('Stages the default for every property except chosen files and folders. Revert undoes it.'), disabled: lock || !options.supported || !restorable });
   return `${!options.supported ? `<section class="inspector-section"><p class="notice warning">${escapeHTML(t('This wallpaper cannot be rendered on this Mac.'))}</p></section>` : ''}
     <section class="inspector-section"><details open ${keyAttr(`general-${id}`)}><summary>${escapeHTML(t('General configuration'))}${icon('chevronRight', 14)}</summary><div class="section-content general-controls">
       <label class="check-label inspector-check">${icon('volume')}<span>${escapeHTML(t('Mute wallpaper audio'))}</span><input type="checkbox" data-change="wallpaperSetting" data-id="${escapeHTML(id)}" data-setting="muted"${checked(options.muted)}${disabled(lock)}></label>
       <div class="field inspector-row"><label for="wallpaper-volume">${icon('volume')}${escapeHTML(t('Volume'))}</label><div class="range-field"><input id="wallpaper-volume" type="range" min="0" max="100" step="1" value="${Number(options.volume) * 100}" data-change="wallpaperSetting" data-id="${escapeHTML(id)}" data-setting="volume"${disabled(lock || options.muted)}><output>${Math.round(options.volume * 100)}%</output></div></div>
       ${renderAudioAndMedia(options, lock)}
     </div></details></section>
-    ${properties ? `<section class="inspector-section"><details open ${keyAttr(`properties-${id}`)}><summary>${escapeHTML(t('Wallpaper properties'))}${icon('chevronRight', 14)}</summary><div class="section-content wallpaper-properties">${presets.section({ id }, { dirty })}${properties}</div></details></section>` : ''}
-    <section class="inspector-section"><details ${keyAttr(`displays-${id}`)}><summary>${escapeHTML(t('Displays'))}${icon('chevronRight', 14)}</summary><div class="section-content">${(options.displays || []).map(display => `<details class="display-options" open ${keyAttr(display.id)}><summary>${escapeHTML(display.title)}${icon('chevronRight', 13)}</summary><div class="section-content"><label class="check-label"><input type="checkbox" data-change="displayConfig" data-id="${escapeHTML(id)}" data-display-id="${escapeHTML(display.id)}" data-setting="enabled"${checked(display.enabled)}${disabled(lock)}>${escapeHTML(t('Enabled'))}</label><label class="field">${escapeHTML(t('Scaling mode'))}<select data-change="displayConfig" data-id="${escapeHTML(id)}" data-display-id="${escapeHTML(display.id)}" data-setting="scalingMode"${disabled(lock)}>${selectOptions([['none', t('Original size')], ['stretch', t('Stretch')], ['match', t('Fit')], ['fill', t('Fill')]], display.scalingMode)}</select></label><label class="field">${escapeHTML(t('Scale factor'))}<input type="number" min="${Number.MIN_VALUE}" step="any" value="${Number(display.scalingFactor)}" data-change="displayConfig" data-id="${escapeHTML(id)}" data-display-id="${escapeHTML(display.id)}" data-setting="scalingFactor"${disabled(lock)}></label><label class="field">${escapeHTML(t('Frame rate'))}<input type="number" min="1" max="${Number(display.maxFps) || 240}" step="1" value="${Number(display.fps)}" data-change="displayConfig" data-id="${escapeHTML(id)}" data-display-id="${escapeHTML(display.id)}" data-setting="fps"${disabled(lock)}></label>${(() => { const limited = performanceLimitedFps(display.fps, state.settings || {}); return limited == null ? '' : `<p class="muted field-note"><small>${escapeHTML(t('Limited to {fps} fps by Performance settings', { fps: limited }))}</small> ${button(t('Open Performance'), 'openPerformance', {}, { className: 'link' })}</p>`; })()}${button(t('Remove from display'), 'eject', { id, displayID: display.id }, { className: 'link', disabled: lock })}</div></details>`).join('') || `<p class="muted">${escapeHTML(t('Apply this wallpaper to a display to configure playback.'))}</p>`}</div></details></section>`;
+    <section class="inspector-section"><details${options.displays?.length ? ' open' : ''} ${keyAttr(`displays-${id}`)}><summary>${escapeHTML(t('Displays'))}${icon('chevronRight', 14)}</summary><div class="section-content">${(options.displays || []).map((display, index) => `<details class="display-options" open ${keyAttr(display.id)}><summary>${escapeHTML(display.title)}${icon('chevronRight', 13)}</summary><div class="section-content"><label class="check-label"><input type="checkbox" data-change="displayConfig" data-id="${escapeHTML(id)}" data-display-id="${escapeHTML(display.id)}" data-setting="enabled"${checked(display.enabled)}${disabled(lock)}>${escapeHTML(t('Enabled'))}</label><label class="field">${escapeHTML(t('Scaling mode'))}<select data-change="displayConfig" data-id="${escapeHTML(id)}" data-display-id="${escapeHTML(display.id)}" data-setting="scalingMode"${disabled(lock)}>${selectOptions([['none', t('Original size')], ['stretch', t('Stretch')], ['match', t('Fit')], ['fill', t('Fill')]], display.scalingMode)}</select></label><label class="field">${escapeHTML(t('Scale factor'))}<input type="number" min="${Number.MIN_VALUE}" step="any" value="${Number(display.scalingFactor)}" data-change="displayConfig" data-id="${escapeHTML(id)}" data-display-id="${escapeHTML(display.id)}" data-setting="scalingFactor"${disabled(lock)}></label><label class="field">${escapeHTML(t('Frame rate'))}<input type="number" min="1" max="${Number(display.maxFps) || 240}" step="1" value="${Number(display.fps)}" data-change="displayConfig" data-id="${escapeHTML(id)}" data-display-id="${escapeHTML(display.id)}" data-setting="fps"${disabled(lock)}></label>${(() => { const limited = performanceLimitedFps(display.fps, state.settings || {}); return limited == null ? '' : `<p class="muted field-note"><small>${escapeHTML(t('Limited to {fps} fps by Performance settings', { fps: limited }))}</small> ${button(t('Open Performance'), 'openPerformance', {}, { className: 'link' })}</p>`; })()}${positionRows(options, display, index)}${button(t('Remove from display'), 'eject', { id, displayID: display.id }, { className: 'link', disabled: lock })}</div></details>`).join('') || `<p class="muted">${escapeHTML(t('Apply this wallpaper to a display to configure playback.'))}</p>`}</div></details></section>${collectionsSection}
+    ${properties ? `<section class="inspector-section"><details open ${keyAttr(`properties-${id}`)}><summary>${escapeHTML(t('Wallpaper properties'))}${icon('chevronRight', 14)}</summary><div class="section-content wallpaper-properties">${presets.section({ id }, { dirty })}<div class="property-tools" ${keyAttr(`property-tools-${id}`)}>${restoreAll}</div>${properties}</div></details></section>` : ''}`;
 }
 function renderInspectorSave(options) {
   const id = options.id;
@@ -779,9 +1044,11 @@ function assetProperty(id, property, fieldID, unavailable, name) {
     + (property.error ? `<p class="notice error" role="alert">${escapeHTML(property.error)}</p>` : '');
 }
 function renderProperty(id, property, lock) {
-  const token = property.labelHTML || property.label;
+  const token = String(property.labelHTML || property.label || '').trim();
   const engineLabel = Object.hasOwn(enginePropertyLabels, token) ? enginePropertyLabels[token]
-    : packagedStill(id) && packagedPropertyLabels.includes(token) ? token : null;
+    : packagedStill(id) && packagedPropertyLabels.includes(token) ? token
+    // Any other built-in token arrives as words from the app; the same phrase in the catalog is translated.
+    : engineToken.test(token) && property.label ? property.label : null;
   const presentation = engineLabel ? { ...property, label: t(engineLabel), labelHTML: '' } : property;
   const name = presentation.label || t('Unnamed option');
   const label = renderPropertyLabel(presentation);
@@ -801,6 +1068,9 @@ function renderProperty(id, property, lock) {
     case 'texture': control = `<p class="file-value">${escapeHTML(value || t('No image selected'))}</p><div class="actions">${button(t('Choose image'), 'choosePropertyFile', { id, propertyID: property.id }, { icon: 'folder', disabled: unavailable })}${value ? button(t('Clear'), 'clearProperty', { id, propertyID: property.id }, { disabled: unavailable }) : ''}</div>`; break;
     case 'file': case 'directory': control = assetProperty(id, property, fieldID, unavailable, name); break;
     case 'text': { const extra = value && value !== property.label ? `<p>${escapeHTML(value)}</p>` : ''; return label || extra ? `<div ${keyAttr(property.id)} class="property-description property-label">${label}${extra}</div>` : ''; }
+    // A group only names the controls after it. A div with a heading role, not an <h3>, because an
+    // author's own label may carry headings of its own and a heading cannot hold one.
+    case 'group': return label ? `<div ${keyAttr(property.id)} class="property-group property-label" role="heading" aria-level="3">${label}</div>` : '';
     default: return `<p ${keyAttr(property.id)} class="muted">${escapeHTML(t('{name}: unsupported property type.', { name }))}</p>`;
   }
   const restore = property.defaultValue !== undefined && property.defaultValue !== null ? button('', 'restoreProperty', { id, propertyID: property.id }, { icon: 'refresh', className: 'quiet icon-button property-reset', title: t('Restore default: {name}', { name }), disabled: unavailable }) : '';
@@ -811,7 +1081,9 @@ function renderProperty(id, property, lock) {
 // are translated for those wallpapers, which the library knows by their id.
 const packagedPropertyLabels = ['Image fit', 'Background color'];
 const packagedStill = (id) => /^(pixiv|image)-/.test(id);
-// Wallpaper Engine's built-in label tokens are UI vocabulary, not author prose.
+// Wallpaper Engine's built-in label tokens are UI vocabulary, not author prose. A token with no
+// phrase below is shown as the English words the app derives from it (at most 96 characters, as there).
+const engineToken = /^ui_[A-Za-z0-9_]{1,93}$/;
 const enginePropertyLabels = {
   ui_browse_properties_scheme_color: 'Scheme color',
   ui_editor_properties_alert_tip: 'Hint',
@@ -826,6 +1098,10 @@ const enginePropertyLabels = {
   ui_settings_enable_media_integration_support: 'Media integration',
   ui_editor_script_snippets: 'Script snippets',
   ui_editor_preset_stars_title: 'Stars',
+  // Where the derived words are not the intended phrase.
+  ui_editor_properties_pivot_offset_x: 'Pivot offset X',
+  ui_editor_properties_pivot_offset_y: 'Pivot offset Y',
+  ui_editor_properties_use_24h_format: 'Use 24-hour format',
 };
 
 const clamp = (value) => Math.max(0, Math.min(1, Number(value)));
@@ -885,8 +1161,10 @@ function queueState() {
   const progress = measured.length ? clamp(measured.reduce((sum, item) => sum + clamp(item.progress), 0) / measured.length) : null;
   const percent = progress === null ? null : Math.round(progress * 100);
   const speed = active.reduce((sum, item) => sum + (Number.isFinite(item.bytesPerSecond) ? item.bytesPerSecond : 0), 0);
+  // The batch is done when its slowest job is, so one job without an estimate leaves the batch without one.
+  const remaining = active.length && active.every(item => Number.isFinite(item.secondsRemaining)) ? timeLeft(Math.max(...active.map(item => item.secondsRemaining))) : '';
   const count = requests.length + active.length + queued.length;
-  const summary = active.length > 1 ? [t('{count} downloading', { count: active.length }), percent !== null ? `${percent}%` : '', speed > 0 ? rate(speed) : ''].filter(Boolean).join(' · ') : running ? [running.status || t('Downloading'), percent !== null ? `${percent}%` : '', rate(running.bytesPerSecond)].filter(Boolean).join(' · ') : requests.length ? t(requests.length === 1 ? '{count} download needs setup' : '{count} downloads need setup', { count: requests.length }) : queued.length ? t('{count} waiting to download', { count: queued.length }) : downloads.length ? t(downloads.length === 1 ? '{count} download' : '{count} downloads', { count: downloads.length }) : t('No downloads');
+  const summary = active.length > 1 ? [t('{count} downloading', { count: active.length }), percent !== null ? `${percent}%` : '', speed > 0 ? rate(speed) : '', remaining].filter(Boolean).join(' · ') : running ? [running.status || t('Downloading'), percent !== null ? `${percent}%` : '', rate(running.bytesPerSecond), remaining].filter(Boolean).join(' · ') : requests.length ? t(requests.length === 1 ? '{count} download needs setup' : '{count} downloads need setup', { count: requests.length }) : queued.length ? t('{count} waiting to download', { count: queued.length }) : downloads.length ? t(downloads.length === 1 ? '{count} download' : '{count} downloads', { count: downloads.length }) : t('No downloads');
   return { downloads, requests, active, queued, attention, progress, percent, count, summary };
 }
 function queueButton() {
@@ -917,9 +1195,10 @@ function pixivActivity() {
   const summary = jobs.length === 1 ? t('pixiv: {title}', { title: jobs[0].title || t('Untitled') }) + (percent === null ? '' : ` · ${percent}%`) : t('{count} pixiv downloads', { count: jobs.length });
   return button(summary, 'navigate', { page: 'pixiv' }, { icon: 'download', className: 'quiet', title: summary });
 }
-function previewThumb(url) {
+function libraryThumb(item) { const still = libraryStill(item); return previewThumb(still.source, still.fallback); }
+function previewThumb(url, fallback = '') {
   const source = safeImage(url);
-  return `<span class="thumb-placeholder">${icon('image', 15)}</span>${source ? `<img ${keyAttr(source)} src="${escapeHTML(source)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer">` : ''}`;
+  return `<span class="thumb-placeholder">${icon('image', 15)}</span>${source ? `<img ${keyAttr(source)} src="${escapeHTML(source)}" alt="" loading="lazy" decoding="async"${fallback ? ` data-fallback="${escapeHTML(fallback)}"` : ''} referrerpolicy="no-referrer">` : ''}`;
 }
 function renderPopover() {
   for (const [kind, id, markup] of [['downloads', 'queue-popover', queueMarkup], ['import', 'import-popover', importMarkup], ['history', 'history-popover', historyMarkup]]) {
@@ -933,7 +1212,7 @@ function historyMarkup() {
   const wallpapers = new Map((state.wallpapers || []).map(item => [item.id, item]));
   const recent = (state.history?.recentIDs || []).map(id => wallpapers.get(id)).filter(Boolean);
   const available = target?.enabled && target.mode !== 'mirror';
-  const rows = recent.map(item => `<li data-key="history-${escapeHTML(item.id)}"><button type="button" class="history-item" data-action="activate" data-id="${escapeHTML(item.id)}" aria-label="${escapeHTML(t('Apply {title}', { title: item.title }))}"${target?.wallpaperID === item.id ? ' aria-current="true"' : ''}${disabled(!available || busy('activate', { id: item.id }))}><span class="queue-thumb">${previewThumb(item.thumbnail || item.preview)}</span><span class="history-title">${escapeHTML(item.title)}</span>${target?.wallpaperID === item.id ? `<span class="history-active">${escapeHTML(t('Active'))}</span>` : ''}</button></li>`).join('');
+  const rows = recent.map(item => `<li data-key="history-${escapeHTML(item.id)}"><button type="button" class="history-item" data-action="activate" data-id="${escapeHTML(item.id)}" aria-label="${escapeHTML(t('Apply {title}', { title: item.title }))}"${target?.wallpaperID === item.id ? ' aria-current="true"' : ''}${disabled(!available || busy('activate', { id: item.id }))}><span class="queue-thumb">${libraryThumb(item)}</span><span class="history-title">${escapeHTML(item.title)}</span>${target?.wallpaperID === item.id ? `<span class="history-active">${escapeHTML(t('Active'))}</span>` : ''}</button></li>`).join('');
   const body = rows ? `<ul class="queue-list history-list">${rows}</ul>` : `<p class="queue-empty">${escapeHTML(t('No recent wallpapers for this display. Apply a wallpaper to start its history.'))}</p>`;
   return `<div class="popover-heading"><h2 id="history-popover-title">${escapeHTML(t('Recently used'))}</h2>${button('', 'closePopover', {}, { icon: 'close', title: t('Close history'), className: 'quiet icon-button' })}</div><p class="history-display">${escapeHTML(target?.title || '')}</p>${body}<div class="popover-footer"><p class="queue-note">${escapeHTML(t('Keeps the last 50 wallpapers used on this display.'))}</p>${recent.length ? button(t('Clear history'), 'historyClear', { displayID: state.targetDisplayID }, { className: 'quiet', disabled: !available }) : ''}</div>`;
 }
@@ -968,7 +1247,7 @@ function queueJobRow(item) {
 function importMarkup() {
   const status = state.import || {};
   const report = status.report;
-  return `<div class="popover-heading"><h2 id="import-popover-title">${escapeHTML(t('Import wallpapers'))}</h2>${button('', 'closePopover', {}, { icon: 'close', title: t('Close import'), className: 'quiet icon-button' })}</div><div class="popover-body"><p class="muted">${escapeHTML(t('Choose wallpaper folders, videos, images or web pages. Imports copy the source files into your library and leave the originals untouched.'))}</p><p class="muted"><small>${escapeHTML(t('You can also drop them on WallpaperMachine in the Dock.'))}</small></p><label class="field">${escapeHTML(t('If a wallpaper already exists'))}<select id="import-duplicates"${disabled(status.busy)}>${selectOptions([['skip', t('Skip duplicates')], ['keepBoth', t('Keep both copies')]], importDuplicates)}</select></label><div class="actions">${button(t('Choose wallpapers'), 'import', { duplicates: importDuplicates }, { icon: 'folder', className: 'primary', disabled: status.busy })}${status.busy ? button(t('Cancel import'), 'importCancel') : ''}</div>${status.busy ? `<progress aria-label="${escapeHTML(t('Importing…'))}"></progress>` : ''}${status.status ? `<p class="muted" role="status">${escapeHTML(status.status)}</p>` : ''}${report ? `<div class="import-controls" role="status"><p>${escapeHTML(t('{imported} imported · {skipped} skipped', { imported: Number(report.imported), skipped: Number(report.skipped) }))}${report.cancelled ? escapeHTML(t(' · Cancelled')) : ''}</p>${(report.failures || []).map(failure => `<p class="notice error">${escapeHTML(failure)}</p>`).join('')}</div>` : ''}</div>`;
+  return `<div class="popover-heading"><h2 id="import-popover-title">${escapeHTML(t('Import wallpapers'))}</h2>${button('', 'closePopover', {}, { icon: 'close', title: t('Close import'), className: 'quiet icon-button' })}</div><div class="popover-body"><p class="muted">${escapeHTML(t('Choose wallpaper folders, videos, images or web pages. Imports copy the source files into your library and leave the originals untouched.'))}</p><p class="muted"><small>${escapeHTML(t('You can also drop them on WallpaperMachine in the Dock.'))}</small></p><label class="field">${escapeHTML(t('If a wallpaper already exists'))}<select id="import-duplicates"${disabled(status.busy)}>${selectOptions([['skip', t('Skip duplicates')], ['keepBoth', t('Keep both copies')], ['replaceChanged', t('Replace if changed')]], importDuplicates)}</select></label><div class="actions">${button(t('Choose wallpapers'), 'import', { duplicates: importDuplicates }, { icon: 'folder', className: 'primary', disabled: status.busy })}${status.busy ? button(t('Cancel import'), 'importCancel') : ''}</div>${status.busy ? `<progress aria-label="${escapeHTML(t('Importing…'))}"></progress>` : ''}${status.status ? `<p class="muted" role="status">${escapeHTML(status.status)}</p>` : ''}${report ? `<div class="import-controls" role="status"><p>${escapeHTML(t('{imported} imported · {skipped} skipped', { imported: Number(report.imported), skipped: Number(report.skipped) }))}${report.cancelled ? escapeHTML(t(' · Cancelled')) : ''}</p>${(report.failures || []).map(failure => `<p class="notice error">${escapeHTML(failure)}</p>`).join('')}</div>` : ''}</div>`;
 }
 function placePopover(node) {
   const trigger = popoverTrigger ? document.querySelector(popoverTrigger) : null;
@@ -1127,15 +1406,21 @@ async function commitProperty(element) {
   const { id, propertyId } = element.dataset;
   let value = element.type === 'checkbox' ? element.checked : element.type === 'range' || element.type === 'number' ? Number(element.value) : element.tagName === 'SELECT' ? JSON.parse(element.value) : element.value;
   if (typeof value === 'number' && !Number.isFinite(value)) return;
+  await commitPropertyValue(id, propertyId, value);
+}
+async function commitPropertyValue(id, propertyId, value) {
   const key = draftKey(id, propertyId);
   drafts.set(key, value);
+  // A step of the drag that is still on its way lands before the value that counts, never after it.
+  await propertyDrag.end();
   await send('property', { id, propertyID: propertyId, value });
   if (drafts.get(key) === value) drafts.delete(key);
   render();
 }
 // One click keeps the intent: the native side retains the request and the dialog only collects what is still missing.
-async function requestDownload(id, element) {
-  await send('requestDownload', { id });
+// With `apply`, native applies the wallpaper to the target display once it has arrived, unless the person chooses another meanwhile.
+async function requestDownload(id, element, apply = false) {
+  await send('requestDownload', apply ? { id, apply: true } : { id });
   const target = id === null ? 'scene-assets' : id;
   const request = requestByID(target);
   const job = jobByID(target);
@@ -1178,8 +1463,11 @@ async function handleAction(action, data, element) {
     case 'closePopover': closePopover(true); return;
     case 'toggleQueueHistory': queueExpanded = !queueExpanded; renderPopover(); return;
     case 'requestDownload': await requestDownload(id, element); return;
+    case 'requestDownloadAndApply': await requestDownload(id, element, true); return;
     case 'requestAssets': await requestDownload(null, element); return;
     case 'continueSetup': openDialog(id, element); return;
+    // Native builds the links and opens the share menu under the button.
+    case 'shareWallpaper': await send('shareWallpaper', { id, rect: elementRect(element) }); return;
     case 'dismissDialog': closeDialog(); return;
     case 'consentResources': await continueDownload(true); return;
     // Native cancels this exact job and hands the same intent back at the account stage, so the dialog simply follows it.
@@ -1201,9 +1489,15 @@ async function handleAction(action, data, element) {
     case 'showInstalled': await deliver('navigate', { page: 'installed' }); await deliver('select', { id }); return;
     case 'clearProperty': await deliver('property', { id, propertyID: data.propertyId, value: '' }); return;
     case 'restoreProperty': drafts.delete(draftKey(id, data.propertyId)); await deliver(action, { id, propertyID: data.propertyId }); return;
+    case 'restoreAllProperties': for (const key of [...drafts.keys()]) if (key.startsWith(`${id}\u0000`)) drafts.delete(key); await deliver(action, { id }); return;
     case 'revert': for (const key of drafts.keys()) if (key.startsWith(`${id}\u0000`)) drafts.delete(key); await deliver(action, { id }); return;
-    case 'activate':
-      try { await deliver(action, { id }); activationFailures.delete(id); } catch (error) { activationFailures.set(id, error?.message || String(error)); throw error; } finally { render(); }
+    case 'activate': case 'reapplyWallpaper': case 'activateAll':
+      try { await deliver(action, { id }); activationFailures.delete(id); } catch (error) {
+        activationFailures.set(id, error?.message || String(error));
+        // Putting the displays back selects the wallpapers they showed; stay on the one that failed, where its notice is.
+        if (action === 'activateAll') await deliver('select', { id }).catch(() => {});
+        throw error;
+      } finally { render(); }
       return;
     case 'previewWallpaper': {
       const texts = new Set((state.options?.id === id ? state.options.properties : []).filter(property => property.kind === 'textInput' && property.enabled !== false).map(property => property.id));
@@ -1369,13 +1663,21 @@ document.addEventListener('input', event => {
   const element = event.target;
   if (element.closest('#settings-content, #welcome')) return;
   if (collections.handleInput(element) || presets.handleInput(element) || placement.handleInput(element)) return;
-  if (element.type === 'range') { const output = element.parentElement.querySelector('output'); if (output) output.textContent = element.dataset.setting === 'volume' ? `${element.value}%` : element.value; }
+  if (element.type === 'range') { const output = element.parentElement.querySelector('output'); if (output) output.textContent = element.dataset.setting === 'volume' || element.dataset.change === 'displayPosition' ? `${element.value}%` : element.value; }
+  if (element.dataset.change === 'displayPosition') positionDrag.input(element);
+  if (element.dataset.change === 'property') propertyDrag.input(element);
   if (element.dataset.input === 'property') { drafts.set(draftKey(element.dataset.id, element.dataset.propertyId), element.value); renderInspector(false); }
   if (element.dataset.input === 'account' && dialogAccount) { dialogAccount.account = element.value; renderDialog(); }
   if (element.dataset.input === 'pixivSearch' && state?.page === 'pixiv') pixiv.handleInput(element);
   if (element.dataset.input === 'search') {
-    if (state.page === 'discover') { workshopDraft.text = element.value; clearTimeout(searchTimer); searchTimer = setTimeout(() => run(searchWorkshop()), 450); }
-    else { installed.text = element.value; renderGrid(false); }
+    if (state.page === 'discover') {
+      workshopDraft.text = element.value; clearTimeout(searchTimer);
+      const text = element.value.trim();
+      // A link pasted whole is looked up at once. A bare id (six digits or more, as the native
+      // side reads one) waits for Return, or typing it would look up every prefix of it.
+      if (/^(?:https?|steam):\/\/\S+$/i.test(text) && /^insertFrom(?:Paste|Drop)/.test(event.inputType || '')) run(searchWorkshop());
+      else if (!/^\d{6,}$/.test(text)) searchTimer = setTimeout(() => run(searchWorkshop()), 450);
+    } else { installed.text = element.value; renderGrid(false); viewState.touch(); }
   }
 });
 document.addEventListener('change', event => {
@@ -1390,6 +1692,11 @@ document.addEventListener('change', event => {
   if (change === 'placement') { run(placement.handleChange(element)); return; }
   if (change === 'target') run(send('target', { id: value }));
   else if (change === 'property') run(commitProperty(element));
+  else if (change === 'displayPosition') {
+    // Only the moved axis is sent, so a horizontal drag never disturbs the vertical position.
+    const axis = element.dataset.axis;
+    if (axis === 'x' || axis === 'y') run(commitPosition(element.dataset.id, element.dataset.displayId, axis, value / 100));
+  }
   else if (change === 'wallpaperSetting' || change === 'displayConfig') {
     if (element.validity && !element.validity.valid) { element.reportValidity(); return; }
     const args = { id: element.dataset.id, key: element.dataset.setting, value };
@@ -1462,7 +1769,14 @@ window.addEventListener('resize', () => { if (popover) renderPopover(); queueLiv
 // the grid: CSS alone decides how many columns the tiles fill, and a page scrolls for the rest,
 // so a window resize only reflows the tiles and never asks the native side for anything.
 function workshopMaxPages() { return Math.max(1, Number(state?.workshop?.maxPages) || 1000); }
-document.addEventListener('error', event => { if (event.target.tagName === 'IMG') { event.target.classList.add('failed'); event.target.style.visibility = 'hidden'; if (event.target.classList.contains('tile-live')) settleLivePreview(event.target, false); else if (event.target.classList.contains('tile-still')) queueLivePreviews(); } }, true);
+document.addEventListener('error', event => {
+  const image = event.target;
+  if (image.tagName !== 'IMG') return;
+  // A cover the native cache could not make: the preview file itself stands in, once.
+  if (image.dataset.fallback && image.getAttribute('src') !== image.dataset.fallback) { brokenCovers.add(image.getAttribute('src')); image.src = image.dataset.fallback; return; }
+  image.classList.add('failed'); image.style.visibility = 'hidden';
+  if (image.classList.contains('tile-live')) settleLivePreview(image, false); else if (image.classList.contains('tile-still')) queueLivePreviews();
+}, true);
 // Tiles pulse their placeholder until the image arrives, so a slow connection reads as loading, not broken.
 document.addEventListener('load', event => { if (event.target.tagName !== 'IMG') return; event.target.classList.add('loaded'); if (event.target.classList.contains('tile-live')) settleLivePreview(event.target, true); else if (event.target.classList.contains('tile-still')) queueLivePreviews(); }, true);
 // Discover tiles show their cached still at once. The animated preview then loads through
@@ -1491,6 +1805,7 @@ function stillsSettled() {
   return [...$('wallpaper-grid').querySelectorAll('img.tile-still')].every(still => still.complete);
 }
 function queueLivePreviews() {
+  if (state?.page === 'installed') { if (document.hidden) releaseLivePreviews(); return; }
   if (state?.page !== 'discover') return;
   const canLoad = !document.hidden && stillsSettled();
   let changed = false;
@@ -1532,8 +1847,67 @@ function settleLivePreview(image, loaded) {
   if (!entry || !['loading', 'ready'].includes(entry.status)) return;
   entry.playing = loaded && image.complete && image.naturalWidth > 0;
   entry.status = entry.playing ? 'ready' : 'failed';
-  pumpLivePreviews(true);
+  if (state?.page === 'discover') pumpLivePreviews(true); else renderGrid(false);
 }
+// Installed tiles hold still covers. The animation plays for one tile at a time: the one under the
+// pointer or holding keyboard focus, and only after the pointer settles on it, so sweeping across
+// the grid, dragging a selection or tabbing through it starts nothing. The preview file loads
+// from disk only then; leaving the tile, hiding the page, a page change or a lost window focus
+// releases it. A mouse click alone does not count as focus, so a selected tile does not keep playing.
+const INSTALLED_LIVE_DELAY = 160;
+let livePage = null;
+let pointerLiveID = null;
+let focusLiveID = null;
+let installedLiveTimer = null;
+function installedLiveTarget() {
+  const id = pointerLiveID ?? focusLiveID;
+  return id !== null && state?.page === 'installed' && !document.hidden ? id : null;
+}
+function installedLiveKeep(items) {
+  for (const id of [pointerLiveID, focusLiveID]) if (id !== null && !items.some(item => item.id === id)) { if (id === pointerLiveID) pointerLiveID = null; if (id === focusLiveID) focusLiveID = null; }
+  const id = installedLiveTarget();
+  return id === null ? [] : [id];
+}
+// Drops every animation and forgets which tile was under the pointer or focused.
+function releaseLivePreviews() {
+  clearTimeout(installedLiveTimer);
+  pointerLiveID = null; focusLiveID = null;
+  retireLivePreviews(new Set());
+}
+function syncInstalledLive() {
+  clearTimeout(installedLiveTimer);
+  const id = installedLiveTarget();
+  retireLivePreviews(new Set(id === null ? [] : [id]));
+  if (id === null || live.has(id)) return;
+  installedLiveTimer = setTimeout(() => {
+    const item = installedLiveTarget() === id ? (state.wallpapers || []).find(each => each.id === id) : null;
+    if (!item || !safeImage(item.animated)) return;
+    live.set(id, { status: 'loading', playing: false });
+    renderGrid(false);
+  }, INSTALLED_LIVE_DELAY);
+}
+const liveTileID = (node) => node instanceof Element ? node.closest('.wallpaper-tile')?.dataset.key ?? null : null;
+$('wallpaper-grid').addEventListener('pointerover', event => {
+  const id = liveTileID(event.target);
+  if (state?.page !== 'installed' || id === null || id === pointerLiveID || event.buttons) return;
+  pointerLiveID = id; syncInstalledLive();
+});
+$('wallpaper-grid').addEventListener('pointerout', event => {
+  const id = liveTileID(event.target);
+  if (state?.page !== 'installed' || id === null || id !== pointerLiveID || liveTileID(event.relatedTarget) === id) return;
+  pointerLiveID = null; syncInstalledLive();
+});
+$('wallpaper-grid').addEventListener('focusin', event => {
+  const id = liveTileID(event.target);
+  if (state?.page !== 'installed' || id === null || id === focusLiveID || !event.target.matches(':focus-visible')) return;
+  focusLiveID = id; syncInstalledLive();
+});
+$('wallpaper-grid').addEventListener('focusout', event => {
+  const id = liveTileID(event.target);
+  if (state?.page !== 'installed' || id === null || id !== focusLiveID || liveTileID(event.relatedTarget) === id) return;
+  focusLiveID = null; syncInstalledLive();
+});
+window.addEventListener('blur', () => { if (state?.page === 'installed') releaseLivePreviews(); });
 $('wallpaper-grid').addEventListener('scroll', () => { clearTimeout(liveScrollTimer); liveScrollTimer = setTimeout(queueLivePreviews, 120); }, { passive: true });
 document.addEventListener('visibilitychange', queueLivePreviews);
 const welcomeInert = new Set();
@@ -1559,12 +1933,13 @@ const pixiv = createPixivPage({
   $, send, run, escapeHTML, icon, button, morph, keyAttr, checked, disabled, selectOptions, safeImage, safeLink, preview, tags, bytes, tileRing, filterButton, filterGroup, filterHeading,
   activate: (id) => handleAction('activate', { id }),
 });
-// Installed's collections, the inspector's presets, picture placement and compatibility card
-// draw with the panel's helpers into the same page; each keeps only its own page state.
+// Installed's collections, the inspector's presets, picture placement, compatibility card and
+// black-bar card draw with the panel's helpers into the same page; each keeps only its own page state.
 const collections = createCollections({ send, render, announce, escapeHTML, icon, button, keyAttr, checked, disabled, busy, filterGroup, selection, filtersCollapsed });
 const presets = createPresets({ send, render, escapeHTML, icon, button, keyAttr, disabled, busy });
 const placement = createPlacement({ send, render, escapeHTML, icon, button, keyAttr, disabled, busy, safeImage });
-const compatibilityCard = createCompatibility({ escapeHTML, icon, button, keyAttr, busy });
+const compatibilityCard = createCompatibility({ escapeHTML, icon, button, keyAttr, busy, canReinstall });
+const letterbox = createLetterbox({ escapeHTML, icon, button, keyAttr, busy });
 placement.bind($('inspector'));
 const supportPrompt = createSupportPrompt({
   container: $('support-dialog'), send, escapeHTML, icon, morph,

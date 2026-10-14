@@ -326,6 +326,170 @@ final class WebWallpaperAuthorAPITests: XCTestCase {
       "a late listener is given what the directory currently holds, not the deltas it missed")
   }
 
+  // MARK: - property delivery
+
+  /// Wallpaper Engine documents `applyUserProperties` as one call with every
+  /// property at load and afterwards one call per edit with only what changed.
+  func testFirstUserPropertiesDeliveryIsTheWholeSetAndLaterOnesOnlyWhatChanged() async throws {
+    let page = try await listenerPage()
+    page.applyUserProperties(
+      json: #"{"theme":{"value":"dark"},"tint":{"value":"1 0.5 0"},"crop":{"value":{"x":0.5,"zoom":1}}}"#)
+    var received = try await pollState(page) { ($0["user"] as? [[String: Any]])?.count == 1 }
+    XCTAssertEqual(try keys(received, "user", 0), ["crop", "theme", "tint"], "the first delivery carries every property")
+
+    // A change nested inside a value is a change; the untouched properties are not resent.
+    page.applyUserProperties(
+      json: #"{"theme":{"value":"dark"},"tint":{"value":"1 0.5 0"},"crop":{"value":{"x":0.5,"zoom":2}}}"#)
+    received = try await pollState(page) { ($0["user"] as? [[String: Any]])?.count == 2 }
+    let edit = try payload(received, "user", 1)
+    XCTAssertEqual(edit.keys.sorted(), ["crop"])
+    let crop = (edit["crop"] as? [String: Any])?["value"] as? [String: Any]
+    XCTAssertEqual(crop?["zoom"] as? Int, 2)
+
+    // A property the page has not seen yet counts as changed.
+    page.applyUserProperties(
+      json: #"{"theme":{"value":"light"},"tint":{"value":"1 0.5 0"},"crop":{"value":{"x":0.5,"zoom":2}},"mode":{"value":3}}"#)
+    received = try await pollState(page) { ($0["user"] as? [[String: Any]])?.count == 3 }
+    XCTAssertEqual(try keys(received, "user", 2), ["mode", "theme"])
+  }
+
+  func testIdenticalPropertiesAreNotDeliveredAgain() async throws {
+    let page = try await listenerPage()
+    page.applyUserProperties(json: #"{"a":{"type":"slider","value":1},"b":{"type":"text","value":"x"}}"#)
+    // The bridge builds this object from a dictionary: key order, top level and
+    // nested, is not part of its contract and must never read as an edit.
+    page.applyUserProperties(json: #"{"b":{"value":"x","type":"text"},"a":{"value":1,"type":"slider"}}"#)
+    page.applyUserProperties(json: #"{"b":{"value":"y","type":"text"},"a":{"value":1,"type":"slider"}}"#)
+    // Calls reach the page in order, so once the last edit is there the one
+    // before it either was or was not delivered.
+    let received = try await pollState(page) {
+      (($0["user"] as? [[String: Any]])?.last?.keys.sorted()) == ["b"]
+    }
+    XCTAssertEqual((received["user"] as? [[String: Any]])?.count, 2, "re-applying the same values calls nobody")
+  }
+
+  func testALateOrReplacedListenerGetsTheWholeSet() async throws {
+    let page = WebWallpaperPage(projectURL: project, entryFile: "index.html")
+    page.load()
+    try await waitUntilLoaded(page)
+    try await installUserRecorder(page, as: "first")
+    page.applyUserProperties(json: #"{"a":{"value":1},"b":{"value":2}}"#)
+    page.applyUserProperties(json: #"{"a":{"value":1},"b":{"value":3}}"#)
+    var received = try await pollState(page) { ($0["first"] as? [[String: Any]])?.count == 2 }
+    XCTAssertEqual(try keys(received, "first", 1), ["b"])
+
+    // Assigning another listener resets the baseline: it is handed everything,
+    // with the latest values, and the old one is never called again.
+    try await installUserRecorder(page, as: "second")
+    received = try await state(page)
+    let whole = try payload(received, "second", 0)
+    XCTAssertEqual(whole.keys.sorted(), ["a", "b"])
+    XCTAssertEqual((whole["b"] as? [String: Any])?["value"] as? Int, 3)
+
+    page.applyUserProperties(json: #"{"a":{"value":1},"b":{"value":3},"c":{"value":4}}"#)
+    received = try await pollState(page) { ($0["second"] as? [[String: Any]])?.count == 2 }
+    XCTAssertEqual(try keys(received, "second", 1), ["c"])
+    XCTAssertEqual((received["first"] as? [[String: Any]])?.count, 2, "a replaced listener hears nothing more")
+  }
+
+  func testAListenerThatGainsItsHandlerLaterStillGetsTheWholeSet() async throws {
+    let page = WebWallpaperPage(projectURL: project, entryFile: "index.html")
+    page.load()
+    try await waitUntilLoaded(page)
+    try await eval(page, "window.wallpaperPropertyListener = {}; window.__received.user = [];")
+    // Delivered straight to the script: a main-actor hop in between would leave a
+    // test no way to order the next call against this one.
+    try await deliverUser(page, #"{"a":{"value":1},"b":{"value":2}}"#)
+    try await eval(
+      page, "window.wallpaperPropertyListener.applyUserProperties = p => window.__received.user.push(Object.keys(p).sort());")
+    try await deliverUser(page, #"{"a":{"value":1},"b":{"value":2}}"#)
+    let received = try await state(page)
+    XCTAssertEqual(
+      received["user"] as? [[String]], [["a", "b"]],
+      "nothing was delivered while the handler was missing, so nothing may count as delivered")
+  }
+
+  func testAReloadedDocumentStartsFromTheWholeSet() async throws {
+    let page = try await listenerPage(loading: false)
+    page.applyUserProperties(json: #"{"a":{"value":1},"b":{"value":2}}"#)
+    page.load()
+    try await waitUntilLoaded(page)
+    _ = try await pollState(page) { ($0["user"] as? [[String: Any]])?.count == 1 }
+    page.applyUserProperties(json: #"{"a":{"value":1},"b":{"value":5}}"#)
+    _ = try await pollState(page) { ($0["user"] as? [[String: Any]])?.count == 2 }
+
+    // The last thing the old document took in was one changed key; the new one
+    // has taken in nothing and gets the committed values in full.
+    page.load()
+    let received = try await pollState(page) { ($0["user"] as? [[String: Any]])?.count == 1 }
+    let whole = try payload(received, "user", 0)
+    XCTAssertEqual(whole.keys.sorted(), ["a", "b"])
+    XCTAssertEqual((whole["b"] as? [String: Any])?["value"] as? Int, 5)
+  }
+
+  func testAThrowingFirstHandlerIsRetriedWithTheWholeSet() async throws {
+    let page = try await listenerPage(throwingFirstCall: true)
+    page.applyUserProperties(json: #"{"a":{"value":1},"b":{"value":2}}"#)
+    _ = try await pollState(page) { $0["throwNext"] as? Bool == false }
+
+    // The page never took the first set in, so measuring the next apply against it
+    // would hide `a` from the page for good.
+    page.applyUserProperties(json: #"{"a":{"value":1},"b":{"value":3}}"#)
+    var received = try await pollState(page) { ($0["user"] as? [[String: Any]])?.count == 1 }
+    XCTAssertEqual(try keys(received, "user", 0), ["a", "b"])
+
+    page.applyUserProperties(json: #"{"a":{"value":1},"b":{"value":4}}"#)
+    received = try await pollState(page) { ($0["user"] as? [[String: Any]])?.count == 2 }
+    XCTAssertEqual(try keys(received, "user", 1), ["b"])
+  }
+
+  /// A file reselected after its bytes changed is staged under the same path, so its
+  /// value reads as before; the host says it was restaged, and the page hears it once.
+  func testARestagedFileIsDeliveredAgainThoughItsValueReadsTheSame() async throws {
+    let page = try await listenerPage()
+    let json = #"{"cover":{"type":"file","value":"p/cover.png"},"size":{"value":3}}"#
+    page.applyUserProperties(json: json)
+    page.applyUserProperties(json: json)
+    page.applyUserProperties(json: json, restaged: ["cover"])
+    var received = try await pollState(page) { ($0["user"] as? [[String: Any]])?.count == 2 }
+    XCTAssertEqual(try keys(received, "user", 0), ["cover", "size"])
+    XCTAssertEqual(
+      try keys(received, "user", 1), ["cover"],
+      "only the restaged file is resent; the unchanged apply before it called nobody")
+
+    // Owed once: the next apply is measured against what the page holds again.
+    page.applyUserProperties(json: json)
+    page.applyUserProperties(json: #"{"cover":{"type":"file","value":"p/cover.png"},"size":{"value":4}}"#)
+    received = try await pollState(page) { ($0["user"] as? [[String: Any]])?.count == 3 }
+    XCTAssertEqual(try keys(received, "user", 2), ["size"])
+  }
+
+  func testARestagedFileTheHandlerFailedToTakeInIsOwedAgain() async throws {
+    let page = try await listenerPage()
+    let json = #"{"cover":{"type":"file","value":"p/cover.png"},"size":{"value":3}}"#
+    page.applyUserProperties(json: json)
+    _ = try await pollState(page) { ($0["user"] as? [[String: Any]])?.count == 1 }
+    _ = try await eval(page, "window.__received.throwNext = true;")
+
+    page.applyUserProperties(json: json, restaged: ["cover"])
+    _ = try await pollState(page) { $0["throwNext"] as? Bool == false }
+
+    // The handler threw on the restaged copy, so the page never took it in: the value
+    // matching what it accepted earlier must not hide the new bytes from it for good.
+    page.applyUserProperties(json: json)
+    let received = try await pollState(page) { ($0["user"] as? [[String: Any]])?.count == 2 }
+    XCTAssertEqual(try keys(received, "user", 1), ["cover"])
+  }
+
+  func testGeneralPropertiesAreDeduplicatedToo() async throws {
+    let page = try await listenerPage()
+    page.applyGeneralProperties(fps: 30)
+    page.applyGeneralProperties(fps: 30)
+    page.applyGeneralProperties(fps: 24)
+    let received = try await pollState(page) { ($0["general"] as? [[String: Any]])?.count == 2 }
+    XCTAssertEqual((received["general"] as? [[String: Int]]), [["fps": 30], ["fps": 24]])
+  }
+
   // MARK: - helpers
 
   private static func spectrum(first: Float) -> [Float] {
@@ -364,6 +528,59 @@ final class WebWallpaperAuthorAPITests: XCTestCase {
     }
     try await poll { demands.last?.consuming == true }
     return page
+  }
+
+  /// A page that assigns its listener while parsing and records a copy of each
+  /// payload it is handed. `throwNext` makes the first user-properties call throw.
+  private func listenerPage(throwingFirstCall: Bool = false, loading: Bool = true) async throws -> WebWallpaperPage {
+    try """
+      <!doctype html><html><body><script>
+      window.__received = { user: [], general: [], throwNext: \(throwingFirstCall) };
+      const copy = value => JSON.parse(JSON.stringify(value));
+      window.wallpaperPropertyListener = {
+        applyUserProperties(p) {
+          if (window.__received.throwNext) { window.__received.throwNext = false; throw new Error("first handler fails"); }
+          window.__received.user.push(copy(p));
+        },
+        applyGeneralProperties(p) { window.__received.general.push(copy(p)); },
+      };
+      </script></body></html>
+      """.write(to: project.appendingPathComponent("index.html"), atomically: true, encoding: .utf8)
+    let page = WebWallpaperPage(projectURL: project, entryFile: "index.html")
+    if loading {
+      page.load()
+      try await waitUntilLoaded(page)
+    }
+    return page
+  }
+
+  /// Replaces the page's listener with one that records copies of its user-properties payloads
+  /// under `window.__received.<name>`.
+  private func installUserRecorder(_ page: WebWallpaperPage, as name: String) async throws {
+    try await eval(
+      page,
+      """
+      window.__received.\(name) = [];
+      window.wallpaperPropertyListener = {
+        applyUserProperties(p) { window.__received.\(name).push(JSON.parse(JSON.stringify(p))); },
+      };
+      """)
+  }
+
+  private func deliverUser(_ page: WebWallpaperPage, _ json: String) async throws {
+    _ = try await page.webView.callAsyncJavaScript(
+      "window.__mweWallpaperHost.applyUserProperties(JSON.parse(json))", arguments: ["json": json],
+      in: nil, contentWorld: .page)
+  }
+
+  private func payload(_ received: [String: Any], _ list: String, _ index: Int) throws -> [String: Any] {
+    let calls = try XCTUnwrap(received[list] as? [[String: Any]])
+    XCTAssertTrue(calls.indices.contains(index), "\(list) has \(calls.count) calls, wanted index \(index)")
+    return calls[index]
+  }
+
+  private func keys(_ received: [String: Any], _ list: String, _ index: Int) throws -> [String] {
+    try payload(received, list, index).keys.sorted()
   }
 
   private func requestRandomFile(_ page: WebWallpaperPage, property: String) async throws {

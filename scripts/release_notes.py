@@ -123,7 +123,7 @@ USER_AGENT = "WallpaperMachine-release-notes"
 # a slow answer never trips a proxy's time-to-first-byte limit; a quiet connection
 # times out after READ_TIMEOUT and the whole reply after DEADLINE seconds, because the
 # Version workflow holds its branch lock while it waits.
-MAX_TOKENS = 16000
+MAX_TOKENS = 32000
 READ_TIMEOUT = 120
 DEADLINE = 600
 # What the model reads of each commit: user-visible commits bring their body, cut at

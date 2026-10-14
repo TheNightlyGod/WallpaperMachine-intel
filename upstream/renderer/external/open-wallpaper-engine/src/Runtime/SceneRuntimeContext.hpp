@@ -19,6 +19,7 @@
 #include <functional>
 #include <memory>
 #include <limits>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -46,7 +47,21 @@ struct ScriptHostContext;
 struct SceneRuntimeBootstrap {
     int               canvas_width { 0 };
     int               canvas_height { 0 };
+    // The values the scene loads with.
     ProjectProperties project_properties {};
+    // What the project declares, apart from any saved choice already folded into
+    // `project_properties`. Unset means the loaded table is also the authored one.
+    std::optional<ProjectProperties> authored_project_properties {};
+};
+
+// What showing a property document on a running scene did.
+struct ProjectPropertyPreview {
+    // Sorted names whose value in effect changed.
+    std::vector<std::string> changed;
+    // Sorted names of load-only properties (see `NoteLoadOnlyProperty`) the
+    // document asked to change but that were held at the value the scene loaded
+    // with, because a fresh load is the only thing that applies them.
+    std::vector<std::string> deferred;
 };
 
 // How window-normalized cursor input maps onto scene coordinates:
@@ -101,13 +116,36 @@ public:
 
     ScriptEngine&            scriptEngine();
     const ScriptHostContext& hostContext() const;
+    // What the project declares: the table a document is applied over, and the
+    // one a reset returns to. It is not the table the scene loaded with when a
+    // saved choice was loaded over it.
     const ProjectProperties& defaultProjectProperties() const;
+    // The values currently in effect.
     const ProjectProperties& projectProperties() const;
     // Property bindings are refreshed as one transaction before script callbacks
     // see the change, so callback-only programs never initialize on a partial set.
     bool          ProjectPropertiesChanging() const { return m_project_properties_changing; }
-    void          ApplyProjectPropertyOverride(const ProjectProperties& override_properties);
-    void          ResetProjectPropertyOverride();
+    // `override_properties` is the whole document: the declared defaults with
+    // exactly these values over them. A property the document leaves out is at
+    // its declared default again, whatever the scene loaded with. Returns the
+    // sorted names whose value in effect changed.
+    std::vector<std::string> ApplyProjectPropertyOverride(const ProjectProperties& override_properties);
+    // The declared defaults, as applying an empty document.
+    std::vector<std::string> ResetProjectPropertyOverride();
+    // Records that something read property `name` once, while the scene loaded,
+    // and never again: a scenetexture picked into a material slot, or an effect
+    // a toggle builds or leaves out. Only a fresh load applies a new value to
+    // such a consumer, so a preview keeps the property at the value it was read
+    // with (`name` absent from the table is held absent). Parse-time only.
+    void NoteLoadOnlyProperty(std::string_view name);
+    // The sorted names noted above.
+    std::vector<std::string> LoadOnlyProperties() const;
+    // `ApplyProjectPropertyOverride` for a document shown without reloading the
+    // scene: the same whole document, except that every load-only property stays
+    // at the value it was read with, for every consumer of that name, live ones
+    // included, so no property is ever half applied. A load-only property the
+    // document asked for something else is reported in `deferred`.
+    ProjectPropertyPreview PreviewProjectPropertyOverride(const ProjectProperties& override_properties);
     void          AttachScene(Scene* scene);
     void          SetCursorWorldPosition(const Eigen::Vector3f& value);
     // World rectangle the window shows, so window-normalized cursor input lands
@@ -257,6 +295,12 @@ public:
     std::string     CreateLayerFromTemplate(std::string_view requested_template_path,
                                             std::string_view current_layer_name,
                                             std::string_view script_workshop_id = {});
+    // Removes a layer `CreateLayerFromTemplate` made: it leaves the scene graph
+    // and every registry at once, so whatever a script still holds for it
+    // reaches nothing. The node itself is kept until the graph has been rebuilt
+    // without it, as the graph compiled before still points at it. A layer the
+    // scene file made, or an unknown name, is left alone and answers false.
+    bool            DestroyLayer(std::string_view name);
     Eigen::Vector3f NodeColor(std::string_view name) const;
     bool            SetNodeColor(std::string_view name, const Eigen::Vector3f& color);
     bool            SortNode(std::string_view name, int index);
@@ -378,6 +422,10 @@ private:
         double sampled_animation_frame { std::numeric_limits<double>::quiet_NaN() };
     };
     static void ApplyNodeOriginAnimation(NodeVec3Binding& binding);
+    /// Called when a layer has just become visible: if that shows one the
+    /// render graph left out (`Scene::render_excluded_nodes`), the graph is
+    /// marked mutated so the next frame builds one that draws it.
+    void RequestGraphForShownLayers();
     struct NodeEffectFinalBinding {
         SceneNode*             node { nullptr };
         SceneImageEffectLayer* layer { nullptr };
@@ -467,6 +515,9 @@ private:
     void ApplyAnchoredNodeTransform(std::string_view name);
     void RefreshNodeTransformBindings(const std::string& name);
     void ApplyNodeTransform(SceneNode& node, NodeAlignmentBinding& binding, const Eigen::Vector2f& size);
+    /// Frees the layers `DestroyLayer` retired once the mutation they caused
+    /// has been consumed, that is once no compiled graph can still draw them.
+    void ReleaseRetiredLayers();
     void ApplyMaterialConstantBinding(MaterialConstantBinding& binding);
     void ApplySceneZoomAnimation();
     void ApplyCameraShots();
@@ -481,13 +532,20 @@ private:
     /// Whether this text layer's pending layout is being worked on at all.
     ///
     /// A hidden layer is not: its relayout waits until it is shown again, which
-    /// is an event. Shared with `PumpTextLayerCache` so "in flight" and "the
-    /// pump will do it" cannot drift apart.
+    /// is an event. One another layer samples is, since its composite is drawn
+    /// while it is hidden. Shared with `PumpTextLayerCache` so "in flight" and
+    /// "the pump will do it" cannot drift apart.
     [[nodiscard]] bool TextLayerIsBeingPrepared(const std::string& name) const;
     void EnqueueTextLayerPreparation(std::string name, const TextLayer& layer);
     void CollectPreparedTextLayers();
     bool ApplyPreparedTextLayer(const RuntimePreparedTextLayerImage& prepared);
+    /// Moves the composite of a text layer another layer samples onto `card`,
+    /// the card a relayout left it with, and resizes the target to it.
+    void FitTextLayerComposite(SceneNode& node, const TextLayerRenderFrame& card);
     void TextWorkerLoop();
+    // Makes `next_properties` the table in effect, refreshes every binding and
+    // tells the scripts. Returns the sorted names whose value changed.
+    std::vector<std::string> ApplyProjectProperties(ProjectProperties next_properties);
 
     std::unique_ptr<ScriptEngine>                                  m_script_engine;
     std::unique_ptr<ScriptHostContext>                             m_host_context;
@@ -496,6 +554,9 @@ private:
     ProjectProperties                                              m_default_project_properties;
     ProjectProperties                                              m_project_property_overrides;
     ProjectProperties                                              m_project_properties;
+    // The properties read only while the scene loaded, each with the value it
+    // was read with (empty: the table did not name it).
+    std::map<std::string, std::optional<RuntimeScalarValue>>       m_load_only_properties;
     bool                                                           m_project_properties_changing { false };
     std::unordered_map<std::string, std::unique_ptr<DynamicValue>> m_property_values;
     std::vector<std::unique_ptr<DynamicValue>>                     m_owned_values;
@@ -586,6 +647,11 @@ private:
     /// Guarded by `m_text_worker_mutex`, alongside the queues it describes.
     std::function<void()>                                          m_content_wake_handler;
     uint64_t                                                       m_next_generated_layer_id { 1 };
+    /// Names of the layers scripts created and have not destroyed.
+    std::unordered_set<std::string>                                m_script_created_layers;
+    /// Destroyed layers no longer in the scene graph, kept alive until
+    /// `ReleaseRetiredLayers` sees the graph rebuilt without them.
+    std::vector<std::shared_ptr<SceneNode>>                        m_retired_layers;
     /// Bounded: a wallpaper that requests on every cursor event while nothing
     /// drains must not grow this without limit, and the oldest request is the
     /// one a user has already stopped waiting for.

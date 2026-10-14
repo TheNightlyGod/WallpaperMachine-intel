@@ -2,6 +2,11 @@ import Foundation
 
 @testable import WallpaperMachine
 
+extension BridgeFraming {
+  /// The layout every wallpaper has until it is moved.
+  static let centered = BridgeFraming(panX: 0.5, panY: 0.5)
+}
+
 /// Snapshot values for tests that need a settings snapshot but do not care what
 /// is in it.
 ///
@@ -48,6 +53,15 @@ enum BridgeSnapshotFixtures {
       volume: volume)
   }
 
+  /// A bare text property whose label is `labelHtml`, for tests about what the label says.
+  static func textProperty(id: String, labelHtml: String) -> BridgePropertyDescriptor {
+    BridgePropertyDescriptor(
+      id: id, kind: .text, labelHtml: labelHtml, value: .empty, defaultValue: .empty, slider: nil,
+      comboOptions: [], fileFilter: nil, directoryMode: nil, dirty: false,
+      canRestoreDefaults: false, enabled: true, assetManaged: false, assetMissing: false,
+      assetSourcePath: nil)
+  }
+
   /// A settings snapshot carrying shipped defaults: compatibility backend, full
   /// render scale, keep-running on battery, no frame-rate cap, both experiments
   /// off and scene optimisation on. Tests that care about one of those pass it
@@ -74,12 +88,15 @@ enum BridgeSnapshotFixtures {
     batteryRenderScale: Float = 0.75,
     batteryTargetFps: UInt32 = 30,
     onBatteryPower: Bool = false,
+    qualityThrottle: [BridgeQualityThrottleCause] = [],
+    effectiveFrameRateCap: UInt32? = nil,
     renderScaleSupported: Bool = true
   ) -> BridgeSettingsSnapshot {
     BridgeSettingsSnapshot(
       displays: displays,
       launchAtLoginAvailable: false,
       launchAtLoginEnabled: false,
+      launchAtLoginNeedsApproval: false,
       batteryMode: batteryMode,
       verboseLogging: false,
       gitSha: "",
@@ -106,6 +123,8 @@ enum BridgeSnapshotFixtures {
       batteryRenderScale: batteryRenderScale,
       batteryTargetFps: batteryTargetFps,
       onBatteryPower: onBatteryPower,
+      qualityThrottle: qualityThrottle,
+      effectiveFrameRateCap: effectiveFrameRateCap,
       renderScaleSupported: renderScaleSupported)
   }
 }

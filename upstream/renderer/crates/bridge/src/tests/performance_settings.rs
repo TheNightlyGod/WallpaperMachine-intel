@@ -68,7 +68,7 @@ async fn commit(
         .await
         .unwrap();
     bridge
-        .apply_wallpaper_options(wallpaper.into())
+        .apply_wallpaper_options(wallpaper.into(), true)
         .await
         .unwrap();
 }
@@ -527,12 +527,12 @@ async fn native_export_keeps_all_wallpaper_kinds_and_mirrors_with_playback_and_p
         .edit_property("300".into(), "speed".into(), crate::BridgePropertyValue::Number { value: 2.0 })
         .await
         .unwrap();
-    bridge.apply_wallpaper_options("300".into()).await.unwrap();
+    bridge.apply_wallpaper_options("300".into(), true).await.unwrap();
     bridge
         .edit_property("100".into(), "speed".into(), crate::BridgePropertyValue::Number { value: 3.0 })
         .await
         .unwrap();
-    bridge.apply_wallpaper_options("100".into()).await.unwrap();
+    bridge.apply_wallpaper_options("100".into(), true).await.unwrap();
     for (mirror, source) in [("11", "7"), ("12", "8"), ("13", "9"), ("14", "10")] {
         bridge
             .set_display_mode(mirror.into(), crate::BridgeDisplayMode::Mirror)

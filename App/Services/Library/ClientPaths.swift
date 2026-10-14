@@ -32,11 +32,27 @@ enum ClientPaths {
         return candidates.first(where: { hasSceneAssets(at: $0) }) ?? managedAssetsURL
     }
     static var managedSteamCMDURL: URL { supportURL.appendingPathComponent("SteamCMD", isDirectory: true) }
-    static var thumbnailCacheURL: URL { supportURL.appendingPathComponent("Cache/WorkshopThumbnails", isDirectory: true) }
-    static var pixivThumbnailCacheURL: URL { supportURL.appendingPathComponent("Cache/PixivThumbnails", isDirectory: true) }
+    /// Performance data waiting to be sent, kept only while sending is on (docs/features/telemetry.md).
+    static var telemetryURL: URL { supportURL.appendingPathComponent("Telemetry", isDirectory: true) }
+    /// Everything below is rebuilt on demand, so it stays out of Time Machine.
+    static var cacheURL: URL { supportURL.appendingPathComponent("Cache", isDirectory: true) }
+    static var thumbnailCacheURL: URL { cacheURL.appendingPathComponent("WorkshopThumbnails", isDirectory: true) }
+    static var pixivThumbnailCacheURL: URL { cacheURL.appendingPathComponent("PixivThumbnails", isDirectory: true) }
+    /// Still covers of the installed wallpapers' own preview files, for the Installed grid.
+    static var libraryThumbnailCacheURL: URL { cacheURL.appendingPathComponent("LibraryThumbnails", isDirectory: true) }
+    /// The saved Steam sign-in. Kept out of backups so a token never travels to a backup drive.
+    static func steamSessionURL(in support: URL = supportURL) -> URL {
+        support.appendingPathComponent("SteamSession", isDirectory: true)
+    }
+    /// Partial downloads kept for later, with the queue that names them. Its sibling
+    /// `Downloads/workshop-requests.json` is tiny and stays backed up.
+    static func workshopDownloadsURL(in support: URL = supportURL) -> URL {
+        support.appendingPathComponent("Downloads/Workshop", isDirectory: true)
+    }
 
     static func prepare() throws {
         try FileManager.default.createDirectory(at: libraryURL, withIntermediateDirectories: true)
+        prepareExcludedFolders()
         let starter = libraryURL.appendingPathComponent("starter-aurora", isDirectory: true)
         let starterMarker = supportURL.appendingPathComponent(".starter-installed")
         if !FileManager.default.fileExists(atPath: starterMarker.path),
@@ -56,6 +72,58 @@ enum ClientPaths {
         setenv("WALLPAPER_MACHINE_LIBRARY_ROOT", libraryURL.path, 1)
         setenv("WALLPAPER_MACHINE_ASSETS_ROOT", assetsURL.path, 1)
         setenv("WALLPAPER_MACHINE_USER_ASSETS_ROOT", userAssetsURL.path, 1)
+        setenv("WALLPAPER_MACHINE_BUILD", buildStamp(), 1)
+    }
+
+    /// Names the running build for the renderer's load journal, which releases
+    /// every held wallpaper when the build changes: the code that crashed is gone.
+    static func buildStamp(bundle: Bundle = .main) -> String {
+        let info = bundle.infoDictionary ?? [:]
+        let version = info["CFBundleShortVersionString"] as? String ?? "unknown"
+        let build = info["CFBundleVersion"] as? String ?? "unknown"
+        return "\(version) (\(build))"
+    }
+
+    /// Keeps a folder (and so everything inside it) out of Time Machine and other backups of
+    /// this Mac, for the Steam sign-in, partial downloads, staging and caches. The wallpaper
+    /// library, imported files and scene assets are never passed here.
+    ///
+    /// The flag is only written when it is not already set, so calling this on every launch or
+    /// after every replacement costs one read. A failure (a volume that has no such flag, a
+    /// read-only folder) is logged and never stops the work the folder is for.
+    @discardableResult
+    static func excludeFromBackup(_ url: URL) -> Bool {
+        // A fresh URL value: resource values are cached on the value that read them.
+        let target = URL(fileURLWithPath: url.path)
+        do {
+            if try target.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup == true { return true }
+            var flag = target
+            var values = URLResourceValues()
+            values.isExcludedFromBackup = true
+            try flag.setResourceValues(values)
+            return true
+        } catch {
+            AppLog.warn("could not keep \(url.lastPathComponent) out of backups: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    /// Creates the disposable top-level folders and flags them, and flags the Steam sign-in and
+    /// the partial downloads of an earlier version that are already there. Those two are only
+    /// flagged where they exist: a folder is created by the work it is for, and is flagged then.
+    /// Subfolders created later (the thumbnail caches) inherit the exclusion from `Cache`.
+    static func prepareExcludedFolders() {
+        for folder in [steamSessionURL(), workshopDownloadsURL()]
+        where FileManager.default.fileExists(atPath: folder.path) {
+            excludeFromBackup(folder)
+        }
+        do {
+            try FileManager.default.createDirectory(at: cacheURL, withIntermediateDirectories: true)
+        } catch {
+            AppLog.warn("could not create the cache folder: \(error.localizedDescription)")
+            return
+        }
+        excludeFromBackup(cacheURL)
     }
 
     static func hasSceneAssets(at url: URL) -> Bool {

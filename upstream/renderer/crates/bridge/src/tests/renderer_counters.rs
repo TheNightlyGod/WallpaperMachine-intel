@@ -45,7 +45,7 @@ async fn two_display_bridge(engine: &FakeEngineFacade) -> crate::api::WallpaperB
             .await
             .unwrap();
         bridge
-            .apply_wallpaper_options(wallpaper.into())
+            .apply_wallpaper_options(wallpaper.into(), true)
             .await
             .unwrap();
     }

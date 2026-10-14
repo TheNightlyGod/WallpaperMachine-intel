@@ -145,6 +145,10 @@ public:
     void UpdateCameraFillMode(Scene& scene, FillMode fillmode);
     void SetWallpaperScalingMode(WallpaperScalingMode mode);
     void SetWallpaperScalingFactor(double factor);
+    /// Where the presented image sits in the slack around it. The composition,
+    /// the cursor mapping and a poster all take it from the one layout, so they
+    /// agree. Takes effect on the next frame; no pass or target is rebuilt.
+    void SetWallpaperFraming(const WallpaperFraming& framing);
     void SetWallpaperHorizontalFlip(bool enabled);
 
     /// Where this surface keeps the compiled pipelines it can rebuild.
@@ -237,6 +241,11 @@ public:
     /// device's own counter is process-wide and moves with the drawable pool.
     [[nodiscard]] uint64_t RenderTargetBytesForTests() const;
 
+    /// Whether render targets whose lifetimes in a frame do not overlap share
+    /// one image, for graphs compiled from now on. On unless
+    /// `WALLPAPER_MACHINE_METAL_TARGET_SHARING=0`; process-wide, test-only.
+    static void SetTargetSharingForTests(bool enabled);
+
     /// How many shader sources this process has handed to the Metal compiler.
     ///
     /// Test-only, and process-wide rather than per renderer: what it exists to
@@ -253,6 +262,8 @@ public:
     /// never be refused a pipeline because a cache missed, so the renderer
     /// itself never asks this question.
     [[nodiscard]] static bool PipelineArchiveServesEverySeenPipelineForTests();
+    /// Returns once every pipeline-archive write already scheduled has run.
+    static void WaitForPipelineArchiveWritesForTests();
 #endif
 
 private:

@@ -57,23 +57,31 @@
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
 
+#include <vulkan/vulkan.h>
+#include <vulkan/vulkan_metal.h>
+
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
 
 #include <array>
+#include <atomic>
 #include <charconv>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <memory>
+#include <mutex>
 #include <span>
 #include <string>
 #include <thread>
 #include <utility>
+#include <vector>
 #include <time.h>
 
 using namespace wallpaper;
@@ -207,6 +215,51 @@ std::filesystem::path WriteFeedbackFixture(const std::filesystem::path& root)
     return project;
 }
 
+/// A small card of the probe tile and, apart from it, an echo card that
+/// shows the scene's previous frame through `_rt_MipMappedFrameBuffer`. The
+/// graph fills that buffer from the frame's output after the echo has read
+/// it, so what the echo samples is always the frame before.
+std::filesystem::path WriteHistoryFixture(const std::filesystem::path& root)
+{
+    const auto project = WriteFixture(root);
+    const std::map<std::string, std::string> files {
+        { "models/small.json", R"({"width":96,"height":64,"material":"materials/tile.json"})" },
+        { "models/echo.json", R"({"width":192,"height":128,"material":"materials/echo.json"})" },
+        { "materials/echo.json",
+          R"({"passes":[{"shader":"history_echo","blending":"translucent","cullmode":"nocull",)"
+          R"("depthtest":"disabled","depthwrite":"disabled","textures":["_rt_MipMappedFrameBuffer"]}]})" },
+        { "shaders/history_echo.vert",
+          "uniform mat4 g_ModelViewProjectionMatrix;\n"
+          "attribute vec3 a_Position;\n"
+          "attribute vec2 a_TexCoord;\n"
+          "varying vec2 v_TexCoord;\n"
+          "void main() {\n"
+          "  gl_Position = g_ModelViewProjectionMatrix * vec4(a_Position, 1.0);\n"
+          "  v_TexCoord = a_TexCoord;\n"
+          "}\n" },
+        { "shaders/history_echo.frag",
+          "uniform sampler2D g_Texture0;\n"
+          "varying vec2 v_TexCoord;\n"
+          "void main() {\n"
+          "  gl_FragColor = vec4(texture(g_Texture0, v_TexCoord).rgb, 1.0);\n"
+          "}\n" },
+        { "layout.json",
+          R"({"camera":{"center":[0,0,0],"eye":[0,0,1],"up":[0,1,0]},)"
+          R"("general":{"ambientcolor":[0,0,0],"skylightcolor":[0,0,0],"clearcolor":[0.0,0.0,0.0],)"
+          R"("cameraparallax":false,"orthogonalprojection":{"width":384,"height":256}},)"
+          R"("objects":[{"id":1,"name":"tile","image":"models/small.json","origin":[64,208,0],)"
+          R"("scale":[1,1,1],"angles":[0,0,0],"visible":true},)"
+          R"({"id":2,"name":"echo","image":"models/echo.json","origin":[272,80,0],)"
+          R"("scale":[1,1,1],"angles":[0,0,0],"visible":true}]})" },
+    };
+    for (const auto& [name, contents] : files) {
+        const auto path = root / name;
+        std::filesystem::create_directories(path.parent_path());
+        std::ofstream(path) << contents;
+    }
+    return project;
+}
+
 struct LoadedScene
 {
     fs::VFS                vfs;
@@ -259,6 +312,126 @@ SceneNode* FirstDrawableNode(SceneNode* node)
         if (auto* found = FirstDrawableNode(child.get()); found != nullptr) return found;
     }
     return nullptr;
+}
+
+/// The last frame's final composition from one renderer.
+struct RendererPicture
+{
+    std::vector<uint8_t> rgb;
+    uint32_t             width { 0 };
+    uint32_t             height { 0 };
+    /// Why there is no picture: the renderer did not start, prepare or draw.
+    std::string          error;
+};
+
+/// Draws `scene` with one renderer through `SceneRendererHandle` on a layer no
+/// window owns, as the host drives it -- the scaling it pushes to every
+/// renderer it creates, its per-frame `FrameBegin`, a graph rebuilt on every
+/// mutation -- and returns the last frame through the poster path both
+/// renderers share. Two calls on two parses of one scene, seeded and clocked
+/// alike, differ only by what the renderers did.
+RendererPicture DrawWithRenderer(Scene& scene, bool native, uint32_t width, uint32_t height,
+                                 int frames, double step)
+{
+    RendererPicture picture;
+    @autoreleasepool {
+        CAMetalLayer* layer   = [CAMetalLayer layer];
+        layer.device          = MTLCreateSystemDefaultDevice();
+        layer.pixelFormat     = MTLPixelFormatBGRA8Unorm;
+        layer.contentsScale   = 1.0;
+        layer.frame           = CGRectMake(0, 0, width, height);
+        layer.drawableSize    = CGSizeMake(width, height);
+        layer.framebufferOnly = NO;
+        void* handle          = (__bridge void*)layer;
+
+        std::atomic<bool> wanted { false };
+        RenderInitInfo    info;
+        info.metal_layer   = handle;
+        info.width         = static_cast<uint16_t>(width);
+        info.height        = static_cast<uint16_t>(height);
+        info.render_width  = static_cast<uint16_t>(width);
+        info.render_height = static_cast<uint16_t>(height);
+        info.surface_info.instanceExts = { VK_KHR_SURFACE_EXTENSION_NAME,
+                                           VK_EXT_METAL_SURFACE_EXTENSION_NAME };
+        info.surface_info.createSurfaceOp = [handle](VkInstance instance, VkSurfaceKHR* surface) {
+            auto* create = reinterpret_cast<PFN_vkCreateMetalSurfaceEXT>(
+                vkGetInstanceProcAddr(instance, "vkCreateMetalSurfaceEXT"));
+            if (create == nullptr) return VK_ERROR_EXTENSION_NOT_PRESENT;
+            const VkMetalSurfaceCreateInfoEXT create_info {
+                .sType  = VK_STRUCTURE_TYPE_METAL_SURFACE_CREATE_INFO_EXT,
+                .pNext  = nullptr,
+                .flags  = 0,
+                .pLayer = (__bridge CAMetalLayer*)handle,
+            };
+            return create(instance, &create_info, nullptr, surface);
+        };
+        info.wants_poster   = [&wanted] { return wanted.exchange(false); };
+        info.poster_pending = [&wanted] { return wanted.load(); };
+        info.poster_ready   = [&picture](std::span<const uint8_t> bytes, uint32_t w, uint32_t h,
+                                       bool bgra) {
+            picture.width  = w;
+            picture.height = h;
+            picture.rgb.resize(std::size_t(w) * h * 3);
+            for (std::size_t i = 0; i < std::size_t(w) * h && i * 4 + 3 < bytes.size(); ++i) {
+                picture.rgb[i * 3 + 0] = bytes[i * 4 + (bgra ? 2 : 0)];
+                picture.rgb[i * 3 + 1] = bytes[i * 4 + 1];
+                picture.rgb[i * 3 + 2] = bytes[i * 4 + (bgra ? 0 : 2)];
+            }
+        };
+
+        SceneRendererHandle render;
+        std::string         error;
+        if (native ? ! render.createMetal(info, error) : ! render.createVulkan(info)) {
+            picture.error = "could not start: " + error;
+            return picture;
+        }
+        auto graph = sceneToRenderGraph(scene);
+        if (graph == nullptr || ! render.compileRenderGraph(scene, *graph)) {
+            picture.error = "could not prepare: " + render.lastError();
+            render.destroy();
+            return picture;
+        }
+        render.SetWallpaperScalingMode(WallpaperScalingMode::FILL);
+        render.SetWallpaperScalingFactor(1.0);
+        render.SetWallpaperFraming(WallpaperFraming {});
+        render.SetWallpaperHorizontalFlip(false);
+        render.UpdateCameraFillMode(scene, FillMode::ASPECTCROP);
+        if (scene.runtime != nullptr) {
+            scene.runtime->SetScreenResolution(Eigen::Vector2f(width, height));
+        }
+        for (int frame = 0; frame < frames && picture.error.empty(); ++frame) {
+            scene.paritileSys->Emitt();
+            if (scene.runtime != nullptr) {
+                scene.runtime->Tick(step);
+                scene.runtime->PumpTextLayerCache();
+                if (scene.runtime->ConsumeSceneGraphMutationFlag()) {
+                    // Cleared before the old graph is released: the renderer
+                    // still refers to its passes until then.
+                    if (! render.clearLastRenderGraph()) {
+                        picture.error = "could not rebuild: " + render.lastError();
+                        break;
+                    }
+                    graph = sceneToRenderGraph(scene);
+                    if (graph == nullptr || ! render.compileRenderGraph(scene, *graph)) {
+                        picture.error = "could not rebuild: " + render.lastError();
+                        break;
+                    }
+                }
+            }
+            if (frame == frames - 1) wanted = true;
+            if (scene.shaderValueUpdater != nullptr) scene.shaderValueUpdater->FrameBegin();
+            if (! render.drawFrame(scene)) {
+                picture.error = "frame " + std::to_string(frame) + ": " + render.lastError();
+            }
+            scene.PassFrameTime(step);
+        }
+        if (picture.rgb.empty() && picture.error.empty() && native) {
+            (void)render.ServicePosterRequest(scene);
+        }
+        render.destroy();
+        if (picture.rgb.empty() && picture.error.empty()) picture.error = "delivered no picture";
+    }
+    return picture;
 }
 
 rg::TexNode::Desc TexDesc(const std::string& key)
@@ -728,6 +901,125 @@ TEST_F(MetalSceneDraw, ParsedHdrMissingLayerSourceRetainsBackendRejection)
     EXPECT_EQ(SelectSceneBackend(*loaded.scene).backend, SceneBackend::LegacyVulkan);
 }
 
+namespace
+{
+
+/// A compose layer covering the canvas over one child: a 64x32 card of one
+/// colour in its middle. The compose layer's effect samples that child as a
+/// layer texture and shows it with red and blue swapped wherever the child
+/// itself is not part of the compose layer's picture.
+std::filesystem::path WriteComposePaletteFixture(const std::filesystem::path& root)
+{
+    const auto project = WriteFixture(root);
+    const std::string vertex =
+        "uniform mat4 g_ModelViewProjectionMatrix;\n"
+        "attribute vec3 a_Position;\nattribute vec2 a_TexCoord;\n"
+        "varying vec2 v_TexCoord;\n"
+        "void main(){ gl_Position=g_ModelViewProjectionMatrix*vec4(a_Position,1.0);"
+        "v_TexCoord=a_TexCoord; }\n";
+    const std::map<std::string, std::string> files {
+        { "models/util/composelayer.json",
+          R"({"passthrough":true,"material":"materials/util/composelayer.json"})" },
+        { "materials/util/composelayer.json",
+          R"({"passes":[{"shader":"palette_sample","blending":"translucent","cullmode":"nocull",)"
+          R"("depthtest":"disabled","depthwrite":"disabled","textures":["_rt_FullFrameBuffer"]}]})" },
+        { "models/palette.json", R"({"width":64,"height":32,"material":"materials/palette.json"})" },
+        { "materials/palette.json",
+          R"({"passes":[{"shader":"palette_fill","blending":"translucent","cullmode":"nocull",)"
+          R"("depthtest":"disabled","depthwrite":"disabled"}]})" },
+        { "effects/swap/effect.json",
+          R"({"name":"swap","passes":[{"material":"materials/swap.json"}]})" },
+        { "materials/swap.json",
+          R"({"passes":[{"shader":"palette_swap","blending":"translucent","cullmode":"nocull",)"
+          R"("depthtest":"disabled","depthwrite":"disabled","textures":[null,null]}]})" },
+        { "shaders/palette_sample.vert", vertex },
+        { "shaders/palette_sample.frag",
+          "uniform sampler2D g_Texture0;\nvarying vec2 v_TexCoord;\n"
+          "void main(){ gl_FragColor=texture(g_Texture0,v_TexCoord); }\n" },
+        { "shaders/palette_fill.vert", vertex },
+        { "shaders/palette_fill.frag",
+          "varying vec2 v_TexCoord;\n"
+          "void main(){ gl_FragColor=vec4(0.25,0.5,0.75,1.0); }\n" },
+        { "shaders/palette_swap.vert", vertex },
+        { "shaders/palette_swap.frag",
+          "uniform sampler2D g_Texture0;\nuniform sampler2D g_Texture1;\n"
+          "varying vec2 v_TexCoord;\nvoid main(){\n"
+          "vec4 picture=texture(g_Texture0,v_TexCoord);\n"
+          "vec3 palette=texture(g_Texture1,v_TexCoord).bgr;\n"
+          "gl_FragColor=vec4(mix(palette,picture.rgb,picture.a),1.0); }\n" },
+        { "layout.json",
+          R"({"camera":{"center":[0,0,0],"eye":[0,0,1],"up":[0,1,0]},)"
+          R"("general":{"ambientcolor":[0,0,0],"skylightcolor":[0,0,0],"clearcolor":[0.0,0.0,0.0],)"
+          R"("cameraparallax":false,"orthogonalprojection":{"width":384,"height":256}},)"
+          R"("objects":[{"id":1,"name":"container","image":"models/util/composelayer.json",)"
+          R"("size":[384,256],"origin":[192,128,0],"copybackground":false,"dependencies":[2],)"
+          R"("effects":[{"file":"effects/swap/effect.json","visible":true,)"
+          R"("passes":[{"textures":[null,"_rt_imageLayerComposite_2_a"]}]}]},)"
+          R"({"id":2,"name":"palette","parent":1,"image":"models/palette.json",)"
+          R"("origin":[0,0,0],"visible":true}]})" },
+    };
+    for (const auto& [name, contents] : files) {
+        const auto path = root / name;
+        std::filesystem::create_directories(path.parent_path());
+        std::ofstream(path) << contents;
+    }
+    return project;
+}
+
+} // namespace
+
+// A compose layer's effect sampling the layer's own child found no composite
+// of it: the child was drawn only into the compose layer's target, so the
+// effect's input stayed empty and the native backend could not draw it.
+TEST_F(MetalSceneDraw, AComposeLayersEffectSamplesItsOwnChild)
+{
+    const auto  directory = root_ / "compose-palette";
+    const auto  project   = WriteComposePaletteFixture(directory);
+    LoadedScene loaded;
+    std::string error;
+    ASSERT_TRUE(LoadScene(project, directory / "cache", loaded, error)) << error;
+    auto& scene = *loaded.scene;
+    ASSERT_TRUE(scene.layer_texture_error.empty()) << scene.layer_texture_error;
+    const auto selection = SelectSceneBackend(scene);
+    ASSERT_EQ(selection.backend, SceneBackend::NativeMetal) << selection.fallback_reason;
+    const auto graph = sceneToRenderGraph(scene);
+    ASSERT_NE(graph, nullptr);
+
+    @autoreleasepool {
+        CAMetalLayer* layer = [CAMetalLayer layer];
+        layer.device        = MTLCreateSystemDefaultDevice();
+        layer.pixelFormat   = MTLPixelFormatBGRA8Unorm;
+        layer.drawableSize  = CGSizeMake(384, 256);
+        MetalRender render;
+        ASSERT_TRUE(render.init(MetalRenderInitInfo {
+            .metal_layer = (__bridge void*)layer, .width = 384, .height = 256,
+            .render_width = 384, .render_height = 256, .display_scale_factor = 1.0,
+        }));
+        ASSERT_TRUE(render.compileRenderGraph(scene, *graph)) << render.lastError();
+        ASSERT_TRUE(render.drawFrame(scene)) << render.lastError();
+        std::vector<uint8_t> bytes;
+        std::vector<float>   radiance;
+        uint32_t             width = 0, height = 0;
+        ASSERT_TRUE(render.ReadRenderTargetForTests(
+            scene.ResolveRenderTargetName(SpecTex_Default), bytes, width, height, &radiance));
+        ASSERT_EQ(width, 384u);
+        ASSERT_EQ(height, 256u);
+        const auto expect_color = [&](uint32_t x, uint32_t y, std::array<float, 3> expected) {
+            const size_t pixel = (y * width + x) * 4;
+            for (size_t channel = 0; channel < 3; ++channel) {
+                EXPECT_NEAR(radiance[pixel + channel], expected[channel], 0.01f)
+                    << "pixel " << x << "," << y << " channel " << channel;
+            }
+        };
+        // The child where it sits in the compose layer's picture...
+        expect_color(192, 128, { 0.25f, 0.5f, 0.75f });
+        // ...and, everywhere else, the effect's view of the child's own card.
+        expect_color(32, 32, { 0.75f, 0.5f, 0.25f });
+        expect_color(352, 224, { 0.75f, 0.5f, 0.25f });
+        render.destroy();
+    }
+}
+
 TEST_F(MetalSceneDraw, TranslatedAuthorShaderCompilesAndDrawsTheScene)
 {
     const auto project = WriteFixture(root_ / "project");
@@ -841,6 +1133,81 @@ TEST_F(MetalSceneDraw, TranslatedAuthorShaderCompilesAndDrawsTheScene)
         EXPECT_GT(shader_pixels, 1000u)
             << "the target holds no pixels the author's fragment shader could have produced";
 
+        render.destroy();
+    }
+}
+
+TEST_F(MetalSceneDraw, MatrixInversesOfEverySizeAreTranslatedAndDrawnExactly)
+{
+    // Naga's MSL writer has no `inverse`, so a stage that inverts a matrix --
+    // the stock perspective-warping effects undo `squareToQuad` in the vertex
+    // stage -- failed to translate and was dropped by this backend. Each size
+    // undoes its own matrix here and the residual is drawn a hundredfold: the
+    // card stays white only if every inverse is right, and one wrong cofactor
+    // sign drives its channel to black.
+    const auto directory = root_ / "inverse";
+    const auto project = WriteFixture(directory);
+    std::ofstream(directory / "shaders/metal_probe.vert") << R"(
+uniform mat4 g_ModelViewProjectionMatrix;
+attribute vec3 a_Position;
+attribute vec2 a_TexCoord;
+varying float v_Residual3;
+void main() {
+    mat3 warp = mat3(1.5, 0.25, 0.125, -0.5, 1.25, 0.375, 0.75, -0.25, 1.0);
+    vec3 a = vec3(0.3, -0.6, 0.9);
+    v_Residual3 = distance(inverse(warp) * (warp * a), a);
+    gl_Position = g_ModelViewProjectionMatrix * vec4(a_Position, 1.0);
+}
+)";
+    std::ofstream(directory / "shaders/metal_probe.frag") << R"(
+varying float v_Residual3;
+void main() {
+    mat2 shear = mat2(1.25, -0.5, 0.75, 1.5);
+    mat4 frame = mat4(2.0, 0.25, -0.5, 0.125, 0.5, 1.5, 0.25, -0.25,
+                      -0.375, 0.5, 1.25, 0.5, 0.25, -0.75, 0.5, 1.0);
+    vec2 a = vec2(0.4, -0.7);
+    vec4 b = vec4(-0.2, 0.5, 0.8, -0.9);
+    float residual2 = distance(inverse(shear) * (shear * a), a);
+    float residual4 = distance(inverse(frame) * (frame * b), b);
+    gl_FragColor = vec4(vec3(1.0) - 100.0 * vec3(residual2, v_Residual3, residual4), 1.0);
+}
+)";
+    LoadedScene loaded;
+    std::string error;
+    ASSERT_TRUE(LoadScene(project, root_ / "inverse-cache", loaded, error)) << error;
+    auto* material = FirstMaterial(loaded.scene->sceneGraph.get());
+    ASSERT_NE(material, nullptr);
+    ASSERT_NE(material->customShader.shader, nullptr);
+    const auto* program = material->customShader.shader->metal_program.get();
+    ASSERT_NE(program, nullptr);
+    ASSERT_TRUE(program->error.empty()) << "metal translation failed: " << program->error;
+    const auto selection = SelectSceneBackend(*loaded.scene);
+    ASSERT_EQ(selection.backend, SceneBackend::NativeMetal) << selection.fallback_reason;
+
+    @autoreleasepool {
+        CAMetalLayer* layer = [CAMetalLayer layer];
+        layer.device        = MTLCreateSystemDefaultDevice();
+        layer.pixelFormat   = MTLPixelFormatBGRA8Unorm;
+        layer.drawableSize  = CGSizeMake(384, 256);
+        MetalRender render;
+        ASSERT_TRUE(render.init(MetalRenderInitInfo {
+            .metal_layer = (__bridge void*)layer, .width = 384, .height = 256,
+            .render_width = 384, .render_height = 256, .display_scale_factor = 1.0,
+        }));
+        const auto graph = sceneToRenderGraph(*loaded.scene);
+        ASSERT_NE(graph, nullptr);
+        ASSERT_TRUE(render.compileRenderGraph(*loaded.scene, *graph)) << render.lastError();
+        ASSERT_TRUE(render.drawFrame(*loaded.scene)) << render.lastError();
+        std::vector<uint8_t> pixels;
+        uint32_t width = 0, height = 0;
+        ASSERT_TRUE(render.ReadRenderTargetForTests(
+            loaded.scene->ResolveRenderTargetName(SpecTex_Default), pixels, width, height));
+        ASSERT_GT(width, 0u);
+        ASSERT_GT(height, 0u);
+        const auto offset = ((height / 2) * width + width / 2) * 4;
+        EXPECT_GE(pixels[offset + 0], 250u) << "mat2 inverse is wrong";
+        EXPECT_GE(pixels[offset + 1], 250u) << "mat3 inverse is wrong";
+        EXPECT_GE(pixels[offset + 2], 250u) << "mat4 inverse is wrong";
         render.destroy();
     }
 }
@@ -1152,6 +1519,9 @@ TEST_F(MetalSceneDraw, ParentedCardsStayJoinedWhileParallaxMovesAndReverses)
             // and local effect targets must not receive parallax a second time.
             for (float cursor : {0.5f, 1.0f, 1.0f, 0.0f, 0.0f, 0.5f}) {
                 scene.shaderValueUpdater->MouseInput(cursor, 1.0f - cursor);
+                // The host's per-frame step, which carries the cursor into
+                // the smoothed position the parallax reads.
+                scene.shaderValueUpdater->FrameBegin();
                 ASSERT_TRUE(render.drawFrame(scene)) << render.lastError();
                 std::vector<uint8_t> pixels;
                 uint32_t width = 0, height = 0;
@@ -1490,6 +1860,207 @@ TEST_F(MetalSceneDraw, APerspectiveCameraDrawsThroughTheAuthoredShader)
 
         render.destroy();
     }
+}
+
+/// Two overlapping cards, drawn in order: a half-transparent red card nearer
+/// the camera, whose `blending`, `depthtest` and `depthwrite` are the given
+/// authored strings, then an opaque blue card further away that depth-tests
+/// and writes no depth. The blue card spans x 152..312 and the red one
+/// 72..232, so half the blue card lies behind the red one.
+std::filesystem::path WriteDepthWriteFixture(const std::filesystem::path& root,
+                                             std::string_view blending,
+                                             std::string_view depthtest,
+                                             std::string_view depthwrite)
+{
+    const std::string vertex =
+        "uniform mat4 g_ModelViewProjectionMatrix;\n"
+        "attribute vec3 a_Position;\n"
+        "attribute vec2 a_TexCoord;\n"
+        "varying vec2 v_TexCoord;\n"
+        "void main() {\n"
+        "  gl_Position = g_ModelViewProjectionMatrix * vec4(a_Position, 1.0);\n"
+        "  v_TexCoord = a_TexCoord;\n"
+        "}\n";
+    const auto fragment = [](std::string_view colour) {
+        return "varying vec2 v_TexCoord;\n"
+               "void main() {\n"
+               "  gl_FragColor = vec4(" + std::string(colour) + ");\n"
+               "}\n";
+    };
+    const auto pass = [](std::string_view shader, std::string_view blend, std::string_view test,
+                         std::string_view write) {
+        return R"({"passes":[{"shader":")" + std::string(shader) + R"(","blending":")" +
+               std::string(blend) + R"(","cullmode":"nocull","depthtest":")" +
+               std::string(test) + R"(","depthwrite":")" + std::string(write) + R"("}]})";
+    };
+    const auto card = [](int id, std::string_view name, int x, int z) {
+        return R"({"id":)" + std::to_string(id) + R"(,"name":")" + std::string(name) +
+               R"(","image":"models/)" + std::string(name) + R"(.json","origin":[)" +
+               std::to_string(x) + ",128," + std::to_string(z) +
+               R"(],"scale":[1,1,1],"angles":[0,0,0],"visible":true})";
+    };
+
+    const std::map<std::string, std::string> files {
+        { "project.json",
+          R"({"title":"Metal depth write","type":"scene","file":"layout.json","general":{"properties":{}}})" },
+        { "models/near.json", R"({"width":160,"height":128,"material":"materials/near.json"})" },
+        { "models/far.json", R"({"width":160,"height":128,"material":"materials/far.json"})" },
+        { "materials/near.json", pass("depth_write_near", blending, depthtest, depthwrite) },
+        { "materials/far.json", pass("depth_write_far", "normal", "enabled", "disabled") },
+        { "shaders/depth_write_near.vert", vertex },
+        { "shaders/depth_write_near.frag", fragment("1.0, 0.0, 0.0, 0.5") },
+        { "shaders/depth_write_far.vert", vertex },
+        { "shaders/depth_write_far.frag", fragment("0.0, 0.0, 1.0, 1.0") },
+        { "layout.json",
+          R"({"camera":{"center":[0,0,0],"eye":[0,0,1],"up":[0,1,0]},)"
+          R"("general":{"ambientcolor":[0,0,0],"skylightcolor":[0,0,0],"clearcolor":[0.0,0.0,0.0],)"
+          R"("cameraparallax":false,"orthogonalprojection":{"width":384,"height":256}},)"
+          R"("objects":[)" + card(1, "near", 152, 100) + "," + card(2, "far", 232, -100) + "]}" },
+    };
+    for (const auto& [name, contents] : files) {
+        const auto path = root / name;
+        std::filesystem::create_directories(path.parent_path());
+        std::ofstream(path) << contents;
+    }
+    return root / "project.json";
+}
+
+TEST_F(MetalSceneDraw, ADepthWritingDrawHidesLaterDrawsAsOnCompatibility)
+{
+    // Wallpaper Engine applies a material's `depthwrite` whatever its blending
+    // -- its own depth-tested font materials are translucent and write depth --
+    // so a translucent or additive layer that asks to write depth hides what
+    // is drawn behind it afterwards, its transparent texels included. As in
+    // Direct3D, OpenGL and Vulkan, a draw that does not depth-test writes no
+    // depth, and only a target with a depth attachment has any. Each case is
+    // drawn by both renderers and must come out the same; the cases also have
+    // to differ from each other, or the comparison proves nothing.
+    struct Case
+    {
+        const char* name;
+        const char* blending;
+        const char* depthtest;
+        const char* depthwrite;
+        bool        depth;
+        bool        hides;
+    };
+    const Case cases[] = {
+        { "translucent", "translucent", "enabled", "enabled", true, true },
+        { "additive", "additive", "enabled", "enabled", true, true },
+        { "opaque", "normal", "enabled", "enabled", true, true },
+        { "translucent-no-write", "translucent", "enabled", "disabled", true, false },
+        { "translucent-no-test", "translucent", "disabled", "enabled", true, false },
+        { "translucent-no-depth", "translucent", "enabled", "enabled", false, false },
+        { "opaque-no-depth", "normal", "enabled", "enabled", false, false },
+    };
+    // The far card is 160 x 128 pixels, half of it behind the near card.
+    constexpr std::size_t kFarCard   = 160 * 128;
+    constexpr std::size_t kUnhidden  = kFarCard * 9 / 10;
+    constexpr std::size_t kHalfShown = kFarCard / 2;
+    for (const auto& c : cases) {
+        SCOPED_TRACE(c.name);
+        std::map<bool, RendererPicture> pictures;
+        for (const bool native : { false, true }) {
+            const std::string name = std::string(c.name) + (native ? "-native" : "-compat");
+            const auto        project = WriteDepthWriteFixture(root_ / ("depth-write-" + name),
+                                                               c.blending, c.depthtest,
+                                                               c.depthwrite);
+            LoadedScene loaded;
+            std::string error;
+            ASSERT_TRUE(LoadScene(project, root_ / ("depth-write-cache-" + name), loaded, error))
+                << error;
+            loaded.scene->FindRenderTarget(std::string(SpecTex_Default))->withDepth = c.depth;
+            if (native) {
+                ASSERT_EQ(SelectSceneBackend(*loaded.scene).backend, SceneBackend::NativeMetal);
+            }
+            pictures[native] = DrawWithRenderer(*loaded.scene, native, 384, 256, 1, 1.0 / 60.0);
+            ASSERT_TRUE(pictures[native].error.empty()) << pictures[native].error;
+        }
+        for (const bool native : { false, true }) {
+            const auto& rgb  = pictures[native].rgb;
+            std::size_t blue = 0;
+            for (std::size_t i = 0; i + 2 < rgb.size(); i += 3) {
+                if (rgb[i] < 32 && rgb[i + 1] < 32 && rgb[i + 2] > 224) ++blue;
+            }
+            const char* renderer = native ? "native" : "compatibility";
+            if (c.hides) {
+                EXPECT_GT(blue, kHalfShown * 9 / 10) << renderer << " hid more than the overlap";
+                EXPECT_LT(blue, kHalfShown * 11 / 10)
+                    << renderer << " drew the far card over a nearer depth-writing one";
+            } else {
+                EXPECT_GT(blue, kUnhidden) << renderer << " hid the far card behind a draw "
+                                           << "that writes no depth";
+            }
+        }
+        EXPECT_EQ(pictures[true].rgb, pictures[false].rgb)
+            << "the native renderer wrote other depth than the compatibility renderer";
+    }
+}
+
+TEST_F(MetalSceneDraw, ADepthTestedDrawCullsTheSameFacesAsCompatibility)
+{
+    // The compatibility backend honours a material's `cullmode` for every
+    // pass into a depth-attached target -- models, skyboxes, a planet's ring --
+    // with counter-clockwise front faces, and culls nothing elsewhere. Drawing
+    // both faces of a ring here put its unlit back over its lit front. Each
+    // case is drawn by both renderers and must come out the same; the cases
+    // also have to differ from each other, or the comparison proves nothing.
+    struct Case
+    {
+        const char* name;
+        float       yaw;
+        CullMode    cull;
+        bool        depth;
+    };
+    constexpr float kTowards = 0.3f;
+    constexpr float kAway    = 3.14159265f - 0.3f;
+    const Case cases[] = {
+        { "towards-back", kTowards, CullMode::Back, true },
+        { "away-back", kAway, CullMode::Back, true },
+        { "towards-front", kTowards, CullMode::Front, true },
+        { "away-none", kAway, CullMode::None, true },
+        { "away-back-no-depth", kAway, CullMode::Back, false },
+    };
+    std::map<std::string, std::size_t> card_pixels;
+    for (const auto& c : cases) {
+        SCOPED_TRACE(c.name);
+        std::map<bool, RendererPicture> pictures;
+        for (const bool native : { false, true }) {
+            const std::string name = std::string(c.name) + (native ? "-native" : "-compat");
+            const auto  project = WriteFixture(root_ / ("cull-" + name), "0.30");
+            LoadedScene loaded;
+            std::string error;
+            ASSERT_TRUE(LoadScene(project, root_ / ("cull-cache-" + name), loaded, error)) << error;
+            auto* node = FirstDrawableNode(loaded.scene->sceneGraph.get());
+            ASSERT_NE(node, nullptr);
+            node->SetCamera("global_perspective");
+            node->SetRotation(Eigen::Vector3f { 0.0f, c.yaw, 0.0f });
+            auto* material        = node->Mesh()->Material();
+            material->depth_test  = true;
+            material->depth_write = true;
+            material->cull_mode   = c.cull;
+            loaded.scene->FindRenderTarget(std::string(SpecTex_Default))->withDepth = c.depth;
+            if (native) {
+                ASSERT_EQ(SelectSceneBackend(*loaded.scene).backend, SceneBackend::NativeMetal);
+            }
+            pictures[native] = DrawWithRenderer(*loaded.scene, native, 384, 256, 1, 1.0 / 60.0);
+            ASSERT_TRUE(pictures[native].error.empty()) << pictures[native].error;
+        }
+        EXPECT_EQ(pictures[true].rgb, pictures[false].rgb)
+            << "the native renderer culled other faces than the compatibility renderer";
+        // The card's constant blue, 0.30.
+        std::size_t card = 0;
+        for (std::size_t i = 0; i + 2 < pictures[true].rgb.size(); i += 3) {
+            if (pictures[true].rgb[i + 2] >= 65 && pictures[true].rgb[i + 2] <= 90) ++card;
+        }
+        card_pixels[c.name] = card;
+    }
+    // One side of the card is culled and the other kept, by either cull mode,
+    // and nothing is culled without culling or without depth.
+    EXPECT_NE(card_pixels["towards-back"] == 0, card_pixels["away-back"] == 0);
+    EXPECT_NE(card_pixels["towards-back"] == 0, card_pixels["towards-front"] == 0);
+    EXPECT_GT(card_pixels["away-none"], 1000u);
+    EXPECT_GT(card_pixels["away-back-no-depth"], 1000u);
 }
 
 TEST_F(MetalSceneDraw, AnIntermediateTargetIsDrawnCopiedAndResampledInOneFrame)
@@ -1974,10 +2545,11 @@ TEST_F(MetalSceneDraw, AFrameThatWouldRepeatThePictureTakesNoDrawableAndPresents
 
         // Each of these changes what the composition reads without touching a
         // pass, so the next frame presents once and the one after repeats.
-        const std::array<std::function<void()>, 4> changes {
+        const std::array<std::function<void()>, 5> changes {
             [&] { render.SetWallpaperHorizontalFlip(true); },
             [&] { render.SetWallpaperScalingMode(WallpaperScalingMode::FILL); },
             [&] { render.SetWallpaperScalingFactor(1.5); },
+            [&] { render.SetWallpaperFraming({ 0.0, 1.0 }); },
             [&] { render.InvalidatePresentedFrame(); },
         };
         for (std::size_t i = 0; i < changes.size(); ++i) {
@@ -2007,6 +2579,172 @@ TEST_F(MetalSceneDraw, AFrameThatWouldRepeatThePictureTakesNoDrawableAndPresents
         render.destroy();
     }
     RendererCounters::SetEnabled(false);
+}
+
+TEST_F(MetalSceneDraw, APannedWallpaperIsComposedAtTheChosenPositionInTheDrawableAndThePoster)
+{
+    // A 3:2 scene fitted into a square layer leaves bars above and below. The
+    // composition that fills the drawable is the one a poster is made from, so
+    // where the picture sits is read off the poster: the first and last rows
+    // that are not the bars' black must be the ones the layout function says,
+    // for the top, the middle and the bottom, in the frame that presents the
+    // change and again for a poster served without drawing a frame.
+    const auto project = WriteFixture(root_ / "project");
+    {
+        // The scene's own background must not be black, or it could not be told
+        // from the bars around it.
+        const auto layout_path = root_ / "project" / "layout.json";
+        std::ifstream in(layout_path);
+        std::string   text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        in.close();
+        const std::string black = "\"clearcolor\":[0.0,0.0,0.0]";
+        const auto        at    = text.find(black);
+        ASSERT_NE(at, std::string::npos);
+        text.replace(at, black.size(), "\"clearcolor\":[0.2,0.4,0.6]");
+        std::ofstream(layout_path) << text;
+    }
+    LoadedScene loaded;
+    std::string error;
+    ASSERT_TRUE(LoadScene(project, root_ / "cache", loaded, error)) << error;
+    ASSERT_EQ(SelectSceneBackend(*loaded.scene).backend, SceneBackend::NativeMetal);
+
+    struct Poster {
+        std::mutex              mutex;
+        std::condition_variable changed;
+        bool                    requested { false };
+        int                     delivered { 0 };
+        bool                    bgra { false };
+        uint32_t                width { 0 };
+        uint32_t                height { 0 };
+        std::vector<uint8_t>    pixels;
+    };
+    auto poster = std::make_shared<Poster>();
+
+    constexpr uint32_t kSide = 480;
+    @autoreleasepool {
+        id<MTLDevice> device  = MTLCreateSystemDefaultDevice();
+        CAMetalLayer* layer   = [CAMetalLayer layer];
+        layer.device          = device;
+        layer.pixelFormat     = MTLPixelFormatBGRA8Unorm;
+        layer.drawableSize    = CGSizeMake(kSide, kSide);
+        layer.framebufferOnly = NO;
+
+        MetalRender         render;
+        MetalRenderInitInfo info {
+            .metal_layer          = (__bridge void*)layer,
+            .width                = kSide,
+            .height               = kSide,
+            .render_width         = kSide,
+            .render_height        = kSide,
+            .display_scale_factor = 1.0,
+        };
+        info.wants_poster = [poster] {
+            std::scoped_lock lock(poster->mutex);
+            const bool wanted = poster->requested;
+            poster->requested = false;
+            return wanted;
+        };
+        info.poster_ready = [poster](std::span<const uint8_t> pixels, uint32_t width,
+                                     uint32_t height, bool bgra) {
+            std::scoped_lock lock(poster->mutex);
+            poster->pixels.assign(pixels.begin(), pixels.end());
+            poster->width  = width;
+            poster->height = height;
+            poster->bgra   = bgra;
+            ++poster->delivered;
+            poster->changed.notify_all();
+        };
+        ASSERT_TRUE(render.init(info)) << render.lastError();
+        auto graph = sceneToRenderGraph(*loaded.scene);
+        ASSERT_NE(graph, nullptr);
+        ASSERT_TRUE(render.compileRenderGraph(*loaded.scene, *graph)) << render.lastError();
+        render.UpdateCameraFillMode(*loaded.scene, FillMode::ASPECTFIT);
+        render.SetWallpaperScalingMode(WallpaperScalingMode::FIT);
+
+        const auto ask_for_poster = [&] {
+            std::scoped_lock lock(poster->mutex);
+            poster->requested = true;
+        };
+        const auto wait_for_poster = [&](int expected) {
+            std::unique_lock lock(poster->mutex);
+            return poster->changed.wait_for(lock, std::chrono::seconds(10),
+                                            [&] { return poster->delivered >= expected; });
+        };
+        // The rows and columns that differ from the bars' black.
+        struct Footprint {
+            int32_t first_x { 0 }, last_x { -1 }, first_y { 0 }, last_y { -1 };
+        };
+        const auto footprint_of = [&](const std::vector<uint8_t>& pixels) {
+            Footprint f { static_cast<int32_t>(kSide), -1, static_cast<int32_t>(kSide), -1 };
+            for (int32_t y = 0; y < static_cast<int32_t>(kSide); ++y) {
+                for (int32_t x = 0; x < static_cast<int32_t>(kSide); ++x) {
+                    const auto at = (static_cast<size_t>(y) * kSide + x) * 4;
+                    if (pixels[at] == 0 && pixels[at + 1] == 0 && pixels[at + 2] == 0) continue;
+                    f.first_x = std::min(f.first_x, x);
+                    f.last_x  = std::max(f.last_x, x);
+                    f.first_y = std::min(f.first_y, y);
+                    f.last_y  = std::max(f.last_y, y);
+                }
+            }
+            return f;
+        };
+
+        bool presented = false;
+        ASSERT_TRUE(render.drawFrame(*loaded.scene, &presented)) << render.lastError();
+        ASSERT_TRUE(presented);
+
+        int  deliveries = 0;
+        int  previous_first_y = -1;
+        for (const double pan_y : { 0.0, 0.5, 1.0 }) {
+            SCOPED_TRACE(pan_y);
+            const auto layout = ComputeWallpaperScalingLayout(
+                WallpaperScalingMode::FIT, 384, 256, kSide, kSide, 1.0, 1.0, 0.5, pan_y);
+            ASSERT_EQ(layout.viewport_px.width, static_cast<int32_t>(kSide));
+            ASSERT_EQ(layout.viewport_px.height, 320);
+
+            // The frame that follows the change presents, and the poster
+            // composed beside the drawable is the same picture.
+            render.SetWallpaperFraming({ 0.5, pan_y });
+            ask_for_poster();
+            presented = false;
+            ASSERT_TRUE(render.drawFrame(*loaded.scene, &presented)) << render.lastError();
+            EXPECT_TRUE(presented) << "a changed position did not present";
+            ASSERT_TRUE(wait_for_poster(++deliveries));
+            std::vector<uint8_t> in_frame;
+            {
+                std::scoped_lock lock(poster->mutex);
+                ASSERT_EQ(poster->width, kSide);
+                ASSERT_EQ(poster->height, kSide);
+                ASSERT_EQ(poster->pixels.size(), static_cast<size_t>(kSide) * kSide * 4);
+                in_frame = poster->pixels;
+            }
+            const auto drawn = footprint_of(in_frame);
+            EXPECT_EQ(drawn.first_y, layout.viewport_px.y);
+            EXPECT_EQ(drawn.last_y, layout.viewport_px.y + layout.viewport_px.height - 1);
+            EXPECT_EQ(drawn.first_x, 0);
+            EXPECT_EQ(drawn.last_x, static_cast<int32_t>(kSide) - 1);
+            EXPECT_GT(drawn.first_y, previous_first_y) << "the picture did not move down";
+            previous_first_y = drawn.first_y;
+
+            // An idle wallpaper's poster is composed from the retained output,
+            // with no frame drawn, and has to agree with the drawable's.
+            ask_for_poster();
+            EXPECT_EQ(render.ServicePosterRequest(*loaded.scene), PosterServiceResult::Submitted);
+            ASSERT_TRUE(wait_for_poster(++deliveries));
+            {
+                std::scoped_lock lock(poster->mutex);
+                EXPECT_EQ(poster->pixels, in_frame);
+            }
+
+            // The next frame repeats the picture and presents nothing.
+            presented = true;
+            ASSERT_TRUE(render.drawFrame(*loaded.scene, &presented)) << render.lastError();
+            EXPECT_FALSE(presented);
+        }
+        EXPECT_EQ(previous_first_y, 160) << "the bottom pan leaves all the slack above the picture";
+
+        render.destroy();
+    }
 }
 
 TEST_F(MetalSceneDraw, GeometryRebuiltEveryFrameIsUploadedAndDrawnFromItsOwnSlot)
@@ -2979,6 +3717,8 @@ void AdvanceSceneFrame(MetalRender& render, Scene& scene)
         scene.runtime->Tick(1.0 / 60.0);
         scene.runtime->PumpTextLayerCache();
     }
+    // The host's per-frame step, as `SceneWallpaper`'s draw does it.
+    if (scene.shaderValueUpdater != nullptr) scene.shaderValueUpdater->FrameBegin();
     EXPECT_TRUE(render.drawFrame(scene)) << render.lastError();
     scene.PassFrameTime(1.0 / 60.0);
 }
@@ -3097,6 +3837,345 @@ TEST_F(MetalSceneDraw, ATextLayerIsParsedTranslatedAndDrawnByTheNativeBackend)
             << "a runtime-replaced image was not reported as a reason to keep drawing";
 
         render.destroy();
+    }
+}
+
+namespace
+{
+
+/// A hidden text layer another layer samples: the marquee's card covers the
+/// canvas and shows the title's composite across all of it. The title sits in
+/// a corner of the canvas, so a composite that held it where it sits on screen
+/// would show it there, small, instead of across the marquee.
+std::filesystem::path WriteSampledTextFixture(const std::filesystem::path& root, bool with_effect)
+{
+    const auto project = WriteTextFixture(root, "HELLO", with_effect);
+    const std::string effects =
+        with_effect ? R"(,"effects":[{"file":"effects/probe.json","visible":true}])" : "";
+    const std::map<std::string, std::string> files {
+        { "models/marquee.json", R"({"width":384,"height":256,"material":"materials/marquee.json"})" },
+        { "materials/marquee.json",
+          R"({"passes":[{"shader":"probe_copy","blending":"translucent","cullmode":"nocull",)"
+          R"("depthtest":"disabled","depthwrite":"disabled",)"
+          R"("textures":["_rt_imageLayerComposite_1_a"]}]})" },
+        { "layout.json",
+          R"({"camera":{"center":[0,0,0],"eye":[0,0,1],"up":[0,1,0]},)"
+          R"("general":{"ambientcolor":[0,0,0],"skylightcolor":[0,0,0],"clearcolor":[0.0,0.0,0.0],)"
+          R"("cameraparallax":false,"orthogonalprojection":{"width":384,"height":256}},)"
+          R"("objects":[{"id":1,"name":"title","text":"HELLO","font":"Arial","pointsize":24,)"
+          R"("padding":0,"origin":[60,220,0],"visible":false)" + effects + R"(},)"
+          R"({"id":2,"name":"marquee","image":"models/marquee.json","origin":[192,128,0],)"
+          R"("dependencies":[1]}]})" },
+    };
+    for (const auto& [name, contents] : files) {
+        const auto path = root / name;
+        std::filesystem::create_directories(path.parent_path());
+        std::ofstream(path) << contents;
+    }
+    return project;
+}
+
+} // namespace
+
+// A hidden text layer another layer samples was never drawn into a composite
+// on the native backend (nothing marked it as one that must produce), and,
+// visible, it would have been drawn where it sits on screen rather than as its
+// own card: the marquee showed nothing.
+TEST_F(MetalSceneDraw, AHiddenTextLayerAnotherSamplesIsItsCardInItsComposite)
+{
+    for (const bool with_effect : { false, true }) {
+        SCOPED_TRACE(with_effect ? "with an effect" : "plain");
+        const auto  directory = root_ / (with_effect ? "sampled-text-effect" : "sampled-text");
+        const auto  project   = WriteSampledTextFixture(directory, with_effect);
+        LoadedScene loaded;
+        std::string error;
+        ASSERT_TRUE(LoadScene(project, directory / "cache", loaded, error)) << error;
+        auto& scene = *loaded.scene;
+        ASSERT_TRUE(scene.layer_texture_error.empty()) << scene.layer_texture_error;
+        const auto selection = SelectSceneBackend(scene);
+        ASSERT_EQ(selection.backend, SceneBackend::NativeMetal) << selection.fallback_reason;
+
+        @autoreleasepool {
+            CAMetalLayer* layer = [CAMetalLayer layer];
+            layer.device        = MTLCreateSystemDefaultDevice();
+            layer.pixelFormat   = MTLPixelFormatBGRA8Unorm;
+            layer.drawableSize  = CGSizeMake(384, 256);
+            MetalRender render;
+            ASSERT_TRUE(render.init(MetalRenderInitInfo {
+                .metal_layer = (__bridge void*)layer, .width = 384, .height = 256,
+                .render_width = 384, .render_height = 256, .display_scale_factor = 1.0,
+            }));
+            auto graph = sceneToRenderGraph(scene);
+            ASSERT_NE(graph, nullptr);
+            ASSERT_TRUE(render.compileRenderGraph(scene, *graph)) << render.lastError();
+            render.UpdateCameraFillMode(scene, FillMode::ASPECTFIT);
+            for (int frame = 0; frame < 3; ++frame) AdvanceSceneFrame(render, scene);
+
+            const auto pixels = ReadOutput(render, scene);
+            ASSERT_EQ(pixels.size(), 384u * 256u * 4u);
+            uint32_t left = 384, right = 0, bottom = 0, top = 256;
+            for (uint32_t y = 0; y < 256; ++y) {
+                for (uint32_t x = 0; x < 384; ++x) {
+                    const auto* pixel = &pixels[(y * 384 + x) * 4];
+                    if (pixel[0] == 0 && pixel[1] == 0 && pixel[2] == 0) continue;
+                    left   = std::min(left, x);
+                    right  = std::max(right, x);
+                    top    = std::min(top, y);
+                    bottom = std::max(bottom, y);
+                }
+            }
+            ASSERT_GT(LitPixels(pixels), 0u) << "the marquee found nothing in the title's composite";
+            // The title's card fills its composite, so its glyphs stretch from
+            // one side of the marquee to the other, and sit across its middle.
+            EXPECT_LT(left, 384u / 8u);
+            EXPECT_GT(right, 384u * 7u / 8u);
+            EXPECT_LT(top, 256u / 2u);
+            EXPECT_GT(bottom, 256u / 2u);
+            render.destroy();
+        }
+    }
+}
+
+namespace
+{
+
+/// One card of one colour in the middle of the canvas, with `effects`: each
+/// `effects/own/effect.json` shows what it reads with red and blue swapped.
+std::filesystem::path WriteOwnBufferFixture(const std::filesystem::path& root,
+                                            const std::string&           effects)
+{
+    const auto project = WriteFixture(root);
+    const std::string vertex =
+        "uniform mat4 g_ModelViewProjectionMatrix;\n"
+        "attribute vec3 a_Position;\nattribute vec2 a_TexCoord;\n"
+        "varying vec2 v_TexCoord;\n"
+        "void main(){ gl_Position=g_ModelViewProjectionMatrix*vec4(a_Position,1.0);"
+        "v_TexCoord=a_TexCoord; }\n";
+    const std::map<std::string, std::string> files {
+        { "models/card.json", R"({"width":128,"height":64,"material":"materials/card.json"})" },
+        { "materials/card.json",
+          R"({"passes":[{"shader":"own_fill","blending":"translucent","cullmode":"nocull",)"
+          R"("depthtest":"disabled","depthwrite":"disabled"}]})" },
+        { "effects/own/effect.json",
+          R"({"name":"own","passes":[{"material":"materials/own.json"}]})" },
+        { "materials/own.json",
+          R"({"passes":[{"shader":"own_swap","blending":"translucent","cullmode":"nocull",)"
+          R"("depthtest":"disabled","depthwrite":"disabled","textures":[null]}]})" },
+        { "shaders/own_fill.vert", vertex },
+        { "shaders/own_fill.frag",
+          "varying vec2 v_TexCoord;\n"
+          "void main(){ gl_FragColor=vec4(0.25,0.5,0.75,1.0); }\n" },
+        { "shaders/own_swap.vert", vertex },
+        { "shaders/own_swap.frag",
+          "uniform sampler2D g_Texture0;\nvarying vec2 v_TexCoord;\n"
+          "void main(){ vec4 own=texture(g_Texture0,v_TexCoord);"
+          "gl_FragColor=vec4(own.bgr,own.a); }\n" },
+        { "layout.json",
+          R"({"camera":{"center":[0,0,0],"eye":[0,0,1],"up":[0,1,0]},)"
+          R"("general":{"ambientcolor":[0,0,0],"skylightcolor":[0,0,0],"clearcolor":[0.0,0.0,0.0],)"
+          R"("cameraparallax":false,"orthogonalprojection":{"width":384,"height":256}},)"
+          R"("objects":[{"id":1,"name":"card","image":"models/card.json","origin":[192,128,0],)"
+          R"("effects":)" + effects + "}]}" },
+    };
+    for (const auto& [name, contents] : files) {
+        const auto path = root / name;
+        std::filesystem::create_directories(path.parent_path());
+        std::ofstream(path) << contents;
+    }
+    return project;
+}
+
+} // namespace
+
+// An effect binding its own layer's `_a` composite read a link the frame had
+// yet to fill: the layer drew nothing, and the native backend refused the whole
+// scene as history feedback. Inside the layer's chain the name is the image the
+// effect works on.
+TEST_F(MetalSceneDraw, ALayersOwnEffectReadsItsBufferANotItsComposite)
+{
+    {
+        SCOPED_TRACE("image");
+        const auto  directory = root_ / "own-buffer-a";
+        // The card's own `_a` composite where the effect would take `previous`.
+        const auto  project   = WriteOwnBufferFixture(
+            directory, R"([{"file":"effects/own/effect.json","visible":true,)"
+                       R"("passes":[{"textures":["_rt_imageLayerComposite_1_a"]}]}])");
+        LoadedScene loaded;
+        std::string error;
+        ASSERT_TRUE(LoadScene(project, directory / "cache", loaded, error)) << error;
+        auto& scene = *loaded.scene;
+        ASSERT_TRUE(scene.layer_texture_error.empty()) << scene.layer_texture_error;
+        const auto selection = SelectSceneBackend(scene);
+        ASSERT_EQ(selection.backend, SceneBackend::NativeMetal) << selection.fallback_reason;
+        const auto graph = sceneToRenderGraph(scene);
+        ASSERT_NE(graph, nullptr);
+
+        @autoreleasepool {
+            CAMetalLayer* layer = [CAMetalLayer layer];
+            layer.device        = MTLCreateSystemDefaultDevice();
+            layer.pixelFormat   = MTLPixelFormatBGRA8Unorm;
+            layer.drawableSize  = CGSizeMake(384, 256);
+            MetalRender render;
+            ASSERT_TRUE(render.init(MetalRenderInitInfo {
+                .metal_layer = (__bridge void*)layer, .width = 384, .height = 256,
+                .render_width = 384, .render_height = 256, .display_scale_factor = 1.0,
+            }));
+            ASSERT_TRUE(render.compileRenderGraph(scene, *graph)) << render.lastError();
+            ASSERT_TRUE(render.drawFrame(scene)) << render.lastError();
+            std::vector<uint8_t> bytes;
+            std::vector<float>   radiance;
+            uint32_t             width = 0, height = 0;
+            ASSERT_TRUE(render.ReadRenderTargetForTests(
+                scene.ResolveRenderTargetName(SpecTex_Default), bytes, width, height, &radiance));
+            ASSERT_EQ(width, 384u);
+            ASSERT_EQ(height, 256u);
+            const auto expect_color = [&](uint32_t x, uint32_t y, std::array<float, 3> expected) {
+                const size_t pixel = (y * width + x) * 4;
+                for (size_t channel = 0; channel < 3; ++channel) {
+                    EXPECT_NEAR(radiance[pixel + channel], expected[channel], 0.01f)
+                        << "pixel " << x << "," << y << " channel " << channel;
+                }
+            };
+            // The card as its effect saw it, and nothing around it.
+            expect_color(192, 128, { 0.75f, 0.5f, 0.25f });
+            expect_color(140, 100, { 0.75f, 0.5f, 0.25f });
+            expect_color(32, 32, { 0.0f, 0.0f, 0.0f });
+            render.destroy();
+        }
+    }
+    {
+        SCOPED_TRACE("text");
+        const auto  directory = root_ / "own-buffer-a-text";
+        const auto  project   = WriteTextFixture(
+            directory, "HELLO", false, {},
+            R"(,"effects":[{"file":"effects/probe.json","visible":true,)"
+            R"("passes":[{"textures":["_rt_imageLayerComposite_1_a"]}]}])");
+        LoadedScene loaded;
+        std::string error;
+        ASSERT_TRUE(LoadScene(project, directory / "cache", loaded, error)) << error;
+        auto& scene = *loaded.scene;
+        ASSERT_TRUE(scene.layer_texture_error.empty()) << scene.layer_texture_error;
+        const auto selection = SelectSceneBackend(scene);
+        ASSERT_EQ(selection.backend, SceneBackend::NativeMetal) << selection.fallback_reason;
+
+        @autoreleasepool {
+            CAMetalLayer* layer = [CAMetalLayer layer];
+            layer.device        = MTLCreateSystemDefaultDevice();
+            layer.pixelFormat   = MTLPixelFormatBGRA8Unorm;
+            layer.drawableSize  = CGSizeMake(384, 256);
+            MetalRender render;
+            ASSERT_TRUE(render.init(MetalRenderInitInfo {
+                .metal_layer = (__bridge void*)layer, .width = 384, .height = 256,
+                .render_width = 384, .render_height = 256, .display_scale_factor = 1.0,
+            }));
+            auto graph = sceneToRenderGraph(scene);
+            ASSERT_NE(graph, nullptr);
+            ASSERT_TRUE(render.compileRenderGraph(scene, *graph)) << render.lastError();
+            render.UpdateCameraFillMode(scene, FillMode::ASPECTFIT);
+            for (int frame = 0; frame < 3; ++frame) AdvanceSceneFrame(render, scene);
+            EXPECT_GT(LitPixels(ReadOutput(render, scene)), 0u)
+                << "the text layer's effect showed nothing of the text";
+            render.destroy();
+        }
+    }
+}
+
+// The editor names `previous`'s ping-pong buffer in the slot `previous` fills,
+// `_a` and `_b` alternating along the chain, so a second effect names `_b`.
+// Taken as last-frame history, the name made the native backend refuse the
+// whole scene; it is the image the effect works on, the first effect's output.
+TEST_F(MetalSceneDraw, ALayersOwnEffectReadsItsBufferBAsTheImageItWorksOn)
+{
+    const std::string effects =
+        R"([{"file":"effects/own/effect.json","visible":true,)"
+        R"("passes":[{"textures":["_rt_imageLayerComposite_1_a"]}]},)"
+        R"({"file":"effects/own/effect.json","visible":true,)"
+        R"("passes":[{"textures":["_rt_imageLayerComposite_1_b"]}]}])";
+    {
+        SCOPED_TRACE("image");
+        const auto  directory = root_ / "own-buffer-b";
+        const auto  project   = WriteOwnBufferFixture(directory, effects);
+        LoadedScene loaded;
+        std::string error;
+        ASSERT_TRUE(LoadScene(project, directory / "cache", loaded, error)) << error;
+        auto& scene = *loaded.scene;
+        ASSERT_TRUE(scene.layer_texture_error.empty()) << scene.layer_texture_error;
+        const auto selection = SelectSceneBackend(scene);
+        ASSERT_EQ(selection.backend, SceneBackend::NativeMetal) << selection.fallback_reason;
+        const auto graph = sceneToRenderGraph(scene);
+        ASSERT_NE(graph, nullptr);
+
+        @autoreleasepool {
+            CAMetalLayer* layer = [CAMetalLayer layer];
+            layer.device        = MTLCreateSystemDefaultDevice();
+            layer.pixelFormat   = MTLPixelFormatBGRA8Unorm;
+            layer.drawableSize  = CGSizeMake(384, 256);
+            MetalRender render;
+            ASSERT_TRUE(render.init(MetalRenderInitInfo {
+                .metal_layer = (__bridge void*)layer, .width = 384, .height = 256,
+                .render_width = 384, .render_height = 256, .display_scale_factor = 1.0,
+            }));
+            ASSERT_TRUE(render.compileRenderGraph(scene, *graph)) << render.lastError();
+            ASSERT_TRUE(render.drawFrame(scene)) << render.lastError();
+            std::vector<uint8_t> bytes;
+            std::vector<float>   radiance;
+            uint32_t             width = 0, height = 0;
+            ASSERT_TRUE(render.ReadRenderTargetForTests(
+                scene.ResolveRenderTargetName(SpecTex_Default), bytes, width, height, &radiance));
+            ASSERT_EQ(width, 384u);
+            ASSERT_EQ(height, 256u);
+            const auto expect_color = [&](uint32_t x, uint32_t y, std::array<float, 3> expected) {
+                const size_t pixel = (y * width + x) * 4;
+                for (size_t channel = 0; channel < 3; ++channel) {
+                    EXPECT_NEAR(radiance[pixel + channel], expected[channel], 0.01f)
+                        << "pixel " << x << "," << y << " channel " << channel;
+                }
+            };
+            // Swapped twice: the second effect swapped back what the first made.
+            // Reading the card before any effect would leave it swapped, and an
+            // empty texture black.
+            expect_color(192, 128, { 0.25f, 0.5f, 0.75f });
+            expect_color(140, 100, { 0.25f, 0.5f, 0.75f });
+            expect_color(32, 32, { 0.0f, 0.0f, 0.0f });
+            render.destroy();
+        }
+    }
+    {
+        SCOPED_TRACE("text");
+        const auto  directory = root_ / "own-buffer-b-text";
+        const auto  project   = WriteTextFixture(
+            directory, "HELLO", false, {},
+            R"(,"effects":[{"file":"effects/probe.json","visible":true,)"
+            R"("passes":[{"textures":["_rt_imageLayerComposite_1_a"]}]},)"
+            R"({"file":"effects/probe.json","visible":true,)"
+            R"("passes":[{"textures":["_rt_imageLayerComposite_1_b"]}]}])");
+        LoadedScene loaded;
+        std::string error;
+        ASSERT_TRUE(LoadScene(project, directory / "cache", loaded, error)) << error;
+        auto& scene = *loaded.scene;
+        ASSERT_TRUE(scene.layer_texture_error.empty()) << scene.layer_texture_error;
+        const auto selection = SelectSceneBackend(scene);
+        ASSERT_EQ(selection.backend, SceneBackend::NativeMetal) << selection.fallback_reason;
+
+        @autoreleasepool {
+            CAMetalLayer* layer = [CAMetalLayer layer];
+            layer.device        = MTLCreateSystemDefaultDevice();
+            layer.pixelFormat   = MTLPixelFormatBGRA8Unorm;
+            layer.drawableSize  = CGSizeMake(384, 256);
+            MetalRender render;
+            ASSERT_TRUE(render.init(MetalRenderInitInfo {
+                .metal_layer = (__bridge void*)layer, .width = 384, .height = 256,
+                .render_width = 384, .render_height = 256, .display_scale_factor = 1.0,
+            }));
+            auto graph = sceneToRenderGraph(scene);
+            ASSERT_NE(graph, nullptr);
+            ASSERT_TRUE(render.compileRenderGraph(scene, *graph)) << render.lastError();
+            render.UpdateCameraFillMode(scene, FillMode::ASPECTFIT);
+            for (int frame = 0; frame < 3; ++frame) AdvanceSceneFrame(render, scene);
+            EXPECT_GT(LitPixels(ReadOutput(render, scene)), 0u)
+                << "the text layer's second effect showed nothing of the text";
+            render.destroy();
+        }
     }
 }
 
@@ -3807,6 +4886,83 @@ TEST_F(MetalSceneDraw, PipelinesThisProcessBuildsAreArchivedAndServeTheProductio
             << "a wallpaper stopped drawing when there was no pipeline archive";
         render.destroy();
     }
+}
+
+TEST_F(MetalSceneDraw, AStoreFolderDeletedWhileItsArchiveIsWrittenCostsOnlyThatWrite)
+{
+    // The pipeline store sits in a regenerable cache folder that clearing the
+    // cache or removing a wallpaper deletes whenever it likes, and its write
+    // runs two seconds after the last pipeline. Metal's archive serialiser
+    // writes a scratch file beside its destination and corrupts the heap when
+    // that folder disappears under it, so a write that raced a deletion took
+    // the whole process down. Here eight wallpapers each keep their own store,
+    // so eight writes run, and every store folder is deleted and made again
+    // without pause for as long as they take: a write may be lost, the process
+    // must not be, and no scratch file may be left behind.
+    std::vector<std::filesystem::path> archive_roots;
+    const auto collected_before = MetalPipelineArchiveStatusForDiagnostics().collected;
+
+    // Colours no other test draws, so every pipeline is new to the archive.
+    for (const char* blue : { "0.53125", "0.59375", "0.65625", "0.71875", "0.78125", "0.84375",
+                              "0.90625", "0.96875" }) {
+        SCOPED_TRACE(blue);
+        const auto archive_root = archive_roots.emplace_back(root_ / (std::string("archive-") + blue));
+        std::filesystem::create_directories(archive_root);
+        const auto  project = WriteFixture(root_ / (std::string("vanishing-") + blue), blue);
+        LoadedScene loaded;
+        std::string error;
+        ASSERT_TRUE(LoadScene(project, root_ / (std::string("vanishing-cache-") + blue), loaded,
+                              error))
+            << error;
+        @autoreleasepool {
+            CAMetalLayer* layer   = [CAMetalLayer layer];
+            layer.device          = MTLCreateSystemDefaultDevice();
+            layer.pixelFormat     = MTLPixelFormatBGRA8Unorm;
+            layer.drawableSize    = CGSizeMake(384, 256);
+            layer.framebufferOnly = NO;
+
+            SceneRendererHandle render;
+            RenderInitInfo info {
+                .metal_layer          = (__bridge void*)layer,
+                .width                = 384,
+                .height               = 256,
+                .render_width         = 384,
+                .render_height        = 256,
+                .display_scale_factor = 1.0,
+            };
+            render.SetPipelineArchivePath(archive_root.string());
+            ASSERT_TRUE(render.createMetal(info, error)) << error;
+            auto graph = sceneToRenderGraph(*loaded.scene);
+            ASSERT_NE(graph, nullptr);
+            ASSERT_TRUE(render.compileRenderGraph(*loaded.scene, *graph)) << render.lastError();
+            loaded.scene->PassFrameTime(1.0 / 60.0);
+            ASSERT_TRUE(render.drawFrame(*loaded.scene)) << render.lastError();
+            render.destroy();
+        }
+    }
+    ASSERT_GT(MetalPipelineArchiveStatusForDiagnostics().collected, collected_before)
+        << "nothing new was offered to the archive, so no write was scheduled";
+
+    std::atomic<bool> churn { true };
+    std::thread       deleter([&] {
+        while (churn.load()) {
+            for (const auto& archive_root : archive_roots) {
+                std::error_code ignored;
+                std::filesystem::remove_all(archive_root, ignored);
+                std::filesystem::create_directories(archive_root, ignored);
+            }
+        }
+    });
+    MetalRender::WaitForPipelineArchiveWritesForTests();
+    churn = false;
+    deleter.join();
+
+    std::size_t scratch = 0;
+    const auto  prefix  = "owe-pipelines-" + std::to_string(::getpid()) + "-";
+    for (const auto& entry : std::filesystem::directory_iterator(NSTemporaryDirectory().UTF8String)) {
+        if (entry.path().filename().string().rfind(prefix, 0) == 0) ++scratch;
+    }
+    EXPECT_EQ(scratch, 0u) << "a write left its scratch file in the temporary folder";
 }
 
 TEST_F(MetalSceneDraw, ACaptionChangedWhileHiddenIsNotWorkInFlight)
@@ -4953,6 +6109,21 @@ TEST_F(MetalSceneDraw, LocalProjectsNamedByTheEnvironmentRunThroughTheNativeBack
                       << selection.fallback_reason << std::endl;
             continue;
         }
+        // Runtime ticks before the graph is built, as `offscreen_scene_probe`
+        // takes 40 of them. Comparing a scripted or timed scene with that
+        // probe needs both runtime clocks on the same second, so this matches
+        // it on request; the scene clock is not advanced by it, there or here.
+        if (const char* value = std::getenv("WE_TEST_METAL_WARMUP_TICKS");
+            value != nullptr && loaded.scene->runtime != nullptr) {
+            const int ticks = std::atoi(value);
+            ASSERT_TRUE(ticks >= 0 && ticks <= 3600) << "WE_TEST_METAL_WARMUP_TICKS " << value;
+            for (int tick = 0; tick < ticks; ++tick) {
+                loaded.scene->runtime->Tick(1.0 / 60.0);
+                loaded.scene->runtime->PumpTextLayerCache();
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+            (void)loaded.scene->runtime->ConsumeSceneGraphMutationFlag();
+        }
 
         // A real surface is the size of the display it is on, and screen-space
         // shader inputs -- texel size above all -- follow it. Comparing this
@@ -5057,6 +6228,9 @@ TEST_F(MetalSceneDraw, LocalProjectsNamedByTheEnvironmentRunThroughTheNativeBack
                         ASSERT_TRUE(render.compileRenderGraph(*loaded.scene, *graph))
                             << render.lastError();
                     }
+                }
+                if (loaded.scene->shaderValueUpdater != nullptr) {
+                    loaded.scene->shaderValueUpdater->FrameBegin();
                 }
                 const double cpu_before = ThreadCpuMilliseconds();
                 ASSERT_TRUE(render.drawFrame(*loaded.scene))
@@ -5176,6 +6350,157 @@ TEST_F(MetalSceneDraw, LocalProjectsNamedByTheEnvironmentRunThroughTheNativeBack
     wallpaper::vulkan::SetSceneOptimizationEnabled(optimization_was);
 }
 
+TEST_F(MetalSceneDraw, LocalProjectsDrawTheSamePictureOnBothRenderers)
+{
+    // The two renderers in one harness: each project is parsed twice exactly
+    // as a wallpaper loads it, seeded and clocked identically, and drawn
+    // through `SceneRendererHandle` on a layer no window owns -- once by the
+    // compatibility backend, once by the native one. The final composition of
+    // the last frame comes back through the poster path both backends share,
+    // so the two pictures differ only by what the renderers did. Prints the
+    // mean absolute difference per channel and the share of pixels off by more
+    // than 48, and writes both pictures under `WE_TEST_OUTPUT`. A diagnostic,
+    // not a verdict: nothing is asserted about the size of a difference.
+    // `WE_TEST_COMPARE_PROJECTS` is a colon-separated list of `project.json`
+    // paths; `WE_TEST_METAL_FRAMES`, `WE_TEST_METAL_FRAME_STEP`,
+    // `WE_TEST_METAL_WARMUP_TICKS`, `WE_TEST_RANDOM_SEED` and
+    // `WE_TEST_PROPERTIES` mean what they mean for the local-project run, and
+    // `WE_TEST_COMPARE_SURFACE` is the layer's `<width>x<height>` (960x540).
+    const char* listed = std::getenv("WE_TEST_COMPARE_PROJECTS");
+    const auto  assets = LocalSceneAssetsRoot();
+    if (listed == nullptr || *listed == '\0' || assets.empty() ||
+        ! std::filesystem::is_directory(assets)) {
+        GTEST_SKIP() << "WE_TEST_COMPARE_PROJECTS names no local project";
+    }
+    int    frame_count = 120;
+    double frame_step  = 1.0 / 60.0;
+    int    warmup      = 0;
+    if (const char* value = std::getenv("WE_TEST_METAL_FRAMES")) frame_count = std::atoi(value);
+    if (const char* value = std::getenv("WE_TEST_METAL_FRAME_STEP")) frame_step = std::strtod(value, nullptr);
+    if (const char* value = std::getenv("WE_TEST_METAL_WARMUP_TICKS")) warmup = std::atoi(value);
+    ASSERT_TRUE(frame_count >= 1 && frame_count <= 3600 && frame_step > 0.0 && frame_step <= 1.0 &&
+                warmup >= 0 && warmup <= 3600);
+    uint32_t width = 960, height = 540;
+    if (const char* size = std::getenv("WE_TEST_COMPARE_SURFACE")) {
+        unsigned w = 0, h = 0;
+        if (std::sscanf(size, "%ux%u", &w, &h) == 2 && w > 0 && h > 0 && w <= 8192 && h <= 8192) {
+            width  = w;
+            height = h;
+        }
+    }
+    const char* output = std::getenv("WE_TEST_OUTPUT");
+
+    std::vector<std::string> projects;
+    for (std::string_view rest = listed; ! rest.empty();) {
+        const auto colon = rest.find(':');
+        if (colon != 0) projects.emplace_back(rest.substr(0, colon));
+        if (colon == std::string_view::npos) break;
+        rest.remove_prefix(colon + 1);
+    }
+
+    std::size_t index = 0;
+    for (const auto& project : projects) {
+        SCOPED_TRACE(project);
+        const std::string label = "compare-" + std::to_string(index++);
+        std::map<bool, RendererPicture> pictures;
+        std::string             scene_id;
+        for (const bool native : { false, true }) {
+            SetSceneRendererPreference(native ? SceneRendererPreference::NativeMetalPreferred
+                                              : SceneRendererPreference::Compatibility);
+            if (const char* seed = std::getenv("WE_TEST_RANDOM_SEED")) {
+                Random::seed(static_cast<uint32_t>(std::strtoul(seed, nullptr, 10)));
+            }
+            SceneSourcePaths paths;
+            std::string      error;
+            ASSERT_TRUE(ResolveSceneSourcePaths(project, &paths, &error)) << error;
+            scene_id = paths.scene_id;
+            LoadedScene loaded;
+            ASSERT_TRUE(loaded.vfs.Mount("/assets", fs::CreatePhysicalFs(assets.string()), "assets"));
+            ASSERT_TRUE(MountSceneSource(loaded.vfs, paths, &error)) << error;
+            ASSERT_TRUE(loaded.vfs.Mount(
+                "/cache",
+                fs::CreatePhysicalFs((root_ / (label + (native ? "-native" : "-compat"))).string(), true),
+                "cache"));
+            InstallVirtualAssets(loaded.vfs);
+            ASSERT_TRUE(ParseProjectProperties(project, &loaded.properties, &error)) << error;
+            if (const char* json = std::getenv("WE_TEST_PROPERTIES")) {
+                ProjectProperties overrides;
+                ASSERT_TRUE(ParseFlatProjectPropertyOverrideJson(json, &overrides, &error)) << error;
+                loaded.properties = MergeProjectProperties(loaded.properties, overrides);
+            }
+            auto source = loaded.vfs.Open("/assets/" + paths.pkg_entry);
+            ASSERT_NE(source, nullptr);
+            WPSceneParser parser;
+            loaded.scene = parser.Parse(SceneParseRequest {
+                                            .scene_id           = paths.scene_id,
+                                            .project_path       = project,
+                                            .project_properties = &loaded.properties,
+                                            .pkg_version        = PackageVersionOf(paths.pkg_path),
+                                        },
+                                        source->ReadAllStr(), loaded.vfs, loaded.sound);
+            ASSERT_NE(loaded.scene, nullptr);
+            InjectSystemMediaForMetal(*loaded.scene);
+            if (native) {
+                const auto selection = SelectSceneBackend(*loaded.scene);
+                if (selection.backend != SceneBackend::NativeMetal) {
+                    std::cout << "[ COMPARE  ] " << scene_id << ": native refused -- "
+                              << selection.fallback_reason << std::endl;
+                    break;
+                }
+            }
+            auto& scene = *loaded.scene;
+            if (scene.runtime != nullptr) {
+                for (int tick = 0; tick < warmup; ++tick) {
+                    scene.runtime->Tick(1.0 / 60.0);
+                    scene.runtime->PumpTextLayerCache();
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                }
+                (void)scene.runtime->ConsumeSceneGraphMutationFlag();
+            }
+
+            auto picture = DrawWithRenderer(scene, native, width, height, frame_count, frame_step);
+            if (! picture.error.empty()) {
+                std::cout << "[ COMPARE  ] " << scene_id << ": "
+                          << (native ? "native" : "compatibility") << " -- " << picture.error
+                          << std::endl;
+                break;
+            }
+            pictures[native] = std::move(picture);
+        }
+        if (pictures.size() != 2) continue;
+        const auto& a = pictures[false];
+        const auto& b = pictures[true];
+        ASSERT_EQ(a.width, b.width);
+        ASSERT_EQ(a.height, b.height);
+        double      total = 0.0;
+        std::size_t off   = 0;
+        for (std::size_t i = 0; i < a.rgb.size(); i += 3) {
+            int worst = 0;
+            for (std::size_t c = 0; c < 3; ++c) {
+                const int d = std::abs(int(a.rgb[i + c]) - int(b.rgb[i + c]));
+                total += d;
+                worst = std::max(worst, d);
+            }
+            if (worst > 48) ++off;
+        }
+        std::printf("[ COMPARE  ] %s: mean abs difference %.3f, %.4f of pixels off by more than 48\n",
+                    scene_id.c_str(), total / double(a.rgb.size()),
+                    double(off) / double(a.rgb.size() / 3));
+        if (output != nullptr && *output != '\0') {
+            std::filesystem::create_directories(output);
+            for (const auto& [native, picture] : pictures) {
+                std::ofstream image(std::filesystem::path(output) /
+                                        (scene_id + (native ? "-native.ppm" : "-compat.ppm")),
+                                    std::ios::binary);
+                image << "P6\n" << picture.width << " " << picture.height << "\n255\n";
+                image.write(reinterpret_cast<const char*>(picture.rgb.data()),
+                            std::streamsize(picture.rgb.size()));
+            }
+        }
+    }
+    SetSceneRendererPreference(SceneRendererPreference::Compatibility);
+}
+
 TEST_F(MetalSceneDraw, LayersSharingATargetShareOneRenderPassAndHiddenLayersCostNone)
 {
     // Every card here draws straight into the scene's own image, so the whole
@@ -5252,6 +6577,301 @@ TEST_F(MetalSceneDraw, LayersSharingATargetShareOneRenderPassAndHiddenLayersCost
     EXPECT_NE(pixels["shown"], pixels["hidden"]) << "showing the middle card changed nothing";
 }
 
+TEST_F(MetalSceneDraw, ALayerItsPropertiesHideHoldsNoImagesUntilAScriptShowsIt)
+{
+    // A layer the wallpaper's properties hide cannot appear before the next
+    // parse unless a script shows it, so it holds none of the images its
+    // effect chain draws through: it costs what a layer that is not there
+    // costs. A script that shows it gets a graph that draws it, and the
+    // picture is the one the property would have given.
+    struct Variant
+    {
+        std::string name;
+        std::string visible;
+        bool        show;
+    };
+    const Variant variants[] = {
+        { "hidden", R"({"user":"showmiddle","value":false})", false },
+        { "dropped", "false", false },
+        { "shown", R"({"user":"showmiddle","value":false})", true },
+    };
+    std::map<std::string, std::vector<uint8_t>> pixels;
+    std::map<std::string, uint64_t>             bytes;
+    for (const auto& variant : variants) {
+        SCOPED_TRACE(variant.name);
+        const auto directory = root_ / ("property-hidden-" + variant.name);
+        const auto project   = WriteLayeredFixture(directory, variant.visible, variant.show);
+        // The middle card draws through an effect, whose ping-pong images are
+        // what a hidden layer would otherwise keep.
+        std::filesystem::create_directories(directory / "effects");
+        std::ofstream(directory / "effects/identity.json")
+            << R"({"name":"identity","passes":[{"material":"materials/identity.json"}]})";
+        std::ofstream(directory / "materials/identity.json")
+            << R"({"passes":[{"shader":"identity_effect","blending":"translucent","cullmode":"nocull",)"
+               R"("depthtest":"disabled","depthwrite":"disabled","textures":[null]}]})";
+        std::ofstream(directory / "shaders/identity_effect.vert")
+            << "uniform mat4 g_ModelViewProjectionMatrix;\n"
+               "attribute vec3 a_Position;\n"
+               "attribute vec2 a_TexCoord;\n"
+               "varying vec2 v_TexCoord;\n"
+               "void main() {\n"
+               "  gl_Position = g_ModelViewProjectionMatrix * vec4(a_Position, 1.0);\n"
+               "  v_TexCoord = a_TexCoord;\n"
+               "}\n";
+        std::ofstream(directory / "shaders/identity_effect.frag")
+            << "uniform sampler2D g_Texture0;\n"
+               "varying vec2 v_TexCoord;\n"
+               "void main() { gl_FragColor = texture(g_Texture0, v_TexCoord); }\n";
+        auto layout = nlohmann::json::parse(std::ifstream(directory / "layout.json"));
+        layout["objects"][1]["effects"] = nlohmann::json::array({
+            { { "file", "effects/identity.json" }, { "visible", true } },
+        });
+        std::ofstream(directory / "layout.json") << layout;
+
+        LoadedScene loaded;
+        std::string error;
+        ASSERT_TRUE(LoadScene(project, directory / "cache", loaded, error)) << error;
+        auto& scene = *loaded.scene;
+        ASSERT_EQ(SelectSceneBackend(scene).backend, SceneBackend::NativeMetal);
+
+        @autoreleasepool {
+            CAMetalLayer* layer   = [CAMetalLayer layer];
+            layer.device          = MTLCreateSystemDefaultDevice();
+            layer.pixelFormat     = MTLPixelFormatBGRA8Unorm;
+            layer.drawableSize    = CGSizeMake(384, 256);
+            layer.framebufferOnly = NO;
+            MetalRender render;
+            ASSERT_TRUE(render.init(MetalRenderInitInfo {
+                .metal_layer = (__bridge void*)layer, .width = 384, .height = 256,
+                .render_width = 384, .render_height = 256, .display_scale_factor = 1.0,
+            })) << render.lastError();
+            auto graph = sceneToRenderGraph(scene);
+            ASSERT_NE(graph, nullptr);
+            ASSERT_TRUE(render.compileRenderGraph(scene, *graph)) << render.lastError();
+            render.UpdateCameraFillMode(scene, FillMode::ASPECTFIT);
+            for (int frame = 0; frame < 2; ++frame) AdvanceSceneFrame(render, scene);
+            ASSERT_FALSE(scene.runtime->ConsumeSceneGraphMutationFlag());
+            bytes[variant.name]  = render.RenderTargetBytesForTests();
+            pixels[variant.name] = ReadOutput(render, scene);
+
+            if (variant.name == "hidden") {
+                // What `thisScene.getLayer('middle').visible = true` reaches.
+                ASSERT_TRUE(scene.runtime->SetNodeVisible("middle", true));
+                EXPECT_TRUE(scene.runtime->ConsumeSceneGraphMutationFlag())
+                    << "a script showed a layer the graph left out and no new graph was asked for";
+                ASSERT_TRUE(render.clearLastRenderGraph()) << render.lastError();
+                graph = sceneToRenderGraph(scene);
+                ASSERT_TRUE(render.compileRenderGraph(scene, *graph)) << render.lastError();
+                for (int frame = 0; frame < 2; ++frame) AdvanceSceneFrame(render, scene);
+                bytes["revealed"]  = render.RenderTargetBytesForTests();
+                pixels["revealed"] = ReadOutput(render, scene);
+            }
+            render.destroy();
+        }
+    }
+
+    ASSERT_FALSE(pixels["hidden"].empty());
+    EXPECT_EQ(bytes["hidden"], bytes["dropped"])
+        << "a layer its properties hide still holds the images its effects draw through";
+    EXPECT_GT(bytes["shown"], bytes["hidden"]) << "the shown layer's effect chain holds no images";
+    EXPECT_EQ(pixels["hidden"], pixels["dropped"]);
+    EXPECT_NE(pixels["shown"], pixels["hidden"]) << "showing the middle card changed nothing";
+    EXPECT_EQ(pixels["revealed"], pixels["shown"])
+        << "a layer a script showed is not drawn the way its property shows it";
+    EXPECT_EQ(bytes["revealed"], bytes["shown"]);
+}
+
+namespace
+{
+
+/// The layered fixture with a slider driving the left card's alpha, which the
+/// cards' shader reads, and an effect chain on the middle card, which is hidden
+/// by the `showmiddle` switch unless `show_middle` says otherwise. Written with
+/// the values a user would have saved, so a fresh load of it is the picture a
+/// property preview has to arrive at.
+std::filesystem::path WritePropertyPreviewFixture(const std::filesystem::path& directory,
+                                                  bool show_middle, float opacity)
+{
+    const auto project =
+        WriteLayeredFixture(directory, R"({"user":"showmiddle","value":false})", show_middle);
+    std::ofstream(project)
+        << R"({"title":"Metal preview smoke","type":"scene","file":"layout.json","general":)"
+        << R"({"properties":{"showmiddle":{"type":"bool","value":)"
+        << (show_middle ? "true" : "false")
+        << R"(},"opacity":{"type":"slider","value":)" << opacity << "}}}}";
+    std::filesystem::create_directories(directory / "effects");
+    std::ofstream(directory / "effects/identity.json")
+        << R"({"name":"identity","passes":[{"material":"materials/identity.json"}]})";
+    std::ofstream(directory / "materials/identity.json")
+        << R"({"passes":[{"shader":"identity_effect","blending":"translucent","cullmode":"nocull",)"
+           R"("depthtest":"disabled","depthwrite":"disabled","textures":[null]}]})";
+    std::ofstream(directory / "shaders/identity_effect.vert")
+        << "uniform mat4 g_ModelViewProjectionMatrix;\n"
+           "attribute vec3 a_Position;\n"
+           "attribute vec2 a_TexCoord;\n"
+           "varying vec2 v_TexCoord;\n"
+           "void main() {\n"
+           "  gl_Position = g_ModelViewProjectionMatrix * vec4(a_Position, 1.0);\n"
+           "  v_TexCoord = a_TexCoord;\n"
+           "}\n";
+    std::ofstream(directory / "shaders/identity_effect.frag")
+        << "uniform sampler2D g_Texture0;\n"
+           "varying vec2 v_TexCoord;\n"
+           "void main() { gl_FragColor = texture(g_Texture0, v_TexCoord); }\n";
+    // Every card carries the alpha the slider writes; a card nothing binds keeps
+    // the full alpha the shader declares as its default.
+    std::ofstream(directory / "shaders/metal_probe.frag")
+        << "uniform float g_UserAlpha; // {\"material\":\"alpha\",\"default\":1.0}\n"
+           "varying vec2 v_TexCoord;\n"
+           "void main() {\n"
+           "  gl_FragColor = vec4(v_TexCoord.x, v_TexCoord.y, 0.25, g_UserAlpha);\n"
+           "}\n";
+    auto layout = nlohmann::json::parse(std::ifstream(directory / "layout.json"));
+    layout["objects"][0]["alpha"] = { { "user", "opacity" }, { "value", 1.0 } };
+    layout["objects"][1]["effects"] = nlohmann::json::array({
+        { { "file", "effects/identity.json" }, { "visible", true } },
+    });
+    std::ofstream(directory / "layout.json") << layout;
+    return project;
+}
+
+/// One frame the way the wallpaper's own draw runs it: the tick applies the
+/// bindings, a tick that showed a layer the graph left out asks for a new graph
+/// before anything is drawn, and then the frame is. Returns whether it rebuilt.
+bool AdvanceLikeTheWallpaper(MetalRender& render, Scene& scene,
+                             std::unique_ptr<rg::RenderGraph>& graph)
+{
+    scene.runtime->Tick(1.0 / 60.0);
+    scene.runtime->PumpTextLayerCache();
+    bool rebuilt = false;
+    if (scene.runtime->ConsumeSceneGraphMutationFlag()) {
+        EXPECT_TRUE(render.clearLastRenderGraph()) << render.lastError();
+        graph = sceneToRenderGraph(scene);
+        EXPECT_NE(graph, nullptr);
+        EXPECT_TRUE(render.compileRenderGraph(scene, *graph)) << render.lastError();
+        rebuilt = true;
+    }
+    EXPECT_TRUE(render.drawFrame(scene)) << render.lastError();
+    scene.PassFrameTime(1.0 / 60.0);
+    return rebuilt;
+}
+
+} // namespace
+
+TEST_F(MetalSceneDraw, APropertyPreviewChangesThePixelsAndAnEmptyDocumentRestoresThemByteForByte)
+{
+    // A property edit shown on the running scene, without loading it again: a
+    // slider moves what is drawn, a switch shows a layer the graph left out (one
+    // new graph, then it draws like any other), and the picture is the one a
+    // fresh load with the same values gives. The empty document is the project's
+    // own values again, and the first frame comes back exactly.
+    const ProjectProperties preview_document {
+        { "showmiddle", RuntimeScalarValue::Bool(true) },
+        { "opacity", RuntimeScalarValue::Float(0.5f) },
+    };
+
+    std::vector<uint8_t> reference;
+    {
+        SCOPED_TRACE("a fresh load with the previewed values");
+        const auto  project = WritePropertyPreviewFixture(root_ / "reference", true, 0.5f);
+        LoadedScene loaded;
+        std::string error;
+        ASSERT_TRUE(LoadScene(project, root_ / "reference-cache", loaded, error)) << error;
+        auto& scene = *loaded.scene;
+        ASSERT_EQ(SelectSceneBackend(scene).backend, SceneBackend::NativeMetal);
+        @autoreleasepool {
+            CAMetalLayer* layer   = [CAMetalLayer layer];
+            layer.device          = MTLCreateSystemDefaultDevice();
+            layer.pixelFormat     = MTLPixelFormatBGRA8Unorm;
+            layer.drawableSize    = CGSizeMake(384, 256);
+            layer.framebufferOnly = NO;
+            MetalRender render;
+            ASSERT_TRUE(render.init(MetalRenderInitInfo {
+                .metal_layer = (__bridge void*)layer, .width = 384, .height = 256,
+                .render_width = 384, .render_height = 256, .display_scale_factor = 1.0,
+            })) << render.lastError();
+            auto graph = sceneToRenderGraph(scene);
+            ASSERT_NE(graph, nullptr);
+            ASSERT_TRUE(render.compileRenderGraph(scene, *graph)) << render.lastError();
+            render.UpdateCameraFillMode(scene, FillMode::ASPECTFIT);
+            for (int frame = 0; frame < 2; ++frame) AdvanceSceneFrame(render, scene);
+            reference = ReadOutput(render, scene);
+            render.destroy();
+        }
+    }
+    ASSERT_FALSE(reference.empty());
+
+    const auto  project = WritePropertyPreviewFixture(root_ / "preview", false, 1.0f);
+    LoadedScene loaded;
+    std::string error;
+    ASSERT_TRUE(LoadScene(project, root_ / "preview-cache", loaded, error)) << error;
+    auto& scene = *loaded.scene;
+    ASSERT_NE(scene.runtime, nullptr);
+    ASSERT_EQ(SelectSceneBackend(scene).backend, SceneBackend::NativeMetal);
+
+    @autoreleasepool {
+        CAMetalLayer* layer   = [CAMetalLayer layer];
+        layer.device          = MTLCreateSystemDefaultDevice();
+        layer.pixelFormat     = MTLPixelFormatBGRA8Unorm;
+        layer.drawableSize    = CGSizeMake(384, 256);
+        layer.framebufferOnly = NO;
+        MetalRender render;
+        ASSERT_TRUE(render.init(MetalRenderInitInfo {
+            .metal_layer = (__bridge void*)layer, .width = 384, .height = 256,
+            .render_width = 384, .render_height = 256, .display_scale_factor = 1.0,
+        })) << render.lastError();
+        auto graph = sceneToRenderGraph(scene);
+        ASSERT_NE(graph, nullptr);
+        ASSERT_TRUE(render.compileRenderGraph(scene, *graph)) << render.lastError();
+        render.UpdateCameraFillMode(scene, FillMode::ASPECTFIT);
+        const auto frames = [&](int count) {
+            int rebuilds = 0;
+            for (int frame = 0; frame < count; ++frame) {
+                rebuilds += AdvanceLikeTheWallpaper(render, scene, graph) ? 1 : 0;
+            }
+            return rebuilds;
+        };
+
+        EXPECT_EQ(frames(2), 0);
+        const auto first = ReadOutput(render, scene);
+        ASSERT_FALSE(first.empty());
+        EXPECT_NE(first, reference) << "the previewed values draw the same picture as the saved ones";
+
+        // The slider alone moves what is drawn, in place.
+        scene.runtime->PreviewProjectPropertyOverride({ { "opacity", RuntimeScalarValue::Float(0.5f) } });
+        EXPECT_EQ(frames(2), 0) << "a slider asked for a new graph";
+        const auto faded = ReadOutput(render, scene);
+        EXPECT_NE(faded, first) << "the slider changed nothing that is drawn";
+        EXPECT_NE(faded, reference);
+
+        // The switch shows a layer the graph left out: one new graph, however many
+        // frames follow, and then the picture a fresh load of those values draws.
+        scene.runtime->PreviewProjectPropertyOverride(preview_document);
+        EXPECT_EQ(frames(1), 1) << "showing a layer the graph left out did not rebuild the graph";
+        EXPECT_EQ(frames(2), 0);
+        const auto previewed = ReadOutput(render, scene);
+        EXPECT_EQ(previewed, reference)
+            << "a previewed property draws something a fresh load with it does not";
+
+        // The empty document is the project's own values: the layer is hidden by
+        // its property again and the first frame is back, bit for bit, without
+        // another graph.
+        scene.runtime->PreviewProjectPropertyOverride({});
+        EXPECT_EQ(frames(3), 0);
+        const auto restored = ReadOutput(render, scene);
+        EXPECT_EQ(restored, first) << "the empty document did not restore the first frame";
+
+        // And a second round trip lands on the same pictures: nothing drifts.
+        scene.runtime->PreviewProjectPropertyOverride(preview_document);
+        EXPECT_EQ(frames(3), 0) << "the graph already draws the layer";
+        EXPECT_EQ(ReadOutput(render, scene), reference);
+        scene.runtime->PreviewProjectPropertyOverride({});
+        EXPECT_EQ(frames(2), 0);
+        EXPECT_EQ(ReadOutput(render, scene), first);
+        render.destroy();
+    }
+}
+
 TEST_F(MetalSceneDraw, AFeedbackCopyTradesTexturesAndDrawsTheSamePicture)
 {
     // Each lens reads the scene's own image, so the graph copies that image
@@ -5326,6 +6946,421 @@ TEST_F(MetalSceneDraw, AFeedbackCopyTradesTexturesAndDrawsTheSamePicture)
         if (drawn[i + 2] >= 185 && drawn[i + 2] <= 197) ++lensed;
     }
     EXPECT_GT(lensed, 500u) << "no lens shows the card it was drawn over";
+}
+
+TEST_F(MetalSceneDraw, ASceneLightReachesTheAuthorsLightingUniforms)
+{
+    // Lighting in a scene is its author's shader reading the light arrays. The
+    // card writes the first light's premultiplied colour (colour x intensity x
+    // radius squared) and its x position, so the drawn pixel is those values.
+    const auto project = WriteFixture(root_ / "lit");
+    std::ofstream(root_ / "lit/shaders/metal_probe.frag")
+        << "uniform vec4 g_LightsColorPremultiplied[3];\n"
+           "uniform vec4 g_LightsPosition[4];\n"
+           "varying vec2 v_TexCoord;\n"
+           "void main() {\n"
+           "  gl_FragColor = vec4(g_LightsColorPremultiplied[0].rg, g_LightsPosition[0].x / 400.0, 1.0);\n"
+           "}\n";
+    std::ofstream(root_ / "lit/layout.json")
+        << R"({"camera":{"center":[0,0,0],"eye":[0,0,1],"up":[0,1,0]},)"
+           R"("general":{"ambientcolor":[0,0,0],"skylightcolor":[0,0,0],"clearcolor":[0.0,0.0,0.0],)"
+           R"("cameraparallax":false,"orthogonalprojection":{"width":384,"height":256}},)"
+           R"("objects":[{"id":1,"name":"tile","image":"models/tile.json","origin":[192,128,0],)"
+           R"("scale":[1,1,1],"angles":[0,0,0],"visible":true},)"
+           R"({"id":2,"name":"lamp","light":"point","color":"1 0.5 0","intensity":0.5,"radius":1,)"
+           R"("origin":"100 64 300","angles":"0 0 0","scale":"1 1 1","visible":true}]})";
+    LoadedScene loaded;
+    std::string error;
+    ASSERT_TRUE(LoadScene(project, root_ / "lit-cache", loaded, error)) << error;
+    ASSERT_EQ(loaded.scene->lights.size(), 1u);
+    const auto selection = SelectSceneBackend(*loaded.scene);
+    ASSERT_EQ(selection.backend, SceneBackend::NativeMetal) << selection.fallback_reason;
+
+    @autoreleasepool {
+        id<MTLDevice> device  = MTLCreateSystemDefaultDevice();
+        CAMetalLayer* layer   = [CAMetalLayer layer];
+        layer.device          = device;
+        layer.pixelFormat     = MTLPixelFormatBGRA8Unorm;
+        layer.drawableSize    = CGSizeMake(384, 256);
+        layer.framebufferOnly = NO;
+
+        MetalRender         render;
+        MetalRenderInitInfo info {
+            .metal_layer          = (__bridge void*)layer,
+            .width                = 384,
+            .height               = 256,
+            .render_width         = 384,
+            .render_height        = 256,
+            .display_scale_factor = 1.0,
+        };
+        ASSERT_TRUE(render.init(info)) << render.lastError();
+        auto graph = sceneToRenderGraph(*loaded.scene);
+        ASSERT_NE(graph, nullptr);
+        ASSERT_TRUE(render.compileRenderGraph(*loaded.scene, *graph)) << render.lastError();
+        render.UpdateCameraFillMode(*loaded.scene, FillMode::ASPECTFIT);
+        AdvanceSceneFrame(render, *loaded.scene);
+        const auto rgba = ReadOutput(render, *loaded.scene);
+        render.destroy();
+
+        // The canvas centre is inside the card.
+        ASSERT_EQ(rgba.size(), 384u * 256u * 4u);
+        const std::size_t centre = (128u * 384u + 192u) * 4u;
+        EXPECT_NEAR(rgba[centre + 0], 128, 2) << "the light's red did not reach the shader";
+        EXPECT_NEAR(rgba[centre + 1], 64, 2) << "the light's green did not reach the shader";
+        EXPECT_NEAR(rgba[centre + 2], 64, 2) << "the light's position did not reach the shader";
+    }
+}
+
+TEST_F(MetalSceneDraw, AStepSamplingAnImageNothingProducesIsSkippedLikeOnCompatibility)
+{
+    // The overlay samples the composite of an object that is a layer by id
+    // but never draws one -- a light here, a hidden text layer in the wild.
+    // The graph finds no producer and leaves the slot without a name. The
+    // compatibility backend then neither draws nor clears that step, every
+    // frame; refusing the whole scene for it would send a wallpaper to a
+    // renderer that draws exactly the same picture.
+    const auto project = WriteFixture(root_ / "unproduced");
+    std::ofstream(root_ / "unproduced/models/overlay.json")
+        << R"({"width":128,"height":96,"material":"materials/overlay.json"})";
+    std::ofstream(root_ / "unproduced/materials/overlay.json")
+        << R"({"passes":[{"shader":"overlay_sample","blending":"translucent","cullmode":"nocull",)"
+           R"("depthtest":"disabled","depthwrite":"disabled","textures":["_rt_imageLayerComposite_3_a"]}]})";
+    std::ofstream(root_ / "unproduced/shaders/overlay_sample.vert")
+        << "uniform mat4 g_ModelViewProjectionMatrix;\n"
+           "attribute vec3 a_Position;\n"
+           "attribute vec2 a_TexCoord;\n"
+           "varying vec2 v_TexCoord;\n"
+           "void main() {\n"
+           "  gl_Position = g_ModelViewProjectionMatrix * vec4(a_Position, 1.0);\n"
+           "  v_TexCoord = a_TexCoord;\n"
+           "}\n";
+    std::ofstream(root_ / "unproduced/shaders/overlay_sample.frag")
+        << "uniform sampler2D g_Texture0;\n"
+           "varying vec2 v_TexCoord;\n"
+           "void main() {\n"
+           "  gl_FragColor = vec4(1.0, 1.0, 1.0, 1.0) - texture(g_Texture0, v_TexCoord) * 0.0;\n"
+           "}\n";
+    std::ofstream(root_ / "unproduced/layout.json")
+        << R"({"camera":{"center":[0,0,0],"eye":[0,0,1],"up":[0,1,0]},)"
+           R"("general":{"ambientcolor":[0,0,0],"skylightcolor":[0,0,0],"clearcolor":[0.0,0.0,0.0],)"
+           R"("cameraparallax":false,"orthogonalprojection":{"width":384,"height":256}},)"
+           R"("objects":[{"id":1,"name":"tile","image":"models/tile.json","origin":[192,128,0],)"
+           R"("scale":[1,1,1],"angles":[0,0,0],"visible":true},)"
+           R"({"id":2,"name":"overlay","image":"models/overlay.json","origin":[192,128,0],)"
+           R"("scale":[1,1,1],"angles":[0,0,0],"visible":true},)"
+           R"({"id":3,"name":"lamp","light":"point","color":"1 1 1","intensity":1,"radius":1,)"
+           R"("origin":"0 0 300","angles":"0 0 0","scale":"1 1 1","visible":true}]})";
+    LoadedScene loaded;
+    std::string error;
+    ASSERT_TRUE(LoadScene(project, root_ / "unproduced-cache", loaded, error)) << error;
+    const auto selection = SelectSceneBackend(*loaded.scene);
+    ASSERT_EQ(selection.backend, SceneBackend::NativeMetal) << selection.fallback_reason;
+
+    @autoreleasepool {
+        id<MTLDevice> device  = MTLCreateSystemDefaultDevice();
+        CAMetalLayer* layer   = [CAMetalLayer layer];
+        layer.device          = device;
+        layer.pixelFormat     = MTLPixelFormatBGRA8Unorm;
+        layer.drawableSize    = CGSizeMake(384, 256);
+        layer.framebufferOnly = NO;
+
+        MetalRender         render;
+        MetalRenderInitInfo info {
+            .metal_layer          = (__bridge void*)layer,
+            .width                = 384,
+            .height               = 256,
+            .render_width         = 384,
+            .render_height        = 256,
+            .display_scale_factor = 1.0,
+        };
+        ASSERT_TRUE(render.init(info)) << render.lastError();
+        auto graph = sceneToRenderGraph(*loaded.scene);
+        ASSERT_NE(graph, nullptr);
+        ASSERT_TRUE(render.compileRenderGraph(*loaded.scene, *graph)) << render.lastError();
+        render.UpdateCameraFillMode(*loaded.scene, FillMode::ASPECTFIT);
+        for (int frame = 0; frame < 2; ++frame) AdvanceSceneFrame(render, *loaded.scene);
+        const auto rgba = ReadOutput(render, *loaded.scene);
+        render.destroy();
+
+        // The overlay covers the canvas centre; the tile beneath it shows,
+        // with its constant 0.25 blue, and no overlay white anywhere.
+        ASSERT_EQ(rgba.size(), 384u * 256u * 4u);
+        const std::size_t centre = (128u * 384u + 192u) * 4u;
+        EXPECT_NEAR(rgba[centre + 2], 64, 2) << "the tile under the skipped step is missing";
+        std::size_t white = 0;
+        for (std::size_t i = 0; i + 3 < rgba.size(); i += 4) {
+            if (rgba[i] == 255 && rgba[i + 1] == 255 && rgba[i + 2] == 255) ++white;
+        }
+        EXPECT_EQ(white, 0u) << "the step with no input was drawn";
+    }
+}
+
+TEST_F(MetalSceneDraw, ThePointerSmoothingStepsOnceForEachFrameTheHostDraws)
+{
+    // `FrameBegin` steps the parallax cursor's smoothing by one frame time; the
+    // host calls it once per frame before drawing, on either backend. The card
+    // shows the smoothed pointer's x as red. With a 1 s delay the first 1/60 s
+    // frame moves it a sixtieth of the way from the centre to the cursor at
+    // the right edge; a backend that stepped it again inside its own frame
+    // would draw it nearer the cursor than the compatibility backend does.
+    const auto project = WriteFixture(root_ / "pointer");
+    std::ofstream(root_ / "pointer/shaders/metal_probe.frag")
+        << "uniform vec2 g_PointerPosition;\n"
+           "varying vec2 v_TexCoord;\n"
+           "void main() {\n"
+           "  gl_FragColor = vec4(g_PointerPosition.x, 0.0, 0.25, 1.0);\n"
+           "}\n";
+    std::ofstream(root_ / "pointer/layout.json")
+        << R"({"camera":{"center":[0,0,0],"eye":[0,0,1],"up":[0,1,0]},)"
+           R"("general":{"ambientcolor":[0,0,0],"skylightcolor":[0,0,0],"clearcolor":[0.0,0.0,0.0],)"
+           R"("cameraparallax":true,"cameraparallaxdelay":1.0,"cameraparallaxamount":0.0,)"
+           R"("cameraparallaxmouseinfluence":0.0,"orthogonalprojection":{"width":384,"height":256}},)"
+           R"("objects":[{"id":1,"name":"tile","image":"models/tile.json","origin":[192,128,0],)"
+           R"("scale":[1,1,1],"angles":[0,0,0],"visible":true}]})";
+    LoadedScene loaded;
+    std::string error;
+    ASSERT_TRUE(LoadScene(project, root_ / "pointer-cache", loaded, error)) << error;
+    ASSERT_EQ(SelectSceneBackend(*loaded.scene).backend, SceneBackend::NativeMetal);
+
+    @autoreleasepool {
+        id<MTLDevice> device  = MTLCreateSystemDefaultDevice();
+        CAMetalLayer* layer   = [CAMetalLayer layer];
+        layer.device          = device;
+        layer.pixelFormat     = MTLPixelFormatBGRA8Unorm;
+        layer.drawableSize    = CGSizeMake(384, 256);
+        layer.framebufferOnly = NO;
+
+        MetalRender         render;
+        MetalRenderInitInfo info {
+            .metal_layer          = (__bridge void*)layer,
+            .width                = 384,
+            .height               = 256,
+            .render_width         = 384,
+            .render_height        = 256,
+            .display_scale_factor = 1.0,
+        };
+        ASSERT_TRUE(render.init(info)) << render.lastError();
+        auto graph = sceneToRenderGraph(*loaded.scene);
+        ASSERT_NE(graph, nullptr);
+        ASSERT_TRUE(render.compileRenderGraph(*loaded.scene, *graph)) << render.lastError();
+        render.UpdateCameraFillMode(*loaded.scene, FillMode::ASPECTFIT);
+
+        // One host frame of 1/60 s with the cursor at the right edge.
+        loaded.scene->PassFrameTime(1.0 / 60.0);
+        loaded.scene->shaderValueUpdater->MouseInput(1.0, 0.5);
+        loaded.scene->shaderValueUpdater->FrameBegin();
+        ASSERT_TRUE(render.drawFrame(*loaded.scene)) << render.lastError();
+        const auto rgba = ReadOutput(render, *loaded.scene);
+        render.destroy();
+
+        ASSERT_EQ(rgba.size(), 384u * 256u * 4u);
+        const std::size_t centre = (128u * 384u + 192u) * 4u;
+        // 0.5 + 0.5 / 60 = 0.5083, 129.6 of 255; stepped twice it is 0.5247.
+        EXPECT_NEAR(rgba[centre + 0], 130, 1)
+            << "the pointer smoothing did not step exactly once for the frame";
+    }
+}
+
+TEST_F(MetalSceneDraw, ALayerReadingThePreviousFrameSeesExactlyThePreviousFrame)
+{
+    // History: the echo samples a buffer the graph fills only after the echo
+    // has drawn, so frame N shows frame N-1. That buffer is the target's own
+    // image for as long as the graph lives. The first frame must see the
+    // cleared buffer, not this frame's tile, and every later frame must see
+    // the frame before -- with scene optimisation off and on, which plans the
+    // copies and the reuse table differently around the same loop.
+    struct RestoreOptimization
+    {
+        bool was { wallpaper::vulkan::SceneOptimizationEnabled() };
+        ~RestoreOptimization() { wallpaper::vulkan::SetSceneOptimizationEnabled(was); }
+    } restore;
+
+    // The tile's constant blue, 0.25, which nothing else in the fixture draws.
+    const auto tile_pixels = [](const std::vector<uint8_t>& rgba) {
+        std::size_t count = 0;
+        for (std::size_t i = 0; i + 3 < rgba.size(); i += 4) {
+            if (rgba[i + 2] >= 56 && rgba[i + 2] <= 72) ++count;
+        }
+        return count;
+    };
+
+    std::map<bool, std::vector<std::vector<uint8_t>>> frames;
+    for (const bool optimise : { false, true }) {
+        SCOPED_TRACE(optimise ? "optimisation on" : "optimisation off");
+        wallpaper::vulkan::SetSceneOptimizationEnabled(optimise);
+        const std::string name    = optimise ? "history-on" : "history-off";
+        const auto        project = WriteHistoryFixture(root_ / name);
+        LoadedScene       loaded;
+        std::string       error;
+        ASSERT_TRUE(LoadScene(project, root_ / (name + "-cache"), loaded, error)) << error;
+        const auto selection = SelectSceneBackend(*loaded.scene);
+        ASSERT_EQ(selection.backend, SceneBackend::NativeMetal) << selection.fallback_reason;
+
+        @autoreleasepool {
+            id<MTLDevice> device  = MTLCreateSystemDefaultDevice();
+            CAMetalLayer* layer   = [CAMetalLayer layer];
+            layer.device          = device;
+            layer.pixelFormat     = MTLPixelFormatBGRA8Unorm;
+            layer.drawableSize    = CGSizeMake(384, 256);
+            layer.framebufferOnly = NO;
+
+            MetalRender         render;
+            MetalRenderInitInfo info {
+                .metal_layer          = (__bridge void*)layer,
+                .width                = 384,
+                .height               = 256,
+                .render_width         = 384,
+                .render_height        = 256,
+                .display_scale_factor = 1.0,
+            };
+            ASSERT_TRUE(render.init(info)) << render.lastError();
+            auto graph = sceneToRenderGraph(*loaded.scene);
+            ASSERT_NE(graph, nullptr);
+            ASSERT_TRUE(render.compileRenderGraph(*loaded.scene, *graph)) << render.lastError();
+            render.UpdateCameraFillMode(*loaded.scene, FillMode::ASPECTFIT);
+
+            // Nothing in the fixture moves, so only the loop can keep it
+            // changing; the clock must not be allowed to stop on it.
+            EXPECT_TRUE(render.ShaderUpdateDemandReasons() &
+                        wallpaper::vulkan::DynamicReason::Feedback);
+
+            for (int frame = 0; frame < 4; ++frame) {
+                AdvanceSceneFrame(render, *loaded.scene);
+                frames[optimise].push_back(ReadOutput(render, *loaded.scene));
+            }
+            render.destroy();
+        }
+
+        const auto& drawn = frames[optimise];
+        ASSERT_EQ(drawn.size(), 4u);
+        // Frame 0 reads the cleared buffer. Had the echo read this frame's
+        // own picture it would already hold the tile, and frame 1 would add
+        // nothing to it.
+        const auto alone = tile_pixels(drawn[0]);
+        EXPECT_GT(alone, 3000u) << "the tile itself was not drawn";
+        // Frame 1 shows frame 0 at half size: the tile once more, a quarter of
+        // its area.
+        EXPECT_GT(tile_pixels(drawn[1]), alone + alone / 8)
+            << "the echo did not show the previous frame's tile";
+        // Frame 2 shows frame 1, which already held an echo of its own; once
+        // the echo's echo is below a pixel the picture stops changing.
+        EXPECT_GE(tile_pixels(drawn[2]), tile_pixels(drawn[1]));
+        EXPECT_NE(drawn[1], drawn[2]) << "frame 2 did not read frame 1";
+    }
+
+    for (std::size_t frame = 0; frame < frames[true].size(); ++frame) {
+        EXPECT_EQ(frames[true][frame], frames[false][frame]) << "frame " << frame;
+    }
+}
+
+TEST_F(MetalSceneDraw, TargetsThatAreNeverAliveTogetherShareImagesAndDrawTheSamePicture)
+{
+    // Two cases share images: traded copies of the scene (each lens reads a
+    // copy of the picture so far, alive only until the lens has drawn) and
+    // effect buffers of layers drawn one after the other. With sharing on,
+    // fewer bytes of targets must hold exactly the same frames as with every
+    // target in an image of its own, and the copies must still be traded
+    // rather than blitted. Scene optimisation is on for the lenses and off for
+    // the effects, whose static results it would otherwise pin.
+    struct RestoreSwitches
+    {
+        bool optimise { wallpaper::vulkan::SceneOptimizationEnabled() };
+        ~RestoreSwitches()
+        {
+            wallpaper::vulkan::SetSceneOptimizationEnabled(optimise);
+            MetalRender::SetTargetSharingForTests(true);
+        }
+    } restore;
+
+    const auto effect_fixture = [this](const std::filesystem::path& root) {
+        const auto project = WriteFixture(root);
+        std::filesystem::create_directories(root / "effects");
+        std::ofstream(root / "effects/halve.json")
+            << R"({"name":"halve green","passes":[{"material":"materials/halve.json"}]})";
+        std::ofstream(root / "materials/halve.json")
+            << R"({"passes":[{"shader":"halve_green","blending":"translucent","cullmode":"nocull",)"
+               R"("depthtest":"disabled","depthwrite":"disabled","textures":[null]}]})";
+        std::ofstream(root / "shaders/halve_green.vert")
+            << "uniform mat4 g_ModelViewProjectionMatrix;\n"
+               "attribute vec3 a_Position;\n"
+               "attribute vec2 a_TexCoord;\n"
+               "varying vec2 v_TexCoord;\n"
+               "void main() {\n"
+               "  gl_Position = g_ModelViewProjectionMatrix * vec4(a_Position, 1.0);\n"
+               "  v_TexCoord = a_TexCoord;\n"
+               "}\n";
+        std::ofstream(root / "shaders/halve_green.frag")
+            << "uniform sampler2D g_Texture0;\n"
+               "varying vec2 v_TexCoord;\n"
+               "void main() {\n"
+               "  gl_FragColor = texture(g_Texture0, v_TexCoord) * vec4(1.0, 0.5, 1.0, 1.0);\n"
+               "}\n";
+        const std::string effects =
+            R"("effects":[{"file":"effects/halve.json","visible":true},{"file":"effects/halve.json","visible":true}])";
+        std::ofstream(root / "layout.json")
+            << R"({"camera":{"center":[0,0,0],"eye":[0,0,1],"up":[0,1,0]},)"
+               R"("general":{"ambientcolor":[0,0,0],"skylightcolor":[0,0,0],"clearcolor":[0.0,0.0,0.0],)"
+               R"("cameraparallax":false,"orthogonalprojection":{"width":384,"height":256}},)"
+               R"("objects":[{"id":1,"name":"left","image":"models/tile.json","origin":[120,128,0],)"
+               R"("scale":[0.5,0.5,1],"angles":[0,0,0],"visible":true,)" + effects + "},"
+               R"({"id":2,"name":"right","image":"models/tile.json","origin":[264,128,0],)"
+               R"("scale":[0.5,0.5,1],"angles":[0,0,0],"visible":true,)" + effects + "}]}";
+        return project;
+    };
+
+    for (const bool lenses : { true, false }) {
+        SCOPED_TRACE(lenses ? "traded copies" : "effect buffers");
+        wallpaper::vulkan::SetSceneOptimizationEnabled(lenses);
+        std::map<bool, std::vector<std::vector<uint8_t>>>    frames;
+        std::map<bool, uint64_t>                              bytes;
+        std::map<bool, MetalRender::FrameEncodeCountsForTests> counts;
+        for (const bool share : { false, true }) {
+            MetalRender::SetTargetSharingForTests(share);
+            const std::string name =
+                std::string(lenses ? "share-lens-" : "share-effect-") + (share ? "on" : "off");
+            const auto  project = lenses ? WriteFeedbackFixture(root_ / name)
+                                         : effect_fixture(root_ / name);
+            LoadedScene loaded;
+            std::string error;
+            ASSERT_TRUE(LoadScene(project, root_ / (name + "-cache"), loaded, error)) << error;
+            ASSERT_EQ(SelectSceneBackend(*loaded.scene).backend, SceneBackend::NativeMetal);
+            @autoreleasepool {
+                CAMetalLayer* layer   = [CAMetalLayer layer];
+                layer.device          = MTLCreateSystemDefaultDevice();
+                layer.pixelFormat     = MTLPixelFormatBGRA8Unorm;
+                layer.drawableSize    = CGSizeMake(384, 256);
+                layer.framebufferOnly = NO;
+                MetalRender         render;
+                MetalRenderInitInfo info {
+                    .metal_layer          = (__bridge void*)layer,
+                    .width                = 384,
+                    .height               = 256,
+                    .render_width         = 384,
+                    .render_height        = 256,
+                    .display_scale_factor = 1.0,
+                };
+                ASSERT_TRUE(render.init(info)) << render.lastError();
+                auto graph = sceneToRenderGraph(*loaded.scene);
+                ASSERT_NE(graph, nullptr);
+                ASSERT_TRUE(render.compileRenderGraph(*loaded.scene, *graph)) << render.lastError();
+                render.UpdateCameraFillMode(*loaded.scene, FillMode::ASPECTFIT);
+                for (int frame = 0; frame < 3; ++frame) {
+                    AdvanceSceneFrame(render, *loaded.scene);
+                    frames[share].push_back(ReadOutput(render, *loaded.scene));
+                }
+                bytes[share]  = render.RenderTargetBytesForTests();
+                counts[share] = render.LastFrameEncodeCountsForTests();
+                render.destroy();
+            }
+        }
+        EXPECT_LT(bytes[true], bytes[false]) << "no target gave its image up";
+        EXPECT_EQ(counts[true].blit_passes, counts[false].blit_passes)
+            << "sharing turned a traded copy into a blit";
+        ASSERT_EQ(frames[true].size(), frames[false].size());
+        for (std::size_t frame = 0; frame < frames[true].size(); ++frame) {
+            EXPECT_EQ(frames[true][frame], frames[false][frame]) << "frame " << frame;
+        }
+    }
 }
 
 TEST_F(MetalSceneDraw, InterleavedFeedbackCopiesPreserveEachReadersImage)

@@ -211,13 +211,15 @@ bool BuildScenePassDescriptions(Scene& scene, const rg::RenderGraph& graph,
             desc.camera_override = src.camera_override;
             desc.blend           = material->blenmode;
             desc.write_alpha     = src.write_alpha;
-            desc.depth_test      = material->depth_test;
-            // Transparent coverage must not occlude later content. Additive
-            // and translucent layers keep painter's-algorithm order.
-            desc.depth_write =
-                material->depth_write && material->blenmode != BlendMode::Translucent &&
-                material->blenmode != BlendMode::Additive;
             desc.target_key      = scene.ResolveRenderTargetName(src.output);
+            {
+                const auto* target    = scene.FindRenderTarget(desc.target_key);
+                const bool  has_depth = target != nullptr && target->withDepth;
+                const auto  depth     = ResolveSceneDepthState(*material, has_depth);
+                desc.depth_test       = depth.test;
+                desc.depth_write      = depth.write;
+                desc.cull_mode        = SceneMetalCullMode(material->cull_mode, has_depth);
+            }
             desc.load_action = ResolveLoadAction(src.preserve_target_contents,
                                                  src.clear_on_first_use);
             // Only the scene's own colour buffer clears to the author's

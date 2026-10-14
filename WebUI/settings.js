@@ -1,5 +1,5 @@
 import { t, language } from './i18n.js';
-import { intervalLabel, sourceSelect, sourceNote, planRows, plansGroup } from './plans.js';
+import { intervalLabel, unlockLabel, sourceSelect, sourceNote, planRows, plansGroup } from './plans.js';
 import { backupGroup } from './backup.js';
 import { playlistOrderMarkup, movePlaylistItem, installPlaylistDrag } from './playlist-order.js';
 import { automationRows, solarLocationGroup, automationClick, automationInput, automationChange, automationSubmit, restoreAutomationFocus } from './automation.js';
@@ -19,12 +19,16 @@ const batteryModes = [['keepRunning', 'Keep running'], ['reducedQuality', 'Reduc
 const otherAudioActions = [['keepRunning', 'Keep running'], ['mute', 'Mute'], ['pause', 'Pause']];
 const displaySleepActions = [['pause', 'Pause'], ['stop', 'Stop (free memory)']];
 const desktopCoveredActions = [['pause', 'Pause'], ['keepRunning', 'Keep running']];
-const systemConditionActions = [['keepRunning', 'Keep running'], ['pause', 'Pause'], ['stop', 'Stop (free memory)']];
+// Reduced quality keeps wallpapers playing at the battery profile's scale and frame rate instead of
+// pausing them. Low Power Mode, a hot Mac and a low battery offer it; display sleep and the rest do not.
+const systemConditionActions = [['keepRunning', 'Keep running'], ['reduceQuality', 'Reduced quality'], ['pause', 'Pause'], ['stop', 'Stop (free memory)']];
+// The charge levels the low-battery rule offers, in percent; Swift refuses any other.
+const lowBatteryLevels = [[10, '10%'], [20, '20%'], [30, '30%']];
 const focusActions = { keepRunning: 'Keep running', mute: 'Mute', pause: 'Pause', stop: 'Stop (free memory)', wallpaper: 'Use wallpaper', playlist: 'Use saved playlist' };
 const thermalStates = { nominal: 'normal', fair: 'warm', serious: 'hot', critical: 'very hot' };
-const hotkeyTitles = { togglePlayback: 'Play or pause wallpapers', nextWallpaper: 'Next wallpaper', previousWallpaper: 'Previous wallpaper', openControlPanel: 'Open the control panel' };
+const hotkeyTitles = { togglePlayback: 'Play or pause wallpapers', toggleMute: 'Mute or unmute wallpapers', nextWallpaper: 'Next wallpaper', previousWallpaper: 'Previous wallpaper', randomWallpaper: 'Random wallpaper', openControlPanel: 'Open the control panel' };
 // What the Shortcuts app and wallpapermachine:// links can do; the ellipsis stands for an id.
-const automationLinks = ['wallpapermachine://toggle', 'wallpapermachine://play', 'wallpapermachine://pause', 'wallpapermachine://next', 'wallpapermachine://previous', 'wallpapermachine://apply?id=…', 'wallpapermachine://playlist?id=…', 'wallpapermachine://preset?id=…', 'wallpapermachine://layout?id=…', 'wallpapermachine://open?page=settings'];
+const automationLinks = ['wallpapermachine://toggle', 'wallpapermachine://play', 'wallpapermachine://pause', 'wallpapermachine://mute', 'wallpapermachine://unmute', 'wallpapermachine://togglemute', 'wallpapermachine://next', 'wallpapermachine://previous', 'wallpapermachine://random', 'wallpapermachine://random?from=favorites', 'wallpapermachine://apply?id=…', 'wallpapermachine://apply?id=…&display=all', 'wallpapermachine://playlist?id=…', 'wallpapermachine://preset?id=…', 'wallpapermachine://layout?id=…', 'wallpapermachine://open?page=settings'];
 const playlistModes = [['off', 'Off'], ['rotate', 'Rotate wallpapers'], ['dayNight', 'Day and night']];
 const playlistOrders = [['sequential', 'In order'], ['shuffle', 'Shuffle']];
 // Draft keys of a display's How often menu and its custom minutes field.
@@ -75,10 +79,13 @@ const demandReasons = {
 };
 // Every mode the bridge can emit. `unknown` is a running scene that could not be
 // read, which is not the same as one that is ticking, so it gets its own words.
+// `stopped_after_failure` is a scene whose renderer gave up after an error: it is
+// not paused by anyone, so it must never be worded like a pause.
 const sceneModes = {
   continuous: 'updating continuously', waiting_for_event: 'waiting for events',
   waiting_for_deadline: 'waiting for a timer', user_paused: 'paused by you',
-  policy_suspended: 'suspended by the app', not_applicable: 'not applicable to this wallpaper',
+  policy_suspended: 'suspended by the app', stopped_after_failure: 'stopped after a rendering failure',
+  not_applicable: 'not applicable to this wallpaper',
   unknown: 'running — state could not be read',
 };
 // Only backends that actually drew something are named here. A scene with no
@@ -158,22 +165,48 @@ export function activeQualityPreset(settings) {
   return 'custom';
 }
 
-// Effective rate for the "limited by Performance" note: saved fps, the global
-// cap, and the battery cap while reduced quality is actually in force. Display
-// refresh is not a Performance setting, so it does not raise this note.
+// Effective rate for the "limited by Performance" note: the saved fps against the
+// ceiling the engine reports in force, which is the global cap lowered by the
+// reduced-quality frame rate while that holds, whatever the reason. Display refresh
+// is not a Performance setting, so it does not raise this note.
 export function performanceLimitedFps(saved, settings = {}) {
   const rate = finiteNumber(saved);
   if (rate == null) return null;
-  const limits = [];
-  const cap = storedFrameRateCap(settings);
-  if (cap != null) limits.push(cap);
-  if (settings.batteryMode === 'reducedQuality' && settings.onBatteryPower) {
-    const battery = finiteNumber(settings.batteryTargetFps);
-    if (battery != null) limits.push(battery);
+  const ceiling = settings.effectiveFrameRateCap == null ? null : finiteNumber(settings.effectiveFrameRateCap);
+  return ceiling != null && ceiling < rate ? ceiling : null;
+}
+
+// Why quality is lowered right now, most specific first: the reasons the engine
+// holds (heat, Low Power Mode, a low battery), then the battery mode, which the
+// engine reports as the power source rather than as a reason.
+const qualityCauseOrder = ['heat', 'lowPowerMode', 'lowBattery'];
+function qualityReducedBy(settings) {
+  const held = Array.isArray(settings.qualityThrottle) ? settings.qualityThrottle : [];
+  const causes = qualityCauseOrder.filter(cause => held.includes(cause));
+  if (settings.batteryMode === 'reducedQuality' && settings.onBatteryPower) causes.push('battery');
+  return causes;
+}
+
+// The sentences name the first cause only; every one is a direct t() call so the
+// localization check sees it.
+function qualityStatusText(cause) {
+  switch (cause) {
+    case 'heat': return t('The Mac is hot. Reduced quality is in use.');
+    case 'lowPowerMode': return t('Low Power Mode is on. Reduced quality is in use.');
+    case 'lowBattery': return t('The battery is low. Reduced quality is in use.');
+    case 'battery': return t('On battery. Reduced quality is in use.');
+    default: return t('Your usual quality settings are in use.');
   }
-  if (!limits.length) return null;
-  const effective = Math.min(rate, ...limits);
-  return effective < rate ? effective : null;
+}
+
+function qualityEffectiveText(cause, values) {
+  switch (cause) {
+    case 'heat': return t('{effective} while the Mac is hot. Your setting is {saved}.', values);
+    case 'lowPowerMode': return t('{effective} in Low Power Mode. Your setting is {saved}.', values);
+    case 'lowBattery': return t('{effective} while the battery is low. Your setting is {saved}.', values);
+    case 'battery': return t('{effective} on battery. Your setting is {saved}.', values);
+    default: return t('{effective}. Your setting of {saved} is not in effect right now.', values);
+  }
 }
 
 export function revealSettingsSection(section) {
@@ -197,7 +230,7 @@ export function energyLevelLabel(level) {
   return energyLevels[level] ? t(energyLevels[level]) : '';
 }
 
-function batteryShare(percent) {
+export function batteryShare(percent) {
   const number = Number(percent);
   if (!Number.isFinite(number)) return '';
   if (number < 1) return t('Less than 1% of a full battery charge per hour.');
@@ -336,7 +369,11 @@ function draw(view) {
   const disclosure = (key, title, content, style = '', note = '') => `<details class="settings-disclosure${style ? ` ${style}` : ''}" data-key="${e(key)}"><summary><span class="settings-disclosure-indicator" aria-hidden="true">${helpers.icon('chevronRight', 16)}</span><span class="settings-disclosure-title">${e(title)}${note ? `<span class="settings-note">${e(note)}</span>` : ''}</span></summary><div class="settings-disclosure-body">${content}</div></details>`;
   const group = (key, title, content) => `<section class="settings-group" data-key="${e(key)}"${title ? ` aria-labelledby="settings-group-${e(key)}"` : ''}>${title ? `<h3 id="settings-group-${e(key)}">${e(title)}</h3>` : ''}${content}</section>`;
   const section = (id, title, content, action = '') => `<section class="settings-page" id="settings-${id}" role="tabpanel" aria-labelledby="settings-tab-${id}" tabindex="0" data-key="page-${id}"${view.section === id ? '' : ' hidden'}><header class="settings-heading"><h2>${e(title)}</h2>${action}</header>${content}</section>`;
-  const settingToggle = (key, label, off = false, note = '') => row(key, t(label), toggle(key, t(label), draft(key, settings[key]), `data-setting="${key}"${note ? ` aria-describedby="settings-note-${key}"` : ''}`, off || busy || unavailable), note, '', key);
+  const settingToggle = (key, label, off = false, note = '', extra = '') => row(key, t(label), toggle(key, t(label), draft(key, settings[key]), `data-setting="${key}"${note ? ` aria-describedby="settings-note-${key}"` : ''}`, off || busy || unavailable) + extra, note, '', key);
+  // The login item is registered but switched off in System Settings; only the user can allow it there.
+  const loginNote = !settings.launchAtLoginAvailable ? t('Move the app to Applications to enable.')
+    : settings.launchAtLoginNeedsApproval ? t('Allow WallpaperMachine in System Settings → General → Login Items to launch it at login.') : '';
+  const loginAction = settings.launchAtLoginAvailable && settings.launchAtLoginNeedsApproval ? button(t('Open Login Items…'), 'openLoginItemsSettings', {}, busy) : '';
   const paragraphs = (...texts) => texts.map(text => `<p>${e(text)}</p>`).join('');
   // The helpers the saved-playlist and backup modules draw with, so their rows match these.
   const ctx = { state, view, e, row, select, button, toggle, group, disclosure, error, draft, busy, unavailable };
@@ -348,10 +385,12 @@ function draw(view) {
   const languageOptions = [['system', t('System (Auto)')], ...(languageState.options || []).map(option => [option.id, option.name])];
   const languageValue = draft('language', languageState.preference || 'system');
   const general = group('general-language', t('Interface'), row('language', t('Language'), select('language', t('Language'), languageValue, languageOptions, 'data-language-setting', view.pending.has('language')), t('The interface and import picker switch at once. Quit and reopen the app to switch menus and other dialogs.')))
-    + group('general-behavior', t('Startup & desktop'), settingToggle('launchAtLogin', 'Launch at login', !settings.launchAtLoginAvailable, !settings.launchAtLoginAvailable ? t('Move the app to Applications to enable.') : '')
+    + group('general-behavior', t('Startup & desktop'), settingToggle('launchAtLogin', 'Launch at login', !settings.launchAtLoginAvailable, loginNote, loginAction)
       + settingToggle('hideAfterActivating', 'Hide window after applying a wallpaper')
+      + settingToggle('livePropertyEdits', 'Show property edits on the desktop as I make them', false, t('While you edit a wallpaper’s properties, your displays follow each change before you press Apply changes, and Revert puts the saved look back. Pictures and options that switch an effect on or off still wait for Apply changes. The lock screen and the Mission Control picture keep the saved look until you apply.'))
       + settingToggle('keepWindowsOnWallpaperClick', 'Keep windows in place when clicking the wallpaper', false, t('Turns off macOS’s “Click wallpaper to reveal desktop” so clicks reach interactive wallpapers.'))
-      + settingToggle('refreshDesktopPicture', 'Update the Mission Control picture every 5 minutes', false, t('Mission Control shows a still picture of the wallpaper, retaken when it starts, changes or resumes. This also retakes it while it plays. Not used while the lock screen is animated.')))
+      + settingToggle('writeDesktopPicture', 'Use the wallpaper as the macOS desktop picture', settings.desktopPictureLocked === true, settings.desktopPictureLocked === true ? t('Animate lock screen sets the desktop picture itself, so this cannot be changed while it is on.') : t('Mission Control and the moment before a wallpaper loads show a still frame of the wallpaper. Turn this off to leave macOS’s own wallpaper settings alone; your own picture comes back at once.'))
+      + settingToggle('refreshDesktopPicture', 'Update the Mission Control picture every 5 minutes', settings.writeDesktopPicture === false, t('Mission Control shows a still picture of the wallpaper, retaken when it starts, changes or resumes. This also retakes it while it plays. Not used while the lock screen is animated.')))
     + group('general-shortcuts', t('Keyboard shortcuts'), (settings.hotkeys || []).map(hotkey => {
       const id = String(hotkey.id);
       const recording = view.recording === id;
@@ -360,7 +399,7 @@ function draw(view) {
         : `<kbd class="settings-shortcut">${e(hotkey.shortcut || t('Not set'))}</kbd>${button(hotkey.shortcut ? t('Change…') : t('Record…'), 'hotkeyRecord', { id }, busy)}${hotkey.shortcut ? button(t('Clear'), 'hotkeyClear', { id }, busy) : ''}`;
       return row(`hotkey-${id}`, t(hotkeyTitles[id] || id), control) + error(`hotkey-error-${id}`, hotkey.error);
     }).join('') + `<p class="settings-note" data-key="hotkeys-note">${e(t('They work whichever app is in front. Hold ⌘, ⌥ or ⌃ with the key; F13 to F20 work alone. No permission is needed.'))}</p>`)
-      + disclosure('general-automation', t('Shortcuts app and links'), paragraphs(t('The Shortcuts app can control playback, go to the previous or next wallpaper, apply a wallpaper, saved playlist or property preset, and open this window. Siri and Spotlight can run these actions too.'), t('Apply Display Layout restores a saved arrangement across its displays. Choose the layout by name in Shortcuts, or use its saved id in a layout link.'), t('Links can run the same actions. Wallpaper and playlist actions accept display= for a specific screen; otherwise they use the target display. Property presets affect their wallpaper on every display. Choose saved items by name in Shortcuts.')) + `<ul class="settings-list" data-key="automation-links">${automationLinks.map(link => `<li><code>${e(link)}</code></li>`).join('')}</ul>`)
+      + disclosure('general-automation', t('Shortcuts app and links'), paragraphs(t('The Shortcuts app can control playback, mute or unmute wallpapers, go to the previous or next wallpaper, apply a wallpaper, saved playlist or property preset, and open this window. Siri and Spotlight can run these actions too.'), t('Apply Display Layout restores a saved arrangement across its displays. Choose the layout by name in Shortcuts, or use its saved id in a layout link.'), t('Random Wallpaper changes a display to a wallpaper other than the one it shows, and goes through all of them before it repeats one. It can draw from your favorites only: choose Favorites in Shortcuts, or use from=favorites in a link.'), t('Links can run the same actions. Wallpaper and playlist actions accept display= for a specific screen; otherwise they use the target display. An apply link also accepts display=all, and Apply Wallpaper has an On all displays option, to use every display at once. Property presets affect their wallpaper on every display. Choose saved items by name in Shortcuts.')) + `<ul class="settings-list" data-key="automation-links">${automationLinks.map(link => `<li><code>${e(link)}</code></li>`).join('')}</ul>`)
     + group('general-lock', t('Lock screen'), settingToggle('lockScreenEnabled', 'Animate lock screen', lockUnavailable || settings.lockScreenBusy, t('Experimental'))
       + row('lock-status', t('Lock screen status'), `<span class="settings-status" role="status">${e(lockUnavailable ? (settings.lockScreenAvailable === false && settings.lockScreenStatus) || t('Unavailable') : settings.lockScreenBusy ? `${settings.lockScreenStatus || t('Updating')}…` : settings.lockScreenStatus)}</span>${settings.lockScreenError ? button(t('Retry'), 'lockScreenRetry', {}, busy || settings.lockScreenBusy) : ''}`, '', 'settings-readout')
       + error('lock-error', settings.lockScreenError)
@@ -377,8 +416,11 @@ function draw(view) {
   const scaleOverridden = Number(settings.renderScale) !== Number(settings.preferredRenderScale);
   const preferredScale = scaleValue(settings.preferredRenderScale);
   const batteryScale = scaleValue(settings.batteryRenderScale);
-  const batteryReduced = settings.batteryMode === 'reducedQuality';
-  const batteryActive = batteryReduced && Boolean(settings.onBatteryPower);
+  // The render scale and frame rate below are one profile, shared by every Reduced quality choice.
+  // A low-battery choice counts only on a Mac with a battery, which is where its select is offered.
+  const reducedChosen = settings.batteryMode === 'reducedQuality' || settings.lowPowerModeAction === 'reduceQuality'
+    || settings.thermalAction === 'reduceQuality' || (settings.batteryPercent != null && settings.lowBatteryAction === 'reduceQuality');
+  const reducedBy = qualityReducedBy(settings);
   const sessions = Number(settings.sharedVideoDecodeSessions) || 0;
   const consumers = Number(settings.sharedVideoDecodeConsumers) || 0;
   const displayName = (name, id) => name || t('Display {id}', { id });
@@ -388,6 +430,10 @@ function draw(view) {
   // first frame — so it is reported as starting rather than listed as a cause.
   const sceneModeLine = report => {
     const where = `${displayName(report.display, report.displayId)} — ${report.wallpaperTitle || report.wallpaperId || t('wallpaper')}`;
+    // Before the starting check: a scene whose first frame failed also has no
+    // frame yet, and reading "starting" forever is the lie this mode exists to end.
+    // The reasons describe what keeps a clock running, which is moot once it stopped.
+    if (report.mode === 'stopped_after_failure') return `${where}: ${t(sceneModes.stopped_after_failure)}`;
     const reasons = Array.isArray(report.reasons) ? report.reasons : [];
     if (reasons.includes('no_frame_yet')) return `${where}: ${t('starting — no frame drawn yet')}`;
     const named = reasons.map(reason => t(demandReasons[reason]) || reason);
@@ -412,7 +458,11 @@ function draw(view) {
     const video = t(videoPaths[report.videoPath]);
     return `${where}: ${backend}${fellBack && report.fallbackReason ? ` ${t('(fell back: {reason})', { reason: report.fallbackReason })}` : ''}${video ? ` ${t('— video: {path}', { path: video })}` : ''}`;
   };
-  const sceneModeReport = (settings.sceneUpdateModes || []).map(report => `<li>${e(sceneModeLine(report))}</li>`).join('');
+  // A scene that stopped after a failure is the one reading with something to do about
+  // it: Retry loads that wallpaper again on that display. Nothing retries by itself, and
+  // no other row offers it, because a pause or a suspension is not a fault to retry.
+  const sceneModeItem = report => `<li>${e(sceneModeLine(report))}${report.mode === 'stopped_after_failure' ? ` ${button(t('Retry'), 'sceneRetry', { displayId: report.displayId }, busy)}` : ''}</li>`;
+  const sceneModeReport = (settings.sceneUpdateModes || []).map(sceneModeItem).join('');
   const sceneBackendReport = (settings.sceneRenderers || []).map(report => `<li>${e(sceneRendererLine(report))}</li>`).join('');
   // Read from what actually drew a scene, not from the preference: the note it
   // gates is only true of a surface that really is on the native backend.
@@ -458,23 +508,35 @@ function draw(view) {
       t('Includes the control panel, the lock screen and the CPU side of video decoding. Screen compositing, the hardware video decoder, videos played with Native video, memory and the display itself are not included.'),
       t('Low: below 0.5 W. Medium: 0.5 W to below 2 W. High: 2 W or more.'),
       t('Change a quality setting below to compare energy use.')), 'settings-energy-help'));
+  // The option needs a second display to mean anything; it stays on screen while on, so it can be turned off.
+  const enabledDisplayCount = (state.displays || []).filter(display => display.enabled).length;
   const playback = group('performance-playback', t('Playback'),
-    row('desktop-covered', t('When windows cover the desktop'), select('desktopCoveredAction', t('When windows cover the desktop'), draft('desktopCoveredAction', settings.desktopCoveredAction || 'pause'), localizedOptions(desktopCoveredActions), 'data-setting="desktopCoveredAction"', busy || unavailable), t('Covered means windows hide everything but the menu bar and the screen edges. Pause keeps the last frame there. Wallpapers you can’t see at all always pause.'))
+    settingToggle('wallpapersMuted', 'Mute all wallpapers', false, t('Silences every wallpaper without changing their saved sound or volume. It works together with the rules below.'))
+    + row('desktop-covered', t('When windows cover the desktop'), select('desktopCoveredAction', t('When windows cover the desktop'), draft('desktopCoveredAction', settings.desktopCoveredAction || 'pause'), localizedOptions(desktopCoveredActions), 'data-setting="desktopCoveredAction"', busy || unavailable), t('Covered means windows hide everything but the menu bar and the screen edges. Pause keeps the last frame there. Wallpapers you can’t see at all always pause.'))
+    + (enabledDisplayCount >= 2 || settings.playOnlyOnActiveDisplay
+      ? settingToggle('playOnlyOnActiveDisplay', 'Only play on the display I’m using', false, t('The display your pointer is on keeps playing. The others pause a few seconds after you leave them and resume the moment you return. Your own Play and Pause are not changed.'))
+      : '')
     + row('other-audio', t('When another app plays sound'), select('otherAudioAction', t('When another app plays sound'), draft('otherAudioAction', settings.otherAudioAction || 'keepRunning'), localizedOptions(otherAudioActions), 'data-setting="otherAudioAction"', busy || unavailable), t('Mute silences scene and video wallpapers, and Web wallpapers when page-output mute is available. Pause applies to every wallpaper.'))
     + row('display-sleep', t('When displays sleep'), select('displaySleepAction', t('When displays sleep'), draft('displaySleepAction', settings.displaySleepAction || 'pause'), localizedOptions(displaySleepActions), 'data-setting="displaySleepAction"', busy || unavailable), t('Stop frees renderer memory and reloads the wallpaper when the display wakes. Pause keeps it loaded.'))
     + row('battery-mode', t('On battery'), select('batteryMode', t('On battery'), draft('batteryMode', settings.batteryMode || 'keepRunning'), localizedOptions(batteryModes), 'data-setting="batteryMode"', busy || unavailable), t('Reduced quality uses the scale and frame rate below instead of your usual quality settings. Pause stops wallpapers until you plug in.'))
-    + (batteryReduced ? row('battery-scale', t('Render scale on battery'), select('batteryRenderScale', t('Render scale on battery'), draft('batteryRenderScale', batteryScale), scaleOptions(batteryScale), 'data-setting="batteryRenderScale" data-number', busy || unavailable))
-      + row('battery-fps', t('Frame rate on battery'), `<input class="settings-number" data-key="batteryTargetFps" type="number" inputmode="numeric" aria-label="${e(t('Frame rate on battery'))}" min="1" max="240" step="1" value="${e(draft('batteryTargetFps', settings.batteryTargetFps))}" data-setting="batteryTargetFps"${disabled(busy || unavailable)}><span class="settings-unit">fps</span>`)
-      + row('battery-state', t('Power source'), `<span class="settings-status" role="status">${e(batteryActive ? t('On battery. Reduced quality is in use.') : settings.onBatteryPower ? t('On battery') : t('Plugged in. Your usual quality settings are in use.'))}</span>`, '', 'settings-readout') : '')
+    + (reducedChosen ? row('battery-scale', t('Render scale when reduced'), select('batteryRenderScale', t('Render scale when reduced'), draft('batteryRenderScale', batteryScale), scaleOptions(batteryScale), 'data-setting="batteryRenderScale" data-number', busy || unavailable), t('Every Reduced quality choice on this page uses this render scale and frame rate.'))
+      + row('battery-fps', t('Frame rate when reduced'), `<input class="settings-number" data-key="batteryTargetFps" type="number" inputmode="numeric" aria-label="${e(t('Frame rate when reduced'))}" min="1" max="240" step="1" value="${e(draft('batteryTargetFps', settings.batteryTargetFps))}" data-setting="batteryTargetFps"${disabled(busy || unavailable)}><span class="settings-unit">fps</span>`)
+      + row('reduced-quality-state', t('Reduced quality'), `<span class="settings-status" role="status" data-cause="${e(reducedBy[0] || '')}">${e(qualityStatusText(reducedBy[0]))}</span>`, '', 'settings-readout') : '')
+    + (settings.batteryPercent != null
+      ? row('low-battery', t('When the battery is low'), select('lowBatteryAction', t('When the battery is low'), draft('lowBatteryAction', settings.lowBatteryAction || 'keepRunning'), localizedOptions(systemConditionActions), 'data-setting="lowBatteryAction"', busy || unavailable), t('Applies only while the Mac runs on battery. It ends 5 points above the level you choose, or when you plug in. The battery is at {percent}% now.', { percent: settings.batteryPercent }))
+        + (settings.lowBatteryAction && settings.lowBatteryAction !== 'keepRunning' ? row('low-battery-level', t('Low battery level'), select('lowBatteryThreshold', t('Low battery level'), draft('lowBatteryThreshold', settings.lowBatteryThreshold ?? 20), lowBatteryLevels, 'data-setting="lowBatteryThreshold" data-number', busy || unavailable)) : '')
+      : '')
     + row('low-power', t('In Low Power Mode'), select('lowPowerModeAction', t('In Low Power Mode'), draft('lowPowerModeAction', settings.lowPowerModeAction || 'keepRunning'), localizedOptions(systemConditionActions), 'data-setting="lowPowerModeAction"', busy || unavailable), settings.lowPowerMode ? t('Low Power Mode is on now.') : t('Low Power Mode is off now.'))
-    + row('thermal', t('When the Mac is hot'), select('thermalAction', t('When the Mac is hot'), draft('thermalAction', settings.thermalAction || 'keepRunning'), localizedOptions(systemConditionActions), 'data-setting="thermalAction"', busy || unavailable), t('Applies while macOS reports the Mac as hot or very hot, which is when it starts slowing itself down. Right now it is {state}.', { state: t(thermalStates[settings.thermalState] || 'normal') }))
+    + row('thermal', t('When the Mac is hot'), select('thermalAction', t('When the Mac is hot'), draft('thermalAction', settings.thermalAction || 'keepRunning'), localizedOptions(systemConditionActions), 'data-setting="thermalAction"', busy || unavailable), settings.thermalAction === 'reduceQuality'
+      ? t('Reduced quality applies while the Mac is hot, and wallpapers pause if it becomes very hot. Right now it is {state}.', { state: t(thermalStates[settings.thermalState] || 'normal') })
+      : t('Applies while macOS reports the Mac as hot or very hot, which is when it starts slowing itself down. Right now it is {state}.', { state: t(thermalStates[settings.thermalState] || 'normal') }))
     + row('focus', t('Focus'), button(t('Open Focus Settings…'), 'openFocusSettings', {}, busy), settings.focusAction && settings.focusAction !== 'keepRunning' ? t('A Focus filter is in effect now: {action}.', { action: t(focusActions[settings.focusAction] || settings.focusAction) }) : t('In System Settings → Focus, add the WallpaperMachine filter to pause, mute, stop or temporarily switch wallpapers. No Focus filter is in effect now.'))
     + row('app-rules', t('App rules'), '', t('Pause, mute or stop wallpapers while a chosen app is running or in front.')) + disclosure('app-rules-editor', t('Edit…'), rulesEditor));
   const quality = group('performance-quality', t('Quality'),
     row('quality-preset', t('Preset'), `<div class="settings-segment" role="group" aria-label="${e(t('Quality preset'))}">${presetButtons}</div>`, t('Low, Medium and High set the frame-rate limit and render scale together. Custom means the current values match none of those.'))
     + row('frame-rate-cap', t('Frame rate limit'), `<input data-key="frameRateCap" type="range" aria-label="${e(t('Frame rate limit'))}" min="10" max="${capSlider.max}" step="1" value="${e(capDraft)}" data-setting="frameRateCap"${disabled(busy || unavailable)}><output class="settings-unit" data-value-for="frameRateCap">${e(frameRateCapReadout(capDraft, capSlider.max))}</output>`, t('At the top of the slider there is no limit, and each display runs at its own frame rate: up to 60 fps unless you chose more for it. A lower value caps every display; saved per-display frame rates are not rewritten.'))
     + row('render-scale', t('Internal render scale'), select('renderScale', t('Internal render scale'), draft('renderScale', preferredScale), scaleOptions(preferredScale), 'data-setting="renderScale" data-number', busy || unavailable || !scaleSupported), scaleSupported ? t('Renders at a lower resolution and scales the result to fill the same area. Size and position on screen don’t change.') : t('Not applicable to the wallpapers currently running'))
-    + (scaleSupported && scaleOverridden ? row('render-scale-effective', t('Effective now'), `<span class="settings-status" role="status">${e(batteryActive ? t('{effective} on battery. Your setting is {saved}.', { effective: percent(settings.renderScale), saved: percent(settings.preferredRenderScale) }) : t('{effective}. Your setting of {saved} is not in effect right now.', { effective: percent(settings.renderScale), saved: percent(settings.preferredRenderScale) }))}</span>`, '', 'settings-readout') : ''));
+    + (scaleSupported && scaleOverridden ? row('render-scale-effective', t('Effective now'), `<span class="settings-status" role="status">${e(qualityEffectiveText(reducedBy[0], { effective: percent(settings.renderScale), saved: percent(settings.preferredRenderScale) }))}</span>`, '', 'settings-readout') : ''));
   const sceneGroup = group('performance-scene', t('Scene wallpapers'),
     row('scene-renderer', t('Scene renderer'), select('sceneRenderer', t('Scene renderer'), draft('sceneRenderer', settings.sceneRenderer), localizedOptions(sceneRenderers), 'data-setting="sceneRenderer"', busy || unavailable), t('Unsupported scenes use Compatibility. Lock screen playback always uses Compatibility.'))
     + settingToggle('sceneOptimization', 'Scene render optimisation', false, `${t('Skips rendering work that wouldn’t change the picture, such as parts of a scene that stay the same. Resolution, frame rate and animation speed are unaffected. Works with both scene renderers. Turn it off to compare.')}${nativeSceneRunning ? ` ${t('How much can be skipped depends on the scene. If everything in it moves, nothing is skipped.')}` : ''}`)
@@ -483,7 +545,7 @@ function draw(view) {
       row('scene-renderer-report', t('Drawn by'), sceneBackendReport ? `<ul class="settings-list">${sceneBackendReport}</ul>` : noScene, '', 'settings-readout')
       + (sceneOptimizationStatus ? row('scene-optimization-state', t('In force now'), `<span class="settings-status" role="status">${e(sceneOptimizationStatus)}</span>`, '', 'settings-readout') : '')
       + row('scene-update-report', t('Updating now'), sceneModeReport ? `<ul class="settings-list">${sceneModeReport}</ul>` : noScene, '', 'settings-readout'), 'settings-performance-diagnostics')
-    + disclosure('scene-compatibility', t('Renderer compatibility'), paragraphs(t('Native Metal draws a scene only if it supports everything in it: image layers, sprite-sheet animation, 2D puppets with their own skinning shader, 2D sprite, sprite-trail, rope and rope-trail particles, perspective cameras for these layers, standard effect chains and post-processing, same-frame layer links, and BGRA or 8-bit NV12 video textures. Scenes with anything else, such as lit particles, 3D models, dynamic lighting, history-feedback effects or HDR video, use Compatibility. This applies to desktop wallpapers only; the lock screen always uses Compatibility.'))));
+    + disclosure('scene-compatibility', t('Renderer compatibility'), paragraphs(t('Native Metal draws a scene only if it supports everything in it: image layers, sprite-sheet animation, 2D puppets with their own skinning shader, 2D sprite, sprite-trail, rope and rope-trail particles, 3D models, perspective cameras, scene lights, standard effect chains and post-processing, effects that read the previous frame, layer links, and BGRA or 8-bit NV12 video textures. Scenes with anything else, such as lit particles or HDR video, use Compatibility. This applies to desktop wallpapers only; the lock screen always uses Compatibility.'))));
   const videoGroup = group('performance-video', t('Video backend'),
     row('video-backend', t('Video playback'), select('videoBackend', t('Video playback backend'), draft('videoBackend', settings.videoBackend), localizedOptions(videoBackends), 'data-setting="videoBackend"', busy || unavailable), t('Native plays supported videos through macOS and uses Compatibility for the rest.'))
     + disclosure('video-diagnostics', t('Live diagnostics'), row('video-backend-report', t('In use now'), backendReport ? `<ul class="settings-list">${backendReport}</ul>` : noVideo, '', 'settings-readout'), 'settings-performance-diagnostics'));
@@ -496,11 +558,14 @@ function draw(view) {
     + disclosure('performance-advanced', t('Advanced'), videoGroup + sceneGroup + experimentalGroup, 'settings-group settings-performance-advanced', t('Renderers & experimental options'))
     + disclosure('performance-context', t('What these settings change'), paragraphs(
       t('Wallpapers you can’t see, such as behind a full-screen app, pause on their own. When windows cover the desktop, Pause keeps the last frame and Keep running keeps it moving in the gaps.'),
+      t('With two or more displays, Only play on the display I’m using pauses the others a few seconds after your pointer leaves them.'),
       t('When another app plays sound, Mute uses each wallpaper’s output mute channel. Web mute availability is shown in its details. Pause stops every wallpaper until that sound ends.'),
       t('When displays sleep, Pause keeps wallpapers loaded. Stop frees renderer memory and reloads them when the display wakes.'),
       t('On battery, Keep running leaves quality alone, Reduced quality uses the battery scale and frame rate, and Pause stops wallpapers until you plug in. None of these promises a measured power saving.'),
+      t('When the battery is low, wallpapers pause or stop once the charge falls to the level you chose, and resume when you plug in or the charge recovers.'),
       t('App rules pause, mute or stop wallpapers while a chosen app is running or in front. Your own Play and Pause are not changed.'),
       t('Low Power Mode, a hot Mac and a Focus filter work the same way: while they hold, wallpapers pause, mute or stop as you chose, and resume when they end. Stop frees renderer memory and reloads wallpapers afterwards.'),
+      t('In Low Power Mode, when the Mac is hot or when the battery is low, Reduced quality keeps wallpapers running at the lower render scale and frame rate instead of pausing them, and never goes above your own quality settings. If the Mac gets very hot, wallpapers pause instead. It promises no measured power saving.'),
       t('A quality preset sets the frame-rate limit and render scale together. The frame-rate limit caps every display without rewriting the frame rate saved for each wallpaper. Internal render scale sets how many pixels are rendered before the image is scaled to fit.'),
       t('Video playback picks a backend for each wallpaper. Native is used only for videos it supports; the rest play in Compatibility.'),
       t('Scene render optimisation reuses work inside a scene and produces the same picture. It only affects scene wallpapers.'),
@@ -537,23 +602,23 @@ function draw(view) {
     const limited = performanceLimitedFps(playback.fps, settings);
     const number = (field, label, min, max, step, suffix = '', { value = playback[field], attributes = data(field), off: inactive = playbackOff } = {}) => `<input class="settings-number" data-key="${e(key(field))}" type="number" inputmode="decimal" aria-label="${e(name(label))}"${min == null ? '' : ` min="${min}"`}${max == null ? '' : ` max="${max}"`} step="${step}" value="${e(draft(key(field), value))}" ${attributes}${disabled(inactive)}>${suffix ? `<span class="settings-unit">${e(suffix)}</span>` : ''}`;
     // The display's playlist: off, a rotation, or a day and a night wallpaper.
-    const playlist = { mode: 'off', source: 'all', order: 'sequential', interval: 30, wallpaperIDs: [], collectionID: null, planID: null, dayWallpaperID: null, nightWallpaperID: null, dayStart: 420, nightStart: 1140, nextChange: null, ...((state.playlists || {})[id] || {}) };
+    const playlist = { mode: 'off', source: 'all', order: 'sequential', trigger: 'interval', interval: 30, wallpaperIDs: [], collectionID: null, planID: null, dayWallpaperID: null, nightWallpaperID: null, dayStart: 420, nightStart: 1140, nextChange: null, ...((state.playlists || {})[id] || {}) };
     const playlistData = field => `data-playlist="${e(id)}" data-playlist-key="${field}"`;
     // The menu offers the presets; any other stored interval, or choosing Custom, shows a minutes field.
     const intervalPresets = state.playlistIntervals || [];
     const [intervalMin, intervalMax] = state.playlistIntervalRange || [];
-    const intervalChoice = String(draft(intervalKeys(id).menu, intervalPresets.includes(Number(playlist.interval)) ? playlist.interval : 'custom'));
+    const intervalChoice = String(draft(intervalKeys(id).menu, playlist.trigger === 'unlock' ? 'unlock' : intervalPresets.includes(Number(playlist.interval)) ? playlist.interval : 'custom'));
     const listed = (playlist.wallpaperIDs || []).map(wallpaperID => (state.wallpapers || []).find(item => item.id === wallpaperID)).filter(Boolean);
     const playable = (state.wallpapers || []).filter(item => item.supported).sort((a, b) => a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: 'base' }));
     const nextChange = playlist.nextChange != null && Number.isFinite(Number(playlist.nextChange)) ? changeTime(Number(playlist.nextChange)) : '';
     const clockInput = (field, label, minute) => `<input type="time" data-key="${e(key(`playlist-${field}`))}" aria-label="${e(name(label))}" value="${e(draft(key(`playlist-${field}`), clockValue(minute)))}" ${playlistData(field)}${disabled(off)}>`;
     const rotateRows = row(key('playlist-source-row'), t('Wallpapers'), sourceSelect(ctx, key('playlist-source'), name(t('Wallpapers')), playlist, listed.length, playlistData('source'), off), sourceNote(ctx, playlist))
       + row(key('playlist-order-row'), t('Order'), select(key('playlist-order'), name(t('Order')), draft(key('playlist-order'), playlist.order), localizedOptions(playlistOrders), playlistData('order'), off))
-      + row(key('playlist-interval-row'), t('How often'), select(intervalKeys(id).menu, name(t('How often')), intervalChoice, [...intervalPresets.map(minutes => [minutes, intervalLabel(minutes)]), ['custom', t('Custom')]], playlistData('interval'), off))
+      + row(key('playlist-interval-row'), t('How often'), select(intervalKeys(id).menu, name(t('How often')), intervalChoice, [...intervalPresets.map(minutes => [minutes, intervalLabel(minutes)]), ['unlock', unlockLabel()], ['custom', t('Custom')]], playlistData('interval'), off))
       + (intervalChoice === 'custom' ? row(key('playlist-custom-interval-row'), t('Minutes between changes'), number('playlist-custom-interval', t('Minutes between changes'), intervalMin, intervalMax, 1, t('min'), { value: playlist.interval, attributes: playlistData('interval'), off }), intervalMax == null ? '' : t('Any whole number of minutes, up to {count}.', { count: Number(intervalMax).toLocaleString(language()) })) : '')
       + (playlist.source === 'list' ? playlistOrderMarkup(ctx, id, playlist, off) : '')
       + playlistFailures(ctx, id, playlist, off)
-      + row(key('playlist-next-row'), t('Next change'), button(t('Change now'), 'playlistSkip', { displayID: id }, off), nextChange ? t('Around {time}, if wallpapers are playing then.', { time: nextChange }) : t('Starts counting once wallpapers play.'));
+      + row(key('playlist-next-row'), t('Next change'), button(t('Change now'), 'playlistSkip', { displayID: id }, off), playlist.trigger === 'unlock' ? t('Changes when you unlock the Mac, while wallpapers are playing.') : nextChange ? t('Around {time}, if wallpapers are playing then.', { time: nextChange }) : t('Starts counting once wallpapers play.'));
     const wallpaperChoices = [['', t('Leave as it is')], ...playable.map(item => [item.id, item.title])];
     const dayNightRows = row(key('playlist-day-row'), t('Day wallpaper'), select(key('playlist-day'), name(t('Day wallpaper')), draft(key('playlist-day'), playlist.dayWallpaperID || ''), wallpaperChoices, playlistData('dayWallpaper'), off))
       + row(key('playlist-day-start-row'), t('Day starts at'), clockInput('dayStart', t('Day starts at'), playlist.dayStart))
@@ -561,10 +626,13 @@ function draw(view) {
       + row(key('playlist-night-start-row'), t('Night starts at'), clockInput('nightStart', t('Night starts at'), playlist.nightStart))
       + (nextChange ? row(key('playlist-switch-row'), t('Next switch'), `<span class="settings-status" role="status">${e(t('Around {time}.', { time: nextChange }))}</span>`, '', 'settings-readout') : '');
     const playlistMode = playlistModes.find(([mode]) => mode === playlist.mode) || playlistModes[0];
+    // The user removed this display's wallpaper, so the playlist leaves it empty until it is resumed.
+    const held = playlist.held === true && playlist.mode !== 'off';
     const playlistRows = mirror ? '' : disclosure(key('playlist'), playlist.mode === 'off' ? t('Playlist') : t('Playlist: {mode}', { mode: t(playlistMode[1]) }),
       row(key('playlist-mode-row'), t('Changes on its own'), select(key('playlist-mode'), name(t('Changes on its own')), draft(key('playlist-mode'), playlist.mode), localizedOptions(playlistModes), playlistData('mode'), off), t('Only while wallpapers play. A change that falls due while they are paused, the screen is locked or the displays sleep happens once they play again.'))
+      + (held ? row(key('playlist-held-row'), t('Playlist paused'), button(t('Resume playlist'), 'playlistResume', { displayID: id }, off), t('This display’s wallpaper was removed, so its playlist waits until you choose a wallpaper or resume it.')) : '')
       + (playlist.mode === 'rotate' ? rotateRows : playlist.mode === 'dayNight' ? dayNightRows : '')
-      + planRows(ctx, display, playlist, off), 'settings-disclosure-rows');
+      + planRows(ctx, display, playlist, off), 'settings-disclosure-rows', held ? t('Playlist paused') : '');
     return `<section class="settings-display settings-group" data-key="display-${e(id)}" aria-labelledby="settings-group-display-${e(id)}"><h3 id="settings-group-display-${e(id)}">${e(display.title)}${primary ? `<span class="settings-note">${e(t('Primary display'))}</span>` : ''}</h3>`
       + row(key('enabled-row'), t('Enable wallpaper'), toggle(key('enabled'), name(t('Enable wallpaper')), draft(key('enabled'), display.enabled), data('enabled'), busy || primary))
       + row(key('mode-row'), t('Display mode'), select(key('mode'), name(t('Display mode')), draft(key('mode'), display.mode), localizedOptions([['standalone', 'Independent'], ['mirror', 'Mirror another display']]), data('mode'), off || primary))
@@ -635,7 +703,11 @@ function draw(view) {
     + disclosure('storage-context', t('What gets removed'), paragraphs(t('Clearing the shader cache removes compiled shaders and render pipelines. They are rebuilt as wallpapers load, which can briefly slow playback. Clearing logs doesn’t affect wallpapers or settings. Clearing download history keeps the downloaded files.'), t('Files you chose in a wallpaper’s settings are copied to the folder above, so clearing caches or updating the wallpaper won’t remove them. To remove one, clear that setting on the wallpaper.'))))
     + backupGroup(ctx, language())
     + group('storage-diagnostics', t('Troubleshooting'), settingToggle('verboseLogging', 'Detailed logging', false, t('Records extra detail from now on, including after a restart. Turn it off when you are done.'))
-      + row('diagnostics-export', t('Diagnostics report'), button(t('Export…'), 'exportDiagnostics', {}, busy || unavailable), t('Saves recent logs, lock screen and crash reports and a system summary as one .zip file to attach to a bug report. Home folder paths, your Mac user name and Steam account names are replaced.')));
+      + settingToggle('inspectWebWallpapers', 'Allow inspecting web wallpapers', false, t('Lets Safari’s Develop menu attach to the web wallpapers running on this Mac so you can debug a page. Turn it off when you are done.'))
+      + row('diagnostics-export', t('Diagnostics report'), button(t('Export…'), 'exportDiagnostics', {}, busy || unavailable), t('Saves recent logs, the lock screen log, macOS crash, resource, spin and hang reports, which wallpapers were loading when WallpaperMachine quit unexpectedly, and a system summary as one .zip file to attach to a bug report. Home folder paths, your Mac user name and Steam account names are replaced.'))
+      + settingToggle('telemetry', 'Send performance data', !settings.telemetryAvailable, t('Sends once a day: how long wallpapers take to apply, their frame rate and energy use, how the app quit, your Mac’s model, and the Workshop ids of the wallpapers measured. No names, files or account details. Turning it off asks for the sent data to be deleted.'))
+      + row('telemetry-data', t('Data to be sent'), button(t('Show in Finder'), 'telemetryShowData', {}, busy || !settings.telemetry) + button(t('What is sent'), 'telemetryDetails', {}),
+        !settings.telemetry ? '' : Number.isFinite(settings.telemetryLastSent) ? t('Last sent on {date}.', { date: new Date(settings.telemetryLastSent).toLocaleDateString(language()) }) : t('Nothing sent yet.')));
   const versionRow = (id, label, value) => row(id, label, `<span class="settings-version">${e(value || t('Unavailable'))}</span>`);
   const update = state.update || {};
   const updateBusy = Boolean(update.busy) || ['checkForUpdates', 'downloadUpdate', 'installUpdate', 'openReleases', 'revealDownloadedUpdate'].some(action => view.pending.has(action));
@@ -664,6 +736,7 @@ function draw(view) {
     + `<div class="settings-form-actions">${updateActions}</div>`
     + updateNotes
     + `<p class="settings-note settings-update-footnote">${e(update.footnote || t('Updates are checked against the latest published GitHub Release. Download and restart-install happen only after you confirm.'))}</p></section>`
+    + group('about-share', t('Spread the word'), `<div class="settings-form-actions">${button(t('Share WallpaperMachine…'), 'shareApp', {})}${button(t('Star on GitHub'), 'starRepository', {})}</div>`)
     + group('about-credits', '', `<div class="settings-attribution">${e(t('Not affiliated with Wallpaper Engine or Valve. Built on the GPLv2-only open-source renderer. Workshop browsing is independently implemented. No warranty is provided.'))}</div>`
     + `<div class="settings-form-actions">${button(t('GNU General Public License v2'), 'openExternal', { url: 'https://www.gnu.org/licenses/old-licenses/gpl-2.0.html' })}</div>`);
   const html = `<div class="settings-layout" data-key="settings-layout"><nav class="settings-nav" aria-label="${e(t('Settings categories'))}" role="tablist" aria-orientation="${compactNavigation.matches ? 'horizontal' : 'vertical'}" data-key="settings-nav">${sections.map(([id, title, glyph]) => `<button type="button" id="settings-tab-${id}" role="tab" aria-selected="${id === view.section}" aria-controls="settings-${id}" tabindex="${id === view.section ? '0' : '-1'}" data-key="nav-${id}" data-section="${id}">${helpers.icon(glyph, 16)}<span>${e(t(title))}</span></button>`).join('')}</nav><div class="settings-scroll" data-key="settings-scroll">${error('settings-action-error', view.error || state.error)}${unavailable ? `<div class="settings-notice" role="status">${e(t('Settings are unavailable. Try refreshing the library.'))}</div>` : ''}${section('general', t('General'), general)}${section('appearance', t('Appearance'), appearance)}${section('performance', t('Performance'), performance)}${section('displays', t('Displays'), displaysPage, button(t('Refresh'), 'refreshDisplays', {}, busy))}${section('library', t('Library & Steam'), library)}${section('storage', t('Storage'), storage)}${section('about', t('About'), about)}</div></div>`;
@@ -807,8 +880,12 @@ async function onChange(view, event) {
         [...view.container.querySelectorAll('input[data-key]')].find(node => node.dataset.key === keys.field)?.focus();
         return;
       }
-      if (input.type === 'number' && (!input.checkValidity() || input.value.trim() === '')) { input.reportValidity(); return; }
-      value = Number(value);
+      // Unlocking is not a number of minutes: it is the playlist's trigger, which minutes replace.
+      if (value === 'unlock') { field = 'trigger'; }
+      else {
+        if (input.type === 'number' && (!input.checkValidity() || input.value.trim() === '')) { input.reportValidity(); return; }
+        value = Number(value);
+      }
     }
     if (field === 'dayStart' || field === 'nightStart') {
       value = clockMinute(value);
@@ -892,6 +969,12 @@ async function onClick(view, event) {
   }
   if (action === 'automationClearLocation') {
     await perform(view, action, action, args, () => { view.drafts.delete('solar-latitude'); view.drafts.delete('solar-longitude'); });
+    return;
+  }
+  // Native opens the share menu next to the button.
+  if (action === 'shareApp') {
+    const box = button.getBoundingClientRect();
+    await perform(view, action, action, { rect: { x: box.x, y: box.y, width: box.width, height: box.height } });
     return;
   }
   if (action === 'playlistMove') {

@@ -223,6 +223,17 @@ impl DisplayDesc {
         self.display_id == other.display_id || self.identity.match_score(&other.identity).is_some()
     }
 
+    /// Whether the display reports a pixel size a window and a renderer
+    /// surface can be built for.
+    ///
+    /// A display that is still connecting can be listed as active while its
+    /// mode reports 0x0 pixels. Opening a window for it fails with
+    /// [`crate::EngineError::InvalidInput`].
+    #[must_use]
+    pub fn has_presentable_size(&self) -> bool {
+        self.width > 0 && self.height > 0
+    }
+
     /// Builds a `CAMetalLayer` matching this display's geometry and the
     /// provided placeholder style.
     ///
@@ -302,6 +313,99 @@ impl DisplayDesc {
                 .map(DisplayDesc::from)
                 .collect::<Vec<_>>()
         })
+    }
+}
+
+/// What one display report from the platform means for the running scenes.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum RefreshPlan {
+    /// The primary display has no pixels, so the whole layout is in flux and
+    /// every runtime stays as it is until the next report.
+    Skip { reason: String },
+    /// The report is usable. `transitional` holds the displays that report no
+    /// pixels yet: they stay out of `displays`, and a display that already
+    /// runs a scene keeps the descriptor it had.
+    Apply {
+        primary: DisplayDesc,
+        displays: Vec<DisplayDesc>,
+        transitional: Vec<DisplayDesc>,
+    },
+}
+
+/// Splits a platform display report into the displays a scene can be placed
+/// on and the ones that are still connecting.
+///
+/// The platform watcher schedules another refresh on every display
+/// reconfiguration, so a display left out here is picked up when it settles.
+#[must_use]
+pub(crate) fn plan_refresh(primary: DisplayDesc, all: Vec<DisplayDesc>) -> RefreshPlan {
+    if !primary.has_presentable_size() {
+        return RefreshPlan::Skip {
+            reason: format!(
+                "primary display {} reports {}x{} px",
+                primary.display_id, primary.width, primary.height
+            ),
+        };
+    }
+    let (displays, transitional) = all
+        .into_iter()
+        .partition(DisplayDesc::has_presentable_size);
+    RefreshPlan::Apply {
+        primary,
+        displays,
+        transitional,
+    }
+}
+
+/// Remembers which display-report problems were already logged, so a refresh
+/// that repeats the same one on every reconfiguration event stays quiet.
+#[derive(Debug, Default)]
+pub(crate) struct RefreshReportLog {
+    last_skip_reason: Option<String>,
+    reported_transitional: Vec<u32>,
+}
+
+impl RefreshReportLog {
+    /// The line to log for `plan`, or `None` when this situation was already
+    /// logged and has not changed since.
+    pub(crate) fn message_for(&mut self, plan: &RefreshPlan) -> Option<String> {
+        match plan {
+            RefreshPlan::Skip { reason } => {
+                if self.last_skip_reason.as_deref() == Some(reason.as_str()) {
+                    return None;
+                }
+                self.last_skip_reason = Some(reason.clone());
+                Some(format!(
+                    "[wallpaper-core display] keeping every scene as it is: {reason}"
+                ))
+            }
+            RefreshPlan::Apply { transitional, .. } => {
+                self.last_skip_reason = None;
+                let mut sorted: Vec<&DisplayDesc> = transitional.iter().collect();
+                sorted.sort_by_key(|display| display.display_id);
+                let ids: Vec<u32> = sorted.iter().map(|display| display.display_id).collect();
+                if ids == self.reported_transitional {
+                    return None;
+                }
+                self.reported_transitional.clone_from(&ids);
+                if ids.is_empty() {
+                    return None;
+                }
+                let labels = sorted
+                    .into_iter()
+                    .map(|display| {
+                        format!(
+                            "display {} ({}x{} px)",
+                            display.display_id, display.width, display.height
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                Some(format!(
+                    "[wallpaper-core display] ignoring {labels} until it reports a size"
+                ))
+            }
+        }
     }
 }
 
@@ -531,7 +635,9 @@ mod sys {
 
 #[cfg(test)]
 mod tests {
-    use super::{DisplayDesc, DisplayIdentity, DisplayMetrics};
+    use super::{
+        DisplayDesc, DisplayIdentity, DisplayMetrics, RefreshPlan, RefreshReportLog, plan_refresh,
+    };
 
     fn assert_f64_close(actual: f64, expected: f64) {
         assert!(
@@ -821,5 +927,120 @@ mod tests {
         assert_eq!(display.identity, identity);
         assert_f64_close(display.scale_factor, 2.0);
         assert_eq!(display.refresh_rate_hz, 120);
+    }
+
+    fn apply_parts(plan: RefreshPlan) -> (DisplayDesc, Vec<u32>, Vec<u32>) {
+        match plan {
+            RefreshPlan::Apply {
+                primary,
+                displays,
+                transitional,
+            } => (
+                primary,
+                displays.iter().map(|display| display.display_id).collect(),
+                transitional
+                    .iter()
+                    .map(|display| display.display_id)
+                    .collect(),
+            ),
+            RefreshPlan::Skip { reason } => {
+                panic!("expected an applicable plan, got skip: {reason}")
+            }
+        }
+    }
+
+    #[test]
+    fn plan_refresh_splits_zero_width_and_zero_height_displays() {
+        let primary = DisplayDesc::new(1, 0, 0, 1920, 1080, 1.0);
+        let all = vec![
+            primary.clone(),
+            DisplayDesc::new(2, 1920, 0, 0, 1080, 1.0),
+            DisplayDesc::new(3, 3840, 0, 1920, 0, 1.0),
+            DisplayDesc::new(4, 5760, 0, 1, 1, 1.0),
+        ];
+
+        let (kept_primary, displays, transitional) =
+            apply_parts(plan_refresh(primary.clone(), all));
+
+        assert_eq!(kept_primary, primary);
+        assert_eq!(displays, vec![1, 4]);
+        assert_eq!(transitional, vec![2, 3]);
+    }
+
+    #[test]
+    fn plan_refresh_still_applies_the_primary_when_every_other_display_is_degenerate() {
+        let primary = DisplayDesc::new(1, 0, 0, 1920, 1080, 1.0);
+        let all = vec![
+            primary.clone(),
+            DisplayDesc::new(2, 1920, 0, 0, 0, 1.0),
+            DisplayDesc::new(3, 3840, 0, 0, 0, 1.0),
+        ];
+
+        let (_, displays, transitional) = apply_parts(plan_refresh(primary, all));
+
+        assert_eq!(displays, vec![1]);
+        assert_eq!(transitional, vec![2, 3]);
+    }
+
+    #[test]
+    fn plan_refresh_skips_when_the_primary_has_no_pixels() {
+        let primary = DisplayDesc::new(9, 0, 0, 0, 0, 1.0);
+        let all = vec![primary.clone(), DisplayDesc::new(2, 1920, 0, 1920, 1080, 1.0)];
+
+        match plan_refresh(primary, all) {
+            RefreshPlan::Skip { reason } => {
+                assert!(reason.contains('9'), "reason should name display 9: {reason}");
+            }
+            RefreshPlan::Apply { .. } => panic!("a primary without pixels must skip the refresh"),
+        }
+    }
+
+    #[test]
+    fn report_log_mentions_a_transitional_display_once_until_the_set_changes() {
+        let primary = DisplayDesc::new(1, 0, 0, 1920, 1080, 1.0);
+        let plan = |ids: &[u32]| {
+            let mut all = vec![primary.clone()];
+            all.extend(ids.iter().map(|id| DisplayDesc::new(*id, 0, 0, 0, 0, 1.0)));
+            plan_refresh(primary.clone(), all)
+        };
+        let mut log = RefreshReportLog::default();
+
+        let first = log.message_for(&plan(&[5])).expect("first report is logged");
+        assert!(first.contains('5'), "{first}");
+        assert_eq!(log.message_for(&plan(&[5])), None);
+
+        let wider = log.message_for(&plan(&[7, 5])).expect("a changed set is logged");
+        assert!(wider.contains('5') && wider.contains('7'), "{wider}");
+
+        assert_eq!(log.message_for(&plan(&[])), None, "settling is not a problem to log");
+        assert!(
+            log.message_for(&plan(&[5])).is_some(),
+            "the same display going degenerate again is a new event"
+        );
+    }
+
+    #[test]
+    fn report_log_mentions_a_skipped_refresh_once_per_reason() {
+        let skip = |id: u32| {
+            plan_refresh(
+                DisplayDesc::new(id, 0, 0, 0, 0, 1.0),
+                vec![DisplayDesc::new(id, 0, 0, 0, 0, 1.0)],
+            )
+        };
+        let healthy = plan_refresh(
+            DisplayDesc::new(1, 0, 0, 1920, 1080, 1.0),
+            vec![DisplayDesc::new(1, 0, 0, 1920, 1080, 1.0)],
+        );
+        let mut log = RefreshReportLog::default();
+
+        assert!(log.message_for(&skip(1)).is_some());
+        assert_eq!(log.message_for(&skip(1)), None);
+        assert!(log.message_for(&skip(2)).is_some(), "another display is another reason");
+
+        assert_eq!(log.message_for(&healthy), None);
+        assert!(
+            log.message_for(&skip(2)).is_some(),
+            "a refresh that applied in between makes the next skip new again"
+        );
     }
 }

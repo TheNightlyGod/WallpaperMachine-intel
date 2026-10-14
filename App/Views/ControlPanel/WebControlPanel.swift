@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import Observation
+import ServiceManagement
 import SwiftUI
 import UniformTypeIdentifiers
 import WebKit
@@ -71,6 +72,9 @@ final class WebPanelController: NSObject, WKNavigationDelegate {
   let backup: WallpaperBackupStore
   let imagePlacement: StillImagePlacementStore
   let compatibility: WallpaperCompatibilityStore
+  let letterbox: VideoLetterboxStore
+  /// The scale factor the Black bars card last set, while it can still be waiting in the draft.
+  var letterboxStaged: LetterboxStagedFactor?
   var imagePlacementRequestSequence: UInt64 = 0
   var imagePlacementRequests: [String: UInt64] = [:]
   /// Tests pass a closure so choosing an app does not open a panel. Nil uses the sheet.
@@ -82,6 +86,13 @@ final class WebPanelController: NSObject, WKNavigationDelegate {
   var signInToSteamWeb: (@MainActor () async -> String?)?
   /// Support links open only on a deliberate choice; tests capture their destinations.
   var openSupportURL: @MainActor (URL) -> Bool = { NSWorkspace.shared.open($0) }
+  /// Shows System Settings › General › Login Items, where the user allows a launch at login
+  /// they switched off there. Tests capture the call so no Settings window opens.
+  var openLoginItemsSettings: @MainActor () -> Void = { SMAppService.openSystemSettingsLoginItems() }
+  /// Tests capture what would be shared, and where, so no share menu opens. Nil shows macOS's.
+  var presentSharePicker: (@MainActor ([Any], NSRect) -> Void)?
+  /// Shows a file in Finder; tests capture it instead.
+  var revealFile: @MainActor (URL) -> Void = { NSWorkspace.shared.activateFileViewerSelecting([$0]) }
   let displayTitles: DisplayTitleResolver
   weak var webView: WKWebView?
   let assets: WebPanelAssets
@@ -93,6 +104,9 @@ final class WebPanelController: NSObject, WKNavigationDelegate {
   var stopped = false
   var updateTask: Task<Void, Never>?
   var updatePending = false
+  /// The status read that follows the user's return to the panel while a Login Items note
+  /// is showing; one at a time, so repeated focus changes do not stack bridge round trips.
+  var loginItemRefresh: Task<Void, Never>?
   var pageGeneration: UInt64 = 0
   var librarySectionCache: LibrarySection?
   var pixivInstalledIndex: (revision: UInt64, pages: [String: [Int]])?
@@ -114,6 +128,9 @@ final class WebPanelController: NSObject, WKNavigationDelegate {
   var dragSelectLearned: Bool
   /// Folder sizes and dates for Installed's sort menu, measured off the main thread.
   let libraryMetrics: LibraryMetricsService
+  /// Stamps of the Installed tiles' preview files, read off the main thread, so a cover is
+  /// requested again only when its preview changed.
+  let libraryCovers: LibraryCoverStamps
   /// Energy readout on Settings › Performance; samples only while Settings is on screen.
   let energyUsage: EnergyUsageMonitor
   let defaults: UserDefaults
@@ -161,6 +178,7 @@ final class WebPanelController: NSObject, WKNavigationDelegate {
     displayTitles: DisplayTitleResolver = .system,
     defaults: UserDefaults = ClientPreferences.defaults,
     libraryMetrics: LibraryMetricsService? = nil,
+    libraryCovers: LibraryCoverStamps? = nil,
     assets: WebPanelAssets? = nil,
     energyUsage: EnergyUsageMonitor? = nil,
     appLanguage: AppLanguageStore? = nil,
@@ -172,6 +190,7 @@ final class WebPanelController: NSObject, WKNavigationDelegate {
     backup: WallpaperBackupStore? = nil,
     imagePlacement: StillImagePlacementStore? = nil,
     compatibility: WallpaperCompatibilityStore? = nil,
+    letterbox: VideoLetterboxStore? = nil,
     chooseApplication: (@MainActor () async -> URL?)? = nil,
     automations: WallpaperAutomationStore? = nil,
     displayLayouts: WallpaperDisplayLayoutStore? = nil,
@@ -201,11 +220,13 @@ final class WebPanelController: NSObject, WKNavigationDelegate {
     self.backup = backup ?? WallpaperBackupStore(defaults: defaults)
     self.imagePlacement = imagePlacement ?? .shared
     self.compatibility = compatibility ?? WallpaperCompatibilityStore()
+    self.letterbox = letterbox ?? Self.letterboxStore(for: store)
     self.chooseApplication = chooseApplication
     filtersCollapsed = Self.filtersCollapsedKeys.mapValues { defaults.bool(forKey: $0) }
     welcomeSeen = defaults.bool(forKey: Self.welcomeSeenKey)
     dragSelectLearned = defaults.bool(forKey: Self.dragSelectLearnedKey)
     self.libraryMetrics = libraryMetrics ?? LibraryMetricsService()
+    self.libraryCovers = libraryCovers ?? LibraryCoverStamps()
     self.energyUsage = energyUsage ?? EnergyUsageMonitor()
     defaults.removeObject(forKey: Self.legacyInspectorWidthKey)
     favoriteIDs = Set(
@@ -213,6 +234,7 @@ final class WebPanelController: NSObject, WKNavigationDelegate {
         [String].self, from: defaults.data(forKey: Self.favoriteKey) ?? Data())) ?? [])
     super.init()
     self.libraryMetrics.onChange = { [weak self] in self?.scheduleUpdate() }
+    self.libraryCovers.onChange = { [weak self] in self?.scheduleUpdate() }
     self.energyUsage.onChange = { [weak self] in self?.pushEnergyUsage() }
     // What the engine routed to the native player: the report Settings shows as In use now.
     self.energyUsage.nativeVideoPlaying = { [weak self] in
@@ -220,6 +242,7 @@ final class WebPanelController: NSObject, WKNavigationDelegate {
     }
     self.backup.onChange = { [weak self] in self?.scheduleUpdate() }
     self.compatibility.onChange = { [weak self] in self?.scheduleUpdate() }
+    self.letterbox.onChange = { [weak self] in self?.scheduleUpdate() }
   }
 
   func makeWebView() -> WKWebView {
@@ -257,12 +280,7 @@ final class WebPanelController: NSObject, WKNavigationDelegate {
             guard let self, let window = note.object as? NSWindow,
               window === self.webView?.window
             else { return }
-            // Assets Steam installed or someone removed while the panel was away show up
-            // when the user comes back to it.
-            if note.name == NSWindow.didBecomeKeyNotification {
-              self.workshop.refreshSceneAssetsReadiness()
-            }
-            self.scheduleUpdate()
+            self.windowStateChanged(note.name)
           }
         }
         .store(in: &subscriptions)
@@ -369,8 +387,11 @@ final class WebPanelController: NSObject, WKNavigationDelegate {
     pageGeneration &+= 1
     updateTask?.cancel()
     updateTask = nil
+    loginItemRefresh?.cancel()
+    loginItemRefresh = nil
     updatePending = false
     cancelDisplayOptions()
+    letterbox.cancelAll()
     subscriptions.removeAll()
     webView?.configuration.userContentController.removeScriptMessageHandler(
       forName: "native", contentWorld: .page)
@@ -445,6 +466,31 @@ final class WebPanelController: NSObject, WKNavigationDelegate {
     return state
   }
 
+  /// The panel's window changed how it is presented (key, minimized, occluded, full screen).
+  /// Coming back to the panel also rereads what changes outside the app while the user is
+  /// away, and every change delivers any snapshot that was waiting.
+  func windowStateChanged(_ name: Notification.Name) {
+    if name == NSWindow.didBecomeKeyNotification {
+      // Assets Steam installed or someone removed while the panel was away show up
+      // when the user comes back to it.
+      workshop.refreshSceneAssetsReadiness()
+      refreshLoginItemApproval()
+    }
+    scheduleUpdate()
+  }
+
+  /// A login item waiting for approval is allowed in System Settings, which does not tell
+  /// the app. The bridge keeps its status for two seconds, so the read the user's return
+  /// triggers sees their change. Nothing is read while no approval is pending.
+  func refreshLoginItemApproval() {
+    guard !stopped, store.settingsSnapshot.launchAtLoginNeedsApproval, loginItemRefresh == nil
+    else { return }
+    loginItemRefresh = Task { @MainActor [weak self] in
+      try? await self?.store.refreshAllAsync()
+      self?.loginItemRefresh = nil
+    }
+  }
+
   func scheduleUpdate() {
     guard !stopped else { return }
     updateEnergyMonitoring()
@@ -471,6 +517,8 @@ final class WebPanelController: NSObject, WKNavigationDelegate {
         // occlusion and deminiaturize observers call back here once this task
         // has ended, and that call delivers it along with the energy readout.
         guard self.presentationAllowsUpdates() else { return }
+        // A day the panel was on screen, for the star prompt's count.
+        self.store.supportPrompt?.recordPanelUse()
         self.refreshDisplayOptions()
         self.updatePending = false
         let state = self.deliverySnapshot()
@@ -566,11 +614,39 @@ final class WebPanelController: NSObject, WKNavigationDelegate {
       reply(nil, nil)
       return
     }
+    // The page reports its view state while the person types and scrolls. It is stored and
+    // acknowledged without building or pushing a snapshot.
+    if action == "viewState" {
+      storeViewState(body)
+      reply(nil, nil)
+      return
+    }
+    // A position slider or a property's slider or colour reports every step of a drag. The
+    // wallpaper follows, but nothing is saved and no state changed, so there is no snapshot to
+    // build or push, and a refusal is not an error to show: the release that ends the drag
+    // reports its own.
+    if action == "displayPositionPreview" || action == "propertyPreview" {
+      Task { @MainActor in
+        do {
+          try await perform(action, body: body)
+          reply(nil, nil)
+        } catch {
+          reply(nil, error.localizedDescription)
+        }
+      }
+      return
+    }
     Task { @MainActor in
       do {
         try await perform(action, body: body)
         reconcileDismissedErrors()
-        reply(snapshot(), nil)
+        var state = snapshot()
+        // A page that has just loaded asks once with `ready`; the reply also carries what
+        // the previous page left, so a reopened panel resumes where it was closed.
+        if action == "ready", let viewState = navigation.viewState {
+          state["restoreViewState"] = viewState.payload
+        }
+        reply(state, nil)
       } catch {
         actionError = error.localizedDescription
         reply(nil, error.localizedDescription)
@@ -686,6 +762,9 @@ final class WebPanelAssets: NSObject, WKURLSchemeHandler {
   static let indexURL = URL(string: "mwe-ui://app/index.html")!
   /// Library preview files by wallpaper id, served as `mwe-ui://preview/<id>`.
   var previews: [String: URL] = [:]
+  /// The same preview files, served as small still covers at `mwe-ui://library-thumbnail/<id>`.
+  /// Installed tiles show these; `previews` stays for the inspector and a tile's hover animation.
+  var libraryThumbnails: [String: URL] = [:]
   /// Workshop preview URLs by item id, served as still thumbnails at `mwe-ui://thumbnail/<id>`
   /// and relayed with their animation at `mwe-ui://animated/<id>`.
   var thumbnails: [String: URL] = [:]
@@ -697,6 +776,9 @@ final class WebPanelAssets: NSObject, WKURLSchemeHandler {
   let thumbnailCache: WorkshopThumbnailCache
   /// A cache of its own, so pixiv's images and Steam's never evict each other.
   let pixivThumbnailCache: WorkshopThumbnailCache
+  /// Still covers of the library's own previews. It keeps no animation: a tile that animates
+  /// plays the preview file itself.
+  let libraryThumbnailCache: WorkshopThumbnailCache
   /// In-flight loads by scheme task identity. WebKit frees a stopped task, and a new one can
   /// land on the same address, so each entry carries a unique ticket: a finished job may only
   /// act when the entry for its key still belongs to it.
@@ -705,7 +787,7 @@ final class WebPanelAssets: NSObject, WKURLSchemeHandler {
   private static let files: Set<String> = [
     "index.html", "panel.js", "panel.css", "settings.js", "settings.css", "welcome.js",
     "welcome.css", "theme.js", "icons.js", "i18n.js", "property-label.js", "pixiv.js", "support-prompt.js",
-    "collections.js", "presets.js", "placement.js", "compatibility.js", "plans.js", "backup.js", "playlist-order.js", "automation.js", "display-layouts.js",
+    "collections.js", "presets.js", "placement.js", "compatibility.js", "letterbox.js", "plans.js", "backup.js", "playlist-order.js", "automation.js", "display-layouts.js",
     "app-icons/minimal.png", "app-icons/day.png", "app-icons/night.png",
   ]
   /// One catalog module per shipped language, served as `mwe-ui://app/locales/<tag>.js`.
@@ -719,6 +801,7 @@ final class WebPanelAssets: NSObject, WKURLSchemeHandler {
     case thumbnail(URL)
     case animated(URL)
     case pixivThumbnail(URL)
+    case libraryThumbnail(URL)
     case propertyImage(URL)
   }
 
@@ -726,10 +809,15 @@ final class WebPanelAssets: NSObject, WKURLSchemeHandler {
     thumbnailCache: WorkshopThumbnailCache = WorkshopThumbnailCache(),
     pixivThumbnailCache: WorkshopThumbnailCache = WorkshopThumbnailCache(
       directory: ClientPaths.pixivThumbnailCacheURL, fetcher: PixivThumbnailFetcher(),
-      maxConcurrentFetches: 6, byteLimit: 256 * 1024 * 1024)
+      maxConcurrentFetches: 6, byteLimit: 256 * 1024 * 1024),
+    libraryThumbnailCache: WorkshopThumbnailCache = WorkshopThumbnailCache(
+      directory: ClientPaths.libraryThumbnailCacheURL, fetcher: LibraryPreviewFetcher(),
+      maxConcurrentFetches: 4, byteLimit: 128 * 1024 * 1024, keepsAnimation: false,
+      sourceByteLimit: LibraryPreviewFetcher.maximumBytes)
   ) {
     self.thumbnailCache = thumbnailCache
     self.pixivThumbnailCache = pixivThumbnailCache
+    self.libraryThumbnailCache = libraryThumbnailCache
     super.init()
   }
 
@@ -768,6 +856,16 @@ final class WebPanelAssets: NSObject, WKURLSchemeHandler {
           headers["Cache-Control"] = "max-age=86400"
         case .pixivThumbnail(let image):
           data = try await pixivThumbnailCache.thumbnail(for: image)
+          headers["Content-Type"] = "image/jpeg"
+          headers["Cache-Control"] = "max-age=86400"
+        case .libraryThumbnail(let file):
+          // Stamped with the file's modification time and size, so a replaced preview is a new
+          // cache entry; the address's own stamp keeps the page from reusing the old image.
+          let root = ClientPaths.libraryURL
+          let identity = try await Task.detached(priority: .utility) {
+            try LibraryPreviewFetcher.identity(of: file, in: root)
+          }.value
+          data = try await libraryThumbnailCache.thumbnail(for: identity)
           headers["Content-Type"] = "image/jpeg"
           headers["Cache-Control"] = "max-age=86400"
         case .propertyImage(let source):
@@ -820,6 +918,10 @@ final class WebPanelAssets: NSObject, WKURLSchemeHandler {
       url.password == nil, url.port == nil,
       let image = pixivThumbnails[String(url.path.dropFirst())], PixivService.isImageURL(image)
     { return .pixivThumbnail(image) }
+    if url.scheme == "mwe-ui", url.host == "library-thumbnail", url.user == nil,
+      url.password == nil, url.port == nil, url.fragment == nil, Self.isStampQuery(url.query),
+      let file = libraryThumbnails[String(url.path.dropFirst())]
+    { return .libraryThumbnail(file) }
     guard url.scheme == "mwe-ui", let host = url.host, url.user == nil, url.password == nil,
       url.port == nil, let preview = thumbnails[String(url.path.dropFirst())],
       preview.scheme == "https"
@@ -829,6 +931,13 @@ final class WebPanelAssets: NSObject, WKURLSchemeHandler {
     case "animated": return .animated(preview)
     default: return nil
     }
+  }
+
+  /// The only query an address may carry: the stamp of the preview file (`v=<digits>`) it was announced with.
+  private static func isStampQuery(_ query: String?) -> Bool {
+    guard let query else { return true }
+    guard query.hasPrefix("v="), (3...22).contains(query.count) else { return false }
+    return query.dropFirst(2).unicodeScalars.allSatisfy { ("0"..."9").contains($0) }
   }
 
   func webView(_ webView: WKWebView, stop task: WKURLSchemeTask) {
@@ -845,13 +954,7 @@ final class WebPanelAssets: NSObject, WKURLSchemeHandler {
         .appendingPathComponent(name)
     }
     if url.host == "preview", let file = previews[name] {
-      let resolved = file.resolvingSymlinksInPath().standardizedFileURL
-      let root = ClientPaths.libraryURL.resolvingSymlinksInPath().standardizedFileURL.path + "/"
-      guard resolved.path.hasPrefix(root),
-        ["jpg", "jpeg", "png", "gif", "webp", "heic", "avif", "bmp", "tiff"].contains(
-          resolved.pathExtension.lowercased())
-      else { return nil }
-      return resolved
+      return LibraryPreviewFetcher.confined(file, in: ClientPaths.libraryURL)
     }
     return nil
   }

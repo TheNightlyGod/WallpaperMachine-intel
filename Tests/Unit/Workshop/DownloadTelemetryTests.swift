@@ -340,7 +340,7 @@ final class DownloadTelemetryTests: DownloaderTestCase {
     let downloader = WorkshopDownloader(
       sessionDirectory: root.appendingPathComponent("SteamSession"),
       runtimeProvider: ShellRuntimeProvider(),
-      networkMonitor: monitor)
+      networkMonitor: monitor, freeSpace: { _ in nil })
     downloader.installAssets(
       username: "localtest", executable: root.appendingPathComponent("runtime/steamcmd"),
       destination: root.appendingPathComponent("SceneAssets")
@@ -431,12 +431,13 @@ final class DownloadTelemetryTests: DownloaderTestCase {
     let monitor = FixtureNetworkMonitor()
     monitor.received = 0
     // Both limits run on this clock, so a slow launch or a late wakeup under load cannot use
-    // them up; only the steps below move it.
+    // them up; only the steps below move it. The stall is meant to end the run here, so the
+    // automatic retry of a stalled transfer (`DownloaderRetryTests`) is off.
     var clock = Date(timeIntervalSinceReferenceDate: 0)
     let downloader = WorkshopDownloader(
       sessionDirectory: root.appendingPathComponent("SteamSession"),
       runtimeProvider: ShellRuntimeProvider(), networkMonitor: monitor,
-      inactivityTimeout: 1, passTimeout: 1.5, now: { clock })
+      inactivityTimeout: 1, passTimeout: 1.5, now: { clock }, retryDelays: [])
     downloader.start(
       item: item, username: "localtest", executable: root.appendingPathComponent("runtime/steamcmd"),
       library: root.appendingPathComponent("Library"), rememberSession: false, onImported: {})

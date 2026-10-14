@@ -4,7 +4,7 @@ use crate::{
     DisplayConfig, DisplayDesc, DisplayIdentity, DisplaySelector, EngineError, WallpaperAssignment,
     WallpaperEngine, WallpaperEngineConfig,
     media::audio::AudioVolume,
-    project::{ScalingMode, SceneDesc, SceneHandle},
+    project::{ScalingMode, SceneDesc, SceneFraming, SceneHandle},
 };
 
 #[test]
@@ -68,6 +68,7 @@ pub fn case_rust_api_boundary() {
         assert_async_result(engine.set_wallpaper_for_display(selector, wallpaper));
         assert_async_result(engine.set_scaling_mode(handle, scaling_mode));
         assert_async_result(engine.set_scaling_factor(handle, 1.25));
+        assert_async_result(engine.set_framing(handle, SceneFraming::default()));
         assert_async_result(engine.set_fps(handle, 60));
         assert_async_result(engine.set_render_resolution(handle, 1920, 1080));
         assert_async_result(engine.set_mouse_position(handle, 0.25, 0.75));
@@ -124,6 +125,13 @@ pub fn case_scene_builder_preserves_defaults() {
     assert_eq!(scene.property_override_json, None);
     assert_eq!(scene.shader_cache_path, None);
     assert!(!scene.force_shader_refresh);
+    assert_eq!(
+        scene.framing,
+        SceneFraming {
+            pan_x: 0.5,
+            pan_y: 0.5
+        }
+    );
 }
 
 fn display() -> DisplayDesc {

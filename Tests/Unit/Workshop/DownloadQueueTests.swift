@@ -1,3 +1,4 @@
+import AppKit
 import Darwin
 import XCTest
 
@@ -94,6 +95,59 @@ final class DownloadQueueTests: DownloaderTestCase {
       XCTAssertFalse(
         FileManager.default.fileExists(atPath: root.appendingPathComponent("running-5").path))
       try assertNoStaging(in: root)
+    } catch {
+      await manager.shutdown()
+      throw error
+    }
+  }
+
+  /// The menu bar's line counts what is moving or waiting. A paused job stays pending until its
+  /// session has closed, and the sign-in downloads nothing, so neither may count.
+  func testMenuBarCountsOnlyTransfersThatAreMovingOrWaiting() async throws {
+    let root = try makeRuntime(
+      """
+      set -eu
+      printf 'password: '
+      IFS= read -r password
+      while :; do sleep 0.02; done
+      """)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let manager = WorkshopDownloadManager(
+      sessionDirectory: root.appendingPathComponent("SteamSession"),
+      runtimeProvider: ShellRuntimeProvider())
+    let executable = root.appendingPathComponent("runtime/steamcmd")
+    for id in ["1", "2"] {
+      manager.start(
+        item: WorkshopItem(
+          id: id, title: "Queued \(id)", creator: "Test", summary: "", previewURL: nil,
+          tags: ["Video"], size: 0, subscriptions: 0),
+        username: "localtest", executable: executable,
+        library: root.appendingPathComponent("Library"), rememberSession: false, onImported: {})
+    }
+    manager.signIn(username: "localtest", executable: executable, root: root, rememberSession: false)
+    do {
+      let first = try XCTUnwrap(manager.download(for: "1"))
+      let second = try XCTUnwrap(manager.download(for: "2"))
+      try await waitUntil { first.worker.prompt == .password }
+      XCTAssertTrue(second.isQueued)
+      XCTAssertNotNil(manager.signIn, "the sign-in job is waiting in line too")
+
+      XCTAssertEqual(manager.inProgressTransfers.count, 2, "the running job and the waiting one, not the sign-in")
+      XCTAssertEqual(StatusMenuModel.DownloadActivity.make(manager.inProgressTransfers),
+                     StatusMenuModel.DownloadActivity(count: 2, percent: nil),
+                     "neither has byte counts yet, so no percent is guessed")
+
+      manager.pause(second)
+      XCTAssertEqual(manager.inProgressTransfers.count, 1, "a paused job is out of the count")
+
+      manager.pause(first)
+      XCTAssertTrue(first.isPending, "a pausing job still holds its slot until its session has closed")
+      XCTAssertTrue(manager.inProgressTransfers.isEmpty)
+      XCTAssertNil(StatusMenuModel.DownloadActivity.make(manager.inProgressTransfers))
+
+      if let signIn = manager.signIn { manager.cancel(signIn) }
+      await manager.shutdown()
+      XCTAssertTrue(manager.inProgressTransfers.isEmpty)
     } catch {
       await manager.shutdown()
       throw error
@@ -483,5 +537,79 @@ final class DownloadQueueTests: DownloaderTestCase {
       await rejected.shutdown()
       throw error
     }
+  }
+
+  /// The wake observer belongs to the manager's lifetime, not the process's: one that goes away
+  /// without `shutdown()` takes its observer with it.
+  func testAManagerThatIsDroppedRemovesItsWakeObserver() throws {
+    let root = try makeParallelRuntime()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let center = ObserverCountingCenter()
+    do {
+      let manager = WorkshopDownloadManager(
+        sessionDirectory: root.appendingPathComponent("SteamSession"),
+        runtimeProvider: ShellRuntimeProvider(), wakeCenter: center)
+      XCTAssertEqual(center.added, 1)
+      XCTAssertEqual(center.removed, 0)
+      XCTAssertTrue(manager.downloads.isEmpty)
+    }
+    XCTAssertEqual(center.removed, 1, "Nothing is left registered once the manager is gone")
+  }
+
+  /// Waking from sleep makes every running transfer check that bytes still arrive. A job that
+  /// is only waiting for a slot has no connection to check.
+  func testWakeNotificationReachesRunningTransfersOnly() async throws {
+    let root = try makeParallelRuntime()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let center = NotificationCenter()
+    let manager = WorkshopDownloadManager(
+      sessionDirectory: root.appendingPathComponent("SteamSession"),
+      runtimeProvider: ShellRuntimeProvider(), maximumConcurrentDownloads: 1,
+      networkMonitorFactory: { FixtureNetworkMonitor() }, wakeCenter: center)
+    func enqueue(_ id: String) throws -> WorkshopDownload {
+      manager.start(
+        item: WorkshopItem(
+          id: id, title: "Wake \(id)", creator: "Test", summary: "", previewURL: nil,
+          tags: ["Video"], size: 0, subscriptions: 0),
+        username: "localtest", executable: root.appendingPathComponent("runtime/steamcmd"),
+        library: root.appendingPathComponent("Library")
+      ) {}
+      return try XCTUnwrap(manager.download(for: id))
+    }
+    do {
+      let running = try enqueue("1")
+      let waiting = try enqueue("2")
+      try await authenticate(running.worker, guardCode: false)
+      try await waitUntil { running.worker.phase == .transferring }
+      XCTAssertTrue(waiting.isQueued)
+      XCTAssertNil(running.worker.resumedAt)
+      center.post(name: NSWorkspace.didWakeNotification, object: nil)
+      try await waitUntil { running.worker.resumedAt != nil }
+      XCTAssertNil(waiting.worker.resumedAt)
+      XCTAssertTrue(waiting.isQueued)
+      await manager.shutdown()
+    } catch {
+      await manager.shutdown()
+      throw error
+    }
+  }
+}
+
+/// Counts the observers a notification center is given and takes back.
+private final class ObserverCountingCenter: NotificationCenter, @unchecked Sendable {
+  private(set) var added = 0
+  private(set) var removed = 0
+
+  override func addObserver(
+    forName name: NSNotification.Name?, object: Any?, queue: OperationQueue?,
+    using block: @escaping @Sendable (Notification) -> Void
+  ) -> NSObjectProtocol {
+    added += 1
+    return super.addObserver(forName: name, object: object, queue: queue, using: block)
+  }
+
+  override func removeObserver(_ observer: Any) {
+    removed += 1
+    super.removeObserver(observer)
   }
 }

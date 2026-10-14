@@ -80,12 +80,16 @@ actor WorkshopThumbnailCache {
     static let frameSamples = 8
     /// Mean luminance (0...1) below which a sampled frame counts as a black fade-in frame.
     static let darkFrameLuminance = 0.08
-    private static let downloadLimit = URLSessionThumbnailFetcher.maximumBytes
     private static let writesPerPrune = 25
 
     let directory: URL
     let maxPixelSize: Int
     let byteLimit: Int64
+    /// Whether an animated source also leaves its original bytes (and a single-frame source its
+    /// marker) beside the still. A cache that only ever serves stills turns this off.
+    let keepsAnimation: Bool
+    /// The largest source this cache will turn into a thumbnail.
+    let sourceByteLimit: Int
     private let fetcher: any WorkshopThumbnailFetching
     private let maxConcurrentFetches: Int
     private let maxConcurrentAnimatedFetches: Int
@@ -105,7 +109,9 @@ actor WorkshopThumbnailCache {
         maxPixelSize: Int = WorkshopThumbnailCache.defaultMaxPixelSize,
         maxConcurrentFetches: Int = 8,
         maxConcurrentAnimatedFetches: Int = 2,
-        byteLimit: Int64 = 512 * 1024 * 1024
+        byteLimit: Int64 = 512 * 1024 * 1024,
+        keepsAnimation: Bool = true,
+        sourceByteLimit: Int = URLSessionThumbnailFetcher.maximumBytes
     ) {
         self.directory = directory
         self.fetcher = fetcher
@@ -113,6 +119,8 @@ actor WorkshopThumbnailCache {
         self.maxConcurrentFetches = max(1, maxConcurrentFetches)
         self.maxConcurrentAnimatedFetches = max(1, maxConcurrentAnimatedFetches)
         self.byteLimit = byteLimit
+        self.keepsAnimation = keepsAnimation
+        self.sourceByteLimit = max(1, sourceByteLimit)
     }
 
     /// JPEG bytes for `previewURL`, from disk when present, otherwise fetched once per URL even
@@ -124,11 +132,15 @@ actor WorkshopThumbnailCache {
         if let task = inFlight[key] { return try await task.value }
         let fetcher = fetcher
         let maxPixelSize = maxPixelSize
+        let keepsAnimation = keepsAnimation
+        let sourceByteLimit = sourceByteLimit
         let task = Task<Data, Error> {
             await acquireSlot(.still)
             do {
                 let data = try await Task.detached(priority: .userInitiated) {
-                    try await Self.produce(previewURL: previewURL, into: file, fetcher: fetcher, maxPixelSize: maxPixelSize)
+                    try await Self.produce(
+                        previewURL: previewURL, into: file, fetcher: fetcher, maxPixelSize: maxPixelSize,
+                        keepsAnimation: keepsAnimation, sourceByteLimit: sourceByteLimit)
                 }.value
                 finishFetch(key)
                 recordWrite()
@@ -155,6 +167,7 @@ actor WorkshopThumbnailCache {
     /// the still pass found to be a single frame is refused without a request, so the panel keeps
     /// its still instead of loading the same picture at full size.
     func animatedPreview(for previewURL: URL) async throws -> Data {
+        guard keepsAnimation else { throw WorkshopThumbnailFailure(code: .notAnimated) }
         let file = fileURL(for: previewURL)
         let key = file.lastPathComponent
         // A still pass under way is already downloading these bytes; wait rather than race it.
@@ -173,7 +186,7 @@ actor WorkshopThumbnailCache {
                 release(.animated)
             }
             let data = try await fetcher.fetch(previewURL)
-            guard data.count <= Self.downloadLimit else { throw WorkshopThumbnailFailure(code: .tooLarge) }
+            guard data.count <= sourceByteLimit else { throw WorkshopThumbnailFailure(code: .tooLarge) }
             guard Self.animationFitsBudget(data) else { throw WorkshopThumbnailFailure(code: .notAnimated) }
             try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             try? data.write(to: animation, options: .atomic)
@@ -340,19 +353,22 @@ actor WorkshopThumbnailCache {
     }
 
     private nonisolated static func produce(
-        previewURL: URL, into file: URL, fetcher: any WorkshopThumbnailFetching, maxPixelSize: Int
+        previewURL: URL, into file: URL, fetcher: any WorkshopThumbnailFetching, maxPixelSize: Int,
+        keepsAnimation: Bool, sourceByteLimit: Int
     ) async throws -> Data {
         let source = try await fetcher.fetch(previewURL)
-        guard source.count <= downloadLimit else { throw WorkshopThumbnailFailure(code: .tooLarge) }
+        guard source.count <= sourceByteLimit else { throw WorkshopThumbnailFailure(code: .tooLarge) }
         try Task.checkCancellation()
         let thumbnail = try encodeThumbnail(source, maxPixelSize: maxPixelSize)
         try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
         // The animation lands before the still, so a tile that shows its still can always play.
-        if animationFitsBudget(source) {
-            try? source.write(to: animationFile(for: file), options: .atomic)
-            try? FileManager.default.removeItem(at: stillMarker(for: file))
-        } else {
-            try? Data().write(to: stillMarker(for: file), options: .atomic)
+        if keepsAnimation {
+            if animationFitsBudget(source) {
+                try? source.write(to: animationFile(for: file), options: .atomic)
+                try? FileManager.default.removeItem(at: stillMarker(for: file))
+            } else {
+                try? Data().write(to: stillMarker(for: file), options: .atomic)
+            }
         }
         try thumbnail.write(to: file, options: .atomic)
         return thumbnail

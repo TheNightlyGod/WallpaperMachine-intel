@@ -228,6 +228,60 @@ final class WorkshopThumbnailCacheTests: XCTestCase {
         XCTAssertEqual(fetcher.requests.count, 1)
     }
 
+    func testCacheThatKeepsNoAnimationWritesOnlyStillsAndRelaysNothing() async throws {
+        let gif = try Self.image(type: .gif, width: 200, height: 120, frames: 4)
+        let png = try Self.image(type: .png, width: 200, height: 120, frames: 1)
+        let fetcher = RecordingFetcher { url in url.path.contains("gif") ? gif : png }
+        let cache = WorkshopThumbnailCache(directory: root, fetcher: fetcher, keepsAnimation: false)
+        let animated = try XCTUnwrap(URL(string: "https://images.steamusercontent.com/ugc/20/gif/"))
+        let still = try XCTUnwrap(URL(string: "https://images.steamusercontent.com/ugc/21/png/"))
+
+        let cover = try await cache.thumbnail(for: animated)
+        _ = try await cache.thumbnail(for: still)
+        XCTAssertEqual(WorkshopThumbnailCache.frameCount(of: cover), 1)
+        let files = try FileManager.default.contentsOfDirectory(atPath: root.path).sorted()
+        XCTAssertEqual(files.filter { $0.hasSuffix(".jpg") }.count, 2)
+        XCTAssertEqual(files.filter { !$0.hasSuffix(".jpg") }, [], "No original animation and no single-frame marker is left behind")
+
+        do {
+            _ = try await cache.animatedPreview(for: animated)
+            XCTFail("a cache that keeps no animation has none to relay")
+        } catch let failure as WorkshopThumbnailFailure {
+            XCTAssertEqual(failure.code, .notAnimated)
+        }
+        XCTAssertEqual(fetcher.requests.count, 2, "Declining to relay costs no request")
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.path).count, 2)
+    }
+
+    func testSourceLargerThanTheCachesLimitIsRefusedAndLeavesNothing() async throws {
+        let png = try Self.image(type: .png, width: 400, height: 300, frames: 1)
+        let fetcher = RecordingFetcher { _ in png }
+        let url = try XCTUnwrap(URL(string: "https://images.steamusercontent.com/ugc/22/limit/"))
+
+        let strict = WorkshopThumbnailCache(directory: root, fetcher: fetcher, sourceByteLimit: png.count - 1)
+        do {
+            _ = try await strict.thumbnail(for: url)
+            XCTFail("a source over the limit must not become a cover")
+        } catch let failure as WorkshopThumbnailFailure {
+            XCTAssertEqual(failure.code, .tooLarge)
+        }
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: root.path).isEmpty)
+
+        let exact = WorkshopThumbnailCache(directory: root, fetcher: fetcher, sourceByteLimit: png.count)
+        let cover = try await exact.thumbnail(for: url)
+        XCTAssertFalse(cover.isEmpty)
+
+        let gif = try Self.image(type: .gif, width: 32, height: 32, frames: 3)
+        let animated = try XCTUnwrap(URL(string: "https://images.steamusercontent.com/ugc/23/limit/"))
+        let relaying = WorkshopThumbnailCache(directory: root, fetcher: RecordingFetcher { _ in gif }, sourceByteLimit: gif.count - 1)
+        do {
+            _ = try await relaying.animatedPreview(for: animated)
+            XCTFail("an animation over the limit must not be relayed")
+        } catch let failure as WorkshopThumbnailFailure {
+            XCTAssertEqual(failure.code, .tooLarge)
+        }
+    }
+
     private static func meanLuminance(of encoded: Data) throws -> Double {
         let source = try XCTUnwrap(CGImageSourceCreateWithData(encoded as CFData, nil))
         let image = try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil))

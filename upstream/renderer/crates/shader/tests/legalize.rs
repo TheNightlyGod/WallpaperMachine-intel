@@ -10,6 +10,22 @@ fn legalize(stage: ShaderStageKind, source: &str) -> CodegenStageSource {
     Codegen.legalize(&module).expect("shader legalizes")
 }
 
+/// Compiles legalized fragment source for both renderers, which share the
+/// strict frontend a legacy expression has to get past.
+fn compile_for_both_targets(legalized: &CodegenStageSource, expectation: &str) {
+    for target in [ShaderTarget::VulkanSpirv, ShaderTarget::MetalMsl] {
+        if let Err(error) =
+            NagaCompiler.compile_stage(target, ShaderStageKind::Fragment, legalized)
+        {
+            panic!(
+                "{expectation} ({target:?}): {}\n{}",
+                error.to_miette_report(),
+                legalized.source()
+            );
+        }
+    }
+}
+
 #[test]
 fn legalizer_returns_stage_source_and_phase_diagnostics_without_mutating_module() {
     let source = "void main() { gl_FragColor = vec4(1.0); }\n";
@@ -4228,6 +4244,64 @@ fn control_flow_coercion_strategy_float_times_bool_preserves_nested_reserved_ide
 }
 
 #[test]
+fn control_flow_coercion_strategy_converts_comparisons_stored_into_float_lvalues() {
+    // The permissive path converts a comparison to 1.0/0.0 wherever it is
+    // stored into a number, compound assignments included.
+    let source = concat!(
+        "uniform float u_Start;\n",
+        "uniform float u_End;\n",
+        "void main() {\n",
+        "    vec2 shapeCoord = vec2(0.0);\n",
+        "    float wrapped = 0.0;\n",
+        "    shapeCoord.x += u_End - u_Start < 0.0;\n",
+        "    wrapped = u_Start > u_End;\n",
+        "    gl_FragColor = vec4(shapeCoord, wrapped, 1.0);\n",
+        "}\n",
+    );
+
+    let legalized = legalize(ShaderStageKind::Fragment, source);
+    let source = legalized.source();
+
+    assert!(
+        source.contains("shapeCoord.x += ((u_End - u_Start < 0.0) ? 1.0 : 0.0);"),
+        "{source}"
+    );
+    assert!(
+        source.contains("wrapped = ((u_Start > u_End) ? 1.0 : 0.0);"),
+        "{source}"
+    );
+    compile_for_both_targets(&legalized, "a comparison stored into a float must convert");
+}
+
+#[test]
+fn control_flow_coercion_strategy_keeps_conditionals_that_select_numbers() {
+    // A conditional selects one of its branches, so a comparison in its
+    // condition says nothing about the value it produces.
+    let source = concat!(
+        "uniform float u_A;\n",
+        "uniform float u_B;\n",
+        "void main() {\n",
+        "    bool flag = u_A < u_B;\n",
+        "    float x = u_A < 0.5 ? 1.0 : 2.0;\n",
+        "    x += u_B > 0.5 ? 1.0 : 0.0;\n",
+        "    float y = flag ? u_A > 0.5 : false;\n",
+        "    gl_FragColor = vec4(x, y, 0.0, 1.0);\n",
+        "}\n",
+    );
+
+    let legalized = legalize(ShaderStageKind::Fragment, source);
+    let source = legalized.source();
+
+    assert!(source.contains("float x = u_A < 0.5 ? 1.0 : 2.0;"), "{source}");
+    assert!(source.contains("x += u_B > 0.5 ? 1.0 : 0.0;"), "{source}");
+    assert!(
+        source.contains("float y = ((flag ? u_A > 0.5 : false) ? 1.0 : 0.0);"),
+        "{source}"
+    );
+    compile_for_both_targets(&legalized, "conditionals selecting numbers must stay intact");
+}
+
+#[test]
 fn control_flow_coercion_strategy_lowers_bool_float_in_later_comma_declarator() {
     let source = concat!(
         "void main() {\n",
@@ -4556,4 +4630,28 @@ fn widened_uniform_arrays_swizzle_reads_written_through_a_macro_alias() {
         source.contains("float v = u_AudioSpectrumLeft[int(2)].x;"),
         "{source}"
     );
+}
+
+#[test]
+fn widened_scalar_uniform_array_component_subscript_reads_the_element() {
+    // A `float` element is a one-component value, so the only component a
+    // further subscript can select is the element itself. Without the author
+    // subscript the widened read narrows with `.x`; with it, `.x` replaces it.
+    let source = concat!(
+        "uniform float g_AudioSpectrum64Left[64];\n",
+        "float bar(float barID) {\n",
+        "    return g_AudioSpectrum64Left[barID / 4][barID % 4];\n",
+        "}\n",
+        "void main() {\n",
+        "    gl_FragColor = vec4(bar(5.0), g_AudioSpectrum64Left[1], 0.0, 1.0);\n",
+        "}\n",
+    );
+
+    let legalized = legalize(ShaderStageKind::Fragment, source);
+    let source = legalized.source();
+
+    assert!(source.contains("vec4 g_AudioSpectrum64Left[64];"), "{source}");
+    assert!(source.contains("g_AudioSpectrum64Left[1].x"), "{source}");
+    assert!(!source.contains(".x["), "{source}");
+    compile_for_both_targets(&legalized, "a component subscript on a scalar element must compile");
 }

@@ -5,6 +5,8 @@
 //! counting on, and a reading that could not be taken is `None` rather than a
 //! plausible-looking default.
 
+use std::time::Duration;
+
 /// Why a scene still needs its frame clock.
 ///
 /// Mirrors `owe_scene_demand_reason` in the renderer's C header. Hand-rolled
@@ -269,6 +271,96 @@ pub struct SceneRuntimeReport {
     /// Whether this scene's compiled graph is running under the current scene
     /// optimisation setting. `None` when the renderer could not say.
     pub optimization_applied: Option<bool>,
+    /// Whether this scene's frame loop is alive and whether it stopped after a
+    /// failure. `None` when the renderer returned no reading, which is not the
+    /// same as a healthy surface.
+    pub surface: Option<SurfaceHealth>,
+}
+
+/// Why a scene surface stopped drawing although nobody asked it to.
+///
+/// Mirrors `owe_surface_stop_reason`. A running surface has no stop reason at
+/// all, which is why this is never a variant of its own: "not stopped" is
+/// `None` where it is carried.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SurfaceStopReason {
+    /// A frame failed after the graph was built: the swapchain, an acquire, a
+    /// present or a submit. The graph itself is intact.
+    FrameFailed,
+    /// The render graph or the backend under it could not be built or released,
+    /// so there is nothing to draw with until a scene or surface is installed
+    /// again.
+    GraphFailed,
+}
+
+impl SurfaceStopReason {
+    /// Maps a raw `owe_surface_stop_reason`. Zero is a surface that is not
+    /// stopped, and a value this build does not name yields `None` as well: the
+    /// renderer is linked from the same header as this crate, so an unnamed
+    /// value is not a newer renderer, only a corrupt reading.
+    #[must_use]
+    pub const fn from_raw(raw: u32) -> Option<Self> {
+        match raw {
+            1 => Some(Self::FrameFailed),
+            2 => Some(Self::GraphFailed),
+            _ => None,
+        }
+    }
+
+    /// Stable lowercase name for logs.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::FrameFailed => "frame_failed",
+            Self::GraphFailed => "graph_failed",
+        }
+    }
+}
+
+/// One reading of a scene surface's frame loop.
+///
+/// Always on and pull-only, unlike the renderer's work counters. Liveness is
+/// `frames_completed` advancing: a frame that would repeat the picture
+/// completes without presenting, so `frames_presented` and `last_present_age`
+/// stand still on a healthy, still scene and are diagnostics, not a signal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SurfaceHealth {
+    /// Frames the render loop ran to the end, presented or not.
+    pub frames_completed: u64,
+    /// Frames that reached the surface.
+    pub frames_presented: u64,
+    /// Frames lost to a failure inside the draw. Never reset by the renderer.
+    pub failed_frames: u64,
+    /// Time since the last present; `None` before the first one.
+    pub last_present_age: Option<Duration>,
+    /// Set while the surface is stopped by a failure.
+    pub stop: Option<SurfaceStopReason>,
+}
+
+impl SurfaceHealth {
+    /// Builds from the renderer's raw fields. `u64::MAX` is the renderer's
+    /// "never presented" and becomes `None` instead of an age of half a billion
+    /// years.
+    #[must_use]
+    pub const fn from_raw(
+        frames_completed: u64,
+        frames_presented: u64,
+        failed_frames: u64,
+        last_present_age_ms: u64,
+        stop_reason: u32,
+    ) -> Self {
+        Self {
+            frames_completed,
+            frames_presented,
+            failed_frames,
+            last_present_age: if last_present_age_ms == u64::MAX {
+                None
+            } else {
+                Some(Duration::from_millis(last_present_age_ms))
+            },
+            stop: SurfaceStopReason::from_raw(stop_reason),
+        }
+    }
 }
 
 /// How a scene's video textures reached the shaders that sample them.
@@ -361,6 +453,46 @@ mod tests {
         let reasons = SceneDemandReasons::TEXT_LAYOUT_PENDING;
         assert_eq!(reasons.names(), vec!["text_layout_pending"]);
         assert!(!reasons.names().contains(&"unknown_input"));
+    }
+
+    #[test]
+    fn a_stop_reason_the_renderer_names_is_kept_and_anything_else_is_not_invented() {
+        assert_eq!(SurfaceStopReason::from_raw(1), Some(SurfaceStopReason::FrameFailed));
+        assert_eq!(SurfaceStopReason::from_raw(2), Some(SurfaceStopReason::GraphFailed));
+        assert_eq!(
+            SurfaceStopReason::from_raw(0),
+            None,
+            "zero is a surface that is not stopped"
+        );
+        assert_eq!(
+            SurfaceStopReason::from_raw(3),
+            None,
+            "an unnamed value must not be read as a failure this build can describe"
+        );
+        assert_eq!(SurfaceStopReason::from_raw(u32::MAX), None);
+    }
+
+    #[test]
+    fn a_surface_that_never_presented_has_no_present_age() {
+        let health = SurfaceHealth::from_raw(12, 0, 0, u64::MAX, 0);
+        assert_eq!(
+            health.last_present_age, None,
+            "the renderer's never-presented marker is not a duration"
+        );
+        assert_eq!(health.frames_completed, 12);
+        assert_eq!(health.stop, None);
+
+        let presented = SurfaceHealth::from_raw(12, 3, 0, 1_500, 0);
+        assert_eq!(presented.last_present_age, Some(Duration::from_millis(1_500)));
+    }
+
+    #[test]
+    fn the_failure_count_survives_a_cleared_stop() {
+        // The renderer never resets it, so a host can tell a surface that
+        // failed once from one that never has even after it recovered.
+        let recovered = SurfaceHealth::from_raw(900, 900, 2, 16, 0);
+        assert_eq!(recovered.stop, None);
+        assert_eq!(recovered.failed_frames, 2);
     }
 
     #[test]

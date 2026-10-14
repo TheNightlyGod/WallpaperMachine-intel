@@ -11,22 +11,28 @@ final class WebWallpaperPreviewSurface: NSObject, WallpaperPreviewSurface, WKUID
     private let request: WallpaperPreviewRequest
     private let assets: UserAssetStore
     private var fetchAll = Set<String>()
+    /// The staged copies of the files the page was handed, by property id. A later delivery
+    /// names the user's own path again, so these are put back to keep the page's value.
+    private var replacements: [String: String] = [:]
     private var stopped = false
 
+    /// `inspectable` is read once: a preview lives for a few minutes at most, and
+    /// the next one opened honors whatever the preference is by then.
     init(request: WallpaperPreviewRequest, generation: UInt64,
-         counters: RuntimeCounters? = nil, assets: UserAssetStore? = nil) {
+         counters: RuntimeCounters? = nil, assets: UserAssetStore? = nil,
+         inspectable: Bool = WebWallpaperInspection.isEnabled()) {
         self.request = request
         self.assets = assets ?? UserAssetStore(projectURL: request.projectURL, wallpaperId: request.wallpaperID)
         page = WebWallpaperPage(projectURL: request.projectURL, entryFile: request.entryFile,
             surface: RuntimeSurfaceKey(kind: .preview, displayID: 0, generation: generation),
-            counters: counters, persistentData: false)
+            counters: counters, persistentData: false, inspectable: inspectable)
         let content = NSView(frame: CGRect(x: 0, y: 0, width: 960, height: 540))
         content.wantsLayer = true
         content.layer?.backgroundColor = NSColor.black.cgColor
         view = content
         super.init()
         page.webView.uiDelegate = self
-        page.webView.configuration.userContentController.addUserScript(WKUserScript(
+        page.addUserScript(WKUserScript(
             source: Self.denyCaptureScript, injectionTime: .atDocumentStart, forMainFrameOnly: false))
         page.attach(to: content)
         page.onLoaded = { [weak self] in
@@ -54,7 +60,7 @@ final class WebWallpaperPreviewSurface: NSObject, WallpaperPreviewSurface, WKUID
         guard WebWallpaperAudioOutput.apply(volume: request.volume, muted: true, to: page.webView).pageMute else {
             throw WallpaperPreviewFailure(message: String(localized: "WebKit cannot provide muted playback for this preview."))
         }
-        var replacements: [String: String] = [:]
+        replacements = [:]
         for property in WebWallpaperHost.pathProperties(in: request.propertiesJSON) {
             try Task.checkCancellation()
             guard !property.source.isEmpty else { continue }
@@ -76,6 +82,12 @@ final class WebWallpaperPreviewSurface: NSObject, WallpaperPreviewSurface, WKUID
         page.setAudioResponseEnabled(false)
         page.setMediaIntegrationEnabled(false)
         page.load()
+    }
+
+    /// The page already hands its listener only the properties whose values changed.
+    func applyProperties(_ json: String) throws {
+        guard !stopped else { return }
+        page.applyUserProperties(json: WebWallpaperHost.substituting(replacements, in: json) ?? json)
     }
 
     func setPaused(_ paused: Bool) throws {

@@ -54,6 +54,15 @@ impl BridgePaths {
         )
     }
 
+    /// The project file of a Workshop wallpaper: the `scene_path` its scene
+    /// descriptor carries, and so what a running scene reports it draws.
+    #[must_use]
+    pub fn project_json(&self, wallpaper_id: &str) -> PathBuf {
+        self.steam_workshop_root()
+            .join(wallpaper_id)
+            .join("project.json")
+    }
+
     #[must_use]
     pub fn assets_root(&self) -> PathBuf {
         if let Some(root) = std::env::var_os("WALLPAPER_MACHINE_ASSETS_ROOT") {

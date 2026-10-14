@@ -85,7 +85,7 @@ final class WallpaperPreviewRequestTests: XCTestCase {
                 canRestoreDefaults: false, enabled: true, assetManaged: false, assetMissing: false, assetSourcePath: nil),
         ])
         let store = BridgeStore(bridge: bridge)
-        store.appSnapshot = .init(playbackState: .playing, selectedWallpaperId: "other", activeWallpaperIds: ["other"], errors: [])
+        store.appSnapshot = .init(playbackState: .playing, selectedWallpaperId: "other", activeWallpaperIds: ["other"], errors: [], heldWallpaperIds: [])
         let before = store.appSnapshot
         let field = WallpaperEditorState.FieldKey(wallpaperID: "preview", fieldID: "message")
         store.editorState.setPropertyText("local draft", key: field)
@@ -100,11 +100,58 @@ final class WallpaperPreviewRequestTests: XCTestCase {
         XCTAssertTrue(store.editorState.hasPendingEdits(wallpaperID: "preview"))
         do { _ = try await store.wallpaperPreviewRequestAsync(id: "preview", displayID: "primary", textOverrides: ["unknown": "x"]); XCTFail("undeclared preview property accepted") } catch {}
     }
+
+    func testPreviewAsksForTheValuesBeingDraggedUntilTheDragEnds() async throws {
+        let bridge = PreviewInputsBridge(noPointer: .init())
+        bridge.preview = descriptor()
+        bridge.options = BridgeSnapshotFixtures.options(wallpaperId: "preview", kind: .webpage)
+        let store = BridgeStore(bridge: bridge)
+        let draft = WallpaperEditorState.FieldKey(wallpaperID: "preview", fieldID: "message")
+        store.editorState.setPropertyText("local draft", key: draft)
+
+        _ = try await store.wallpaperPreviewRequestAsync(id: "preview", displayID: "primary")
+        await store.previewPropertyAsync(wallpaperId: "preview", propertyId: "size", value: .number(value: 3))
+        await store.previewPropertyAsync(wallpaperId: "other", propertyId: "size", value: .number(value: 9))
+        await store.previewPropertyAsync(wallpaperId: "preview", propertyId: "size", value: .number(value: 4))
+        _ = try await store.wallpaperPreviewRequestAsync(id: "preview", displayID: "primary")
+        store.editorState.discard(wallpaperID: "preview")
+        _ = try await store.wallpaperPreviewRequestAsync(id: "preview", displayID: "primary")
+
+        XCTAssertEqual(
+            bridge.requested,
+            [[], [.init(propertyId: "size", value: .number(value: 4))], []],
+            "the newest step of this wallpaper alone, and none once a revert or an apply ended it")
+        XCTAssertTrue(store.history.entries.isEmpty)
+        XCTAssertEqual(store.editorState.propertyPreviews(wallpaperID: "other").count, 1, "another wallpaper's drag is its own")
+    }
+
+    func testPreviewNamesThePicturesAndFilesItCannotChangeInPlace() async throws {
+        func property(_ id: String, _ kind: BridgePropertyKind) -> BridgePropertyDescriptor {
+            BridgePropertyDescriptor(id: id, kind: kind, labelHtml: id, value: .string(value: ""), defaultValue: .string(value: ""),
+                slider: nil, comboOptions: [], fileFilter: nil, directoryMode: nil, dirty: false,
+                canRestoreDefaults: false, enabled: true, assetManaged: false, assetMissing: false, assetSourcePath: nil)
+        }
+        let bridge = PreviewInputsBridge(noPointer: .init())
+        bridge.preview = descriptor()
+        bridge.options = BridgeSnapshotFixtures.options(wallpaperId: "preview", kind: .webpage, properties: [
+            property("picture", .texture), property("file", .file), property("folder", .directory),
+            property("size", .slider), property("tint", .color), property("flag", .bool), property("mode", .combo),
+            property("message", .textInput), property("heading", .group), property("label", .text),
+        ])
+        let store = BridgeStore(bridge: bridge)
+        let request = try await store.wallpaperPreviewRequestAsync(id: "preview", displayID: "primary")
+        XCTAssertEqual(request.frozenPropertyIDs, ["picture", "file", "folder"])
+    }
 }
 
 private final class PreviewInputsBridge: WallpaperBridge {
     var preview: BridgeWallpaperPreview!
     var options: BridgeWallpaperOptionsSnapshot!
-    override func wallpaperPreview(wallpaperId: String, displayId: String) async throws -> BridgeWallpaperPreview { preview }
+    /// The values being dragged that each request asked the bridge to show on top of the draft.
+    var requested: [[BridgePropertyEdit]] = []
+    override func wallpaperPreview(wallpaperId: String, displayId: String, pending: [BridgePropertyEdit]) async throws -> BridgeWallpaperPreview {
+        requested.append(pending)
+        return preview
+    }
     override func wallpaperOptionsSnapshot(wallpaperId: String) async throws -> BridgeWallpaperOptionsSnapshot { options }
 }

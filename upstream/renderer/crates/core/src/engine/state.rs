@@ -361,7 +361,7 @@ mod tests {
             runtime::SceneRuntimeState,
             state::{DisplayRuntimeRecord, StoredSceneRuntimeState},
         },
-        project::{ScalingMode, SceneDesc, SceneTemplate},
+        project::{ScalingMode, SceneDesc, SceneFraming, SceneTemplate},
     };
 
     fn identity(label: &str) -> DisplayIdentity {
@@ -524,6 +524,55 @@ mod tests {
             Some(WallpaperAssignment::Direct(SceneTemplate::from_scene_desc(
                 &updated
             )))
+        );
+    }
+
+    #[test]
+    fn runtime_record_keeps_a_live_framing_in_its_direct_assignment() {
+        let original = SceneDesc::new(
+            DisplayDesc::new(1, 0, 0, 1920, 1080, 1.0),
+            "/tmp/project.json",
+            "/tmp/assets",
+            60,
+            false,
+        );
+        let moved = SceneFraming {
+            pan_x: 0.2,
+            pan_y: 0.8,
+        };
+        let mut live = original.clone();
+        live.framing = moved;
+        let mut record = DisplayRuntimeRecord {
+            model: DisplayRecord {
+                key: DisplayKey::Primary,
+                live_display: Some(original.display.clone()),
+                assignment: Some(WallpaperAssignment::Direct(SceneTemplate::from_scene_desc(
+                    &original,
+                ))),
+                window_active: true,
+                runtime_open: true,
+                primary_inheritance_consumed: false,
+            },
+            handle: None,
+            runtime: None,
+            last_runtime_state: None,
+        };
+
+        record.sync_direct_assignment_from_desc(&live);
+
+        // The bridge compares these templates to decide what needs reconciling,
+        // and the scene a later reconcile builds from them must keep the position.
+        let Some(WallpaperAssignment::Direct(template)) = record.model.assignment.as_ref() else {
+            panic!("the direct assignment should remain");
+        };
+        assert_eq!(template.framing, moved);
+        assert_eq!(
+            record
+                .scene_desc()
+                .expect("scene should build")
+                .expect("assigned scene should exist")
+                .framing,
+            moved
         );
     }
 

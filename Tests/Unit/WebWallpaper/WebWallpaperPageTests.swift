@@ -84,6 +84,29 @@ final class WebWallpaperPageTests: XCTestCase {
     XCTAssertNil(page.webView.window, "This regression must not open a desktop window")
   }
 
+  /// An offscreen view never draws, so the cadence itself cannot be observed
+  /// here; WebKit's own record of the preference the page was created with is
+  /// what decides it. The rate was measured on a 120 Hz display instead.
+  func testOnlyAFullRefreshPageLeavesWebKitsNear60FPSCadence() throws {
+    let features = (WKPreferences.self as NSObject.Type)
+      .perform(NSSelectorFromString("_features"))?.takeUnretainedValue() as? [NSObject]
+    let isEnabled = NSSelectorFromString("_isEnabledForFeature:")
+    guard let feature = features?.first(where: {
+      $0.value(forKey: "key") as? String == "PreferPageRenderingUpdatesNear60FPSEnabled"
+    }), WKPreferences.instancesRespond(to: isEnabled) else {
+      throw XCTSkip("This WebKit has no near-60 fps rendering preference")
+    }
+    typealias IsEnabled = @convention(c) (AnyObject, Selector, AnyObject) -> Bool
+    func prefersNear60FPS(_ page: WebWallpaperPage) -> Bool {
+      let preferences = page.webView.configuration.preferences
+      return unsafeBitCast(preferences.method(for: isEnabled), to: IsEnabled.self)(
+        preferences, isEnabled, feature)
+    }
+    XCTAssertTrue(prefersNear60FPS(WebWallpaperPage(projectURL: project, entryFile: "index.html")))
+    XCTAssertFalse(prefersNear60FPS(WebWallpaperPage(
+      projectURL: project, entryFile: "index.html", rendersAtDisplayRefresh: true)))
+  }
+
   func testTopFrameCannotNavigateAwayFromTheEntryPage() async throws {
     try """
       <!doctype html><html><body><script>location.href = "https://example.invalid/";</script></body></html>
@@ -241,6 +264,40 @@ final class WebWallpaperPageTests: XCTestCase {
     XCTAssertEqual(contextMenu[3] as? Int, 2)
     XCTAssertEqual(contextMenu[4] as? Bool, true, "WebKit's context menu must never open over the desktop")
     XCTAssertNil(page.webView.window, "This regression must not open a desktop window")
+  }
+
+  func testPointerMoveIntervalFollowsTheFrameLimit() {
+    let page = WebWallpaperPage(projectURL: project, entryFile: "index.html")
+    XCTAssertEqual(page.pointerMoveInterval, 1.0 / 60, accuracy: 1e-12, "no rate committed yet")
+    // (descriptor fps, forwarded moves per second)
+    let cases: [(UInt32, Double)] = [
+      (0, 60), (120, 60), (60, 60), (59, 59), (30, 30), (12, 12), (9, 10), (1, 10),
+    ]
+    for (fps, rate) in cases {
+      page.applyGeneralProperties(fps: fps)
+      XCTAssertEqual(page.pointerMoveInterval, 1 / rate, accuracy: 1e-12, "fps \(fps)")
+    }
+  }
+
+  /// WebKit hands a page one pointer move per frame it draws, so the interval
+  /// follows the rate the page draws at: 60 near its default cadence even on a
+  /// fast display, the display's refresh for a page created to draw at it, and
+  /// the refresh of a slow display.
+  func testPointerMoveIntervalFollowsTheRateThePageDrawsAt() {
+    // (display refresh, page created for the full refresh, fps, forwarded moves per second)
+    let cases: [(Int, Bool, UInt32, Double)] = [
+      (120, false, 120, 60), (120, false, 90, 60), (120, false, 30, 30),
+      (120, true, 120, 120), (144, true, 144, 144), (120, true, 240, 120), (120, true, 30, 30),
+      (48, false, 48, 48), (48, false, 30, 30), (30, false, 60, 30),
+    ]
+    for (refresh, full, fps, rate) in cases {
+      let page = WebWallpaperPage(projectURL: project, entryFile: "index.html", rendersAtDisplayRefresh: full)
+      page.applyDisplayRefreshRate(refresh)
+      page.applyGeneralProperties(fps: fps)
+      XCTAssertEqual(
+        page.pointerMoveInterval, 1 / rate, accuracy: 1e-12,
+        "\(fps) fps on a \(refresh) Hz display\(full ? " drawn at its refresh" : "")")
+    }
   }
 
   private func poll(

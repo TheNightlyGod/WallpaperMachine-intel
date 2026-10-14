@@ -1,4 +1,3 @@
-import Darwin
 import Foundation
 
 enum LockScreenExtensionDiagnostics {
@@ -29,25 +28,6 @@ enum LockScreenExtensionDiagnostics {
   /// Legacy extensions cannot send diagnostics. Inspect only this user's extension processes
   /// after a timeout; an old process still exiting during activation is not itself a failure.
   static func runningExtensionBundles() -> [URL] {
-    let estimate = proc_listallpids(nil, 0)
-    guard estimate > 0 else { return [] }
-    var pids = [pid_t](repeating: 0, count: Int(estimate) + 64)
-    let count = pids.withUnsafeMutableBytes { proc_listallpids($0.baseAddress, Int32($0.count)) }
-    guard count > 0 else { return [] }
-    return pids.prefix(Int(count)).compactMap { pid in
-      var info = proc_bsdinfo()
-      guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, Int32(MemoryLayout.size(ofValue: info)))
-        == MemoryLayout.size(ofValue: info), info.pbi_uid == getuid()
-      else { return nil }
-      var path = [CChar](repeating: 0, count: Int(MAXPATHLEN))
-      guard proc_pidpath(pid, &path, UInt32(path.count)) > 0 else { return nil }
-      let executable = URL(fileURLWithPath: String(cString: path))
-      guard executable.lastPathComponent == "WallpaperMachineExtension" else { return nil }
-      let bundle = executable.deletingLastPathComponent().deletingLastPathComponent()
-        .deletingLastPathComponent()
-      guard Bundle(url: bundle)?.bundleIdentifier == LockScreenConfiguration.extensionIdentifier
-      else { return nil }
-      return bundle.resolvingSymlinksInPath().standardizedFileURL
-    }
+    LockScreenExtensionProcesses.live.list().compactMap(\.bundle)
   }
 }

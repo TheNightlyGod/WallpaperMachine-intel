@@ -150,6 +150,21 @@ fn macos_engine_exposes_property_override_methods() {
     let _async_property_api: fn(&WallpaperEngine, SceneHandle) = assert_async_property_api;
 }
 
+#[test]
+fn macos_engine_exposes_property_preview_method() {
+    fn assert_async_property_preview_api(engine: &WallpaperEngine, handle: SceneHandle) {
+        assert_async_result(engine.preview_property_override(handle, "/library/1/project.json", "{}"));
+        assert_async_result(engine.preview_property_override(
+            handle,
+            String::from("/library/1/project.json"),
+            String::from("{}"),
+        ));
+    }
+
+    let _async_property_preview_api: fn(&WallpaperEngine, SceneHandle) =
+        assert_async_property_preview_api;
+}
+
 fn assert_async_result<Fut, T>(_future: Fut)
 where
     Fut: Future<Output = Result<T, EngineError>>,

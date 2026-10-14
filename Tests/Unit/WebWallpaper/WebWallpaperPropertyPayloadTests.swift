@@ -145,6 +145,7 @@ final class WebWallpaperPropertyPayloadTests: XCTestCase {
       assetStore: { UserAssetStore(projectURL: $0, wallpaperId: $1) })
     defer { host.shutdown() }
     let first = await host.stageAssets(for: fixture.wallpaper)
+    XCTAssertEqual(first.restagedFiles, ["cover"], "a restaged folder is not a restaged file")
     let root = try Fixture.object(first.json)
     let pagePath = try XCTUnwrap((root["cover"] as? [String: Any])?["value"] as? String)
     let source = try XCTUnwrap(WebWallpaperHost.pathProperties(in: fixture.wallpaper.propertiesJson)
@@ -154,9 +155,89 @@ final class WebWallpaperPropertyPayloadTests: XCTestCase {
     host.invalidateAsset(wallpaperID: fixture.wallpaper.wallpaperId, propertyID: "cover")
     let second = await host.stageAssets(for: fixture.wallpaper)
     XCTAssertTrue(second.restaged)
+    XCTAssertEqual(second.restagedFiles, ["cover"])
+    XCTAssertEqual(
+      try Fixture.object(second.json)["cover"] as? NSDictionary, try Fixture.object(first.json)["cover"] as? NSDictionary,
+      "the same name stages to the same path, so the payload alone cannot tell the page the bytes changed")
     XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: "/" + pagePath.replacingOccurrences(of: "%25", with: "%"))), bytes)
     let unchanged = await host.stageAssets(for: fixture.wallpaper)
     XCTAssertFalse(unchanged.restaged)
+    XCTAssertTrue(unchanged.restagedFiles.isEmpty)
+  }
+
+  /// The whole path from the user's reselection to the page: the host restages, the staged
+  /// path and so the payload stay the same, and the page's listener is still told.
+  func testReselectingTheSameFileAfterItsBytesChangedReachesThePageAgain() async throws {
+    let fixture = try Fixture()
+    defer { fixture.remove() }
+    try """
+      <!doctype html><html><head><script>
+      window.__calls = [];
+      window.wallpaperPropertyListener = {
+        applyUserProperties(p) {
+          window.__calls.push({ keys: Object.keys(p).sort(), cover: p.cover && p.cover.value });
+        },
+      };
+      </script></head><body></body></html>
+      """.write(to: fixture.project.appendingPathComponent("index.html"), atomically: true, encoding: .utf8)
+    var surfaces: [InertSurface] = []
+    let host = WebWallpaperHost(
+      fetch: { [] }, screens: { [(id: UInt32(1), frame: NSRect(x: 0, y: 0, width: 320, height: 200))] },
+      assetStore: { UserAssetStore(projectURL: $0, wallpaperId: $1) }, pointerMonitor: InertPointerMonitor(),
+      makeSurface: { frame, page in
+        let surface = InertSurface(frame: frame, page: page)
+        surfaces.append(surface)
+        return surface
+      })
+    defer { host.shutdown() }
+    await host.apply([fixture.wallpaper])
+    let page = try XCTUnwrap(surfaces.first?.page)
+    func calls() async -> [[String: Any]] {
+      guard page.isLoaded,
+        let value = try? await page.webView.callAsyncJavaScript(
+          "return window.__calls", arguments: [:], in: nil, contentWorld: .page)
+      else { return [] }
+      return (value as? [[String: Any]]) ?? []
+    }
+    func waitForCalls(_ count: Int) async throws -> [[String: Any]] {
+      let deadline = Date().addingTimeInterval(10)
+      var current = await calls()
+      while current.count < count, Date() < deadline {
+        try await Task.sleep(for: .milliseconds(25))
+        current = await calls()
+      }
+      return current
+    }
+    let first = try await waitForCalls(1)
+    XCTAssertEqual(first.first?["keys"] as? [String], ["cover", "gallery"], "the first delivery carries every property")
+
+    let source = fixture.source.appendingPathComponent("a b+c.png")
+    try Data("same path with new content".utf8).write(to: source, options: .atomic)
+    host.invalidateAsset(wallpaperID: fixture.wallpaper.wallpaperId, propertyID: "cover")
+    await host.apply([fixture.wallpaper])
+
+    let second = try await waitForCalls(2)
+    XCTAssertEqual(second.count, 2, "the reselection reaches the page: \(second)")
+    XCTAssertEqual(second.last?["keys"] as? [String], ["cover"], "and only the restaged file is resent")
+    XCTAssertEqual(second.last?["cover"] as? String, first.first?["cover"] as? String)
+  }
+
+  private final class InertPointerMonitor: WebWallpaperPointerMonitoring {
+    var isActive = false
+    func setActive(_ active: Bool) { isActive = active }
+  }
+
+  private final class InertSurface: WebWallpaperSurface {
+    let page: WebWallpaperPage
+    var frame: NSRect
+    var posterLayer: CALayer? = CALayer()
+    init(frame: NSRect, page: WebWallpaperPage) {
+      self.frame = frame
+      self.page = page
+    }
+    func setScreenFrame(_ frame: NSRect) { self.frame = frame }
+    func present() {}
+    func retire() {}
   }
 
   func testStagingFixtureRestoresTheCallersHomeIncludingSetupFailure() async throws {
@@ -201,7 +282,7 @@ final class WebWallpaperPropertyPayloadTests: XCTestCase {
       wallpaper = BridgeWebWallpaper(
         displayId: 1, startupRevision: 0, displayKey: "1", audioSourceDisplayId: 1,
         wallpaperId: "w", title: "Test", projectPath: project.path,
-        entryFile: "index.html", fps: 30, paused: false, volume: 1, muted: false,
+        entryFile: "index.html", fps: 30, renderScale: 1, paused: false, volume: 1, muted: false,
         audioResponseEnabled: false,
         mediaIntegrationEnabled: false,
         propertiesJson: """

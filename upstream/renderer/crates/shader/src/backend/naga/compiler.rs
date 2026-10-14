@@ -9,7 +9,8 @@ use naga::{
 use super::{diagnostic::DiagnosticBuilder, metal::MetalEmitter};
 use crate::{
     CompiledShaderStage, CompiledStageArtifact, CompiledStageCode, ShaderCompiler, ShaderError,
-    ShaderResult, ShaderStageKind, ShaderTarget, legalize::CodegenStageSource,
+    ShaderResult, ShaderStageKind, ShaderTarget,
+    codegen::declarations::functions::MATRIX_INVERSE_POLYFILL_MACRO, legalize::CodegenStageSource,
 };
 
 /// Compiler backend that lowers legalized GLSL through Naga.
@@ -38,7 +39,14 @@ impl ShaderCompiler for NagaCompiler {
             ShaderStageKind::Fragment => "generated/fragment.glsl",
         };
 
-        let options = glsl::Options::from(stage.into_naga());
+        let mut options = glsl::Options::from(stage.into_naga());
+        if target == ShaderTarget::MetalMsl {
+            // Naga's MSL writer has no matrix `inverse`; the legalized source
+            // carries a helper for it that only this macro enables.
+            let _previous = options
+                .defines
+                .insert(MATRIX_INVERSE_POLYFILL_MACRO.to_owned(), "1".to_owned());
+        }
         let mut frontend = glsl::Frontend::default();
         let module = frontend.parse(&options, source_text).map_err(|err| {
             let diagnostic = DiagnosticBuilder::new(stage, "naga glsl parse", source_path)

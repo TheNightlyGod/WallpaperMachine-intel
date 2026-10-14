@@ -16,6 +16,10 @@ final class ControlPanelNavigation: ObservableObject {
   @Published var targetDisplayID = "primary"
   @Published private(set) var settingsSection = SettingsSection.performance
   @Published private(set) var settingsSectionToken: UInt64 = 0
+  /// Installed's filters and the library scroll offsets the last page reported, handed to
+  /// the next page when the window is reopened. Memory only, and not `@Published`: the page
+  /// reports while the person scrolls, and nothing in SwiftUI reads it.
+  var viewState: PanelViewState?
 
   init(selection: SidebarSelection? = .wallpaper) { self.selection = selection }
 

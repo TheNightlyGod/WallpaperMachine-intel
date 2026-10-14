@@ -32,6 +32,13 @@ impl ConfigStore {
         Self { root: root.into() }
     }
 
+    /// The directory every file of this store lives under. Other state that
+    /// has to survive a restart (the load journal) is kept beside it.
+    #[must_use]
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
     /// Parses backup bytes without reading, repairing, or replacing live configuration files.
     pub fn validate_app_config_text(raw: &str) -> Result<(), BridgeError> {
         let config = toml::from_str::<AppConfig>(raw)
@@ -263,7 +270,7 @@ mod tests {
     fn a_config_that_never_heard_of_the_scene_settings_reads_the_shipped_defaults() {
         let config = load_config("[general]\n");
 
-        assert_eq!(config.scene_renderer, SceneRendererModeCfg::Compatibility);
+        assert_eq!(config.scene_renderer, SceneRendererModeCfg::NativeMetalPreferred);
         assert!(
             !config.quality.scene_on_demand_enabled,
             "stopping a scene's tick is opted into; an older config must not arrive already on"
@@ -294,14 +301,43 @@ mod tests {
         assert!(reloaded.quality.scene_on_demand_enabled);
     }
 
-    /// The scene renderer is a new setting. Nothing in an older config means
-    /// "prefer native Metal", so no key may be read as an opt-in to it.
+    /// The scene renderer is decided by its own key and the one-time move to
+    /// the new default, never by the video backend choice.
     #[test]
     fn the_scene_renderer_never_inherits_the_video_backend_choice() {
-        let config = load_config("video_backend = \"native_preferred\"\n");
+        let config = load_config(
+            "video_backend = \"native_preferred\"\nnative_metal_default_applied = true\n\
+             scene_renderer = \"compatibility\"\n",
+        );
 
         assert_eq!(config.video_backend, VideoBackendModeCfg::NativePreferred);
         assert_eq!(config.scene_renderer, SceneRendererModeCfg::Compatibility);
+    }
+
+    /// A config saved before Native Metal became the default stores the old
+    /// default, `compatibility`, whether or not anyone chose it. It moves to the
+    /// new default once, and the marker it is saved with keeps a later choice.
+    #[test]
+    fn a_config_from_before_the_native_default_moves_to_it_once() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.toml");
+        std::fs::write(&path, "scene_renderer = \"compatibility\"\n").unwrap();
+        let store = ConfigStore::open(root.path().to_path_buf());
+
+        let mut config = store.load().expect("config load").config;
+        assert_eq!(config.scene_renderer, SceneRendererModeCfg::NativeMetalPreferred);
+        assert!(config.native_metal_default_applied);
+
+        config.scene_renderer = SceneRendererModeCfg::Compatibility;
+        store.save_app_config(&config).expect("config save");
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.contains("native_metal_default_applied = true"), "{written}");
+        let reloaded = store.load().expect("config load").config;
+        assert_eq!(
+            reloaded.scene_renderer,
+            SceneRendererModeCfg::Compatibility,
+            "a choice made after the move is kept"
+        );
     }
 
     #[test]

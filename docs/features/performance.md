@@ -4,7 +4,7 @@
 opens on. It is a playback and quality page. Every engine control is applied
 through the bridge and the page re-renders from the snapshot the engine returns,
 so the page never shows a setting the engine did not accept. Playback choices
-that the app owns (other-app audio, display sleep, app rules) are stored in
+that the app owns (muting everything, other-app audio, display sleep, app rules) are stored in
 `PlaybackPreferences` and published on the same snapshot.
 
 Nothing on this page promises a measured power saving. A lower frame rate or
@@ -72,19 +72,27 @@ kernel's resource-coalition accounting (`CoalitionEnergySource`,
   sent.
 - **Battery share.** On a Mac with a battery, the row adds **About N% of a full
   battery charge per hour** (or less than 1%). `BatteryCapacity` reads today's full
-  charge (`AppleRawMaxCapacity`, mAh) from the `AppleSmartBattery` registry entry,
-  once per activation, and multiplies it by 3.85 V per cell; a desktop Mac has no
-  such entry and shows no line.
+  charge in mAh from the `AppleSmartBattery` registry entry, once per activation:
+  `AppleRawMaxCapacity`, or `BatteryData`'s `FullChargeCapacity` on macOS 27,
+  which dropped the top-level keys. It multiplies that by 3.85 V per cell, counting
+  cells from `BatteryData`'s `CellVoltage` or, where macOS 27 no longer lists it,
+  from the pack voltage (a 99.6 Wh MacBook Pro reads about 98.5 Wh). A desktop Mac
+  has no such entry and shows no line.
 - **Before and after.** A Performance setting that changes rendering work
   (`WebPanelController.renderingSettings`: presets, frame-rate limit, render scale,
-  battery mode and quality, video backend, scene renderer and the scene and
+  battery mode and quality, what to do in Low Power Mode, when the Mac is hot and when
+  the battery is low, video backend, scene renderer and the scene and
   experimental switches) calls `EnergyUsageMonitor.settingChanged()` once the
   engine has accepted it. The window restarts, the row reads **Measuring…** with
   the last settled figure as **Before it**, and once four uncontended samples under
   the new setting exist it reads **Before your change: … Now: … (−N%)**. A second
   change before the first settled keeps the original "before". Without a settled,
   uncontended figure at the moment of the change there is no comparison. Leaving
-  Settings drops it.
+  Settings drops it. The three condition choices are stored, not sent: the renderer
+  hears of a change a moment later, when the presentation policy delivers it, so the
+  restart can land just ahead of the change. The restart only discards the old window,
+  and the figure compared is the window that follows, so that moment is a small part
+  of it.
 - **Cost.** One sample is about 3 ms of kernel calls (every coalition on the Mac
   is read for the contention check), taken off the main thread. Sampling runs only
   while the panel window is visible with Settings open; otherwise no timer exists.
@@ -106,8 +114,9 @@ which also remains the way to compare builds; this readout is for users.
 ## Per-wallpaper energy rating
 
 The inspector of an installed wallpaper shows, once measured, a line such as
-**Medium energy use, about 1.2 W. Measured while it played alone on 1 display at
-60 fps, 75% render scale, with this window closed.** It is measured in the
+**Medium energy use, about 1.2 W. About 1% of a full battery charge per hour.
+Measured while it played alone on 1 display at 60 fps, 75% render scale, with this
+window closed.** It is measured in the
 background by `WallpaperEnergyRecorder` and kept by `WallpaperEnergyRatings` (both
 in `App/Services/Diagnostics/WallpaperEnergyRatings.swift`), owned by the app
 delegate and reachable from the panel as `BridgeStore.wallpaperEnergyRatings`:
@@ -115,10 +124,13 @@ delegate and reachable from the panel as `BridgeStore.wallpaperEnergyRatings`:
 - **When a sample is credited.** Every 30 seconds the recorder asks the app
   delegate for a `WallpaperEnergyContext`. There is none, and no sample is taken,
   unless presentation is running and playback is playing (no display sleep, lock,
-  app rule, other-audio, Low Power Mode, heat, Focus-filter or battery pause), the
+  app rule, other-audio, Focus-filter or battery pause, and no Low Power Mode, heat or
+  low-battery pause or stop: choosing Reduced quality for those three keeps the
+  wallpaper playing, so its samples are credited under the lower ceiling and scale), the
   control panel is not on screen, no live preview window is open, no download is
   running SteamCMD or fetching a pixiv original, exactly one wallpaper is assigned
-  across the displays that are not suspended by occlusion, and none of those
+  across the displays that are not suspended (hidden, covered, or not the one in
+  use), and none of those
   displays plays a video on the native player
   (`NativeVideoWallpaperHost.activeDisplayIDs`), whose cost macOS does not charge
   to the app. Stable `primary` and `identity:` selectors are resolved to connected
@@ -131,12 +143,20 @@ delegate and reachable from the panel as `BridgeStore.wallpaperEnergyRatings`:
   either, so a switch's shader compiling and texture decoding are not rated as
   playback.
 - **Conditions.** The context records the displays showing it, the frame-rate
-  ceiling in force (the battery one included) and the effective render scale. A
+  ceiling in force (the reduced-quality one included, whichever reason holds it,
+  read from the engine's `effectiveFrameRateCap`) and the effective render scale. A
   measurement under other conditions replaces the rating rather than being averaged
-  in, so the line always names the settings it describes.
+  in, so the line always names the settings it describes. A Mac that moves in and
+  out of Reduced quality therefore replaces a wallpaper's rating each time, as
+  unplugging does.
 - **Averaging.** Intervals combine as a time-weighted mean. History is weighted as
   at most 30 minutes, so a rating follows a wallpaper whose cost changed. A rating
   is shown after two minutes of credited time.
+- **Battery share.** On a Mac with a battery the snapshot adds
+  `batteryPercentPerHour`, the rated power as a share of a full charge, and the line
+  states it as the readout above does. `BatteryCapacity` is read when the first
+  rating is shown and kept for the app's run, since the panel asks for every
+  wallpaper's rating in each snapshot. A desktop Mac's line has no share.
 - **Storage.** `<support>/EnergyRatings.json`, keyed by wallpaper id. It is saved
   when a rating first appears or changes grade, at most every ten minutes
   otherwise, and on quit. An unreadable file is logged and starts empty. Each
@@ -170,10 +190,21 @@ extra top position. Every value up to the refresh (for example 119 and 120 on a
 120 Hz display) is a cap. The extra top position reads **No limit** and sends null
 (no cap): each display then runs at its own rate, 60 fps by default (below). The
 effective rate on a display is the minimum of the saved per-wallpaper rate, that
-display's refresh, the global cap, and the battery frame rate when reduced quality
-is in force. Saved per-wallpaper frame rates are never rewritten. When a
-Performance cap is below the saved rate, the inspector and **Settings → Displays**
-say so and offer **Open Performance**.
+display's refresh, the global cap, and the reduced-quality frame rate while reduced
+quality is in force, whatever the reason: the battery, Low Power Mode, heat or a low
+battery. Saved per-wallpaper frame rates are never rewritten. When the ceiling the
+engine reports in force (`effectiveFrameRateCap`, which already holds all of that)
+is below the saved rate, the inspector and **Settings → Displays** say so and offer
+**Open Performance**.
+
+For Web wallpapers a limit below the rate the page draws at (60, or the display's
+refresh when that is lower) is enforced on the page's `requestAnimationFrame`, so
+Low (30 fps), a lower cap, the reduced-quality frame rate and a per-wallpaper rate cut
+the page's drawing callbacks; a rate that reaches it is left to WebKit and a No limit
+page keeps its native frames. It applies to a running page without a reload, except
+where a fast display's refresh is crossed and the page is rebuilt (below). Timers,
+video and CSS animation are not limited, and the energy effect has not been
+measured ([limits](web-wallpapers.md#limits)).
 
 **Internal render scale** (100% / 75% / 50%) is the internal rasterization size
 only. Output size, placement and composition are unchanged; a lower scale
@@ -182,8 +213,18 @@ as the scale drops. It is a quality tier and is not part of any same-quality
 backend comparison. For 2D scenes the authored canvas defines 100%; perspective
 scenes with no authored canvas use the physical output size instead of a fixed
 1920×1080 fallback, and the camera aspect follows the surface. This is native
-resolution, not supersampling. When no running wallpaper can honour a scale the
-control is disabled and reads `Not applicable to the wallpapers currently running`.
+resolution, not supersampling. For Web wallpapers the scale multiplies the page's
+`window.devicePixelRatio` (never below 50%, whatever the saved scale), so a page
+that sizes its canvas or WebGL buffers from the ratio and rebuilds them on `resize`
+draws fewer pixels and WebKit stretches the result over the same area. It applies
+to a running page without a reload (the page gets one `resize` event) and is part of
+every new document from its first line, the reduced-quality scale included. A page that
+reads the ratio once keeps full resolution until it reloads, resolution media
+queries and frames the page embeds see the display's own ratio, and a page that
+mixes the ratio into its CSS pixel math can change layout; the energy effect has
+not been measured ([limits](web-wallpapers.md#limits)). When no running wallpaper
+can honour a scale (plain videos, or nothing) the control is disabled and reads
+`Not applicable to the wallpapers currently running`.
 
 The engine clamps a render scale to `0.25...1.0` (values from a stale page are
 clamped the same way) but does not quantize it to these tiers, so a hand-edited
@@ -191,8 +232,10 @@ clamped the same way) but does not quantize it to these tiers, so a hand-edited
 an extra leading option labelled `60% (from configuration)` and keeps it selected,
 rather than displaying a neighbouring tier the user never chose. Picking a tier
 replaces it. Whenever the effective `renderScale` differs from the saved
-`preferredRenderScale`, **Effective now** shows the scale the engine published; it
-names battery as the cause only while reduced quality is actually in force.
+`preferredRenderScale`, **Effective now** shows the scale the engine published. It
+names the cause only while reduced quality is actually in force: heat, Low Power
+Mode, a low battery or the battery, in that order when several hold. Otherwise it
+says only that the saved setting is not in effect.
 
 ### Default per-display frame rate
 
@@ -202,7 +245,8 @@ MacBook Pro, a MacBook Air or a 60 Hz external display, 48 on a 48 Hz one. A
 scene's cost follows its frame rate, and so does WindowServer's compositing share
 ([power benchmarking](../testing/power-benchmark.md#windowservers-share)). A higher
 rate is one choice away: the per-display slider still goes up to the display's
-refresh.
+refresh. Web wallpapers draw near 60 fps below that refresh and at the full
+refresh once the rate reaches it ([frame rate](web-wallpapers.md#runtime-shape)).
 
 The wallpaper config stores the rate as `frame_rate` in each `monitors` entry, and
 a mirror display stores it as `frame_rate` in its `[[monitor_settings]]` table. The
@@ -221,12 +265,35 @@ control for that part.
 
 | Setting | Values | Default |
 | --- | --- | --- |
+| Mute all wallpapers | On, Off | Off |
 | When windows cover the desktop | **Pause**, **Keep running** | Pause |
 | When another app plays sound | **Keep running**, **Mute**, **Pause** | Keep running |
 | When displays sleep | **Pause**, **Stop (free memory)** | Pause |
+| Only play on the display I’m using | On, Off; shown with two or more displays | Off |
 | On battery | **Keep running**, **Reduced quality**, **Pause** | Keep running |
-| In Low Power Mode | **Keep running**, **Pause**, **Stop (free memory)** | Keep running |
-| When the Mac is hot | **Keep running**, **Pause**, **Stop (free memory)** | Keep running |
+| When the battery is low | **Keep running**, **Reduced quality**, **Pause**, **Stop (free memory)**; the level is **10%**, **20%** or **30%** | Keep running, 20% |
+| In Low Power Mode | **Keep running**, **Reduced quality**, **Pause**, **Stop (free memory)** | Keep running |
+| When the Mac is hot | **Keep running**, **Reduced quality**, **Pause**, **Stop (free memory)**; Reduced quality still pauses when the Mac is very hot | Keep running |
+
+**Mute all wallpapers** is the user's own switch for silencing every wallpaper at
+once. The same switch is **Mute Wallpapers** in the menu bar (ticked while it is on,
+and offered while it is on whatever is playing, so it can always be turned off),
+`wallpapermachine://mute`, `unmute` and `togglemute`, the **Mute Wallpapers**,
+**Unmute Wallpapers** and **Mute or Unmute Wallpapers** actions in the Shortcuts app,
+and a shortcut key ([automation](automation.md)); all of them set
+`PlaybackPreferences.wallpapersMuted`. It never rewrites a wallpaper's saved **Mute
+audio** and volume or a display's. It is one more reason, in
+`WallpaperPresentationPolicy`, for the bridge's single audio-suppression flag, which
+the engine combines with each wallpaper's own mute, so a wallpaper plays only if
+neither says mute. It therefore composes with the mute app rules, the Focus filter and
+**When another app plays sound** instead of replacing them: turning it off while one
+of those still applies leaves the wallpapers silent. Turning it on changes nothing
+about presentation, so playback and playlists carry on, and a wallpaper applied while
+it is on starts silent. Turning it off lets each wallpaper play as it was saved. The
+choice is kept across relaunches and is local to this Mac, so a
+[backup](backup-restore.md) neither carries nor restores it: restoring one never
+silences a Mac. For Web wallpapers it has the same boundary as **Mute** below, and the
+lock-screen extension is always muted.
 
 **When windows cover the desktop** handles the case AppKit never reports as
 hidden. A zoomed (not full-screen) window leaves the strip under the translucent
@@ -240,6 +307,39 @@ window does not cover, because macOS decides what covers what. **Keep running**
 leaves the wallpaper animating in the gaps. `WallpaperCoverageProbes` measures this
 with one fully transparent, mouse-transparent window per display just above the
 wallpaper; see [architecture](../architecture.md#desktop-wallpaper-windows-and-private-api-handling).
+
+**Only play on the display I’m using** is for a Mac with two or more displays. The
+display the pointer is on keeps playing; every other display pauses once the pointer
+has been away from it for 3 seconds, and resumes the moment the pointer returns, so
+skimming across a display, or going back to it, never pauses it. It is one more
+reason a display counts as hidden in `WallpaperPresentationPolicy`, beside occlusion
+and a covered working area: it never changes **Play** and **Pause**, nothing has to be
+restored when it ends, and the usual one-second settle applies before a display
+pauses. The policy never darkens every display for it, and a pointer on a screen the
+app has no wallpaper on pauses nothing. `ActiveDisplayTracker` follows the pointer
+with one global and one local event monitor, installed only while the option is on and
+two displays are connected; the global monitor needs no Accessibility or Input
+Monitoring grant, and a pointer event that stays on one display costs one rectangle
+test. While this app is the active one, such as after you click its control panel,
+AppKit sends pointer events to the app: the global monitor sees none of them and the
+local one sees only motion over this app's own windows. So for as long as the app is
+active the tracker also reads the pointer four times a second on a timer that
+tolerates coalescing, and reads it once when the app becomes or stops being active,
+so moving onto another display's desktop is noticed without a click. The row appears
+once two displays are enabled, and stays while the option is on so it can be turned
+off. Turning it off, or unplugging down to one display, resumes everything.
+
+A display that is paused this way is treated like a covered one: an automatic
+wallpaper change, a playlist step and a scheduled rule for it wait until it plays
+again, and its energy counts as not playing. The settle and periodic captures of its
+Mission Control picture skip it while it is paused; a new wallpaper still asks it for
+a frame, and so does a Space change or a wake when its picture is not fresh
+([Desktop picture](desktop-picture.md)). A web wallpaper set on such a display, or
+rebuilt there, loads and draws its first frame before it is paused, as one paused with
+**Pause** does ([Web wallpapers](web-wallpapers.md#runtime-shape)); a covered display
+needs no frame and its page stops at once. Turn the option off if you watch one display
+while working on another. The display is judged only by the pointer, so a video
+playing on a display the pointer is not on pauses too.
 
 **Mute** affects scene and video wallpapers and, where WebKit exposes its native
 output channel, Web wallpapers. Availability is shown in the wallpaper's details;
@@ -256,22 +356,123 @@ the choice is **Keep running**.
 **Stop** on display sleep frees renderer memory. The wallpaper is reloaded when the
 display wakes. **Pause** keeps it loaded.
 
-**On battery** is one choice. **Keep running** leaves quality alone. **Pause**
-stops wallpapers until the Mac is plugged in. **Reduced quality** shows the battery
-render scale (100% / 75% / 50%, default 75%) and battery frame rate (1–240 fps,
-default 30) underneath, plus whether the Mac is on battery. Those two fields are
-sent together: changing one resends the other as the engine currently reports it.
-Reduced quality is in force only while that mode is selected and the Mac is on
-battery. A configuration saved with the former pause-on-battery switch maps to
-**Pause**, otherwise the former battery profile switch maps to **Reduced quality**.
+**After the Mac wakes** the app checks that every scene wallpaper is drawing again
+(`SystemWakeRevalidator` asks, the bridge's `revalidate_scene_presentation` answers). It
+reads each scene's frame counter, waits three seconds, reads it again, and rebuilds the
+drawing surface of only a scene whose counter did not move, or one that had already
+stopped itself after a rendering failure
+([a scene that stops drawing](scene-rendering.md#a-scene-that-stops-drawing)). On a Mac
+that woke well nothing is rebuilt: the check costs two counter reads and the wait.
 
-### Low Power Mode, heat and Focus
+- **What it leaves alone:** a display that is paused for any reason (the user's pause,
+  battery, a covered desktop, sleeping or locked displays), a scene that updates only on
+  events or at a deadline (its counter standing still is how it saves power), a scene
+  the renderer could not be read for, web pages and native video. The signal is frames
+  *completed*, never frames presented: a frame that would repeat the picture completes
+  without presenting, so a healthy, still scene presents nothing for as long as it
+  likes.
+- **When it runs:** about 0.65 s after the wake, whichever of the system's and the
+  displays' wake notifications arrives first; the second notification for the same wake
+  is not a second check. It waits behind a wallpaper change that is being applied. A wake
+  that lands on the lock screen is checked once the unlock lets wallpapers draw again,
+  not at the wake itself, when every scene is suspended on purpose. Nothing polls.
+- **How it repairs:** through the same rebuild ladder a failed frame uses (a surface
+  reconfigure, then renderer rebuilds), so a check cannot loop: three attempts in a
+  minute per scene, and a scene the budget is spent on stays marked as stopped in
+  Settings, where **Retry** reloads it. A check never starts a fresh budget.
+- **What it writes:** one line per display and a summary in the
+  [application log](diagnostics.md#wake-check).
+
+Whether a scene surface ever stops producing frames across a real sleep and wake, and
+whether the reconfigure restores it, is not established here: the tests drive the check
+with scripted frame counters.
+
+**On battery** is one choice. **Keep running** leaves quality alone. **Pause**
+stops wallpapers until the Mac is plugged in. **Reduced quality** is the choice
+that makes the page show **Render scale when reduced** (100% / 75% / 50%, default
+75%) and **Frame rate when reduced** (1–240 fps, default 30) underneath, plus a
+**Reduced quality** line that says why quality is lower right now. This is one
+profile, shared: the same two fields serve **On battery** and the three conditions
+below, and the rows show whenever any of the four selects is on Reduced quality (the
+low-battery one only on a Mac with a battery). Those two fields are sent together:
+changing one resends the other as the engine currently reports it. For **On
+battery**, Reduced quality is in force only while that mode is selected and the Mac
+is on battery. A configuration saved with the former pause-on-battery switch maps to
+**Pause**, otherwise the former battery profile switch maps to **Reduced quality**.
+The power source is also read when the Mac wakes and again two seconds later,
+because a plug or unplug during sleep may not be reported; a change found that way
+applies the same rule, and a read that finds the same source as the one last applied
+changes nothing.
+
+The renderer applies all of this itself when the power source changes, and reports
+nothing back. The app watches the source too (`PowerSourceMonitor`: the system
+notification, and the same two reads after a wake) and then reads the snapshot again,
+repeating a few times until the renderer reports the source the system did, so the
+web pages and native video it hosts take in the pause, frame rate and render scale at
+once instead of at the next unrelated snapshot. The notification itself has not been
+exercised by unplugging a Mac in a test.
+
+### Low battery, Low Power Mode, heat and Focus
 
 **In Low Power Mode** applies while macOS reports Low Power Mode
 (`ProcessInfo.isLowPowerModeEnabled`), and **When the Mac is hot** while it reports
 the thermal state as serious or critical, the states in which macOS starts
 throttling itself. Both are off until chosen. Each row's note says whether the
 condition holds right now.
+
+**When the battery is low** applies while the Mac runs on its internal battery at or
+below the **Low battery level** (10%, 20% or 30%; 20% unless you choose another). The
+level row appears once an action other than **Keep running** is chosen, and both rows
+appear only on a Mac with an internal battery; the note shows the charge when the
+page was drawn. The rule ends when the charge is 5 points above the level, so a charge
+that hovers around it does not pause and resume the wallpapers over and over, and it
+ends at once when you plug in, whatever the charge. Only the internal battery counts,
+never a UPS, and a reading that fails counts as not low. Like the other conditions it
+pauses or stops wallpapers without touching your own Play/Pause; **Stop** frees
+renderer memory and reloads the wallpapers when the rule ends.
+
+All three conditions also offer **Reduced quality**, which keeps the wallpapers
+playing instead of pausing them. While a chosen condition holds, the app asks the
+engine for the reduced-quality profile (the scale and frame rate described under
+**On battery**) on top of whatever the power source already asks, and hands your
+usual settings back when the last condition ends. The request is runtime-only: it
+is never saved, a restart begins without one, and nothing is polled for it (the
+conditions are observed as above).
+
+- **It only lowers.** The frame-rate ceiling is the lowest of your global cap and the
+  profile's rate, and with a condition holding the render scale is the lower of your
+  saved scale and the profile's, so a cap or scale you already set below the profile
+  stays where it is. When a condition and the battery profile hold together, the
+  stricter rule wins and quality never rises. On battery alone the profile's scale
+  is used as it is, as it always was, so a saved scale lower than the profile's is
+  raised to it there; that difference from the conditions was left as it is.
+- **Heat escalates.** Serious reduces. Critical reduces and also pauses the
+  wallpapers, because reducing is no longer enough; choosing Reduced quality is not
+  a promise never to pause, and the row's note says so. The fair ("warm") state is
+  ignored, as it is for **Pause** and **Stop**, which act from serious.
+- **It follows the cause.** **Effective now** and the **Reduced quality** line name
+  the cause (heat, Low Power Mode, a low battery or the battery, in that order when
+  several hold), and the frame-rate note on **Settings → Displays** counts the
+  reduced-quality frame rate whichever reason lowered it.
+- **Cost.** Each change of the render scale rebuilds a scene's render graph, the
+  same cost as unplugging the Mac with **On battery** set to Reduced quality, and
+  there is no hold-down: a Mac whose thermal state flaps at the serious boundary
+  would pay it each time, which is not measured. A Web wallpaper drawing at the full
+  refresh of a display above 60 Hz pays more: its cadence is fixed when the page is
+  created, so the lower rate reloads the page, with the loss of what it kept in
+  memory, and the end of the request reloads it again
+  ([frame rate](web-wallpapers.md#runtime-shape)). Nothing is added per frame.
+- **Saving.** The power saving of Reduced quality, here or on battery, has not been
+  measured, and nothing in the app or these docs claims one. The planned comparison
+  is a [power benchmark](../testing/power-benchmark.md#condition-matrix) of the same
+  content with the profile on and off. The matrix has no row for it yet and the
+  benchmark script no scenario, and the
+  [comparison rules](../testing/power-benchmark.md#comparison-rules) call a lowered
+  frame rate or scale a quality tier, not an equal-quality saving. It needs an
+  authorized desktop session.
+  Whether a change made while the Mac is locked, and a native-video clip whose target
+  rate changes (it may be offered natively again, as for any changed target rate),
+  behave as intended has likewise not been exercised on a Mac.
 
 A Focus can act on wallpapers through a Focus filter (`WallpaperFocusFilter`, an
 App Intents `SetFocusFilterIntent`): in System Settings → Focus → a Focus → Focus
@@ -289,9 +490,19 @@ permission.
 `SystemConditionMonitor` turns the playback conditions into rule actions that join
 the app rules' in `WallpaperPresentationPolicy`, so they pause, mute or stop
 wallpapers exactly as an app rule does and never change the user's own Play/Pause.
+A condition set to Reduced quality is not a rule action: the monitor reports it
+separately (`qualityReductions`) and the policy delivers it to the engine on its own
+channel (`setQualityThrottle`), so wallpapers keep presenting under the lower ceiling
+and scale ([architecture](../architecture.md)). Heat is the one exception, since a
+critical thermal state also contributes a pause.
 It only observes notifications (`NSProcessInfoPowerStateDidChange`,
 `ProcessInfo.thermalStateDidChangeNotification`, the preferences and the Focus
-filter); nothing is polled. Web mute uses the same availability boundary as above.
+filter); nothing is polled. The battery adds IOKit's power-source notification
+(`IOPSNotificationCreateRunLoopSource`, wrapped by `SystemBatteryLevel`), registered
+only while a low-battery action is chosen and removed when it is not, and read again
+when the Mac wakes in case a plug or unplug during sleep was never reported. The
+decision itself is `LowBatteryGate`, fed by one `BatteryReading` of the internal
+battery. Web mute uses the same availability boundary as above.
 Wallpaper and playlist selections instead reach `WallpaperAutomationScheduler`;
 they never become pause/mute/stop actions or change the user's own Play/Pause. The
 experimental [desktop Space mode](spaces.md) uses the same eligibility gate,
@@ -344,6 +555,156 @@ check must not block a file the Compatibility backend can decode, including H.26
 in Matroska. This applies both to **Apply** and **Apply changes**, with either
 backend preference. Missing or empty files fail before display settings change;
 decoder failures still go through the engine's apply recovery.
+
+Native playback honours the wallpaper's scaling mode and scale factor the way
+Compatibility does, so switching backends does not move the picture: **Fill**,
+**Fit** and **Stretch** scale it to the display, **Original size** shows one video
+pixel per point (a 1920x1080 clip covers 1920x1080 points of a Retina display, not
+1920x1080 device pixels), and the scale factor multiplies whichever applies, with
+the picture centred and anything outside the display cropped. A factor that is not a
+positive number counts as 1. Changing the mode or factor moves the running picture;
+it does not reopen the clip or read the file again. The desktop picture shown in
+other Spaces and Mission Control is drawn with the same layout. The wallpaper's
+position on the display is not honoured: the native player always centres, and the
+inspector's Position block says so ([display position](wallpaper-properties.md#display-position)).
+The lock screen and screen saver always use Compatibility and do apply it. One known difference:
+the native player applies a clip's pixel aspect ratio to the picture's size and
+Compatibility ignores it, so an anamorphic clip is laid out by its displayed size
+here. Layer placement is in `NativeVideoLayout`; its expected rectangles come from
+the renderer's own layout code (see [coverage](../testing/coverage.md#nativevideo)).
+How a very large factor affects composition cost on a real display has not been
+measured.
+
+Reading a clip's metadata before it plays is bounded in time, because a file on a
+disk that has gone to sleep, a share that stopped answering or an iCloud or File
+Provider file that was evicted can keep a read waiting indefinitely, and that read
+runs in the same pass that opens, closes and pauses every other display's video. The
+limit follows where the file lives: 8 seconds on the internal drive, 30 seconds on an
+external drive or when the volume cannot be identified (long enough for a hard disk
+to spin up), and 60 seconds on a network volume or a cloud-backed file. A read that
+runs out of time hands the wallpaper to Compatibility like any other refusal, and
+**In use now** says the metadata read did not finish and what kind of storage it was
+waiting on. It is not retried within the pass and is not remembered by the app as a
+verdict on the file, so a clip that is offered natively again is read afresh; but
+while the first read is still blocked, that file is not read a second time, so one
+stuck file never holds more than one blocked call. The hand-off itself lasts for the
+session: the bridge records the refusal against the clip's file and target frame rate
+and does not offer them natively again, so a clip handed over by a slow disk stays on
+Compatibility until its file or its target frame rate changes, or **Video playback**
+is switched to Compatibility and back to **Native video preferred**. Nothing retries
+it on its own, since the bridge never passes a wallpaper back and forth between
+backends. A diagnostic recording counts these as `nativeVideoProbeTimeout`; a count on
+the internal drive means the read is stuck, while on a share or a cloud file it may
+only be slow. The same bound applies to a read that fails and is retried: each of the
+three attempts gets the whole limit.
+
+A clip that never shows a picture is handed back too. A file the platform calls
+playable can reach ready with its clock running and still produce no frame (an HEVC
+clip tagged `hev1` does this on macOS 27), and nothing reports a failure, so the
+display would stay black with Compatibility excluded and the wallpaper's startup
+never finishing. Native playback therefore waits for the first picture: 10 seconds on
+the internal drive, 30 seconds on an external drive or when the volume cannot be
+identified, and 90 seconds on a network volume or a cloud-backed file, the same
+storage classes as the metadata read. If none arrives, the player is rebuilt once and
+given the same time again. If that fails as well, or the player has no rebuild left
+(two per ten minutes for a display's clip, given back after a minute of uninterrupted
+frames), the wallpaper goes to Compatibility and **In use now** says that no first
+frame arrived, after one restart or not, with the state of the pipeline (item status,
+the picture size it reports, whether the clock runs, whether the layer has a frame).
+The wait does not run while the display is hidden or asleep: it starts again with a
+full deadline when the display returns. The user's own pause does not stop it, since
+a paused clip still shows its first frame. As with a slow metadata read, the app does
+not remember this as a verdict on the file, so an offer of the same wallpaper would
+open it again, but the bridge keeps its refusal for the session: a clip handed over by
+a slow volume stays on Compatibility until its file or its target frame rate changes,
+or **Video playback** is switched to Compatibility and back. A diagnostic recording
+counts every deadline that passed without a frame as `nativeVideoFirstFrameTimeout`:
+a single count with no refusal means the rebuild brought the picture, and on the
+internal drive any count means the pipeline stalled.
+
+A clip that has shown a picture is checked, and repaired if need be, after anything that
+can cost it its decoder. The system may reclaim the decoder while nothing is playing (a
+covered desktop for hours, display sleep, Low Power Mode, a locked session), and a clip
+that carries on afterwards can report that it is playing, with its clock running, while no
+picture comes out. A check starts when a clip is resumed after at least 5 seconds paused
+(by the user's Pause or because its display was hidden), and when the displays wake, the
+Mac wakes or the session becomes active again (an unlock, or a switch back to this user).
+A wake waits one second first, so the system can hand the decoder back, and the
+notifications that arrive in a burst make one check, taken after the last of them. Only
+clips that are playing are asked: a clip the user paused stays paused, and a hidden
+display is not looked at. With no native clip open, which is every Mac on the default
+Compatibility backend, a wake starts no wait at all.
+
+A check waits half a second and then, for up to 2 seconds, looks every tenth of a second
+at the playing item. It needs both signs of life in that time: a new picture handed over by
+a video output attached to the item for the check, and a clock that moved by about a frame.
+The clock alone is not enough, because a pipeline that decodes nothing keeps its clock
+running. A healthy clip is proven within a couple of samples, so its cost is one short-lived
+video output and no visible change. When no picture comes out, the check works up a ladder
+of repairs, looking again after each:
+
+1. The clip is kicked: a seek to where it already is, with no tolerance, and `play()`. It
+   restarts an output that is stuck, costs nothing visible when it works, and never starts
+   a clip the user paused. The look after it settles for half a second and lasts 2 seconds.
+2. If pictures are still missing, the clip's item and looper are rebuilt from the file. The
+   layer stays blank until the new item shows its first picture, which is why this comes
+   second. It spends the surface's recovery allowance, the same one the first-frame wait
+   uses (two rebuilds per ten minutes, given back after a minute of uninterrupted
+   pictures), and its look lasts 5 seconds, since the new item has to load first.
+3. If pictures are still missing, or no allowance is left for a rebuild, the wallpaper goes
+   to Compatibility like any other player failure, and **In use now** says that playback
+   stalled after the trigger (`the displays woke`), what was seen, what was tried and how
+   much of the allowance was spent. The bridge keeps the refusal for the session, so the
+   clip stays on Compatibility until its file or its target frame rate changes or **Video
+   playback** is switched to Compatibility and back. The native host does not remember the
+   hand-off as a verdict on the file, unlike a decoder failure: a decoder the system took
+   back during a long sleep says nothing about the clip, so when the bridge does offer the
+   same wallpaper again it opens natively once more.
+
+A clip whose player said throughout that it was waiting for data is looked at again, twice
+at most, before it is treated as stuck, so a disk that is still spinning up is not nudged;
+one that keeps waiting for six seconds is kicked like a stalled one. A clip that never
+showed a picture is left to the first-frame wait above. Pausing again, hiding the display
+or switching the clip ends a check in flight, and a rebuild started by the first-frame wait
+ends it too. A trigger that arrives while a check is still only looking replaces it; one
+that arrives once the check has started repairing is absorbed, so nothing is kicked or
+rebuilt twice for one suspension.
+
+A diagnostic recording counts the first look that finds no picture as
+`nativeVideoPlaybackStalled`, and the repairs as `nativeVideoPlaybackKick` and
+`nativeVideoPlaybackRebuild`: a kick for every stall means the cheap repair is enough, and
+a rebuild for most of them means it is not. Each look and each repair is also a line in the
+diagnostics log under the wallpaper's load (`playback did not advance after the displays
+woke: the clock advances but no frame is produced`). A clip that shows fewer than one
+picture in two seconds can be reported as stalled, and kicked, while it plays. Whether a
+kick or a rebuild really brings back a decoder the system reclaimed has not been seen on a
+real Mac, and neither has the cost of the check's video output on a 4K clip; the output
+exists only while the check samples, normally a fraction of a second after the settle, and
+reads the clip's own pixel format.
+
+Switching wallpapers quickly does not put the ones in between on the desktop. Reading
+a clip's metadata can take a moment, and the next switch may be committed meanwhile.
+When one has, native playback asks the bridge again before it builds a window, and
+builds one only if the display still wants that wallpaper with the settings the read
+checked; otherwise nothing appears and the next pass opens what is wanted now. A burst
+of changes to the same wallpaper (dragging its volume, say) does not hold the clip
+back, and it starts with the latest values. A display that was unplugged during the
+read gets no window, and one that moved gets its current frame. If the bridge cannot be
+asked, the clip is shown as it was offered and the next pass corrects it. **In use
+now** is unaffected: an abandoned open is only a line in the diagnostics log
+(`superseded while its metadata was read`).
+
+A video the bridge offers for a display that the app's own screen list does not contain
+gets no window, since there is no screen to put it on. The engine reads the active displays
+from CoreGraphics and the app reads AppKit's screens, and a hardware mirror set, an AirPlay
+or Sidecar screen or a closed lid can make the two differ. That used to leave the display
+without a wallpaper and without a word in the log; the diagnostics log now says once, per
+wallpaper and display, that it is offered for a display the host cannot see and lists the
+screens it does see. The video opens by itself once the lists agree, because the bridge
+offers it again and a real screen change refreshes the displays. A display that is only
+missing for a moment is logged the same way. Whether real mirror sets, AirPlay and a closed
+lid produce the disagreement has not been checked on a desktop
+([display layouts](display-layouts.md#mirror-sets-airplay-and-a-closed-lid)).
 
 When the clip's audio output cannot start (no output device, or one that will not
 start), AVFoundation fails the whole clip, muted or not, and reports only
@@ -421,6 +782,14 @@ nothing could see or hear.
 - **System audio capture.** Runs only for a presenting wallpaper that actually reads
   the sound; see [audio response](audio-response.md). A wallpaper that reads audio
   still runs the tap, and no drop in coreaudiod cost is claimed for it.
+- **Output device watcher.** The app listens for a change of the default output device
+  only while a tap is wanted (a presenting scene reads the sound, or a page listens, and
+  nothing is suspended), to rebuild that tap
+  ([audio response](audio-response.md#output-device-changes)). With none wanted there is
+  no watcher thread or subscription, so switching to a Bluetooth or USB device wakes
+  nothing and writes nothing. The system-wide device-change listener is registered the
+  first time a watcher starts and stays registered; between watchers it finds nobody to
+  wake.
 - **Pointer sampling.** Scenes receive the cursor from a sampler that runs when
   macOS reports pointer motion or a button, when an interactive scene appears or
   resumes, or when its pointer delivery is reset, at most once per 16 ms, with a
@@ -440,6 +809,21 @@ nothing could see or hear.
   while renderer counters are on.
 - **Discover previews.** Animation sources exist only for visible tiles in a visible
   document ([tile thumbnails](workshop-downloads.md#tile-thumbnails)).
+- **Installed previews.** Tiles show small still covers, and one animation exists
+  only for the tile under the pointer or keyboard focus in a visible document
+  ([control panel](control-panel.md#layout)).
+- **Power source watcher.** The thread that follows plugging in and unplugging
+  sleeps until macOS reports a change or the app quits. It used to wake every five
+  seconds only to read a stop flag, and quitting could wait for that wake; it now
+  stops at once. A power change the app could not apply is offered again at the next
+  change instead of being dropped. The app can also ask it to read again when the Mac
+  wakes ([Playback](#playback)), which wakes the thread once before it sleeps again.
+  No power saving is claimed.
+- **Renderer counters.** They count only inside a bounded window: a
+  [diagnostic window](../testing/power-benchmark.md#runtime-counters) asked for
+  through the environment, or, when **Send performance data** is on, one 60 s
+  [frame window](telemetry.md#frame-windows) every four hours. Outside one, each
+  counted event costs one relaxed atomic load.
 
 The regression coverage for these is in
 [renderer verification](../testing/renderer.md#regression-areas-that-must-stay-covered).

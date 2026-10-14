@@ -83,16 +83,39 @@ final class WebWallpaperPage: NSObject, WKNavigationDelegate {
         var maximumBackoff: Duration = .seconds(30)
     }
 
+    /// How long a paused page keeps running after its document finishes loading
+    /// before the host detaches it, whether the user paused it or it is paused
+    /// only because they are working on another display. `didFinish` fires
+    /// before the first meaningful paint, the renderer defers a battery pause
+    /// until the host reports startup, and a wallpaper can be applied while
+    /// paused. Detaching at once would snapshot a blank view and may stop WebKit
+    /// finishing the load, so the page gets this long to draw one frame first.
+    /// The default matches the first settle capture of `DesktopWallpaperSync`.
+    struct Timing {
+        var firstFrameGrace: Duration = .seconds(3)
+    }
+
     /// Everything the host has committed to this wallpaper. A reloaded document
     /// starts with none of it, so the whole snapshot is replayed on each new
     /// document generation rather than only the values that changed since.
     private struct CommittedState {
         var propertiesJSON: String?
         var fps: UInt32?
+        /// The refresh rate of the display the page is on, 0 while unknown.
+        var displayRefreshRate = 0
+        /// Multiplies the page's `devicePixelRatio`; 1 is the display's own.
+        var renderScale: Float = 1
         var volume: Float = 1
         var muted = false
+        /// The bridge's composed pause, not only the Play/Pause button: user
+        /// pause, battery Pause, and the renderer's own presentation and
+        /// per-display suspension all arrive through `BridgeWebWallpaper.paused`.
         var userPaused = false
         var presentationSuspended = false
+        /// The presentation suspension leaves the display in the user's sight, as
+        /// when they chose to play only where they are working: nothing covers or
+        /// sleeps the display, so the page still owes it a first frame.
+        var suspendedInPlainSight = false
 
         /// The page pauses when the user paused playback or the presentation
         /// policy suspended rendering; either alone is sufficient.
@@ -105,6 +128,11 @@ final class WebWallpaperPage: NSObject, WKNavigationDelegate {
     /// Symlink-resolved entry path, used for identity only: two descriptors name
     /// the same page when this matches, whatever spelling the entry file used.
     let canonicalEntryURL: URL
+    /// Whether the page draws at its display's full refresh instead of WebKit's
+    /// default cadence near 60 fps. WebKit also hands a page one pointer move
+    /// per drawn frame, so this caps hover too. WebKit reads it only when the
+    /// web view is created, so it is fixed for the life of the page.
+    let rendersAtDisplayRefresh: Bool
     private(set) var isLoaded = false
     /// Increments on every `load()`. Async host calls carry the generation they
     /// were issued for, so a late completion cannot write into a newer document.
@@ -114,18 +142,40 @@ final class WebWallpaperPage: NSObject, WKNavigationDelegate {
     private let surface: RuntimeSurfaceKey
     private let counters: RuntimeCounters
     private let recovery: RecoveryPolicy
+    private let timing: Timing
     private let now: @MainActor () -> ContinuousClock.Instant
     private let wait: @Sendable (Duration) async throws -> Void
     private var restartHistory: [ContinuousClock.Instant] = []
     private var restartTask: Task<Void, Never>?
+    /// Whether the current document has had its first-frame grace since it
+    /// finished loading. A user pause waits for it, and so does a suspension of
+    /// a display still in the user's sight; any other presentation suspension is
+    /// immediate, as a surface that is already hidden never attaches. The grace
+    /// counts only time the view is in the window: a page that finished loading
+    /// while covered has drawn nothing yet.
+    private var firstFrameSettled = false
+    private var firstFrameTask: Task<Void, Never>?
     /// When the current document finished loading, so a crash can tell a page
     /// that ran stably from one that died shortly after every load.
     private var lastLoadFinished: ContinuousClock.Instant?
     private weak var container: NSView?
     private var placeholder: NSImageView?
     private(set) var hostSuspended = false
+    /// The last frame captured when the view left the window tree; nil while the
+    /// view is attached or when the snapshot failed. The desktop poster sync is
+    /// answered from it, because a detached view cannot be snapshotted reliably.
+    private(set) var suspensionPoster: NSImage?
     /// Invalidates an in-flight suspension poster when the decision changes.
     private var suspensionGeneration: UInt64 = 0
+    /// Raised after host suspension turns on or off. The grace expiry has no
+    /// host call behind it, so the host learns about it from here.
+    var onHostSuspensionChanged: (@MainActor () -> Void)?
+    /// A property change reached the paused page and `suspensionPoster` now holds
+    /// the frame it drew, so the Space posters can be read again.
+    var onSuspensionPosterRefreshed: (@MainActor () -> Void)?
+    /// Set while a change shown to a paused page waits for the frame it will be
+    /// detached with.
+    private var posterOwed = false
     var onFailure: (@MainActor (String) -> Void)?
     var onLoaded: (@MainActor () -> Void)?
     var onLoading: (@MainActor () -> Void)?
@@ -178,6 +228,10 @@ final class WebWallpaperPage: NSObject, WKNavigationDelegate {
     private static let maximumPendingRandomFileRequests = 32
     private static let maximumDeferredDirectoryChanges = 64
     private let messageProxy = ScriptMessageProxy()
+    /// Installing the host script replaces the controller's whole script list,
+    /// so the scripts the page's owner adds beside it (the preview denies
+    /// capture) are kept here and installed again after it.
+    private var extraUserScripts: [WKUserScript] = []
     /// Raised when the page's audio subscription actually changes, so the host
     /// can open and close the capture tap on real demand.
     var onAudioDemandChanged: (@MainActor (Bool) -> Void)?
@@ -192,6 +246,10 @@ final class WebWallpaperPage: NSObject, WKNavigationDelegate {
         weak var page: WebWallpaperPage?
 
         func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+            // The channel is registered for every frame, but only the wallpaper's
+            // own document speaks for it: a frame it embeds, which may belong to
+            // a remote site, must not subscribe to audio or ask for files.
+            guard message.frameInfo.isMainFrame else { return }
             let body = message.body
             MainActor.assumeIsolated { page?.receiveScriptMessage(body) }
         }
@@ -205,6 +263,26 @@ final class WebWallpaperPage: NSObject, WKNavigationDelegate {
     private static let simulateExit = NSSelectorFromString("_simulateMouseExit:")
     static var supportsHover: Bool { WKWebView.instancesRespond(to: simulateMove) }
     private static var hoverUnavailableLogged = false
+    private static var fullRefreshUnavailableLogged = false
+
+    /// WebKit keeps a page's rendering updates near 60 fps even on a faster
+    /// display. The switch is a WebKit feature flag with no public setter, so it
+    /// is reached through the same feature list Safari's developer settings
+    /// use. Returns false when the running WebKit no longer offers it.
+    private static func allowRenderingAboveNear60FPS(_ preferences: WKPreferences) -> Bool {
+        let featuresSelector = NSSelectorFromString("_features")
+        let setSelector = NSSelectorFromString("_setEnabled:forFeature:")
+        guard WKPreferences.responds(to: featuresSelector), preferences.responds(to: setSelector),
+              let features = WKPreferences.perform(featuresSelector)?.takeUnretainedValue() as? [NSObject],
+              let feature = features.first(where: {
+                  $0.value(forKey: "key") as? String == "PreferPageRenderingUpdatesNear60FPSEnabled"
+              })
+        else { return false }
+        typealias SetEnabled = @convention(c) (AnyObject, Selector, Bool, AnyObject) -> Void
+        unsafeBitCast(preferences.method(for: setSelector), to: SetEnabled.self)(
+            preferences, setSelector, false, feature)
+        return true
+    }
 
 
     /// The `load#N` of the log header written when this page was opened; its
@@ -219,7 +297,10 @@ final class WebWallpaperPage: NSObject, WKNavigationDelegate {
         surface: RuntimeSurfaceKey = RuntimeSurfaceKey(kind: .desktopWeb, displayID: 0),
         counters: RuntimeCounters? = nil,
         persistentData: Bool = true,
+        inspectable: Bool = false,
+        rendersAtDisplayRefresh: Bool = false,
         recovery: RecoveryPolicy = RecoveryPolicy(),
+        timing: Timing = Timing(),
         now: (@MainActor () -> ContinuousClock.Instant)? = nil,
         wait: (@Sendable (Duration) async throws -> Void)? = nil
     ) {
@@ -228,8 +309,10 @@ final class WebWallpaperPage: NSObject, WKNavigationDelegate {
         self.canonicalEntryURL = WebWallpaperProtocol.canonicalEntryURL(projectURL: projectURL, entryFile: entryFile)
             ?? self.entryURL.standardizedFileURL
         self.surface = surface
+        self.rendersAtDisplayRefresh = rendersAtDisplayRefresh
         self.counters = counters ?? .shared
         self.recovery = recovery
+        self.timing = timing
         self.now = now ?? { ContinuousClock.now }
         self.wait = wait ?? { try await Task.sleep(for: $0) }
         let configuration = WKWebViewConfiguration()
@@ -246,15 +329,18 @@ final class WebWallpaperPage: NSObject, WKNavigationDelegate {
         // tree. Media playback and capture are documented exceptions, which is
         // why suspension also suspends media explicitly.
         configuration.preferences.inactiveSchedulingPolicy = .suspend
-        let content = WKUserContentController()
-        content.addUserScript(WKUserScript(source: WebWallpaperProtocol.hostScript, injectionTime: .atDocumentStart, forMainFrameOnly: true))
-        configuration.userContentController = content
+        if rendersAtDisplayRefresh && !Self.allowRenderingAboveNear60FPS(configuration.preferences)
+            && !Self.fullRefreshUnavailableLogged {
+            Self.fullRefreshUnavailableLogged = true
+            AppLog.warn("WebKit rendering-rate control unavailable; web wallpapers stay near 60 fps")
+        }
         webView = WKWebView(frame: .zero, configuration: configuration)
         super.init()
         messageProxy.page = self
-        // Registered on the web view's own controller rather than the one built
-        // above: `WKWebView` copies the configuration it is given, so only this
-        // one is guaranteed to be the live object.
+        // Registered on the web view's own controller: `WKWebView` copies the
+        // configuration it is given, so only the one reached through the web
+        // view is guaranteed to be the live object. The host script is added
+        // per document, in `load()`.
         webView.configuration.userContentController.add(messageProxy, name: WebWallpaperProtocol.messageHandlerName)
         webView.navigationDelegate = self
         webView.underPageBackgroundColor = .black
@@ -274,18 +360,32 @@ final class WebWallpaperPage: NSObject, WKNavigationDelegate {
         } else {
             AppLog.warn("WebKit window occlusion control unavailable; web wallpapers use system scheduling")
         }
-        #if DEBUG
-            webView.isInspectable = true
-        #endif
+        webView.isInspectable = inspectable
+    }
+
+    /// Whether Safari's Web Inspector may attach to this page. The owner decides
+    /// (see `WebWallpaperInspection`); it can change while the page runs.
+    var isInspectable: Bool { webView.isInspectable }
+
+    func setInspectable(_ enabled: Bool) {
+        guard webView.isInspectable != enabled else { return }
+        webView.isInspectable = enabled
     }
 
     func load() {
+        // First, so the document about to start already carries the committed
+        // frame-rate limit: its very first `requestAnimationFrame` call is paced.
+        installUserScripts()
         restartTask?.cancel()
         restartTask = nil
         isLoaded = false
         documentGeneration += 1
         lastLoadFinished = nil
+        resetFirstFrameWindow()
         forgetDocumentState()
+        // A user-paused page that was detached has to be back in the window to
+        // load, and is suspended again after its next first frame.
+        reconcileHostSuspension()
         onLoading?()
         deliverAudioOutput()
         webView.loadFileURL(entryURL, allowingReadAccessTo: projectURL)
@@ -294,6 +394,7 @@ final class WebWallpaperPage: NSObject, WKNavigationDelegate {
     func stop() {
         restartTask?.cancel()
         restartTask = nil
+        resetFirstFrameWindow()
         lastLoadFinished = nil
         // Invalidate any host call still in flight for the document being torn
         // down, so it cannot reach the blank page that replaces it.
@@ -307,6 +408,53 @@ final class WebWallpaperPage: NSObject, WKNavigationDelegate {
         webView.navigationDelegate = nil
         webView.loadHTMLString("", baseURL: nil)
     }
+
+    /// Adds a script to run at the start of every document, after the host script.
+    func addUserScript(_ script: WKUserScript) {
+        extraUserScripts.append(script)
+        installUserScripts()
+    }
+
+    /// Rebuilds the user scripts from the committed state. A script cannot be
+    /// replaced alone, and the frame-rate limit and render scale are baked into
+    /// the host script so a document sees them from its first line; the live
+    /// paths in `deliverGeneralProperties` and `deliverRenderScale` keep a
+    /// running document in step afterwards.
+    private func installUserScripts() {
+        let seed = WebWallpaperProtocol.Seed(
+            framePacing: true, frameLimit: frameLimit, renderScale: Double(committed.renderScale))
+        let controller = webView.configuration.userContentController
+        controller.removeAllUserScripts()
+        for script in WebWallpaperProtocol.userScripts(seed: seed) { controller.addUserScript(script) }
+        for script in extraUserScripts { controller.addUserScript(script) }
+    }
+
+    /// Rendering updates per second this page gets from WebKit: near 60, the
+    /// display's refresh when that is lower, or the full refresh of a page created
+    /// to draw at it.
+    private var renderRate: Int {
+        WebWallpaperProtocol.renderRate(
+            displayRefreshRate: committed.displayRefreshRate, rendersAtDisplayRefresh: rendersAtDisplayRefresh)
+    }
+
+    /// Callbacks per second the page's `requestAnimationFrame` is held to, 0 for
+    /// none: a frame rate that reaches `renderRate` leaves the page alone.
+    private var frameLimit: Int {
+        committed.fps.map { WebWallpaperProtocol.frameLimit(forFPS: $0, renderRate: renderRate) } ?? 0
+    }
+
+    /// The fewest seconds between two pointer moves forwarded to the page: no
+    /// more than the page draws a second (WebKit hands it one move per drawn
+    /// frame, so 60 near its default cadence and the display's refresh for a page
+    /// that draws at it), and no more than the frame limit, since a page held to
+    /// 30 frames cannot show 60 positions. Below 10 a second hover would stop
+    /// following the pointer, so a very low limit does not slow it further.
+    var pointerMoveInterval: TimeInterval {
+        let limit = frameLimit
+        return 1 / Double(limit == 0 ? renderRate : max(limit, Self.minimumPointerRate))
+    }
+
+    private static let minimumPointerRate = 10
 
     /// Drops everything that belonged to the document being replaced. The new
     /// document re-registers its own listeners, so inheriting the old ones would
@@ -322,15 +470,69 @@ final class WebWallpaperPage: NSObject, WKNavigationDelegate {
     }
 
     /// `propertiesJSON` is the bridge's `{ id: { value, type, … } }` payload,
-    /// with any staged `file` value already substituted by the host.
-    func applyUserProperties(json propertiesJSON: String) {
+    /// with any staged `file` value already substituted by the host. `restaged`
+    /// names the `file` properties whose bytes the host replaced under the same
+    /// staged path: their value reads as before, so the page is told to take them
+    /// in again, once, and a paused page draws the new content like any edit.
+    func applyUserProperties(json propertiesJSON: String, restaged: Set<String> = []) {
+        let changed = committed.propertiesJSON != propertiesJSON || !restaged.isEmpty
         committed.propertiesJSON = propertiesJSON
-        deliverUserProperties()
+        deliverUserProperties(restaged: restaged)
+        if changed { showChangeWhilePaused() }
+    }
+
+    /// A change to a page that only its pause holds still would wait in the
+    /// suspended web process until the user plays, and the desktop would keep
+    /// the frame from before the edit. The page is given the first-frame grace
+    /// again, so the change draws, and is detached again with the frame it drew.
+    /// A page that is also covered waits for the cover to end, since it draws
+    /// nothing meanwhile. Only a change to what the page shows counts: the frame
+    /// limit and the render scale change how it draws, and apply when it plays.
+    private func showChangeWhilePaused() {
+        guard isLoaded, committed.userPaused, firstFrameSettled else { return }
+        posterOwed = true
+        resetFirstFrameWindow()
+        reconcileHostSuspension()
     }
 
     func applyGeneralProperties(fps: UInt32) {
+        let before = frameLimit
         committed.fps = fps
+        logFrameLimit(changedFrom: before)
         deliverGeneralProperties()
+    }
+
+    /// The internal render scale in force. The page's `devicePixelRatio` is
+    /// multiplied by it, so a page that sizes its drawing buffers from the ratio
+    /// draws fewer pixels. A running document is told at once and rebuilds on the
+    /// resize event that follows; a new document starts with it.
+    func applyRenderScale(_ scale: Float) {
+        let clamped = Float(WebWallpaperProtocol.clampedRenderScale(Double(scale)))
+        guard clamped != committed.renderScale else { return }
+        committed.renderScale = clamped
+        AppLog.debug("web wallpaper \(projectURL.lastPathComponent): render scale \(clamped)", load: logLoad)
+        deliverRenderScale()
+    }
+
+    /// The refresh rate of the display the page is on. It sets the rate the page
+    /// draws at, so a frame rate that reached the old rate may no longer reach the
+    /// new one (a display moved to a lower refresh), and a running document is
+    /// told when the limit that follows from it changes.
+    func applyDisplayRefreshRate(_ refreshRate: Int) {
+        guard refreshRate != committed.displayRefreshRate else { return }
+        let before = frameLimit
+        committed.displayRefreshRate = refreshRate
+        guard frameLimit != before else { return }
+        logFrameLimit(changedFrom: before)
+        deliverGeneralProperties()
+    }
+
+    private func logFrameLimit(changedFrom before: Int) {
+        guard frameLimit != before else { return }
+        AppLog.debug("""
+            web wallpaper \(projectURL.lastPathComponent): frame limit \
+            \(frameLimit == 0 ? "none" : String(frameLimit))
+            """, load: logLoad)
     }
 
     func applyAudioOutput(volume: Float, muted: Bool) {
@@ -344,7 +546,9 @@ final class WebWallpaperPage: NSObject, WKNavigationDelegate {
 
     func setPaused(_ paused: Bool) {
         committed.userPaused = paused
+        if !paused { posterOwed = false }
         deliverPaused()
+        reconcileHostSuspension()
         refreshDemand()
     }
 
@@ -375,10 +579,69 @@ final class WebWallpaperPage: NSObject, WKNavigationDelegate {
         container.addSubview(webView)
     }
 
-    func setPresentationSuspended(_ suspended: Bool) {
+    /// `stillVisible` says the suspension does not hide the display: the user can
+    /// see it and it is paused only because they are working on another one. Such
+    /// a page draws its first frame before it is detached, as a paused page does,
+    /// so a wallpaper set on that display is not left black. A hidden display
+    /// needs no frame and its page is detached at once.
+    func setPresentationSuspended(_ suspended: Bool, stillVisible: Bool = false) {
         committed.presentationSuspended = suspended
+        committed.suspendedInPlainSight = suspended && stillVisible
         deliverPaused()
-        applyHostSuspension(suspended)
+        reconcileHostSuspension()
+    }
+
+    /// The host suspends a page while no pixel can reach a display, and while it
+    /// is paused once it has drawn its first frame. Both go through
+    /// `applyHostSuspension`, so a page that ignores `setPaused` stops
+    /// regardless; the two reasons compose, and clearing one leaves the other
+    /// in force.
+    private func reconcileHostSuspension() {
+        applyHostSuspension(presentationHolds || userPauseHolds)
+        runFirstFrameWindow()
+    }
+
+    private var userPauseHolds: Bool { committed.userPaused && firstFrameSettled }
+
+    /// A presentation suspension holds at once unless the display is in the
+    /// user's sight, when it waits for the first frame like a user pause.
+    private var presentationHolds: Bool {
+        committed.presentationSuspended && (!committed.suspendedInPlainSight || firstFrameSettled)
+    }
+
+    private func resetFirstFrameWindow() {
+        firstFrameTask?.cancel()
+        firstFrameTask = nil
+        firstFrameSettled = false
+    }
+
+    /// Runs the first-frame grace of the loaded document while its view is in
+    /// the window, and holds it while the view is out: a covered page draws
+    /// nothing, so time spent covered would let a paused page detach with a
+    /// blank frame the moment it is uncovered. Whatever changes where the view
+    /// is ends up here through `reconcileHostSuspension`, so the grace starts
+    /// when the page is first in view and starts over after each interruption.
+    /// A zero grace settles at once instead of scheduling a task.
+    private func runFirstFrameWindow() {
+        if hostSuspended {
+            firstFrameTask?.cancel()
+            firstFrameTask = nil
+            return
+        }
+        guard isLoaded, !firstFrameSettled, firstFrameTask == nil else { return }
+        let grace = timing.firstFrameGrace
+        guard grace > .zero else {
+            firstFrameSettled = true
+            reconcileHostSuspension()
+            return
+        }
+        firstFrameTask = Task { @MainActor [weak self, wait] in
+            try? await wait(grace)
+            guard let self, !Task.isCancelled else { return }
+            self.firstFrameTask = nil
+            self.firstFrameSettled = true
+            self.reconcileHostSuspension()
+        }
     }
 
     /// Suspension the page cannot opt out of.
@@ -411,6 +674,19 @@ final class WebWallpaperPage: NSObject, WKNavigationDelegate {
         // is back where WebKit will run it.
         refreshDemand()
         if !suspended { flushDeferredDeliveries() }
+        AppLog.debug("""
+            web wallpaper \(projectURL.lastPathComponent): host suspension \
+            \(suspended ? "on (\(suspensionReason))" : "off")
+            """, load: logLoad)
+        onHostSuspensionChanged?()
+    }
+
+    private var suspensionReason: String {
+        switch (userPauseHolds, presentationHolds) {
+        case (true, true): "both"
+        case (true, false): "user pause"
+        default: "presentation"
+        }
     }
 
     /// Keeps the last frame on screen while the web view is out of the window.
@@ -440,11 +716,17 @@ final class WebWallpaperPage: NSObject, WKNavigationDelegate {
         placeholder.wantsLayer = true
         container.addSubview(placeholder)
         self.placeholder = placeholder
+        suspensionPoster = poster
         webView.removeFromSuperview()
         counters.record(.webDetached, for: surface)
+        if posterOwed {
+            posterOwed = false
+            onSuspensionPosterRefreshed?()
+        }
     }
 
     private func reattachWebView() {
+        suspensionPoster = nil
         guard let container else { return }
         if webView.superview !== container {
             webView.frame = container.bounds
@@ -459,15 +741,27 @@ final class WebWallpaperPage: NSObject, WKNavigationDelegate {
     /// inactive scheduling policy keys off exactly this.
     var isInWindowTree: Bool { container != nil && webView.superview === container }
 
-    private func deliverUserProperties() {
+    /// `restaged` is not committed: a document that loads later is given the whole
+    /// set, which already carries the new staged bytes.
+    private func deliverUserProperties(restaged: Set<String> = []) {
         guard isLoaded, let json = committed.propertiesJSON else { return }
-        run("window.__mweWallpaperHost.applyUserProperties(JSON.parse(json))", arguments: ["json": json])
+        run(
+            "window.__mweWallpaperHost.applyUserProperties(JSON.parse(json), restaged)",
+            arguments: ["json": json, "restaged": restaged.sorted()])
     }
 
     private func deliverGeneralProperties() {
         guard isLoaded, let fps = committed.fps else { return }
-        run("window.__mweWallpaperHost.applyGeneralProperties(general)",
-            arguments: ["general": ["fps": Int(fps)]])
+        // One call, so the page's listener and its frame pacing change together.
+        run("""
+            window.__mweWallpaperHost.applyGeneralProperties(general);
+            window.__mweWallpaperHost.setFrameLimit(limit);
+            """, arguments: ["general": ["fps": Int(fps)], "limit": frameLimit])
+    }
+
+    private func deliverRenderScale() {
+        guard isLoaded else { return }
+        run("window.__mweWallpaperHost.setRenderScale(scale)", arguments: ["scale": Double(committed.renderScale)])
     }
 
     private func deliverAudioOutput() {
@@ -488,6 +782,7 @@ final class WebWallpaperPage: NSObject, WKNavigationDelegate {
         deliverAudioOutput()
         deliverUserProperties()
         deliverGeneralProperties()
+        deliverRenderScale()
         deliverPaused()
     }
 
@@ -701,6 +996,10 @@ final class WebWallpaperPage: NSObject, WKNavigationDelegate {
         isLoaded = true
         lastLoadFinished = now()
         replayCommittedState()
+        // A document that finishes again starts another grace; it runs once the
+        // view is in the window, and a zero grace suspends the page right here.
+        resetFirstFrameWindow()
+        reconcileHostSuspension()
         // A document that already registered its listeners during load only
         // becomes deliverable now.
         refreshDemand()
@@ -724,7 +1023,11 @@ final class WebWallpaperPage: NSObject, WKNavigationDelegate {
         // The crashed document's listeners died with it. Restarting inherits
         // nothing, so a page that crashes repeatedly cannot accumulate
         // subscriptions the host would keep feeding.
+        resetFirstFrameWindow()
         forgetDocumentState()
+        // The restart loads into the window tree, and a user-paused page is
+        // suspended again after its next first frame.
+        reconcileHostSuspension()
         let moment = now()
         // A load that finishes proves nothing on its own: a page that crashes
         // shortly after every load would otherwise clear its budget forever.

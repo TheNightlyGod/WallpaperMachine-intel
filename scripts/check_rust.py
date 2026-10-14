@@ -26,6 +26,9 @@ OPT_INS = ("WE_RUN_MACOS_WINDOW_TESTS", "WALLPAPER_MACHINE_MEDIA_TESTS", "WALLPA
 CORE_EXCLUSIONS = {
     "tests::general::platform::case_wallpaper_window": "requires an explicitly authorized desktop run",
     "tests::general::platform::case_wallpaper_window_update_display": "requires an explicitly authorized desktop run",
+    "tests::general::platform::case_wallpaper_window_layer_swap_revert": "requires an explicitly authorized desktop run",
+    "tests::general::platform::case_wallpaper_window_layer_swap_finish": "requires an explicitly authorized desktop run",
+    "tests::general::platform::case_wallpaper_window_announces_layers": "requires an explicitly authorized desktop run",
     "tests::general::project_smoke::case_3177024520": "requires an external wallpaper asset corpus",
     "tests::general::project_smoke::case_3470764447": "requires an external wallpaper asset corpus",
     "tests::general::resource_smoke::case_3177024520": "requires an external wallpaper asset corpus",

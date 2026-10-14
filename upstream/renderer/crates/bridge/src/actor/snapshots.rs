@@ -50,6 +50,9 @@ const SCENE_MODE_WAITING_FOR_EVENT: &str = "waiting_for_event";
 const SCENE_MODE_WAITING_FOR_DEADLINE: &str = "waiting_for_deadline";
 const SCENE_MODE_USER_PAUSED: &str = "user_paused";
 const SCENE_MODE_POLICY_SUSPENDED: &str = "policy_suspended";
+/// A scene whose renderer stopped drawing after a failure nobody asked for. Not
+/// a pause: nothing the user or the app chose is holding it still.
+const SCENE_MODE_STOPPED_AFTER_FAILURE: &str = "stopped_after_failure";
 const SCENE_MODE_NOT_APPLICABLE: &str = "not_applicable";
 /// A scene that is running and could not be read. Never `continuous`.
 const SCENE_MODE_UNKNOWN: &str = "unknown";
@@ -141,6 +144,14 @@ impl BridgeActorState {
             .project_models
             .get(&wallpaper_id)
             .map(|model| {
+                // A label that is exactly one of the project's own tokens becomes
+                // its text in the app's language; anything else is left as written.
+                let localized = |raw: &str| {
+                    model
+                        .localization
+                        .resolve(raw, &self.label_locales)
+                        .map_or_else(|| raw.to_owned(), str::to_owned)
+                };
                 let overrides = model.override_values(&config.property_overrides);
                 let lookup = |id: &str| {
                     overrides.get(id).cloned().or_else(|| {
@@ -154,14 +165,16 @@ impl BridgeActorState {
                 model
                     .properties
                     .iter()
-                    .filter(|property| {
-                        property
+                    .map(|property| {
+                        // A rule that hides a property keeps its row, not enabled: the
+                        // host still sees what the project defines and what its hidden
+                        // overrides hold, and decides what to list. A rule that cannot be
+                        // read leaves the property enabled.
+                        let enabled = property
                             .condition
                             .as_deref()
                             .and_then(|condition| Condition::parse(condition).ok())
-                            .is_none_or(|condition| condition.eval(&lookup))
-                    })
-                    .map(|property| {
+                            .is_none_or(|condition| condition.eval(&lookup));
                         let value = property.effective_value(&overrides);
                         let default_value = property.default_value();
                         let dirty = !property.value_is_default(&value);
@@ -184,7 +197,7 @@ impl BridgeActorState {
                             PropertyMetadata::Combo { options } => options
                                 .iter()
                                 .map(|option| BridgeComboOption {
-                                    label: option.label.clone(),
+                                    label: localized(&option.label),
                                     value: BridgePropertyValue::from(PropertyValue::String(
                                         option.value.clone(),
                                     )),
@@ -238,7 +251,7 @@ impl BridgeActorState {
                         BridgePropertyDescriptor {
                             id: property.id.clone(),
                             kind: BridgePropertyKind::from(&property.kind),
-                            label_html: property.label_html.clone(),
+                            label_html: localized(&property.label_html),
                             value: BridgePropertyValue::from(value),
                             default_value: BridgePropertyValue::from(default_value),
                             slider,
@@ -247,7 +260,7 @@ impl BridgeActorState {
                             directory_mode,
                             dirty,
                             can_restore_defaults: dirty,
-                            enabled: true,
+                            enabled,
                             asset_managed: asset.managed,
                             asset_missing: asset.missing,
                             asset_source_path,
@@ -295,6 +308,7 @@ impl BridgeActorState {
                         ScalingMode::Fill => BridgeScalingMode::Fill,
                     },
                     scaling_factor: render.scaling_factor,
+                    framing: render.framing.into(),
                     target_fps: render.fps_on(max_fps),
                     max_fps,
                     muted: config.audio.muted,
@@ -422,9 +436,13 @@ impl BridgeActorState {
     /// Precedence is deliberate and is not the renderer's to decide. A
     /// wallpaper the user paused reads `user_paused` however the renderer has
     /// classified it; a display whose presentation the host suspended reads
-    /// `policy_suspended`; only then does the renderer's own answer show
-    /// through. Those three are separate states, so an event wake must never
-    /// look like the user un-pausing.
+    /// `policy_suspended`; a surface that stopped drawing after a failure reads
+    /// `stopped_after_failure`; only then does the renderer's own answer show
+    /// through. Those are separate states, so an event wake must never look
+    /// like the user un-pausing, and a failure must never look like either
+    /// kind of pause. The pauses outrank the failure because they are what the
+    /// user chose and can undo; the stop is still latched underneath and shows
+    /// the moment they are lifted.
     ///
     /// `None` from the renderer means it could not answer, which becomes
     /// `unknown`. It never becomes `continuous`: "we could not tell" is not
@@ -441,6 +459,9 @@ impl BridgeActorState {
         }
         if self.presentation_suspended || self.suspended_displays.contains(&report.display_id) {
             return SCENE_MODE_POLICY_SUSPENDED;
+        }
+        if report.surface.is_some_and(|surface| surface.stop.is_some()) {
+            return SCENE_MODE_STOPPED_AFTER_FAILURE;
         }
         match report.update_mode {
             Some(SceneUpdateMode::Continuous) => SCENE_MODE_CONTINUOUS,
@@ -624,6 +645,7 @@ impl BridgeActorState {
             native_video_rejected: &self.native_video_rejected,
             frame_rate_cap: self.active_target_fps_cap(),
             audio_suppressed: self.audio_suppressed,
+            held: &self.held_wallpapers,
         }
         .render_backends();
         let video_backends = backends
@@ -704,14 +726,12 @@ impl BridgeActorState {
             .collect();
         BridgeSettingsSnapshot {
             displays: rows,
-            launch_at_login_available: matches!(
+            launch_at_login_available: !matches!(launch_at_login, LaunchAtLoginStatus::Unavailable),
+            launch_at_login_enabled: matches!(
                 launch_at_login,
-                LaunchAtLoginStatus::Available { .. }
+                LaunchAtLoginStatus::Available { enabled: true }
             ),
-            launch_at_login_enabled: match launch_at_login {
-                LaunchAtLoginStatus::Available { enabled } => enabled,
-                LaunchAtLoginStatus::Unavailable => false,
-            },
+            launch_at_login_needs_approval: launch_at_login == LaunchAtLoginStatus::RequiresApproval,
             battery_mode: self.app_config.power.on_battery.into(),
             verbose_logging: self.app_config.diagnostics.verbose_logging,
             git_sha: match option_env!("GIT_SHORT_COMMIT").unwrap_or(crate::build::SHORT_COMMIT) {
@@ -763,12 +783,16 @@ impl BridgeActorState {
             scene_update_modes,
             scene_renderers,
             user_assets_path: paths.user_assets_root().to_string_lossy().into_owned(),
-            render_scale: self.app_config.effective_render_scale(on_battery),
+            render_scale: self
+                .app_config
+                .effective_render_scale(self.quality_in_force()),
             preferred_render_scale: self.app_config.quality.render_scale,
             frame_rate_cap: self.app_config.quality.frame_rate_cap,
             battery_render_scale: self.app_config.quality.battery.render_scale,
             battery_target_fps: self.app_config.quality.battery.target_fps,
             on_battery_power: on_battery,
+            quality_throttle: self.quality_throttle.iter().copied().collect(),
+            effective_frame_rate_cap: self.active_target_fps_cap(),
             render_scale_supported: backends.render_scale_supported,
         }
     }
@@ -806,6 +830,37 @@ mod tests {
         state.invalidate_shader_cache_size();
         assert_eq!(state.shader_cache_size_at(now + Duration::from_secs(2), measure), 0);
         assert_eq!(reads.get(), 3);
+    }
+
+    #[test]
+    fn settings_snapshot_asks_for_approval_only_when_the_login_item_awaits_it() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = BridgePaths::for_home(root.path());
+        let state = crate::actor::state::BridgeActorState::default();
+        // (status, available, enabled, needs approval)
+        for (status, expected) in [
+            (LaunchAtLoginStatus::Unavailable, (false, false, false)),
+            (LaunchAtLoginStatus::Available { enabled: false }, (true, false, false)),
+            (LaunchAtLoginStatus::Available { enabled: true }, (true, true, false)),
+            (LaunchAtLoginStatus::RequiresApproval, (true, false, true)),
+        ] {
+            let snapshot = state.settings(
+                &[],
+                status,
+                &paths,
+                crate::engine::RendererVideoPipelineState::default(),
+                &[],
+            );
+            assert_eq!(
+                (
+                    snapshot.launch_at_login_available,
+                    snapshot.launch_at_login_enabled,
+                    snapshot.launch_at_login_needs_approval,
+                ),
+                expected,
+                "{status:?}"
+            );
+        }
     }
 
     #[test]

@@ -168,6 +168,40 @@ final class WebPanelSupportPromptTests: ControlPanelTestCase {
     }
   }
 
+  /// Someone who finished the guide before it had the switch is asked once, and the answer
+  /// turns sending on without opening any link.
+  func testExistingUserIsAskedOnceAboutPerformanceData() async throws {
+    try await withPromptPanel { panel, prompt, _ in
+      let folder = FileManager.default.temporaryDirectory.appendingPathComponent("telemetry-\(UUID().uuidString)")
+      defer { try? FileManager.default.removeItem(at: folder) }
+      let telemetry = TelemetryService(
+        preferences: TelemetryPreferences(defaults: try TemporaryDefaults.make(for: self).defaults),
+        spool: TelemetrySpool(folder: folder), uploader: NoUploads(), sampler: nil,
+        sleep: { _ in throw CancellationError() })
+      panel.store.telemetry = telemetry
+      // An existing user: the guide was finished by an earlier build, so this page never shows it.
+      panel.controller.welcomeSeen = true
+      panel.controller.webViewWebContentProcessDidTerminate(panel.web)
+      try await panel.waitUntil(timeout: 15) { panel.controller.isReady }
+      try await self.setPageVisible(true, in: panel)
+      panel.show()
+      try await self.pushSnapshot(panel)
+      try await panel.waitJS("document.getElementById('support-dialog').open")
+      try await panel.expectJS(
+        "return !!document.querySelector('#support-dialog [data-choice=\"enableTelemetry\"]')", equals: true)
+
+      _ = try await panel.js("document.querySelector('#support-dialog [data-choice=\"enableTelemetry\"]').click()")
+      try await panel.waitJS("!document.getElementById('support-dialog').open")
+      try await panel.waitUntil { telemetry.isEnabled }
+      XCTAssertNil(prompt.pendingPrompt(welcomeSeen: true, telemetryOn: false, now: Date() + 2 * 86_400))
+    }
+  }
+
+  private struct NoUploads: TelemetryUploading {
+    func send(_ report: Data) async throws {}
+    func delete(install: String) async throws {}
+  }
+
   private func qualify(_ prompt: SupportPromptStore) {
     prompt.recordDownload(wallpaperID: "downloaded")
     prompt.recordSuccessfulActivation(wallpaperID: "downloaded")

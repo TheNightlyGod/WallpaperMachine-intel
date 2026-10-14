@@ -524,6 +524,42 @@ final class AppUpdateTests: XCTestCase {
         XCTAssertEqual(fixture.terminateCalls, 1)
     }
 
+    func testAnInstallIsPendingOnlyOnceTheInstallerIsWaitingForTheAppToQuit() async {
+        let fixture = Fixture()
+        fixture.client.release = fixture.release(version: "1.1.0")
+        let gate = Gate()
+        fixture.installer.prepareGate = gate
+        await fixture.store.checkForUpdates()
+        await fixture.store.downloadUpdate()
+        XCTAssertFalse(fixture.store.isInstallPending, "an update that is only downloaded")
+
+        let install = Task { await fixture.store.installUpdate() }
+        await gate.waitUntilEntered()
+        XCTAssertFalse(fixture.store.isInstallPending, "a Quit while the update is prepared is the user's")
+        gate.open()
+        await install.value
+        XCTAssertFalse(fixture.store.isInstallPending, "prepared, but the installer has not been started")
+
+        var pendingWhenTheAppWasAskedToQuit: Bool?
+        fixture.recorder.onTerminate = { pendingWhenTheAppWasAskedToQuit = fixture.store.isInstallPending }
+        fixture.scheduled[0]()
+
+        XCTAssertEqual(pendingWhenTheAppWasAskedToQuit, true, "the quit the update asks for is the update's")
+    }
+
+    func testAnInstallThatCouldNotStartIsNotPending() async {
+        let fixture = Fixture()
+        fixture.client.release = fixture.release(version: "1.1.0")
+        fixture.installer.installError = AppUpdateIssue(code: .permission, detail: "EACCES")
+        await fixture.store.checkForUpdates()
+        await fixture.store.downloadUpdate()
+        await fixture.store.installUpdate()
+        fixture.scheduled[0]()
+
+        XCTAssertFalse(fixture.store.isInstallPending)
+        XCTAssertEqual(fixture.terminateCalls, 0, "the app was never asked to quit")
+    }
+
     func testErrorsAreClassifiedAndDownloadCanBeRetriedAfterCheck() async {
         let fixture = Fixture()
         fixture.client.fetchError = AppUpdateIssue(code: .verification, detail: "sha256 checksum mismatch at /private/update.dmg")
@@ -568,6 +604,57 @@ final class AppUpdateTests: XCTestCase {
         try? await Task.sleep(for: .milliseconds(80))
         XCTAssertEqual(fixture.store.state, .error(currentVersion: "1.0.0", operation: .install, code: .unknown, availableVersion: "1.1.0"))
         XCTAssertEqual(fixture.installer.installation.cancelCalls, 1)
+    }
+
+    func testARefusedQuitStopsTheWaitingInstallerOnceAndLeavesTheInstallToRetry() async {
+        let fixture = Fixture()
+        fixture.client.release = fixture.release(version: "1.1.0")
+        await fixture.store.checkForUpdates()
+        await fixture.store.downloadUpdate()
+        await fixture.store.installUpdate()
+        fixture.scheduled[0]()
+        XCTAssertTrue(fixture.store.isInstallPending)
+
+        await fixture.store.cancelPendingInstall()
+        await fixture.store.cancelPendingInstall()
+
+        XCTAssertEqual(fixture.installer.installation.cancelCalls, 1, "a second call finds nothing waiting")
+        XCTAssertFalse(fixture.store.isInstallPending)
+        XCTAssertEqual(fixture.store.state, .error(currentVersion: "1.0.0", operation: .install, code: .unknown, availableVersion: "1.1.0"))
+        await fixture.store.installUpdate()
+        XCTAssertEqual(fixture.scheduled.count, 2, "About offers the install again")
+    }
+
+    func testCallingOffAnInstallThatWasNeverStartedChangesNothing() async {
+        let fixture = Fixture()
+        fixture.client.release = fixture.release(version: "1.1.0")
+        await fixture.store.checkForUpdates()
+        await fixture.store.downloadUpdate()
+        await fixture.store.installUpdate()
+        XCTAssertEqual(fixture.store.state, .ready(currentVersion: "1.0.0", availableVersion: "1.1.0"))
+
+        await fixture.store.cancelPendingInstall()
+
+        XCTAssertEqual(fixture.installer.installation.cancelCalls, 0, "the installer was only prepared, not started")
+        XCTAssertEqual(fixture.store.state, .ready(currentVersion: "1.0.0", availableVersion: "1.1.0"))
+    }
+
+    func testAnInstallerThatCannotBeStoppedStaysOwnedUntilItCan() async {
+        let fixture = Fixture()
+        fixture.client.release = fixture.release(version: "1.1.0")
+        fixture.installer.installation.finishesCancellation = false
+        await fixture.store.checkForUpdates()
+        await fixture.store.downloadUpdate()
+        await fixture.store.installUpdate()
+        fixture.scheduled[0]()
+
+        await fixture.store.cancelPendingInstall()
+        XCTAssertTrue(fixture.store.isInstallPending, "a helper that is still alive keeps its owner")
+
+        fixture.installer.installation.finishesCancellation = true
+        await fixture.store.cancelPendingInstall()
+        XCTAssertFalse(fixture.store.isInstallPending)
+        XCTAssertEqual(fixture.installer.installation.cancelCalls, 2)
     }
 
     func testPreparationYieldsMainActorAndCancellationDiscardsItsResult() async {
@@ -740,7 +827,10 @@ private final class Fixture {
             installer: installer,
             workspace: workspace,
             scheduleInstall: { work in recorder.scheduled.append(work) },
-            terminate: { recorder.terminateCalls += 1 },
+            terminate: {
+                recorder.terminateCalls += 1
+                recorder.onTerminate?()
+            },
             installTimeout: installTimeout
         )
     }
@@ -769,6 +859,7 @@ private final class Recorder: @unchecked Sendable {
     var revealed: [URL] = []
     var opened: [URL] = []
     var terminateCalls = 0
+    var onTerminate: (() -> Void)?
 }
 
 private final class FakeAppUpdateClient: AppUpdateClient, @unchecked Sendable {

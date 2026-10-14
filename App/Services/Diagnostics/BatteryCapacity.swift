@@ -23,24 +23,29 @@ enum BatteryCapacity {
     return wattHours(properties)
   }
 
-  /// `AppleRawMaxCapacity` is today's full charge in mAh; the rated `DesignCapacity`
-  /// stands in when it is missing. Cell count comes from the per-cell voltages; failing
-  /// that, the pack's present voltage is used, which reads a few percent high when full.
+  /// Today's full charge in mAh is `AppleRawMaxCapacity`, or `FullChargeCapacity` inside
+  /// `BatteryData` on macOS 27, which keeps the capacities only there; the rated
+  /// `DesignCapacity` from either place stands in when neither is present. Cell count
+  /// comes from the per-cell voltages, which macOS 27 no longer lists; failing that, from
+  /// the pack's present voltage: a cell stays between about 3.2 and 4.4 V while the Mac
+  /// runs, so the nearest whole number of nominal cells is the count.
   static func wattHours(_ properties: [String: Any]) -> Double? {
+    let data = properties["BatteryData"] as? [String: Any] ?? [:]
     guard properties["BatteryInstalled"] as? Bool != false,
-      let milliampHours = (properties["AppleRawMaxCapacity"] ?? properties["DesignCapacity"])
-        as? Int, milliampHours > 0
+      let milliampHours =
+        (properties["AppleRawMaxCapacity"] ?? data["FullChargeCapacity"]
+        ?? properties["DesignCapacity"] ?? data["DesignCapacity"]) as? Int,
+      milliampHours > 0
     else { return nil }
-    let volts: Double
-    if let cells = ((properties["BatteryData"] as? [String: Any])?["CellVoltage"] as? [Int])?
-      .count, cells > 0
-    {
-      volts = Double(cells) * nominalCellVolts
-    } else if let millivolts = properties["Voltage"] as? Int, millivolts > 0 {
-      volts = Double(millivolts) / 1000
+    let cells: Int
+    if let count = (data["CellVoltage"] as? [Int])?.count, count > 0 {
+      cells = count
+    } else if let millivolts = properties["Voltage"] as? Int {
+      cells = Int((Double(millivolts) / 1000 / nominalCellVolts).rounded())
     } else {
       return nil
     }
-    return Double(milliampHours) * volts / 1000
+    guard cells > 0 else { return nil }
+    return Double(milliampHours) * Double(cells) * nominalCellVolts / 1000
   }
 }

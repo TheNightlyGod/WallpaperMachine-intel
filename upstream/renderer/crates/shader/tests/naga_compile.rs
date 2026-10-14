@@ -214,6 +214,130 @@ void main() {
     assert!(diagnostic.span().is_some());
 }
 
+#[test]
+fn global_const_initialized_from_a_uniform_is_evaluated_before_main_reads_it() {
+    // A global initializer that reads a uniform is no constant expression, so
+    // a strict frontend rejects it. The permissive path evaluates it once the
+    // uniforms are bound, before any code reads the global.
+    let source_text = concat!(
+        "uniform float u_Feather;\n",
+        "const float FEATHER = u_Feather * 0.5;\n",
+        "const float SPAN = FEATHER * 2.0;\n",
+        "float edge(float x) { return smoothstep(0.5 - FEATHER, 0.5 + SPAN, x); }\n",
+        "void main() { gl_FragColor = vec4(edge(0.25)); }\n",
+    );
+
+    for target in [ShaderTarget::VulkanSpirv, ShaderTarget::MetalMsl] {
+        let artifact = compile_fragment(target, source_text);
+        assert_eq!(
+            runtime_global_stores(artifact.module(), &["FEATHER", "SPAN"]),
+            ["FEATHER", "SPAN"],
+            "{target:?}: both globals must be written, in declaration order"
+        );
+    }
+}
+
+#[test]
+fn global_variable_initialized_from_a_uniform_keeps_its_value() {
+    // The frontend accepts a mutable global with such an initializer but
+    // silently drops the initializer, which reads as zero everywhere.
+    let source_text = concat!(
+        "uniform vec4 g_Texture0Resolution;\n",
+        "vec2 texel = 1.0 / g_Texture0Resolution.xy;\n",
+        "void main() { gl_FragColor = vec4(texel, 0.0, 1.0); }\n",
+    );
+
+    for target in [ShaderTarget::VulkanSpirv, ShaderTarget::MetalMsl] {
+        let artifact = compile_fragment(target, source_text);
+        assert_eq!(
+            runtime_global_stores(artifact.module(), &["texel"]),
+            ["texel"],
+            "{target:?}: the initializer must still be applied"
+        );
+    }
+}
+
+#[test]
+fn constant_global_initializers_stay_constant_expressions() {
+    // Array sizes need a constant expression, so only initializers that read
+    // runtime values move.
+    let source_text = concat!(
+        "uniform float u_Scale;\n",
+        "const int COUNT = 2 * 2;\n",
+        "const float HALF = 1.0 / 2.0;\n",
+        "void main() {\n",
+        "    float weights[COUNT];\n",
+        "    for (int i = 0; i < COUNT; i++) { weights[i] = HALF * u_Scale; }\n",
+        "    gl_FragColor = vec4(weights[0], weights[3], 0.0, 1.0);\n",
+        "}\n",
+    );
+    let module = ShaderModule::parse(ShaderStageKind::Fragment, source_text).expect("module parses");
+    let legalized = Codegen.legalize(&module).expect("shader legalizes");
+
+    assert!(legalized.source().contains("const int COUNT = 2 * 2;"));
+    assert!(legalized.source().contains("const float HALF = 1.0 / 2.0;"));
+    for target in [ShaderTarget::VulkanSpirv, ShaderTarget::MetalMsl] {
+        let _artifact = NagaCompiler
+            .compile_stage(target, ShaderStageKind::Fragment, &legalized)
+            .expect("constant globals should compile unchanged");
+    }
+}
+
+fn compile_fragment(
+    target: ShaderTarget,
+    source_text: &str,
+) -> CompiledStageArtifact<naga::Module> {
+    let module = ShaderModule::parse(ShaderStageKind::Fragment, source_text).expect("module parses");
+    let legalized = Codegen.legalize(&module).expect("shader legalizes");
+    match NagaCompiler.compile_stage(target, ShaderStageKind::Fragment, &legalized) {
+        Ok(artifact) => artifact,
+        Err(error) => panic!(
+            "{target:?}: {}\n{}",
+            error.to_miette_report(),
+            legalized.source()
+        ),
+    }
+}
+
+/// Returns the named private globals the entry point writes, in the order its
+/// call graph writes them.
+fn runtime_global_stores(module: &naga::Module, names: &[&str]) -> Vec<String> {
+    fn walk(
+        module: &naga::Module,
+        function: &naga::Function,
+        block: &naga::Block,
+        names: &[&str],
+        stores: &mut Vec<String>,
+    ) {
+        for statement in block.iter() {
+            match statement {
+                naga::Statement::Store { pointer, .. } => {
+                    if let naga::Expression::GlobalVariable(global) = function.expressions[*pointer]
+                        && let Some(name) = module.global_variables[global].name.as_deref()
+                        && names.contains(&name)
+                    {
+                        stores.push(name.to_owned());
+                    }
+                }
+                naga::Statement::Call { function: callee, .. } => {
+                    let callee = &module.functions[*callee];
+                    walk(module, callee, &callee.body, names, stores);
+                }
+                naga::Statement::Block(inner) => walk(module, function, inner, names, stores),
+                _ => {}
+            }
+        }
+    }
+
+    let entry = module
+        .entry_points
+        .first()
+        .expect("fragment module has an entry point");
+    let mut stores = Vec::new();
+    walk(module, &entry.function, &entry.function.body, names, &mut stores);
+    stores
+}
+
 fn legalized_source(stage: ShaderStageKind, source: &str) -> CodegenStageSource {
     CodegenStageSource::new(stage, source.to_owned(), Box::from([]))
 }

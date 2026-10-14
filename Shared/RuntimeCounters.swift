@@ -60,11 +60,42 @@ enum RuntimeCounter: String, CaseIterable, Sendable {
     /// The native backend refused a wallpaper and handed it to the scene
     /// engine.
     case nativeVideoRefused
-    /// A poster request could not be answered from the item that is playing
-    /// and fell back to a one-shot image generator, which is a second decode.
-    /// Counted so a fallback that became the normal path is visible instead
-    /// of being inferred from CPU use.
+    /// Reading a clip's metadata did not finish within the limit for its
+    /// storage, so the host stopped waiting and handed the wallpaper over. A
+    /// count on an internal drive means the read is genuinely stuck; on a
+    /// network share or an evicted cloud file it may only be slow.
+    case nativeVideoProbeTimeout
+    /// A clip's first-frame deadline passed with nothing on the layer. The first
+    /// miss restarts the player; a second, or a restart the recovery budget
+    /// refused, hands the wallpaper to the scene engine. A count of one with no
+    /// refusal means a restart brought the picture; on an internal drive any
+    /// count means the pipeline stalled, while on a share or a cloud file the
+    /// file may only have been slow to arrive.
+    case nativeVideoFirstFrameTimeout
+    /// A poster request was answered by a one-shot image generator instead of
+    /// the item that is playing, which is a second decode of a few frames.
+    /// Either the playing item produced no frame in time, or the clip is
+    /// rotated or mirrored and the generator is the only path that returns it
+    /// upright: for such a clip every poster counts here by design, so a
+    /// steady count on one is not a fault. Counted so a fallback that became
+    /// the normal path for an upright clip is visible instead of being
+    /// inferred from CPU use.
     case nativeVideoPosterFallback
+    /// A clip that had shown a picture was checked after a long pause or a
+    /// wake and its pipeline delivered none, although the player reported it
+    /// was playing. Counted once per check, at the first look, before anything
+    /// is repaired. A steady zero over many long suspensions means the decoder
+    /// survives them; a count says it does not, and how often.
+    case nativeVideoPlaybackStalled
+    /// The first repair of a stalled pipeline: a zero-tolerance seek to where
+    /// it is, then play. Compare with `nativeVideoPlaybackStalled`: a kick for
+    /// every stall means the cheap repair is enough.
+    case nativeVideoPlaybackKick
+    /// The second repair, after the kick did not bring pictures: the player's
+    /// item and looper were rebuilt from the file. Spends the surface's
+    /// recovery allowance, like a first-frame restart does, but is counted
+    /// apart from it.
+    case nativeVideoPlaybackRebuild
 }
 
 /// Time-limited, aggregated runtime counters. Off by default: recording happens

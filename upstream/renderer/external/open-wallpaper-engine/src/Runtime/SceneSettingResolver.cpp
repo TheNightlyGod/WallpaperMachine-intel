@@ -223,6 +223,13 @@ DynamicValueUniquePtr resolve_auto_setting(
 
 } // namespace
 
+std::string UserPropertyName(const nlohmann::json& setting)
+{
+    std::string user_name;
+    parse_condition(setting, &user_name);
+    return user_name;
+}
+
 float ScalarAnimation::Evaluate(double seconds) const
 {
     if (!(fps > 0.0) || keyframes.empty() || !std::isfinite(seconds) || seconds < 0.0) {

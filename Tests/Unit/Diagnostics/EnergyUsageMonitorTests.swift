@@ -223,10 +223,31 @@ final class EnergyUsageMonitorTests: XCTestCase {
       try XCTUnwrap(BatteryCapacity.wattHours(pack)), 8.532 * 3 * 3.85, accuracy: 0.001,
       "today's full charge across three nominal cells")
 
+    // Without per-cell voltages the pack's present voltage gives the cell count, from
+    // full charge down to near empty.
     var noCells = pack
     noCells["BatteryData"] = nil
+    for millivolts in [12_993, 11_100, 9_700] {
+      noCells["Voltage"] = millivolts
+      XCTAssertEqual(
+        try XCTUnwrap(BatteryCapacity.wattHours(noCells)), 8.532 * 3 * 3.85, accuracy: 0.001,
+        "\(millivolts) mV")
+    }
+
+    // macOS 27 keeps the capacities only inside BatteryData and lists no cell voltages.
+    let nested: [String: Any] = [
+      "BatteryInstalled": true, "MaxCapacity": 100, "Voltage": 11_944,
+      "BatteryData": [
+        "FullChargeCapacity": 8_562, "DesignCapacity": 8_579, "NominalChargeCapacity": 8_806,
+      ],
+    ]
     XCTAssertEqual(
-      try XCTUnwrap(BatteryCapacity.wattHours(noCells)), 8.532 * 12.993, accuracy: 0.001)
+      try XCTUnwrap(BatteryCapacity.wattHours(nested)), 8.562 * 3 * 3.85, accuracy: 0.001,
+      "today's full charge, not the rated or nominal one")
+    var designOnly = nested
+    designOnly["BatteryData"] = ["DesignCapacity": 8_579]
+    XCTAssertEqual(
+      try XCTUnwrap(BatteryCapacity.wattHours(designOnly)), 8.579 * 3 * 3.85, accuracy: 0.001)
 
     var removed = pack
     removed["BatteryInstalled"] = false

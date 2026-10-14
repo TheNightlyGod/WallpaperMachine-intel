@@ -34,7 +34,31 @@ enum ControlPanelWindow {
         window.isReleasedWhenClosed = false
         window.contentViewController = PanelContentController(hosted: contentViewController)
         window.contentMinSize = minimumContentSize
+        moveToActiveSpace(window)
         return window
+    }
+
+    /// Makes an ordinary window appear on the Space that is active when it is shown, instead
+    /// of switching the person back to the Space it was last left on. For the control panel,
+    /// What's New, preview and sign-in windows; wallpaper, overlay and probe windows keep
+    /// their all-Spaces behavior.
+    ///
+    /// Flags are inserted and removed, never assigned, so the full-screen capability and the
+    /// window-cycle flags a window already has survive (`windowDidEnterFullScreen` relies on
+    /// them). `.canJoinAllSpaces` leaves because AppKit raises when it meets
+    /// `.moveToActiveSpace`.
+    static func moveToActiveSpace(_ window: NSWindow) {
+        var behavior = window.collectionBehavior
+        behavior.subtract([.managed, .canJoinAllSpaces])
+        behavior.insert(.moveToActiveSpace)
+        window.collectionBehavior = behavior
+    }
+
+    /// Fronts a window, bringing it back from the Dock first when it is minimized, which
+    /// `makeKeyAndOrderFront` alone does not do.
+    static func bringForward(_ window: NSWindow) {
+        if window.isMiniaturized { window.deminiaturize(nil) }
+        window.makeKeyAndOrderFront(nil)
     }
 
     /// Keeps the web navigation out from under AppKit's opaque full-screen title bar,

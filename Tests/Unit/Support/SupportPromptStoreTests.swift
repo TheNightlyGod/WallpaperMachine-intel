@@ -124,4 +124,81 @@ final class SupportPromptStoreTests: XCTestCase {
         store.recordSuccessfulActivation(wallpaperID: "wallpaper-1")
         XCTAssertTrue(store.isPending)
     }
+
+    // MARK: - Scheduling of the three prompts
+
+    private let day: TimeInterval = 86_400
+    private var calendar: Calendar {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+        return calendar
+    }
+    private let start = Date(timeIntervalSince1970: 1_791_000_000)
+
+    private func useOnDays(_ store: SupportPromptStore, _ count: Int) {
+        for index in 0..<count { store.recordPanelUse(now: start + Double(index) * day) }
+    }
+
+    func testOnlyOnePromptADayInPriorityOrder() {
+        let store = SupportPromptStore(defaults: defaults, calendar: calendar)
+        store.recordDownload(wallpaperID: "downloaded")
+        store.recordSuccessfulActivation(wallpaperID: "downloaded")
+        XCTAssertEqual(store.pendingPrompt(welcomeSeen: true, telemetryOn: false, now: start), .telemetry)
+
+        store.markPresented(.telemetry, now: start)
+        XCTAssertNil(store.pendingPrompt(welcomeSeen: true, telemetryOn: false, now: start + 60),
+                     "a second prompt waits for another day")
+        XCTAssertEqual(store.pendingPrompt(welcomeSeen: true, telemetryOn: false, now: start + day), .support)
+    }
+
+    func testTelemetryPromptIsForThoseWhoFinishedTheGuideWithoutIt() {
+        let store = SupportPromptStore(defaults: defaults, calendar: calendar)
+        XCTAssertNil(store.pendingPrompt(welcomeSeen: false, telemetryOn: false, now: start), "the guide asks new users")
+        XCTAssertNil(store.pendingPrompt(welcomeSeen: true, telemetryOn: true, now: start), "already on")
+        store.recordTelemetryAsked()
+        XCTAssertNil(store.pendingPrompt(welcomeSeen: true, telemetryOn: false, now: start))
+        XCTAssertNil(SupportPromptStore(defaults: defaults, calendar: calendar)
+            .pendingPrompt(welcomeSeen: true, telemetryOn: false, now: start + day))
+    }
+
+    func testStarPromptWaitsForTwoWeeksAndFiveDaysOfUse() {
+        let store = SupportPromptStore(defaults: defaults, calendar: calendar)
+        store.recordTelemetryAsked()
+        useOnDays(store, 4)
+        XCTAssertNil(store.pendingPrompt(welcomeSeen: true, telemetryOn: false, now: start + 20 * day))
+        store.recordPanelUse(now: start + 4 * day + 60)
+        store.recordPanelUse(now: start + 4 * day + 120)
+        XCTAssertNil(store.pendingPrompt(welcomeSeen: true, telemetryOn: false, now: start + 13 * day),
+                     "five days of use, but not two weeks yet")
+        XCTAssertEqual(store.pendingPrompt(welcomeSeen: true, telemetryOn: false, now: start + 14 * day), .star)
+
+        store.markPresented(.star, now: start + 14 * day)
+        XCTAssertNil(SupportPromptStore(defaults: defaults, calendar: calendar)
+            .pendingPrompt(welcomeSeen: true, telemetryOn: false, now: start + 60 * day), "asked once")
+    }
+
+    func testRepeatedUseOnOneDayCountsOnce() {
+        let store = SupportPromptStore(defaults: defaults, calendar: calendar)
+        store.recordTelemetryAsked()
+        for minute in 0..<10 { store.recordPanelUse(now: start + Double(minute) * 60) }
+        XCTAssertNil(store.pendingPrompt(welcomeSeen: true, telemetryOn: false, now: start + 30 * day))
+    }
+
+    func testChoosingTheStarInTheSupportPromptSkipsTheStarPrompt() {
+        let store = SupportPromptStore(defaults: defaults, calendar: calendar)
+        store.recordTelemetryAsked()
+        useOnDays(store, 6)
+        store.recordStarChosen()
+        XCTAssertNil(store.pendingPrompt(welcomeSeen: true, telemetryOn: false, now: start + 30 * day))
+    }
+
+    func testStateSavedByEarlierBuildsStillLoads() throws {
+        let earlier = try JSONSerialization.data(withJSONObject: [
+            "downloadedWallpaperIDs": ["a"], "pending": true, "presented": false,
+        ])
+        defaults.set(earlier, forKey: "WallpaperMachine.supportPrompt.state")
+        let store = SupportPromptStore(defaults: defaults, calendar: calendar)
+        XCTAssertTrue(store.isPending)
+        XCTAssertEqual(store.pendingPrompt(welcomeSeen: false, telemetryOn: true, now: start), .support)
+    }
 }

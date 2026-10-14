@@ -42,14 +42,15 @@ pub use display::{
 pub use engine::{
     AudioRequirementCallback, DisplayConfig, DisplaySelector, DisplaySnapshotEntry,
     FirstFrameCallback, PointerActivity,
-    PointerActivityCallback, PointerConsumerCallback, PointerProbe, UserShortcutObserverCallback,
-    WallpaperAssignment, WallpaperEngine, WallpaperEngineConfig,
+    PointerActivityCallback, PointerConsumerCallback, PointerProbe, PropertyPreview, RecoveryOutcome,
+    RecoveryReason, RecoveryStep, UserShortcutObserverCallback, WallpaperAssignment,
+    WallpaperEngine, WallpaperEngineConfig,
 };
 pub use error::EngineError;
 pub use owe::backend::AudioSpectrum128;
 pub use owe::scene_demand::{
     SceneBackend, SceneDemandReasons, SceneRendererPreference, SceneRuntimeReport,
-    SceneUpdateMode, SceneVideoPath,
+    SceneUpdateMode, SceneVideoPath, SurfaceHealth, SurfaceStopReason,
 };
 pub use owe::scene_registry::SceneRegistry;
 pub use window::{PlaceholderStyle, WallpaperWindow, WallpaperWindowBuilder};

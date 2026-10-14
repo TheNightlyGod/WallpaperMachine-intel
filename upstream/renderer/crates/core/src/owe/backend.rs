@@ -36,7 +36,7 @@ use crate::{
     EngineError,
     media::audio::{AudioVolume, InterleavedStereoF32, MonoPcmF32},
     owe::{sys, unwind::UnwindSafeFFI},
-    project::{ScalingMode, SceneDesc, SerdeValudeExt},
+    project::{ScalingMode, SceneDesc, SceneFraming, SerdeValudeExt},
 };
 
 /// Private handle to the statically linked Open Wallpaper Engine renderer.
@@ -53,6 +53,10 @@ pub type UserShortcutCallback = Arc<dyn Fn(String, String) + Send + Sync + 'stat
 /// committed scene starts at `false`; a replaced scene's late report never
 /// arrives.
 pub type AudioRequirementCallback = Arc<dyn Fn(bool) + Send + Sync + 'static>;
+/// Told, on the native main looper, that a scene which had drawn failed a frame
+/// and stopped. One call per failure and no payload; never replayed on install
+/// and never raised for a failure before the first presented frame.
+pub type RenderFailureCallback = Arc<dyn Fn() + Send + Sync + 'static>;
 
 impl OweBackend {
     /// Initializes access to the statically linked backend.
@@ -89,11 +93,13 @@ impl OweBackend {
         metal_layer: *mut c_void,
         scaling_mode: ScalingMode,
         scaling_factor: f64,
+        framing: SceneFraming,
         render_resolution: Option<(u32, u32)>,
         first_frame_callback: Option<FirstFrameCallback>,
         pointer_input_callback: Option<PointerInputCallback>,
         user_shortcut_callback: Option<UserShortcutCallback>,
         audio_requirement_callback: Option<AudioRequirementCallback>,
+        render_failure_callback: Option<RenderFailureCallback>,
     ) -> Result<OweScene, EngineError> {
         let display = &desc.display;
         let load = crate::log_context::begin_load(
@@ -101,13 +107,15 @@ impl OweBackend {
             std::path::Path::new(&desc.scene_path),
             format_args!(
                 "display {} {}x{} @{}x {}Hz, fps {}, scaling {scaling_mode} x{scaling_factor}, \
-                 render {}, paused {}",
+                 pan {},{}, render {}, paused {}",
                 display.display_id,
                 display.width,
                 display.height,
                 display.scale_factor,
                 display.refresh_rate_hz,
                 desc.fps,
+                framing.pan_x,
+                framing.pan_y,
                 render_resolution.map_or_else(|| "native".to_string(), |(w, h)| format!("{w}x{h}")),
                 desc.paused,
             ),
@@ -127,6 +135,8 @@ impl OweBackend {
             raw: Some(raw),
             render_initialized: false,
             registration: None,
+            load,
+            previewed_properties: None,
         };
         call_status("owe_scene_wallpaper_set_log_scope", || unsafe {
             sys::owe_scene_wallpaper_set_log_scope(raw.as_ptr(), load)
@@ -136,9 +146,11 @@ impl OweBackend {
         scene.set_pointer_input_callback(pointer_input_callback)?;
         scene.set_user_shortcut_callback(user_shortcut_callback)?;
         scene.set_audio_requirement_callback(audio_requirement_callback)?;
+        scene.set_render_failure_callback(render_failure_callback)?;
         scene.apply_scene_config(desc)?;
         scene.set_scaling_mode(scaling_mode)?;
         scene.set_scaling_factor(scaling_factor)?;
+        scene.set_framing(framing)?;
         Ok(scene)
     }
 
@@ -380,6 +392,22 @@ pub struct OweScene {
     /// is dropped without an explicit close must still withdraw, or a reader
     /// could follow a pointer into freed memory.
     registration: Option<(crate::SceneRegistry, u64)>,
+    /// The load this renderer belongs to, so a line logged about it later
+    /// (a recovery, say) can carry the same `load#N` as the lines that opened it.
+    load: u64,
+    /// The property document this renderer was last shown by
+    /// [`Self::preview_property_override`], so a document it already shows is
+    /// not sent again.
+    ///
+    /// Kept here, not by the caller, because the renderer is what shows it and
+    /// what loses it: a renderer that is replaced starts without one, and a
+    /// reload through [`Self::set_property_override`] or
+    /// [`Self::reset_property_override`] clears it, so no path that rebuilds a
+    /// scene (a descriptor change, a shader cache clear, a surface recovery
+    /// after a wake or a failed frame) can leave a record of a look the scene
+    /// no longer has. `None` is "shows what it loaded with", and also "not
+    /// known" after an update the renderer refused.
+    previewed_properties: Option<String>,
 }
 
 // SAFETY: The pointer is an owned renderer token. Rust mutates it behind the
@@ -489,6 +517,19 @@ impl OweScene {
     pub fn project_property_reset() -> Result<*const c_char, EngineError> {
         Self::property_name("owe_property_project_property_reset", || unsafe {
             sys::owe_property_project_property_reset()
+        })
+    }
+
+    /// Retrieves the name of the property that shows a project property
+    /// document on the running scene without loading it again.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError::Render`] if OWE returns a null property name or
+    /// [`EngineError::Crash`] if the FFI call unwinds.
+    pub fn project_property_preview_json() -> Result<*const c_char, EngineError> {
+        Self::property_name("owe_property_project_property_preview_json", || unsafe {
+            sys::owe_property_project_property_preview_json()
         })
     }
 }
@@ -636,6 +677,24 @@ impl OweScene {
     #[allow(clippy::cast_possible_truncation)]
     pub fn set_scaling_factor(&mut self, factor: f64) -> Result<(), EngineError> {
         self.set_property_float(Self::scaling_factor()?, factor as f32)
+    }
+
+    /// Sets where the presented wallpaper sits inside the room its display
+    /// leaves around it, live.
+    ///
+    /// The renderer applies it without a rebuild: nothing is reparsed and video
+    /// keeps playing. The caller validates the fractions first, so a value the
+    /// renderer would have to clamp never reaches it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError`] if the scene is closed or OWE rejects the
+    /// update.
+    pub fn set_framing(&mut self, framing: SceneFraming) -> Result<(), EngineError> {
+        let raw = self.raw_ptr()?;
+        call_status("owe_scene_wallpaper_set_framing", || unsafe {
+            sys::owe_scene_wallpaper_set_framing(raw.as_ptr(), framing.pan_x, framing.pan_y)
+        })
     }
 
     /// Sets the target renderer frame rate.
@@ -841,6 +900,53 @@ impl OweScene {
         result
     }
 
+    /// Installs the sink for "this scene had drawn and has now stopped after a
+    /// failed frame". `None` clears it. Not replayed on install.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError`] if the scene is closed or OWE rejects the
+    /// registration.
+    pub fn set_render_failure_callback(
+        &mut self,
+        callback: Option<RenderFailureCallback>,
+    ) -> Result<(), EngineError> {
+        let raw = self.raw_ptr()?;
+        let user_data = callback.map_or(std::ptr::null_mut(), |callback| {
+            Box::into_raw(Box::new(callback)).cast::<c_void>()
+        });
+        let result = call_status("owe_scene_wallpaper_set_render_failure_callback", || unsafe {
+            sys::owe_scene_wallpaper_set_render_failure_callback(
+                raw.as_ptr(),
+                if user_data.is_null() { None } else { Some(owe_render_failure_callback) },
+                user_data,
+                if user_data.is_null() { None } else { Some(owe_render_failure_callback_drop) },
+            )
+        });
+        if result.is_err() && !user_data.is_null() {
+            // Failed registration never consumes the caller's userdata.
+            drop(unsafe { Box::<RenderFailureCallback>::from_raw(user_data.cast()) });
+        }
+        result
+    }
+
+    /// The number of the load that opened this renderer; see
+    /// [`crate::log_context`].
+    #[must_use]
+    pub fn load_id(&self) -> u64 {
+        self.load
+    }
+
+    /// The surface's frame-loop health right now, or `None` when the scene is
+    /// closed or the renderer returned no reading.
+    #[must_use]
+    pub fn surface_health(&self) -> Option<crate::owe::scene_demand::SurfaceHealth> {
+        let raw = self.raw?;
+        // SAFETY: `raw` is this scene's own live pointer for as long as `self`
+        // holds it, and the read is a set of relaxed atomic loads.
+        unsafe { super::scene_registry::read_surface_health(raw.as_ptr().cast()) }
+    }
+
     pub fn set_mouse_position(&mut self, x: f64, y: f64) -> Result<(), EngineError> {
         if !x.is_finite() || !y.is_finite() {
             return Err(EngineError::InvalidInput(
@@ -1007,6 +1113,9 @@ impl OweScene {
     /// scene is closed, OWE property lookup fails, or OWE rejects the update.
     pub fn set_property_override(&mut self, flat_json: &str) -> Result<(), EngineError> {
         let encoded = cstring(flat_json)?;
+        // The scene loads again whatever comes of the call, and shows what it
+        // loads.
+        self.previewed_properties = None;
         self.set_force_shader_refresh(true)?;
         self.set_property_string(Self::project_property_override_json()?, encoded.as_ptr())
     }
@@ -1018,8 +1127,49 @@ impl OweScene {
     /// Returns [`EngineError`] if the scene is closed, OWE property lookup
     /// fails, or OWE rejects the update.
     pub fn reset_property_override(&mut self) -> Result<(), EngineError> {
+        self.previewed_properties = None;
         self.set_force_shader_refresh(true)?;
         self.set_property_bool(Self::project_property_reset()?, true)
+    }
+
+    /// Shows a flattened project property document on the running scene
+    /// without loading it again.
+    ///
+    /// The document is the whole property state to show: the project's
+    /// declared defaults with exactly these values over them, so a property it
+    /// leaves out is back at its declared default. The renderer never keeps
+    /// it, which is why this does not ask for a shader refresh the way
+    /// [`Self::set_property_override`] does: nothing is loaded again, and a
+    /// scene that is loaded later, for any reason, shows its saved look.
+    ///
+    /// A renderer that already shows exactly this document is not told again.
+    /// Whether it does is known here and nowhere else, because this object is
+    /// what shows it and what loses it (see `previewed_properties`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError`] if the JSON contains an interior NUL byte, the
+    /// scene is closed, OWE property lookup fails, or OWE rejects the update.
+    /// A refused update leaves nothing recorded, so asking again sends it.
+    pub fn preview_property_override(&mut self, flat_json: &str) -> Result<(), EngineError> {
+        let encoded = cstring(flat_json)?;
+        let name = Self::project_property_preview_json()?;
+        // A closed scene is refused whatever it was last shown.
+        self.raw_ptr()?;
+        if self.previewed_properties.as_deref() == Some(flat_json) {
+            return Ok(());
+        }
+        self.previewed_properties = None;
+        self.set_property_string(name, encoded.as_ptr())?;
+        self.previewed_properties = Some(flat_json.to_owned());
+        Ok(())
+    }
+
+    /// The property document this renderer was last shown by
+    /// [`Self::preview_property_override`], or `None` when it shows what it
+    /// loaded with.
+    pub fn previewed_properties(&self) -> Option<&str> {
+        self.previewed_properties.as_deref()
     }
 
     /// Closes and deletes the OWE renderer object.
@@ -1160,6 +1310,27 @@ impl OweScene {
 impl Drop for OweScene {
     fn drop(&mut self) {
         let _ = self.close();
+    }
+}
+
+#[cfg(test)]
+impl OweScene {
+    /// A renderer object that was allocated and never initialized: it opens no
+    /// backend, window or audio device and loads nothing, yet it takes
+    /// property updates like a running one, so a test can follow what it is told.
+    pub(crate) fn uninitialized_for_test() -> Self {
+        let mut raw = std::ptr::null_mut();
+        call_status("owe_scene_wallpaper_new", || unsafe {
+            sys::owe_scene_wallpaper_new(&raw mut raw)
+        })
+        .unwrap();
+        Self {
+            raw: Some(NonNull::new(raw).unwrap()),
+            render_initialized: false,
+            registration: None,
+            load: 0,
+            previewed_properties: None,
+        }
     }
 }
 
@@ -1306,6 +1477,27 @@ unsafe extern "C-unwind" fn owe_audio_requirement_callback_drop(user_data: *mut 
     }));
 }
 
+unsafe extern "C-unwind" fn owe_render_failure_callback(user_data: *mut c_void) {
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        if !user_data.is_null() {
+            // SAFETY: produced by `OweScene::set_render_failure_callback` from
+            // `Box<RenderFailureCallback>`, owned by C++ until
+            // `owe_render_failure_callback_drop`.
+            let callback = unsafe { &*user_data.cast::<RenderFailureCallback>() };
+            callback();
+        }
+    }));
+}
+
+unsafe extern "C-unwind" fn owe_render_failure_callback_drop(user_data: *mut c_void) {
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        if !user_data.is_null() {
+            // SAFETY: C++ calls this exactly once per transferred box.
+            drop(unsafe { Box::<RenderFailureCallback>::from_raw(user_data.cast()) });
+        }
+    }));
+}
+
 fn copy_c_string(value: *const c_char) -> Option<String> {
     if value.is_null() {
         return None;
@@ -1325,11 +1517,7 @@ mod registration_tests {
     // Allocation alone creates no backend, window or audio device. No renderer
     // initialization or resource loading is performed in this lifecycle test.
     fn uninitialized_scene() -> OweScene {
-        let mut raw = std::ptr::null_mut();
-        call_status("owe_scene_wallpaper_new", || unsafe {
-            sys::owe_scene_wallpaper_new(&raw mut raw)
-        }).unwrap();
-        OweScene { raw: Some(NonNull::new(raw).unwrap()), render_initialized: false, registration: None }
+        OweScene::uninitialized_for_test()
     }
 
     #[test]
@@ -1366,7 +1554,7 @@ mod pointer_callback_tests {
         let dropped = Arc::new(AtomicUsize::new(0));
         let witness = DropWitness(dropped.clone());
         let callback: PointerInputCallback = Arc::new(move |_| { let _ = &witness; });
-        let mut scene = OweScene { raw: None, render_initialized: false, registration: None };
+        let mut scene = OweScene { raw: None, render_initialized: false, registration: None, load: 0, previewed_properties: None };
         assert!(scene.set_pointer_input_callback(Some(callback)).is_err());
         assert_eq!(dropped.load(Ordering::SeqCst), 1);
     }
@@ -1391,5 +1579,200 @@ mod pointer_callback_tests {
         }
         assert_eq!(observed.load(Ordering::SeqCst), 1);
         assert_eq!(dropped.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[cfg(test)]
+mod render_failure_callback_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct DropWitness(Arc<AtomicUsize>);
+
+    impl Drop for DropWitness {
+        fn drop(&mut self) { self.0.fetch_add(1, Ordering::SeqCst); }
+    }
+
+    fn callback_with(dropped: &Arc<AtomicUsize>, called: &Arc<AtomicUsize>) -> RenderFailureCallback {
+        let witness = DropWitness(dropped.clone());
+        let called = called.clone();
+        Arc::new(move || {
+            let _ = &witness;
+            called.fetch_add(1, Ordering::SeqCst);
+        })
+    }
+
+    #[test]
+    fn a_registration_on_a_closed_scene_hands_the_callback_back_to_be_dropped_once() {
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let called = Arc::new(AtomicUsize::new(0));
+        let mut scene = OweScene { raw: None, render_initialized: false, registration: None, load: 0, previewed_properties: None };
+
+        assert!(scene.set_render_failure_callback(Some(callback_with(&dropped, &called))).is_err());
+
+        assert_eq!(dropped.load(Ordering::SeqCst), 1, "a rejected registration leaked its callback");
+        assert_eq!(called.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn a_registration_the_renderer_rejects_hands_the_callback_back_to_be_dropped_once() {
+        // The renderer refuses to take a callback before it is initialized,
+        // which is the same path as any other refusal: Rust still owns the box.
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let called = Arc::new(AtomicUsize::new(0));
+        let mut raw = std::ptr::null_mut();
+        call_status("owe_scene_wallpaper_new", || unsafe {
+            sys::owe_scene_wallpaper_new(&raw mut raw)
+        })
+        .unwrap();
+        let mut scene = OweScene {
+            raw: Some(NonNull::new(raw).unwrap()),
+            render_initialized: false,
+            registration: None,
+            load: 0,
+            previewed_properties: None,
+        };
+
+        assert!(scene.set_render_failure_callback(Some(callback_with(&dropped, &called))).is_err());
+
+        assert_eq!(dropped.load(Ordering::SeqCst), 1, "a rejected registration leaked its callback");
+        assert_eq!(called.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn clearing_the_callback_on_a_closed_scene_has_nothing_to_drop() {
+        let mut scene = OweScene { raw: None, render_initialized: false, registration: None, load: 0, previewed_properties: None };
+        assert!(scene.set_render_failure_callback(None).is_err());
+    }
+
+    #[test]
+    fn the_native_callback_contains_a_panic_and_its_drop_releases_the_callback_once() {
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let called = Arc::new(AtomicUsize::new(0));
+        let witness = DropWitness(dropped.clone());
+        let callback: RenderFailureCallback = Arc::new({
+            let called = called.clone();
+            move || {
+                let _ = &witness;
+                called.fetch_add(1, Ordering::SeqCst);
+                panic!("consumer panic must not cross the ABI");
+            }
+        });
+        let raw = Box::into_raw(Box::new(callback)).cast::<c_void>();
+
+        unsafe {
+            owe_render_failure_callback(raw);
+            // Still callable afterwards: a panic is the consumer's, not the
+            // registration's.
+            owe_render_failure_callback(raw);
+            owe_render_failure_callback_drop(raw);
+        }
+
+        assert_eq!(called.load(Ordering::SeqCst), 2);
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_null_registration_is_ignored_by_both_trampolines() {
+        unsafe {
+            owe_render_failure_callback(std::ptr::null_mut());
+            owe_render_failure_callback_drop(std::ptr::null_mut());
+        }
+    }
+}
+
+#[cfg(test)]
+mod property_preview_tests {
+    use super::*;
+
+    fn name(pointer: *const c_char) -> String {
+        assert!(!pointer.is_null());
+        unsafe { CStr::from_ptr(pointer) }.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn the_preview_is_a_property_of_its_own() {
+        let preview = name(OweScene::project_property_preview_json().unwrap());
+        let others = [
+            name(OweScene::project_property_override_json().unwrap()),
+            name(OweScene::project_property_reset().unwrap()),
+            name(OweScene::force_shader_refresh().unwrap()),
+        ];
+
+        assert!(!preview.is_empty());
+        // A preview sent under the override's name would load the scene again
+        // and keep the document; under the reset's name it would clear the
+        // saved override.
+        for other in others {
+            assert_ne!(preview, other);
+        }
+    }
+
+    #[test]
+    fn a_document_with_a_nul_byte_never_reaches_the_renderer() {
+        let mut scene = OweScene { raw: None, render_initialized: false, registration: None, load: 0, previewed_properties: None };
+
+        let err = scene.preview_property_override("{\"a\":\"b\0c\"}").expect_err("a NUL byte is refused");
+
+        // The closed scene would have said so had the document got that far.
+        assert!(
+            matches!(&err, EngineError::InvalidInput(message) if !message.contains("already closed")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn a_shown_document_is_remembered_until_the_scene_loads_again() {
+        let mut scene = OweScene::uninitialized_for_test();
+        assert_eq!(scene.previewed_properties(), None, "a new renderer shows what it loaded");
+
+        scene.preview_property_override(r#"{"alpha":0.5}"#).unwrap();
+        assert_eq!(scene.previewed_properties(), Some(r#"{"alpha":0.5}"#));
+        scene.preview_property_override(r#"{"alpha":0.5}"#).unwrap();
+        assert_eq!(scene.previewed_properties(), Some(r#"{"alpha":0.5}"#));
+        scene.preview_property_override(r#"{"alpha":0.25}"#).unwrap();
+        assert_eq!(scene.previewed_properties(), Some(r#"{"alpha":0.25}"#));
+
+        // Both ways of loading the scene again put its own look back, and the
+        // renderer must not go on believing it shows the edit.
+        scene.set_property_override(r#"{"alpha":0.75}"#).unwrap();
+        assert_eq!(scene.previewed_properties(), None);
+        scene.preview_property_override(r#"{"alpha":0.5}"#).unwrap();
+        scene.reset_property_override().unwrap();
+        assert_eq!(scene.previewed_properties(), None);
+    }
+
+    #[test]
+    fn a_document_the_renderer_never_took_is_not_remembered() {
+        let mut scene = OweScene::uninitialized_for_test();
+        scene.preview_property_override(r#"{"alpha":0.5}"#).unwrap();
+
+        scene.preview_property_override("{\"a\":\"b\0c\"}").expect_err("a NUL byte is refused");
+
+        assert_eq!(
+            scene.previewed_properties(),
+            Some(r#"{"alpha":0.5}"#),
+            "a document refused before the renderer heard it changed nothing the renderer shows"
+        );
+    }
+
+    #[test]
+    fn a_closed_scene_refuses_a_document_it_was_last_shown() {
+        let mut scene = OweScene::uninitialized_for_test();
+        scene.preview_property_override("{}").unwrap();
+        scene.close().unwrap();
+
+        let err = scene.preview_property_override("{}").expect_err("a closed scene takes nothing");
+
+        assert!(matches!(&err, EngineError::InvalidInput(message) if message.contains("already closed")), "{err:?}");
+    }
+
+    #[test]
+    fn a_closed_scene_refuses_a_preview() {
+        let mut scene = OweScene { raw: None, render_initialized: false, registration: None, load: 0, previewed_properties: None };
+
+        let err = scene.preview_property_override("{}").expect_err("a closed scene takes nothing");
+
+        assert!(matches!(&err, EngineError::InvalidInput(message) if message.contains("already closed")), "{err:?}");
     }
 }

@@ -73,7 +73,12 @@ local under `artifacts/`, and do not commit them.
 
 Debug and Release instances share the app bundle identifier. During desktop
 tests, target the PID of the exact executable under test and quit only that
-instance. Discard performance comparisons if another copy starts, foreground
+instance. `kill -TERM <pid>` (or `-HUP`) now quits in order: the desktop picture is
+restored first, and the log's `quit: reason=signal signal=SIGTERM` line says so. Send
+the signal twice to end a wedged quit at once, which skips whatever it had not yet
+finished; `kill -KILL` is for a process that does not answer even that and leaves the
+poster installed until the next launch. Signals sent while the app is still launching
+are not handled. Discard performance comparisons if another copy starts, foreground
 visibility changes unexpectedly, or the presentation policy suspends playback.
 
 For offscreen WebKit visual checks, use `WKWebView.takeSnapshot`. A hidden native

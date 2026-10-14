@@ -57,7 +57,7 @@ private final class CountingBridge: WallpaperBridge {
     override func refreshLibrary() async throws -> BridgeSnapshotBundle {
         refreshes += 1
         return BridgeSnapshotBundle(
-            app: BridgeAppSnapshot(playbackState: .paused, selectedWallpaperId: nil, activeWallpaperIds: [], errors: []),
+            app: BridgeAppSnapshot(playbackState: .paused, selectedWallpaperId: nil, activeWallpaperIds: [], errors: [], heldWallpaperIds: []),
             library: BridgeLibrarySnapshot(
                 wallpapers: [], scanStatus: BridgeLibraryScanStatus(scanning: false, done: 0, total: 0),
                 sceneCount: 0, videoCount: 0, webpageCount: 0, unknownCount: 0),

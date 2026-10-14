@@ -35,7 +35,7 @@ async fn set_audio_response(bridge: &crate::api::WallpaperBridge, wallpaper: &st
         .set_audio_response_enabled(wallpaper.into(), enabled)
         .await
         .unwrap();
-    bridge.apply_wallpaper_options(wallpaper.into()).await.unwrap();
+    bridge.apply_wallpaper_options(wallpaper.into(), true).await.unwrap();
 }
 
 /// Two displays, each with its own scene wallpaper committed to it.
@@ -54,7 +54,7 @@ async fn two_display_bridge(engine: &FakeEngineFacade) -> crate::api::WallpaperB
             .await
             .unwrap();
         bridge
-            .apply_wallpaper_options(wallpaper.into())
+            .apply_wallpaper_options(wallpaper.into(), true)
             .await
             .unwrap();
     }
@@ -346,7 +346,7 @@ async fn muting_a_wallpaper_does_not_stop_its_audio_response() {
         .unwrap();
     bridge.set_muted("100".into(), true).await.unwrap();
     bridge.set_volume("100".into(), 0.0).await.unwrap();
-    bridge.apply_wallpaper_options("100".into()).await.unwrap();
+    bridge.apply_wallpaper_options("100".into(), true).await.unwrap();
     // A pause transition is what recomputes the gate.
     bridge.set_presentation_suspended(true).await.unwrap();
     bridge.set_presentation_suspended(false).await.unwrap();
@@ -408,7 +408,7 @@ async fn replacing_an_audio_scene_with_one_that_reads_nothing_closes_the_tap() {
     // renderer starts at "reads nothing", which is what it reports.
     bridge.inject_scene_wallpaper_config_for_test("300", "Still").await;
     bridge.set_display_config_enabled("300".into(), "7".into(), true).await.unwrap();
-    bridge.apply_wallpaper_options("300".into()).await.unwrap();
+    bridge.apply_wallpaper_options("300".into(), true).await.unwrap();
     engine.report_requires_audio(SceneHandle::new(1), false);
     eventually("the replaced scene to release the tap", || engine.audio_capture_suspended()).await;
     assert_eq!(last_capture_call(&engine, 1), Some(false));

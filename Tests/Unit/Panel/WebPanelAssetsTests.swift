@@ -84,6 +84,79 @@ final class WebPanelAssetsTests: XCTestCase {
     XCTAssertNil(assets.route(try XCTUnwrap(URL(string: "mwe-ui://animated/100"))))
   }
 
+  func testLibraryThumbnailRouteServesOnlyAnnouncedIdsAndAcceptsOnlyTheRevisionQuery() throws {
+    let assets = WebPanelAssets()
+    let file = URL(fileURLWithPath: "/library/42/preview.gif")
+    assets.libraryThumbnails = ["42": file]
+    func route(_ address: String) throws -> WebPanelAssets.Route? {
+      assets.route(try XCTUnwrap(URL(string: address)))
+    }
+
+    XCTAssertEqual(try route("mwe-ui://library-thumbnail/42"), .libraryThumbnail(file))
+    XCTAssertEqual(try route("mwe-ui://library-thumbnail/42?v=0"), .libraryThumbnail(file))
+    XCTAssertEqual(try route("mwe-ui://library-thumbnail/42?v=18446744073709551615"), .libraryThumbnail(file))
+    XCTAssertNil(try route("mwe-ui://library-thumbnail/43"), "an id the snapshot did not announce")
+    for refused in [
+      "mwe-ui://library-thumbnail/42?v=", "mwe-ui://library-thumbnail/42?v=1a", "mwe-ui://library-thumbnail/42?v=-1",
+      "mwe-ui://library-thumbnail/42?v=1&w=2", "mwe-ui://library-thumbnail/42?w=1", "mwe-ui://library-thumbnail/42?",
+      "mwe-ui://library-thumbnail/42?v=1#fragment", "mwe-ui://library-thumbnail:8080/42",
+      "mwe-ui://someone@library-thumbnail/42", "mwe-ui://library-thumbnails/42", "mwe-ui://library-thumbnail.example/42",
+      "https://library-thumbnail/42",
+    ] {
+      XCTAssertNil(try route(refused), refused)
+    }
+    XCTAssertNil(try route("mwe-ui://thumbnail/42"), "Workshop thumbnails come from their own map")
+    assets.libraryThumbnails = [:]
+    XCTAssertNil(try route("mwe-ui://library-thumbnail/42"))
+  }
+
+  func testLibraryThumbnailAnswersASmallJpegAndNeverReadsOutsideTheLibrary() async throws {
+    let home = FileManager.default.temporaryDirectory
+      .appendingPathComponent("mwe-assets-\(UUID().uuidString)", isDirectory: true)
+    let previous = ProcessInfo.processInfo.environment["WALLPAPER_MACHINE_HOME"]
+    setenv("WALLPAPER_MACHINE_HOME", home.path, 1)
+    defer {
+      if let previous { setenv("WALLPAPER_MACHINE_HOME", previous, 1) } else { unsetenv("WALLPAPER_MACHINE_HOME") }
+      try? FileManager.default.removeItem(at: home)
+    }
+    let inside = ClientPaths.libraryURL.appendingPathComponent("42/preview.png")
+    let outside = home.appendingPathComponent("Elsewhere/preview.png")
+    for file in [inside, outside] {
+      try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+      try Self.png(width: 1600, height: 900).write(to: file)
+    }
+    let covers = home.appendingPathComponent("covers", isDirectory: true)
+    let assets = WebPanelAssets(
+      libraryThumbnailCache: WorkshopThumbnailCache(
+        directory: covers, fetcher: LibraryPreviewFetcher(), keepsAnimation: false))
+    assets.libraryThumbnails = ["42": inside, "99": outside]
+    let webView = WKWebView()
+
+    func load(_ address: String) async throws -> FakeSchemeTask {
+      let task = FakeSchemeTask(try XCTUnwrap(URL(string: address)))
+      let settled = expectation(description: "\(address) settles")
+      task.onSettle = { settled.fulfill() }
+      assets.webView(webView, start: task)
+      await fulfillment(of: [settled], timeout: 10)
+      return task
+    }
+
+    let served = try await load("mwe-ui://library-thumbnail/42?v=3")
+    XCTAssertTrue(served.failures.isEmpty, "\(served.failures)")
+    XCTAssertEqual((served.responses.first as? HTTPURLResponse)?.statusCode, 200)
+    XCTAssertEqual(served.responses.first?.mimeType, "image/jpeg")
+    let source = try XCTUnwrap(CGImageSourceCreateWithData(served.body as CFData, nil))
+    let cover = try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil))
+    XCTAssertEqual(cover.width, 512, "The tile gets a downscaled cover, not the preview file")
+    XCTAssertEqual(cover.height, 288)
+    XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: covers.path).filter { !$0.hasSuffix(".jpg") }, [])
+
+    let refused = try await load("mwe-ui://library-thumbnail/99")
+    XCTAssertTrue(refused.responses.isEmpty, "A preview outside the library is never read")
+    XCTAssertEqual(refused.failures.count, 1)
+    XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: covers.path).filter { $0.hasSuffix(".jpg") }.count, 1)
+  }
+
   func testRestartedTaskStillReceivesItsResponse() async throws {
     let home = FileManager.default.temporaryDirectory
       .appendingPathComponent("mwe-assets-\(UUID().uuidString)", isDirectory: true)

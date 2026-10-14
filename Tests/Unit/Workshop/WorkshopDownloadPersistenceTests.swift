@@ -120,6 +120,28 @@ final class WorkshopDownloadPersistenceTests: DownloaderTestCase {
       throw error
     }
   }
+  func testPartialDownloadsKeptForLaterStayOutOfBackups() async throws {
+    let root = try makeRuntime("mkdir -p steamapps/workshop/downloads/431960; printf 'part' > steamapps/workshop/downloads/431960/part; touch ../ready; while :; do sleep 0.02; done")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let directory = root.appendingPathComponent("Downloads/Workshop")
+    let manager = WorkshopDownloadManager(sessionDirectory: root.appendingPathComponent("SteamSession"),
+      runtimeProvider: ShellRuntimeProvider(), maximumConcurrentDownloads: 1)
+    manager.configurePersistence(at: directory)
+    manager.start(item: item, username: "localtest", executable: root.appendingPathComponent("runtime/steamcmd"),
+      library: root.appendingPathComponent("Library"), rememberSession: false, onImported: {})
+    do {
+      try await waitUntil { FileManager.default.fileExists(atPath: root.appendingPathComponent("ready").path) }
+      await manager.shutdown()
+      XCTAssertTrue(FileManager.default.fileExists(atPath: directory.appendingPathComponent("123456/steamapps").path),
+        "the pause must have kept the partial download")
+      XCTAssertTrue(directory.isKeptOutOfBackups, "the folder holding every kept download is skipped by Time Machine")
+      XCTAssertFalse(root.appendingPathComponent("Downloads").isKeptOutOfBackups, "the request list next to it is tiny and stays")
+    } catch {
+      await manager.shutdown()
+      throw error
+    }
+  }
+
   func testCancelDuringPausedCleanupKeepsCancelledStateAndDiscardsPartialContent() async throws {
     let root = try makeRuntime("mkdir -p steamapps/workshop/downloads/431960; printf 'part' > steamapps/workshop/downloads/431960/part; touch ../ready; while :; do sleep 0.02; done")
     defer { try? FileManager.default.removeItem(at: root) }

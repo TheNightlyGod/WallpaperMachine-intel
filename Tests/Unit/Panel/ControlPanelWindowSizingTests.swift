@@ -171,6 +171,78 @@ final class ControlPanelWindowSizingTests: XCTestCase {
       XCTAssertFalse(window.isVisible, "The window must stay offscreen")
     }
   }
+
+  func testControlPanelWindowMovesToTheActiveSpaceAndKeepsFullScreen() {
+    let window = ControlPanelWindow.make(contentViewController: NSViewController(), delegate: nil)
+    defer { window.close() }
+    XCTAssertTrue(window.collectionBehavior.contains(.moveToActiveSpace),
+      "The panel must open on the Space the person is on")
+    XCTAssertFalse(window.collectionBehavior.contains(.managed))
+    XCTAssertFalse(window.collectionBehavior.contains(.canJoinAllSpaces),
+      "An ordinary window must not follow the person to every Space")
+    XCTAssertTrue(window.styleMask.contains(.resizable))
+    XCTAssertFalse(window.collectionBehavior.contains(.fullScreenNone),
+      "The green button must still offer full screen")
+
+    // Flags a window already carries survive: the helper adds and removes, never assigns.
+    let carrying = Self.unorderedWindow()
+    carrying.collectionBehavior = [.managed, .fullScreenPrimary, .ignoresCycle]
+    ControlPanelWindow.moveToActiveSpace(carrying)
+    XCTAssertEqual(carrying.collectionBehavior, [.moveToActiveSpace, .fullScreenPrimary, .ignoresCycle])
+
+    // AppKit raises when both Space behaviors are present, so joining all Spaces gives way.
+    let everywhere = Self.unorderedWindow()
+    everywhere.collectionBehavior = [.canJoinAllSpaces, .fullScreenPrimary]
+    ControlPanelWindow.moveToActiveSpace(everywhere)
+    XCTAssertEqual(everywhere.collectionBehavior, [.moveToActiveSpace, .fullScreenPrimary])
+
+    // Applying it again changes nothing.
+    ControlPanelWindow.moveToActiveSpace(everywhere)
+    XCTAssertEqual(everywhere.collectionBehavior, [.moveToActiveSpace, .fullScreenPrimary])
+  }
+
+  func testBringForwardDeminiaturizesOnlyAMinimizedWindow() {
+    let minimized = RecordingWindow()
+    minimized.minimized = true
+    ControlPanelWindow.bringForward(minimized)
+    XCTAssertEqual(minimized.calls, ["deminiaturize", "makeKeyAndOrderFront"],
+      "A minimized panel must leave the Dock before it is fronted")
+    XCTAssertFalse(minimized.isMiniaturized)
+
+    let open = RecordingWindow()
+    ControlPanelWindow.bringForward(open)
+    XCTAssertEqual(open.calls, ["makeKeyAndOrderFront"],
+      "A window that is not minimized is only fronted")
+  }
+
+  /// A titled window that is never ordered onto the screen.
+  private static func unorderedWindow() -> NSWindow {
+    NSWindow(
+      contentRect: NSRect(x: 0, y: 0, width: 100, height: 100),
+      styleMask: [.titled, .closable, .miniaturizable, .resizable],
+      backing: .buffered, defer: true)
+  }
+}
+
+/// Records the calls that would change what is on screen instead of making them.
+private final class RecordingWindow: NSWindow {
+  var minimized = false
+  private(set) var calls: [String] = []
+
+  convenience init() {
+    self.init(
+      contentRect: NSRect(x: 0, y: 0, width: 100, height: 100),
+      styleMask: [.titled, .closable, .miniaturizable, .resizable],
+      backing: .buffered, defer: true)
+    isReleasedWhenClosed = false
+  }
+
+  override var isMiniaturized: Bool { minimized }
+  override func deminiaturize(_ sender: Any?) {
+    calls.append("deminiaturize")
+    minimized = false
+  }
+  override func makeKeyAndOrderFront(_ sender: Any?) { calls.append("makeKeyAndOrderFront") }
 }
 
 private struct KeyLoopHost: NSViewRepresentable {

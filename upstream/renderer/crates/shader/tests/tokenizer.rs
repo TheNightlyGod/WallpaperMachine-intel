@@ -290,6 +290,46 @@ fn tokenizer_declaration_facts_ignore_calls_constructors_and_control_headers() {
 }
 
 #[test]
+fn tokenizer_declaration_facts_skip_annotations_and_directives_before_a_statement() {
+    // The JSON annotation trailing one declaration and a `#define` between two
+    // statements belong to neither, so they must not stand in for the type of
+    // the declaration that follows.
+    let stream = TokenStream::lex(concat!(
+        "uniform float u_Feather; // {\"material\":\"Feather\"}\n",
+        "const float FEATHER = u_Feather * 0.5;\n",
+        "#define PI 3.1415926\n",
+        "const vec2 DIRECTION = vec2(PI, 0.0);\n",
+        "void main() {\n",
+        "#define BANDS 16\n",
+        "    float bands = BANDS;\n",
+        "}\n",
+    ))
+    .expect("source tokenizes");
+    let facts = stream.facts();
+
+    assert_eq!(
+        facts
+            .declarations()
+            .iter()
+            .map(|declaration| (declaration.ty().as_str(), declaration.name().as_str()))
+            .collect::<Vec<_>>(),
+        [
+            ("float", "u_Feather"),
+            ("float", "FEATHER"),
+            ("vec2", "DIRECTION"),
+            ("float", "bands"),
+        ]
+    );
+    assert!(
+        facts
+            .declarations()
+            .iter()
+            .skip(1)
+            .all(|declaration| declaration.initializer().is_some())
+    );
+}
+
+#[test]
 fn tokenizer_declaration_facts_handle_nested_initializer_delimiters() {
     let stream = TokenStream::lex(concat!(
         "float values[2] = float[2](1.0, 2.0), ",

@@ -1383,4 +1383,102 @@ final class LockScreenWallpaperTests: XCTestCase {
     }
   }
 
+  // MARK: The scene the extension is handed
+
+  private func publishedScene(
+    framing: LockScreenFraming? = nil, scalingMode: Int32 = 3
+  ) -> LockScreenScene {
+    LockScreenScene(
+      displayID: 1, title: "t", projectPath: "revisions/a/project.json",
+      assetsPath: "revisions/a", previewPath: nil, fps: 30, scalingMode: scalingMode,
+      scalingFactor: 1, propertiesJSON: nil, paused: false, framing: framing)
+  }
+
+  /// A configuration an app that predates the position wrote has no `framing` key.
+  /// The extension has to read it as centred, not refuse the file.
+  func testAConfigurationWrittenBeforePositionsExistedReadsAsCentred() throws {
+    let json = """
+      {"version":2,"revision":"r","lockScreenEnabled":true,"screenSaverEnabled":false,\
+      "scenes":[{"displayID":1,"title":"t","projectPath":"revisions/a/project.json",\
+      "assetsPath":"revisions/a","fps":30,"scalingMode":3,"scalingFactor":1,"paused":false}]}
+      """
+    let scene = try XCTUnwrap(
+      try JSONDecoder().decode(LockScreenConfiguration.self, from: Data(json.utf8)).scenes.first)
+    XCTAssertNil(scene.framing)
+    XCTAssertEqual(scene.effectiveFraming, .centered)
+    XCTAssertTrue(scene.effectiveFraming.isValid)
+  }
+
+  func testAPositionTravelsInTheFileAndAnUnmovedSceneKeepsTheOldShape() throws {
+    let encoder = JSONEncoder()
+    let moved = publishedScene(framing: LockScreenFraming(panX: 0.2, panY: 0.8))
+    let decoded = try JSONDecoder().decode(LockScreenScene.self, from: encoder.encode(moved))
+    XCTAssertEqual(decoded.framing, LockScreenFraming(panX: 0.2, panY: 0.8))
+    XCTAssertEqual(decoded, moved)
+
+    // Nothing is written for a scene without a position, so a web page's entry and the
+    // file an older extension copy reads stay exactly what they were before.
+    let plain = try XCTUnwrap(
+      try JSONSerialization.jsonObject(with: encoder.encode(publishedScene())) as? [String: Any])
+    XCTAssertNil(plain["framing"])
+  }
+
+  func testAMovedPictureReplacesTheRendererButPlaybackSettingsDoNot() {
+    let base = publishedScene(framing: LockScreenFraming(panX: 0.2, panY: 0.8))
+    var other = base
+    other.framing = LockScreenFraming(panX: 0.2, panY: 0.9)
+    XCTAssertFalse(base.sharesRenderer(with: other), "the other axis moved")
+    other.framing = LockScreenFraming(panX: 0.7, panY: 0.8)
+    XCTAssertFalse(base.sharesRenderer(with: other), "one axis moved")
+    other.framing = nil
+    XCTAssertFalse(base.sharesRenderer(with: other), "back to the middle")
+    XCTAssertFalse(publishedScene().sharesRenderer(with: base), "out of the middle")
+
+    // Only the frame rate, the title, the pause and the preview apply to a running renderer.
+    other = base
+    other.fps = 60
+    other.title = "renamed"
+    other.paused = true
+    other.previewPath = "revisions/a/preview.png"
+    XCTAssertTrue(base.sharesRenderer(with: other))
+    XCTAssertTrue(other.sharesRenderer(with: base))
+
+    // The renderer reads these when it is built, so a change of any one replaces it.
+    let changes: [(String, (inout LockScreenScene) -> Void)] = [
+      ("project", { $0.projectPath = "revisions/b/project.json" }),
+      ("assets", { $0.assetsPath = "revisions/b" }),
+      ("web entry", { $0.webEntryFile = "index.html" }),
+      ("properties", { $0.propertiesJSON = #"{"speed":2}"# }),
+      ("scaling mode", { $0.scalingMode = 2 }),
+      ("scaling factor", { $0.scalingFactor = 1.5 }),
+      ("position", { $0.framing = LockScreenFraming(panX: 0, panY: 1) }),
+    ]
+    for (name, change) in changes {
+      var changed = base
+      change(&changed)
+      XCTAssertFalse(base.sharesRenderer(with: changed), name)
+    }
+  }
+
+  /// A file without the key and a file that names the middle describe the same
+  /// picture, so republishing one for the other must not rebuild the renderer.
+  func testNoPositionAndTheMiddleAreTheSamePicture() {
+    let unset = publishedScene()
+    let middle = publishedScene(framing: LockScreenFraming(panX: 0.5, panY: 0.5))
+    XCTAssertTrue(unset.sharesRenderer(with: middle))
+    XCTAssertTrue(middle.sharesRenderer(with: unset))
+    XCTAssertEqual(unset.effectiveFraming, middle.effectiveFraming)
+  }
+
+  func testAPositionOutsideTheRoomIsInvalidInsteadOfDrawnSomewhereElse() {
+    for (panX, panY) in [(0.0, 0.0), (1.0, 1.0), (0.5, 0.0), (0.0, 1.0)] {
+      XCTAssertTrue(LockScreenFraming(panX: panX, panY: panY).isValid, "\(panX), \(panY)")
+    }
+    for (panX, panY) in [
+      (-0.001, 0.5), (0.5, 1.001), (2, 0.5), (0.5, -1), (.nan, 0.5), (0.5, .nan),
+      (.infinity, 0.5), (0.5, -.infinity),
+    ] {
+      XCTAssertFalse(LockScreenFraming(panX: panX, panY: panY).isValid, "\(panX), \(panY)")
+    }
+  }
 }

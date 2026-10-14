@@ -23,6 +23,9 @@ export function intervalLabel(minutes) {
   return minutes % 60 === 0 ? t('Every {count} hours', { count: minutes / 60 }) : t('Every {count} minutes', { count: minutes });
 }
 
+// The How often choice that is not a number of minutes: a rotation that waits for the unlock.
+export const unlockLabel = () => t('Each time the Mac is unlocked');
+
 // What a rotation draws from, as the Wallpapers menu names it.
 export function sourceLabel(state, playlist, listedCount) {
   switch (playlist.source) {
@@ -37,7 +40,7 @@ export function sourceLabel(state, playlist, listedCount) {
 export function playlistSummary(state, playlist) {
   const wallpaperTitle = (id) => (state.wallpapers || []).find(item => item.id === id)?.title || (id ? t('a removed wallpaper') : t('left as it is'));
   const clock = (minute) => `${String(Math.floor((Number(minute) || 0) / 60)).padStart(2, '0')}:${String((Number(minute) || 0) % 60).padStart(2, '0')}`;
-  if (playlist.mode === 'rotate') return t('{source}, {order}, {interval}', { source: sourceLabel(state, playlist, (playlist.wallpaperIDs || []).length), order: t(orderLabels[playlist.order] || orderLabels.sequential), interval: intervalLabel(Number(playlist.interval) || 30).toLocaleLowerCase() });
+  if (playlist.mode === 'rotate') return t('{source}, {order}, {interval}', { source: sourceLabel(state, playlist, (playlist.wallpaperIDs || []).length), order: t(orderLabels[playlist.order] || orderLabels.sequential), interval: (playlist.trigger === 'unlock' ? unlockLabel() : intervalLabel(Number(playlist.interval) || 30)).toLocaleLowerCase() });
   if (playlist.mode === 'dayNight') return t('Day: {day} from {dayStart}; night: {night} from {nightStart}', { day: wallpaperTitle(playlist.dayWallpaperID), dayStart: clock(playlist.dayStart), night: wallpaperTitle(playlist.nightWallpaperID), nightStart: clock(playlist.nightStart) });
   return t('Off');
 }

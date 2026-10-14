@@ -45,7 +45,8 @@ impl FixupSet {
         self.items.push(fixup);
     }
 
-    /// Inserts local-copy declarations at the beginning of `main`.
+    /// Inserts local-copy declarations and moved global initializers at the
+    /// beginning of `main`.
     pub(crate) fn insert_main_prelude(
         &mut self,
         module: &ShaderModule<'_>,
@@ -54,6 +55,12 @@ impl FixupSet {
         let mut prelude = String::new();
         for input in declarations.main_prelude_interfaces() {
             input.emit_local_copy(&mut prelude)?;
+        }
+        // After the input copies: an initializer may read a stage input.
+        for name in &declarations.global_initializers {
+            prelude.push_str("    _we_init_");
+            prelude.push_str(name);
+            prelude.push_str("();\n");
         }
         if prelude.is_empty() {
             return Ok(());

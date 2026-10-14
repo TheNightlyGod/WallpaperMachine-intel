@@ -29,7 +29,9 @@ WallpaperScalingLayout ComputeWallpaperScalingLayout(
     uint32_t display_logical_width,
     uint32_t display_logical_height,
     double display_scale_factor,
-    double wallpaper_scale_factor)
+    double wallpaper_scale_factor,
+    double pan_x,
+    double pan_y)
 {
     WallpaperScalingLayout layout {};
     layout.scene_width = std::max<uint32_t>(1, scene_width);
@@ -69,8 +71,15 @@ WallpaperScalingLayout ComputeWallpaperScalingLayout(
 
     const double logical_width = layout.scene_width * layout.scale_x;
     const double logical_height = layout.scene_height * layout.scale_y;
-    const double logical_x = (layout.display_logical_width - logical_width) * 0.5;
-    const double logical_y = (layout.display_logical_height - logical_height) * 0.5;
+    // The slack is what the display has left after the wallpaper, negative when
+    // the wallpaper overflows it, so one expression places both a letterboxed
+    // and a cropped wallpaper. `viewport_px.y` is measured from the window top,
+    // so a pan of 0 puts the wallpaper's top edge on the display's top. A
+    // mirrored wallpaper is flipped inside this rectangle by the backends, so
+    // the position places the rectangle, not the mirrored picture.
+    const WallpaperFraming framing = NormalizeWallpaperFraming({ pan_x, pan_y });
+    const double logical_x = (layout.display_logical_width - logical_width) * framing.pan_x;
+    const double logical_y = (layout.display_logical_height - logical_height) * framing.pan_y;
 
     layout.viewport_px = PixelRect {
         round_px(logical_x * display_scale_factor),

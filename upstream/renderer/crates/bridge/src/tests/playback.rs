@@ -9,9 +9,10 @@ use std::{
 use arc_swap::ArcSwap;
 use futures_util::future::{BoxFuture, FutureExt};
 use wallpaper_core::{
-    DisplaySelector, DisplaySnapshotEntry, EngineError, FirstFrameCallback, WallpaperAssignment,
+    DisplaySelector, DisplaySnapshotEntry, EngineError, FirstFrameCallback, PropertyPreview,
+    WallpaperAssignment,
     media::audio::AudioVolume,
-    project::{ScalingMode, SceneDesc, SceneHandle, SceneResult},
+    project::{ScalingMode, SceneDesc, SceneFraming, SceneHandle, SceneResult},
 };
 
 use super::api_smoke::{
@@ -522,6 +523,31 @@ impl EngineFacade for FailingPlaybackEngine {
         async move { Ok::<(), EngineError>(()) }.boxed()
     }
 
+    fn set_framing(
+        &self,
+        _handle: SceneHandle,
+        _framing: SceneFraming,
+    ) -> BoxFuture<'static, Result<(), EngineError>> {
+        async move { Ok::<(), EngineError>(()) }.boxed()
+    }
+
+    fn preview_framing(
+        &self,
+        _handle: SceneHandle,
+        _framing: SceneFraming,
+    ) -> BoxFuture<'static, Result<(), EngineError>> {
+        async move { Ok::<(), EngineError>(()) }.boxed()
+    }
+
+    fn preview_property_override(
+        &self,
+        _handle: SceneHandle,
+        _scene_path: String,
+        _flat_json: String,
+    ) -> BoxFuture<'static, Result<PropertyPreview, EngineError>> {
+        async move { Ok(PropertyPreview::Shown) }.boxed()
+    }
+
     fn set_fps(
         &self,
         _handle: SceneHandle,
@@ -770,6 +796,31 @@ impl EngineFacade for ShutdownEngine {
         _factor: f64,
     ) -> BoxFuture<'static, Result<(), EngineError>> {
         async move { Ok::<(), EngineError>(()) }.boxed()
+    }
+
+    fn set_framing(
+        &self,
+        _handle: SceneHandle,
+        _framing: SceneFraming,
+    ) -> BoxFuture<'static, Result<(), EngineError>> {
+        async move { Ok::<(), EngineError>(()) }.boxed()
+    }
+
+    fn preview_framing(
+        &self,
+        _handle: SceneHandle,
+        _framing: SceneFraming,
+    ) -> BoxFuture<'static, Result<(), EngineError>> {
+        async move { Ok::<(), EngineError>(()) }.boxed()
+    }
+
+    fn preview_property_override(
+        &self,
+        _handle: SceneHandle,
+        _scene_path: String,
+        _flat_json: String,
+    ) -> BoxFuture<'static, Result<PropertyPreview, EngineError>> {
+        async move { Ok(PropertyPreview::Shown) }.boxed()
     }
 
     fn set_fps(

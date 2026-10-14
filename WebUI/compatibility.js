@@ -13,7 +13,10 @@ const statuses = {
   unknown: ['circleHelp', 'Unknown'],
 };
 
-export function createCompatibility({ escapeHTML, icon, button, keyAttr, busy }) {
+// The checks about the installed copy itself (its manifest and its entry file).
+const repairable = new Set(['project', 'entry']);
+
+export function createCompatibility({ escapeHTML, icon, button, keyAttr, busy, canReinstall }) {
   let state = null;
   const sync = (snapshot) => { state = snapshot; };
   const report = () => state?.wallpaperCompatibility;
@@ -48,11 +51,16 @@ export function createCompatibility({ escapeHTML, icon, button, keyAttr, busy })
     const words = summary(checks, checking);
     const empty = !checks.length && !checking ? `<p class="muted"><small>${escapeHTML(t('Not checked yet on this display.'))}</small></p>` : '';
     const check = button(checks.length ? t('Check again') : t('Check compatibility'), 'compatibilityCheck', { id: item.id, displayID: data.displayID }, { className: 'link', icon: 'refresh', disabled: checking || !targetOK || busy('compatibilityCheck', { id: item.id, displayID: data.displayID }), title: targetOK ? t('Reads the wallpaper’s files again and re-runs the checks') : t('Choose an enabled, independent target display to check this wallpaper') });
+    // Only the installed files are what a fresh copy from the Workshop repairs: the lock screen, the target
+    // display, native video admission and the shared scene resources are unavailable for reasons it leaves as they are.
+    const repairs = checks.some(entry => entry.status === 'unavailable' && repairable.has(entry.id));
+    const reinstall = repairs && item.kind !== 'Unknown' && canReinstall(item)
+      ? button(t('Reinstall from Workshop…'), 'workshopReinstall', { id: item.id }, { className: 'link', icon: 'refresh' }) : '';
     return `<section class="inspector-section"><details open ${keyAttr(`compatibility-${item.id}`)}><summary><span class="compat-heading">${escapeHTML(t('Compatibility check'))}${words ? `<span class="compat-summary${checking ? ' checking' : ''}" role="status">${checking ? icon('loader', 12) : ''}${escapeHTML(words)}</span>` : ''}</span>${icon('chevronRight', 14)}</summary><div class="section-content compat">`
       + (rows ? `<ul class="compat-list" aria-busy="${checking}">${rows}</ul>` : checking ? `<p class="muted" role="status"><small>${escapeHTML(t('Reading the wallpaper’s files…'))}</small></p>` : empty)
       + backend
       + (data.error ? `<p class="notice error" role="alert">${escapeHTML(data.error)}</p>` : '')
-      + `<div class="actions">${check}</div></div></details></section>`;
+      + `<div class="actions">${check}${reinstall}</div></div></details></section>`;
   }
 
   return { sync, section };

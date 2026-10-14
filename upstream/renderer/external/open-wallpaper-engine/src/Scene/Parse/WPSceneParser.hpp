@@ -25,6 +25,10 @@ struct WPUserTexture;
 void ApplySystemUserTextures(std::vector<std::string>& textures,
                              const std::vector<wpscene::WPUserTexture>& usertextures,
                              const ProjectProperties* properties = nullptr);
+/// The property a `usertextures` slot names (the bare-string form), or empty for
+/// a slot the runtime supplies or one that names nothing. The scene reads such a
+/// property once, while it loads.
+std::string_view UserTexturePropertyName(const wpscene::WPUserTexture& user_texture);
 void LoadMaterialConstantShaderValues(SceneMaterial& material, const wpscene::WPMaterial& wpmat,
                                       const WPShaderInfo& info);
 

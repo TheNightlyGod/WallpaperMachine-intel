@@ -70,6 +70,7 @@ public:
     void UpdateCameraFillMode(Scene&, wallpaper::FillMode);
     void SetWallpaperScalingMode(wallpaper::WallpaperScalingMode);
     void SetWallpaperScalingFactor(double);
+    void SetWallpaperFraming(const wallpaper::WallpaperFraming&);
     void SetWallpaperHorizontalFlip(bool enabled);
     /// Driver pipeline cache beside this scene's shader cache. Empty clears it.
     void SetPipelineCachePath(std::string path);

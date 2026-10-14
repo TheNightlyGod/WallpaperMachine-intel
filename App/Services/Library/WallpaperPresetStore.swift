@@ -141,11 +141,15 @@ final class WallpaperPresetStore {
   func save(name: String, options: BridgeWallpaperOptionsSnapshot, hasPendingEdits: Bool) async throws -> WallpaperPropertyPreset {
     try requireClean(options, hasPendingEdits: hasPendingEdits)
     guard items.count < Self.maximumPresets else { throw Self.invalidDocument() }
-    if let unknown = options.properties.first(where: { $0.kind == .unknown }) {
+    // A preset keeps the properties the panel lists. One a visibility rule hides is not
+    // part of it; applying the preset leaves that property as it is, unless the preset
+    // itself opens the rule and names the property.
+    let listed = options.properties.filter(\.enabled)
+    if let unknown = listed.first(where: { $0.kind == .unknown }) {
       throw Self.invalidProperty(unknown.id)
     }
     let preset = WallpaperPropertyPreset(id: UUID().uuidString, wallpaperID: options.wallpaperId,
-      name: try Self.validName(name), properties: options.properties.compactMap { descriptor in
+      name: try Self.validName(name), properties: listed.compactMap { descriptor in
         guard let kind = Self.kind(descriptor.kind) else { return nil }
         return WallpaperPresetProperty(id: descriptor.id, kind: kind, value: WallpaperPresetValue(descriptor.value),
           usesDefault: !descriptor.canRestoreDefaults, retainedPath: nil)

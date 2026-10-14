@@ -33,4 +33,17 @@ final class SteamCMDReportedFailureTests: XCTestCase {
             XCTAssertEqual(SteamCMDReportedFailure(reason: reason), .unknown, reason)
         }
     }
+
+    func testOnlyAConnectionFailureCanBeRetriedWithoutTheUser() {
+        for reason in ["Timeout", "No Connection", "ServiceUnavailable"] {
+            XCTAssertTrue(SteamCMDReportedFailure(reason: reason).isTransient, reason)
+        }
+        for reason in ["Invalid Password", "Steam Guard expired", "Rate Limit Exceeded", "Access Denied",
+                       "Failure", ""] {
+            XCTAssertFalse(SteamCMDReportedFailure(reason: reason).isTransient, reason)
+        }
+        XCTAssertFalse(
+            SteamCMDReportedFailure(reason: "Cached credentials revoked", cachedCredentialsRejected: true)
+                .isTransient)
+    }
 }

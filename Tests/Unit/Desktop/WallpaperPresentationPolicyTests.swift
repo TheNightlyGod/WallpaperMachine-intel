@@ -17,6 +17,10 @@ private final class PolicyProbe {
     /// Displays whose working area other windows cover.
     var covered: Set<UInt32> = []
     var coveredAction: DesktopCoveredAction = .pause
+    /// Displays the user is not using, as the policy is told when it asks about the displays it knows.
+    var inactive: Set<UInt32> = []
+    /// The displays the policy asked about, each time.
+    var inactiveQueries: [Set<UInt32>] = []
     /// Each screen's frame and working area.
     var screenLayout = [NSRect(x: 0, y: 0, width: 1728, height: 1117), NSRect(x: 0, y: 0, width: 1728, height: 1084)]
 
@@ -55,6 +59,10 @@ final class WallpaperPresentationPolicyTests: XCTestCase {
             },
             desktopCoveredAction: { probe.coveredAction },
             coveredDisplays: { probe.covered },
+            inactiveDisplays: { known in
+                probe.inactiveQueries.append(known)
+                return probe.inactive
+            },
             screenLayout: { probe.screenLayout },
             occlusionSettleDelay: settle,
             counters: counters,
@@ -181,6 +189,92 @@ final class WallpaperPresentationPolicyTests: XCTestCase {
         XCTAssertEqual(probe.applied, [true, false])
     }
 
+    /// The unlock is reported once, after the decision it causes was made, however many
+    /// evaluations follow.
+    func testUnlockIsReportedOnceWhenTheLockClears() {
+        let probe = PolicyProbe()
+        let policy = makePolicy(probe)
+        var unlocks: [GlobalPresentation] = []
+        policy.onSessionUnlocked = { unlocks.append(policy.globalPresentation) }
+        policy.start()
+        defer { policy.stop() }
+
+        probe.sessionLocked = true
+        lockCenter.post(name: Notification.Name("com.apple.screenIsLocked"), object: nil)
+        XCTAssertTrue(unlocks.isEmpty, "locking is not an unlock")
+        probe.sessionLocked = false
+        lockCenter.post(name: Notification.Name("com.apple.screenIsUnlocked"), object: nil)
+        XCTAssertEqual(unlocks, [.running], "the callback sees the presentation the unlock restored")
+        for _ in 0..<5 { policy.evaluate() }
+        lockCenter.post(name: Notification.Name("com.apple.screenIsUnlocked"), object: nil)
+        XCTAssertEqual(unlocks.count, 1, "an unlock is reported once, not again by later evaluations or a repeated notification")
+
+        probe.sessionLocked = true
+        lockCenter.post(name: Notification.Name("com.apple.screenIsLocked"), object: nil)
+        probe.sessionLocked = false
+        lockCenter.post(name: Notification.Name("com.apple.screenIsUnlocked"), object: nil)
+        XCTAssertEqual(unlocks.count, 2, "the next unlock is a new one")
+    }
+
+    /// The lock state is read from the window server, so an unlock whose notification never
+    /// arrived is still reported by the next evaluation.
+    func testAMissedUnlockIsStillReportedAtTheNextEvaluation() {
+        let probe = PolicyProbe()
+        let policy = makePolicy(probe)
+        var unlocks = 0
+        policy.onSessionUnlocked = { unlocks += 1 }
+        policy.start()
+        defer { policy.stop() }
+
+        probe.sessionLocked = true
+        lockCenter.post(name: Notification.Name("com.apple.screenIsLocked"), object: nil)
+        probe.sessionLocked = false
+        policy.evaluate()
+        XCTAssertEqual(unlocks, 1)
+        XCTAssertEqual(probe.applied, [true, false])
+    }
+
+    /// A lock the app saw only after wake, and a user switched away and back, end like any other.
+    func testUnlockAfterWakeOrAUserSwitchIsReported() {
+        let probe = PolicyProbe()
+        let policy = makePolicy(probe)
+        var unlocks = 0
+        policy.onSessionUnlocked = { unlocks += 1 }
+        policy.start()
+        defer { policy.stop() }
+
+        workspaceCenter.post(name: NSWorkspace.screensDidSleepNotification, object: nil)
+        probe.sessionLocked = true
+        workspaceCenter.post(name: NSWorkspace.screensDidWakeNotification, object: nil)
+        XCTAssertEqual(unlocks, 0)
+        probe.sessionLocked = false
+        lockCenter.post(name: Notification.Name("com.apple.screenIsUnlocked"), object: nil)
+        XCTAssertEqual(unlocks, 1)
+
+        probe.sessionLocked = true
+        workspaceCenter.post(name: NSWorkspace.sessionDidResignActiveNotification, object: nil)
+        probe.sessionLocked = false
+        workspaceCenter.post(name: NSWorkspace.sessionDidBecomeActiveNotification, object: nil)
+        XCTAssertEqual(unlocks, 2)
+    }
+
+    func testStartingLockedOrStoppingReportsNoUnlock() {
+        let probe = PolicyProbe()
+        probe.sessionLocked = true
+        let policy = makePolicy(probe)
+        var unlocks = 0
+        policy.onSessionUnlocked = { unlocks += 1 }
+        policy.start()
+        XCTAssertEqual(unlocks, 0, "a session that was locked before the app looked has not been seen to unlock")
+
+        policy.stop()
+        XCTAssertEqual(unlocks, 0, "tearing the policy down while locked is not an unlock")
+        probe.sessionLocked = false
+        policy.start()
+        defer { policy.stop() }
+        XCTAssertEqual(unlocks, 0, "starting again with the session unlocked is a first look, not an unlock")
+    }
+
     func testFullOcclusionSuspendsOnlyAfterTheSettleDelay() async throws {
         let probe = PolicyProbe()
         let policy = makePolicy(probe)
@@ -288,6 +382,172 @@ final class WallpaperPresentationPolicyTests: XCTestCase {
         probe.coveredAction = .pause
         policy.evaluate()
         XCTAssertEqual(probe.displayDecisions(for: 1), [true, false, true])
+    }
+
+    // MARK: - Displays the user is not using
+
+    private func twoVisibleDisplays() -> PolicyProbe {
+        let probe = PolicyProbe()
+        probe.surfaces = [
+            WallpaperSurfaceVisibility(displayID: 1, isVisible: true),
+            WallpaperSurfaceVisibility(displayID: 2, isVisible: true),
+        ]
+        return probe
+    }
+
+    func testAnInactiveDisplayIsSuspendedOnItsOwnAfterTheSettleDelayAndResumesAtOnce() async throws {
+        let probe = twoVisibleDisplays()
+        let policy = makePolicy(probe)
+        policy.start()
+        defer { policy.stop() }
+
+        probe.inactive = [2]
+        policy.evaluate()
+        XCTAssertTrue(probe.appliedDisplays.isEmpty, "The usual settle delay applies on top of the pointer's own wait")
+
+        try await Task.sleep(for: .milliseconds(80))
+        XCTAssertEqual(policy.suspendedDisplayIDs, [2])
+        XCTAssertEqual(probe.displayDecisions(for: 2), [true])
+        XCTAssertEqual(probe.displayDecisions(for: 1), [], "The display in use is never told to stop")
+        XCTAssertEqual(probe.applied, [], "One display not in use is not a global condition")
+        XCTAssertFalse(policy.isSuspended)
+
+        probe.inactive = []
+        policy.evaluate()
+        XCTAssertEqual(probe.displayDecisions(for: 2), [true, false], "Returning to a display resumes it without waiting")
+        XCTAssertTrue(policy.suspendedDisplayIDs.isEmpty)
+    }
+
+    func testAnInactiveDisplayJoinsCoverageAndCoverageCanBeTurnedOffWithoutResumingIt() {
+        let probe = twoVisibleDisplays()
+        probe.covered = [1]
+        probe.inactive = [2]
+        let policy = makePolicy(probe, settle: .zero)
+        policy.start()
+        defer { policy.stop() }
+        XCTAssertEqual(policy.suspendedDisplayIDs, [1, 2], "Each display has its own reason to be paused")
+
+        probe.coveredAction = .keepRunning
+        policy.evaluate()
+        XCTAssertEqual(policy.suspendedDisplayIDs, [2], "Keep running ends the covered reason only")
+        XCTAssertEqual(probe.displayDecisions(for: 1), [true, false])
+        XCTAssertEqual(probe.displayDecisions(for: 2), [true], "and display 2 is not resumed and paused again")
+
+        probe.inactive = []
+        policy.evaluate()
+        XCTAssertTrue(policy.suspendedDisplayIDs.isEmpty)
+    }
+
+    func testTheInactiveSetIsAskedAboutTheDisplaysWithWallpaperAndNeverDarkensAllOfThem() {
+        let probe = twoVisibleDisplays()
+        let policy = makePolicy(probe, settle: .zero)
+        policy.start()
+        defer { policy.stop() }
+        XCTAssertEqual(probe.inactiveQueries.last, [1, 2], "The policy asks about the displays it has wallpaper on")
+
+        probe.inactive = [1, 2]
+        policy.evaluate()
+        XCTAssertTrue(
+            policy.suspendedDisplayIDs.isEmpty,
+            "An answer that would darken every display is a mistake, not a reason to freeze the desktop")
+        XCTAssertTrue(probe.appliedDisplays.isEmpty)
+
+        probe.inactive = [2, 9]
+        policy.evaluate()
+        XCTAssertEqual(policy.suspendedDisplayIDs, [2], "A display with no wallpaper is not the policy's to pause")
+    }
+
+    func testADisplayPausedOnlyBecauseTheUserIsElsewhereIsNotHidden() {
+        let probe = twoVisibleDisplays()
+        probe.inactive = [2]
+        let policy = makePolicy(probe, settle: .zero)
+        policy.start()
+        defer { policy.stop() }
+        XCTAssertEqual(policy.suspendedDisplayIDs, [2])
+        XCTAssertTrue(policy.hiddenDisplayIDs.isEmpty, "An idle second display must not hold back the update alert")
+
+        probe.covered = [1]
+        policy.evaluate()
+        XCTAssertEqual(policy.suspendedDisplayIDs, [1, 2])
+        XCTAssertEqual(policy.hiddenDisplayIDs, [1], "A display something covers is still hidden")
+
+        probe.inactive = []
+        probe.covered = []
+        policy.evaluate()
+        XCTAssertTrue(policy.hiddenDisplayIDs.isEmpty)
+    }
+
+    func testADisplayTheUserIsNotUsingIsStillHiddenWhenSomethingElseHidesIt() {
+        // Pausing for the pointer being elsewhere must not hide a second reason: a
+        // full-screen video on the display next to the one in use is the thing an
+        // unattended modal alert must not take focus from.
+        let probe = twoVisibleDisplays()
+        probe.inactive = [2]
+        let policy = makePolicy(probe, settle: .zero)
+        policy.start()
+        defer { policy.stop() }
+        XCTAssertEqual(policy.suspendedDisplayIDs, [2])
+        XCTAssertTrue(policy.hiddenDisplayIDs.isEmpty)
+
+        probe.setVisible(false, display: 2)
+        policy.evaluate()
+        XCTAssertEqual(policy.suspendedDisplayIDs, [2])
+        XCTAssertEqual(policy.hiddenDisplayIDs, [2], "a full-screen app on it hides it, whoever is using the other display")
+
+        probe.setVisible(true, display: 2)
+        policy.evaluate()
+        XCTAssertTrue(policy.hiddenDisplayIDs.isEmpty, "and not once that app is gone")
+
+        probe.covered = [2]
+        policy.evaluate()
+        XCTAssertEqual(policy.hiddenDisplayIDs, [2], "windows over its working area hide it when that pauses")
+        probe.coveredAction = .keepRunning
+        policy.evaluate()
+        XCTAssertTrue(
+            policy.hiddenDisplayIDs.isEmpty,
+            "unless the user keeps a covered wallpaper running, which leaves the pointer as the only reason")
+    }
+
+    func testOnlyADisplayThatIsSuspendedForTheUserBeingElsewhereIsSuspendedInPlainSight() {
+        let probe = twoVisibleDisplays()
+        probe.inactive = [2]
+        let policy = makePolicy(probe, settle: .zero)
+        policy.start()
+        defer { policy.stop() }
+        XCTAssertEqual(policy.suspendedDisplayIDs, [2])
+        XCTAssertTrue(policy.isSuspendedInPlainSight(displayID: 2), "its wallpaper is on screen and only the pointer is elsewhere")
+        XCTAssertFalse(policy.isSuspendedInPlainSight(displayID: 1), "the display in use is not suspended")
+
+        probe.covered = [2]
+        XCTAssertFalse(policy.isSuspendedInPlainSight(displayID: 2), "a covered working area hides it")
+        probe.coveredAction = .keepRunning
+        XCTAssertTrue(policy.isSuspendedInPlainSight(displayID: 2), "unless the user keeps a covered wallpaper running")
+
+        probe.setVisible(false, display: 2)
+        XCTAssertFalse(policy.isSuspendedInPlainSight(displayID: 2), "a full-screen app on it hides it")
+
+        probe.setVisible(true, display: 2)
+        probe.inactive = [1, 2]
+        XCTAssertFalse(
+            policy.isSuspendedInPlainSight(displayID: 2),
+            "an answer that would darken every display suspends none, so none is suspended in plain sight")
+        probe.inactive = []
+        XCTAssertFalse(policy.isSuspendedInPlainSight(displayID: 2))
+    }
+
+    func testAnInactiveDisplayStaysPausedThroughASleepAndWake() {
+        let probe = twoVisibleDisplays()
+        probe.inactive = [2]
+        let policy = makePolicy(probe, settle: .zero)
+        policy.start()
+        defer { policy.stop() }
+
+        workspaceCenter.post(name: NSWorkspace.screensDidSleepNotification, object: nil)
+        workspaceCenter.post(name: NSWorkspace.screensDidWakeNotification, object: nil)
+
+        XCTAssertEqual(probe.applied, [true, false])
+        XCTAssertEqual(policy.suspendedDisplayIDs, [2])
+        XCTAssertEqual(probe.displayDecisions(for: 2), [true], "Waking the displays does not restart the one not in use")
     }
 
     func testTheCoverageProbeCoversTheWorkingAreaInsideItsMargin() {
@@ -695,5 +955,112 @@ final class WallpaperPresentationPolicyTests: XCTestCase {
         XCTAssertEqual(
             probe.displayDecisions(for: 1), [true, false],
             "Teardown must resume a display it had suspended")
+    }
+
+    // MARK: Resume announcements
+
+    func testAGlobalResumeIsAnnouncedAndASuspendIsNot() {
+        let probe = PolicyProbe()
+        let policy = makePolicy(probe)
+        var resumes = 0
+        policy.onResumed = { resumes += 1 }
+        policy.start()
+        defer { policy.stop() }
+        XCTAssertEqual(resumes, 0, "a desktop that was never suspended has nothing to resume")
+
+        workspaceCenter.post(name: NSWorkspace.screensDidSleepNotification, object: nil)
+        XCTAssertEqual(resumes, 0, "suspending is not a resume")
+
+        workspaceCenter.post(name: NSWorkspace.screensDidWakeNotification, object: nil)
+        XCTAssertEqual(resumes, 1)
+        XCTAssertEqual(probe.applied, [true, false])
+    }
+
+    func testAUnloadedDesktopThatOnlyBecomesSuspendedHasNotResumed() {
+        let probe = PolicyProbe()
+        var action = DisplaySleepAction.stop
+        let policy = WallpaperPresentationPolicy(
+            workspaceCenter: workspaceCenter, lockCenter: lockCenter, windowCenter: windowCenter,
+            surfaces: { probe.surfaces }, isSessionLocked: { probe.sessionLocked },
+            displaySleepAction: { action },
+            applyGlobal: { _, completion in completion(.success(())) },
+            applyDisplay: { _, _, completion in completion(.success(())) })
+        var resumes = 0
+        policy.onResumed = { resumes += 1 }
+        policy.start()
+        defer { policy.stop() }
+
+        workspaceCenter.post(name: NSWorkspace.screensDidSleepNotification, object: nil)
+        action = .pause
+        policy.evaluate()
+        XCTAssertEqual(resumes, 0, "unloaded to suspended still shows nothing")
+
+        workspaceCenter.post(name: NSWorkspace.screensDidWakeNotification, object: nil)
+        XCTAssertEqual(resumes, 1)
+    }
+
+    func testAResumeTheBridgeRefusesIsAnnouncedWhenItLands() {
+        let probe = PolicyProbe()
+        var accepting = true
+        let policy = WallpaperPresentationPolicy(
+            workspaceCenter: workspaceCenter, lockCenter: lockCenter, windowCenter: windowCenter,
+            surfaces: { probe.surfaces }, isSessionLocked: { probe.sessionLocked },
+            applyGlobal: { _, completion in completion(accepting ? .success(()) : .failure(CancellationError())) },
+            applyDisplay: { _, _, completion in completion(.success(())) })
+        var resumes = 0
+        policy.onResumed = { resumes += 1 }
+        policy.start()
+        defer { policy.stop() }
+
+        workspaceCenter.post(name: NSWorkspace.screensDidSleepNotification, object: nil)
+        accepting = false
+        workspaceCenter.post(name: NSWorkspace.screensDidWakeNotification, object: nil)
+        XCTAssertEqual(resumes, 0, "the scenes are still suspended: nothing has resumed")
+
+        accepting = true
+        policy.evaluate()
+        XCTAssertEqual(resumes, 1, "the retried resume is the one that is announced, once")
+        policy.evaluate()
+        XCTAssertEqual(resumes, 1)
+    }
+
+    func testResumingOneDisplayIsAnnouncedAndHidingOrNeverHidingIsNot() {
+        let probe = PolicyProbe()
+        probe.surfaces = [
+            WallpaperSurfaceVisibility(displayID: 1, isVisible: true),
+            WallpaperSurfaceVisibility(displayID: 2, isVisible: true),
+        ]
+        let policy = makePolicy(probe, settle: .zero)
+        var resumes = 0
+        policy.onResumed = { resumes += 1 }
+        policy.start()
+        defer { policy.stop() }
+        XCTAssertEqual(resumes, 0, "displays that were never told anything are presenting already")
+
+        probe.setVisible(false, display: 1)
+        policy.evaluate()
+        XCTAssertEqual(probe.displayDecisions(for: 1), [true])
+        XCTAssertEqual(resumes, 0, "hiding a display is not a resume")
+
+        probe.setVisible(true, display: 1)
+        policy.evaluate()
+        XCTAssertEqual(probe.displayDecisions(for: 1), [true, false])
+        XCTAssertEqual(resumes, 1)
+        XCTAssertEqual(probe.displayDecisions(for: 2), [], "the other display never changed")
+    }
+
+    func testTearingDownDoesNotAnnounceItsOwnResume() {
+        let probe = PolicyProbe()
+        let policy = makePolicy(probe)
+        var resumes = 0
+        policy.onResumed = { resumes += 1 }
+        policy.start()
+        workspaceCenter.post(name: NSWorkspace.screensDidSleepNotification, object: nil)
+        XCTAssertTrue(policy.isSuspended)
+
+        policy.stop()
+
+        XCTAssertEqual(probe.applied.last, false, "teardown still resumes the engine")
+        XCTAssertEqual(resumes, 0, "but it is not the wallpaper presenting again for a wake to be checked")
     }
 }

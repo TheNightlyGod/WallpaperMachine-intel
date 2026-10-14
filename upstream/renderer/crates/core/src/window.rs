@@ -9,7 +9,10 @@ use objc2_app_kit::{
 #[cfg(not(test))]
 use objc2_app_kit::{NSEvent, NSEventMask, NSEventType};
 use objc2_core_graphics::{CGWindowLevelForKey, CGWindowLevelKey};
-use objc2_foundation::{NSInteger, NSPoint, NSRect, NSSize, NSThread};
+use objc2_foundation::{
+    NSDictionary, NSInteger, NSNotificationCenter, NSNumber, NSPoint, NSRect, NSSize, NSString,
+    NSThread, ns_string,
+};
 use objc2_quartz_core::{CAMetalLayer, CATransaction};
 
 use crate::{DisplayDesc, EngineError};
@@ -83,6 +86,68 @@ impl Default for PlaceholderStyle {
             alpha: 1.0,
         }
     }
+}
+
+/// Name of the notification posted for every content layer a wallpaper window
+/// gets, on the default `NSNotificationCenter` and synchronously on the main
+/// thread, before the window is composited with it.
+///
+/// `object` is the new `CAMetalLayer`. `userInfo` holds `displayID`, an
+/// `NSNumber` with the `CoreGraphics` display id, and `reason`, an `NSString`
+/// with one of the [`LayerInstall`] strings. The host app matches the name and
+/// the strings literally, so they change only together with its observer.
+///
+/// An observer runs inside the window operation that posts it, so it must be
+/// cheap and must not call back into the bridge.
+pub(crate) const LAYER_INSTALLED_NOTIFICATION: &str = "WallpaperMachine.wallpaperLayerInstalled";
+
+/// Why a wallpaper window got a new content layer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LayerInstall {
+    /// The window was just opened and is about to be ordered front.
+    Open,
+    /// A scene replacement installed a fresh layer for the new renderer.
+    Replace,
+    /// A display reconfigure installed a fresh layer for the new geometry.
+    Reconfigure,
+}
+
+impl LayerInstall {
+    /// The `reason` string the notification carries.
+    #[allow(clippy::single_call_fn)]
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Replace => "replace",
+            Self::Reconfigure => "reconfigure",
+        }
+    }
+}
+
+/// Posts [`LAYER_INSTALLED_NOTIFICATION`] on `center` for `layer`.
+///
+/// Delivery is synchronous on the calling thread, which production callers
+/// keep on the main thread because the observer touches Core Animation.
+fn announce_layer_installed(
+    center: &NSNotificationCenter,
+    layer: &AnyObject,
+    display_id: u32,
+    install: LayerInstall,
+) {
+    let name = NSString::from_str(LAYER_INSTALLED_NOTIFICATION);
+    let display = NSNumber::new_u32(display_id);
+    let reason = NSString::from_str(install.as_str());
+    let objects: [&AnyObject; 2] = [&display, &reason];
+    let user_info = NSDictionary::<NSString, AnyObject>::from_slices(
+        &[ns_string!("displayID"), ns_string!("reason")],
+        &objects,
+    );
+    // SAFETY: The generic parameters of an Objective-C collection are not part
+    // of its runtime type; an observer reads the keys as strings and the
+    // values as the documented number and string.
+    let user_info = unsafe { objc2::rc::Retained::cast_unchecked::<NSDictionary>(user_info) };
+    // SAFETY: `name` is a notification name and `layer` an arbitrary sender.
+    unsafe { center.postNotificationName_object_userInfo(&name, Some(layer), Some(&user_info)) };
 }
 
 /// Borderless desktop-level window that hosts a `CAMetalLayer`.
@@ -608,11 +673,41 @@ impl WallpaperWindow {
     /// been closed.
     ///
     /// The `NSWindow` and `NSView` are retained. The old `CAMetalLayer` is
-    /// released after the new layer is installed.
+    /// released after the new layer is installed, so this replacement cannot be
+    /// undone; a caller that might have to put the old layer back uses
+    /// `begin_layer_swap`. The new layer is announced with
+    /// [`LAYER_INSTALLED_NOTIFICATION`] as a `reconfigure`.
     pub fn update_layer(
         &mut self,
         display: DisplayDesc,
     ) -> Result<*mut std::ffi::c_void, EngineError> {
+        let swap = self.begin_layer_swap(display, LayerInstall::Reconfigure)?;
+        let layer = swap.layer_ptr();
+        swap.finish();
+        Ok(layer)
+    }
+
+    /// Installs a fresh `CAMetalLayer` under the existing `NSView` and keeps
+    /// the layer it replaced, so the replacement can still be undone.
+    ///
+    /// The new layer is announced with [`LAYER_INSTALLED_NOTIFICATION`] as
+    /// soon as it is under the view and shaped, before any renderer exists.
+    /// A swap that is then reverted takes the announced layer out again
+    /// without a further notification.
+    ///
+    /// The caller opens its renderer on [`LayerSwap::layer_ptr`] and then
+    /// either confirms the swap with [`LayerSwap::finish`] or undoes it with
+    /// [`Self::revert_layer_swap`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the display geometry is invalid or the window has
+    /// been closed.
+    pub(crate) fn begin_layer_swap(
+        &mut self,
+        display: DisplayDesc,
+        install: LayerInstall,
+    ) -> Result<LayerSwap, EngineError> {
         if display.display_id == 0 {
             return Err(EngineError::InvalidInput(
                 "display_id must be non-zero".to_string(),
@@ -623,6 +718,7 @@ impl WallpaperWindow {
                 "display dimensions must be non-zero".to_string(),
             ));
         }
+        let previous_display = self.display.clone();
         let Some(handle) = self.handle.as_mut() else {
             return Err(EngineError::Platform(
                 "wallpaper window is already closed".to_string(),
@@ -632,21 +728,62 @@ impl WallpaperWindow {
         let handle_ref = handle.clone_for_main_thread();
         let display_clone = display.clone();
         let SendPtr(new_layer_ptr) = MainThread::dispatch(move || unsafe {
-            handle_ref.replace_metal_layer(&display_clone)
+            handle_ref.replace_metal_layer(&display_clone, install)
         })?;
 
-        // Swap the stored MainThread wrapper to track the new layer.
+        // Track the new layer in the window and hold on to the old wrapper
+        // instead of releasing it.
         let ptr_for_retain = SendPtr(new_layer_ptr);
-        let old_metal_layer = std::mem::replace(
+        let previous = std::mem::replace(
             &mut handle.metal_layer,
             MainThread::dispatch(move || unsafe { MainThread::retain_from_ptr(ptr_for_retain) })?,
         );
-        MainThread::dispatch(move || unsafe {
-            old_metal_layer.release();
-        });
 
         self.display = display;
-        Ok(new_layer_ptr)
+        Ok(LayerSwap {
+            layer: SendPtr(new_layer_ptr),
+            previous,
+            previous_display,
+        })
+    }
+
+    /// Undoes [`Self::begin_layer_swap`]: puts the previous `CAMetalLayer`
+    /// back under the `NSView`, restores the window, view and layer geometry
+    /// of the display it was installed for, and releases the layer that
+    /// replaced it.
+    ///
+    /// Call it only after whatever was opened on the new layer is closed, so
+    /// nothing else holds on to that layer.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the window has been closed; the previous layer is
+    /// released with the window in that case.
+    #[allow(clippy::single_call_fn)]
+    pub(crate) fn revert_layer_swap(&mut self, swap: LayerSwap) -> Result<(), EngineError> {
+        let LayerSwap {
+            previous,
+            previous_display,
+            ..
+        } = swap;
+        let Some(handle) = self.handle.as_mut() else {
+            MainThread::dispatch(move || unsafe { previous.release() });
+            return Err(EngineError::Platform(
+                "wallpaper window is already closed".to_string(),
+            ));
+        };
+
+        let handle_ref = handle.clone_for_main_thread();
+        let previous_ptr = SendPtr(previous.as_ptr().cast::<std::ffi::c_void>());
+        let abandoned = std::mem::replace(&mut handle.metal_layer, previous);
+        let display_for_main = previous_display.clone();
+        MainThread::dispatch(move || unsafe {
+            handle_ref.restore_metal_layer(previous_ptr, &display_for_main);
+            abandoned.release();
+        });
+
+        self.display = previous_display;
+        Ok(())
     }
 
     /// Returns the retained `CAMetalLayer` pointer used by Vulkan/MoltenVK.
@@ -695,6 +832,37 @@ pub struct WallpaperWindowNativeState {
     pub metal_layer_contents_scale: f64,
     pub metal_layer_drawable_width: f64,
     pub metal_layer_drawable_height: f64,
+}
+
+/// A `CAMetalLayer` replacement that is installed but not yet settled.
+///
+/// [`WallpaperWindow::begin_layer_swap`] puts a fresh layer under the view and
+/// keeps the layer it replaced alive here. Whoever opens a renderer on the new
+/// layer then settles the swap exactly once: [`LayerSwap::finish`] when the
+/// renderer exists, [`WallpaperWindow::revert_layer_swap`] when it could not be
+/// built, which shows the previous layer, and the renderer still drawing on it,
+/// again. Both consume the value, so a swap cannot be settled twice.
+#[must_use = "a layer swap must be finished or reverted, or the previous layer leaks"]
+pub(crate) struct LayerSwap {
+    layer: SendPtr,
+    previous: MainThread,
+    previous_display: DisplayDesc,
+}
+
+impl LayerSwap {
+    /// The new layer, as a renderer's surface takes it.
+    pub(crate) fn layer_ptr(&self) -> *mut std::ffi::c_void {
+        self.layer.0
+    }
+
+    /// Keeps the new layer: releases the one it replaced.
+    ///
+    /// A renderer's surface on the previous layer keeps its own retain until
+    /// that renderer is closed.
+    pub(crate) fn finish(self) {
+        let Self { previous, .. } = self;
+        MainThread::dispatch(move || unsafe { previous.release() });
+    }
 }
 
 impl Drop for WallpaperWindow {
@@ -824,6 +992,15 @@ impl WallpaperWindowBuilder {
                     }
                 };
 
+                // The layer is announced before the window is ordered front,
+                // so an observer can put content on it before the first
+                // composite.
+                announce_layer_installed(
+                    &NSNotificationCenter::defaultCenter(),
+                    &metal_layer,
+                    self.display.display_id,
+                    LayerInstall::Open,
+                );
                 window.orderFrontRegardless();
 
                 Ok(WallpaperWindow {
@@ -983,8 +1160,39 @@ impl WindowHandleRef {
         CATransaction::commit();
     }
 
+    /// Puts `previous` back under the view in place of the layer installed by
+    /// `replace_metal_layer`, then restores the geometry of `display`.
+    ///
+    /// The geometry goes through `update_display` aimed at the previous layer,
+    /// so values that already match are not written again: an untouched
+    /// layer keeps its drawables.
+    unsafe fn restore_metal_layer(self, previous: SendPtr, display: &DisplayDesc) {
+        debug_assert!(NSThread::isMainThread_class());
+        let content_view = unsafe { &*(self.content_view.cast::<NSView>()) };
+        let previous_layer = unsafe { &*(previous.0.cast::<CAMetalLayer>()) };
+
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        content_view.setLayer(Some(previous_layer));
+        content_view.setWantsLayer(true);
+        unsafe {
+            Self {
+                metal_layer: previous.0.cast::<AnyObject>(),
+                ..self
+            }
+            .update_display(display);
+        }
+        CATransaction::commit();
+    }
+
+    /// Installs a fresh layer under the view, shapes the window for `display`
+    /// and announces the layer as `install`.
     #[allow(clippy::unnecessary_wraps)]
-    unsafe fn replace_metal_layer(self, display: &DisplayDesc) -> Result<SendPtr, EngineError> {
+    unsafe fn replace_metal_layer(
+        self,
+        display: &DisplayDesc,
+        install: LayerInstall,
+    ) -> Result<SendPtr, EngineError> {
         debug_assert!(NSThread::isMainThread_class());
 
         let new_layer = display.build_metal_layer(&PlaceholderStyle::default());
@@ -1015,6 +1223,13 @@ impl WindowHandleRef {
         new_layer.setFrame(content_frame);
         new_layer.setContentsScale(scale_factor);
         new_layer.setDrawableSize(drawable_size);
+
+        announce_layer_installed(
+            &NSNotificationCenter::defaultCenter(),
+            &new_layer,
+            display.display_id,
+            install,
+        );
 
         let ptr: *mut std::ffi::c_void = Retained::as_ptr(&new_layer).cast_mut().cast();
         Ok(SendPtr(ptr))
@@ -1106,9 +1321,102 @@ unsafe impl Send for MainThread {}
 #[cfg(test)]
 mod tests {
     use super::{
-        MouseButtonEdges, MouseButtonState, MouseButtonTracker, MouseButtons,
-        NormalizedMousePosition,
+        LAYER_INSTALLED_NOTIFICATION, LayerInstall, MouseButtonEdges, MouseButtonState,
+        MouseButtonTracker, MouseButtons, NormalizedMousePosition, announce_layer_installed,
     };
+    use objc2::{rc::Retained, runtime::AnyObject};
+    use objc2_foundation::{
+        NSNotification, NSNotificationCenter, NSNumber, NSObject, NSString, ns_string,
+    };
+    use std::sync::{Arc, Mutex};
+
+    /// What an observer of the layer announcement read from one notification.
+    #[derive(Debug, PartialEq, Eq)]
+    struct Announcement {
+        layer: usize,
+        display_id: u32,
+        reason: String,
+        thread: std::thread::ThreadId,
+    }
+
+    fn observe_announcements(
+        center: &NSNotificationCenter,
+        sender: Option<&AnyObject>,
+    ) -> (Arc<Mutex<Vec<Announcement>>>, Retained<AnyObject>) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&seen);
+        let block = block2::RcBlock::new(move |notification: std::ptr::NonNull<NSNotification>| {
+            // SAFETY: The center hands the block a live notification.
+            let notification = unsafe { notification.as_ref() };
+            let layer = notification.object().expect("the layer is the notification's object");
+            let info = notification.userInfo().expect("the announcement carries user info");
+            let display = info
+                .objectForKey(ns_string!("displayID"))
+                .and_then(|value| value.downcast::<NSNumber>().ok())
+                .expect("displayID is a number");
+            let reason = info
+                .objectForKey(ns_string!("reason"))
+                .and_then(|value| value.downcast::<NSString>().ok())
+                .expect("reason is a string");
+            sink.lock().unwrap().push(Announcement {
+                layer: Retained::as_ptr(&layer) as usize,
+                display_id: display.as_u32(),
+                reason: reason.to_string(),
+                thread: std::thread::current().id(),
+            });
+        });
+        let name = NSString::from_str(LAYER_INSTALLED_NOTIFICATION);
+        // SAFETY: A nil queue delivers on the posting thread; the block is
+        // copied by the center and the token is removed by the caller.
+        let token =
+            unsafe { center.addObserverForName_object_queue_usingBlock(Some(&name), sender, None, &block) };
+        (seen, token.into())
+    }
+
+    #[test]
+    fn announcement_carries_display_and_reason() {
+        let center = NSNotificationCenter::new();
+        let (seen, token) = observe_announcements(&center, None);
+        let layers = [NSObject::new(), NSObject::new(), NSObject::new()];
+        // An observer on the default center, aimed at one of these layers, must
+        // not hear what is announced on the private center.
+        let (default_center_seen, default_token) =
+            observe_announcements(&NSNotificationCenter::defaultCenter(), Some(&layers[0]));
+
+        for (layer, (display_id, install)) in layers.iter().zip([
+            (1, LayerInstall::Open),
+            (69_733_254, LayerInstall::Replace),
+            (u32::MAX, LayerInstall::Reconfigure),
+        ]) {
+            announce_layer_installed(&center, layer, display_id, install);
+        }
+        // SAFETY: The tokens came from the matching `addObserver` calls above.
+        unsafe {
+            center.removeObserver(&token);
+            NSNotificationCenter::defaultCenter().removeObserver(&default_token);
+        }
+
+        let thread = std::thread::current().id();
+        let expected = [(1, "open"), (69_733_254, "replace"), (u32::MAX, "reconfigure")];
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), expected.len(), "one announcement per install, in order");
+        for ((announcement, layer), (display_id, reason)) in seen.iter().zip(&layers).zip(expected) {
+            assert_eq!(announcement.layer, Retained::as_ptr(layer) as usize, "object is the layer");
+            assert_eq!(announcement.display_id, display_id);
+            assert_eq!(announcement.reason, reason);
+            assert_eq!(announcement.thread, thread, "delivered synchronously on the posting thread");
+        }
+        assert!(default_center_seen.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn install_reason_strings_are_the_swift_contract() {
+        // The Swift observer matches these literally.
+        assert_eq!(LAYER_INSTALLED_NOTIFICATION, "WallpaperMachine.wallpaperLayerInstalled");
+        assert_eq!(LayerInstall::Open.as_str(), "open");
+        assert_eq!(LayerInstall::Replace.as_str(), "replace");
+        assert_eq!(LayerInstall::Reconfigure.as_str(), "reconfigure");
+    }
 
     #[test]
     fn mouse_edge_iterator_preserves_button_and_press_release_order() {

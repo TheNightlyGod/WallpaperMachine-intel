@@ -9,6 +9,7 @@ use wallpaper_core::{
     project::{SceneHandle, SceneTemplate},
 };
 
+use super::engine_release::EngineRelease;
 use crate::{
     BridgeDisplayMode, BridgeErrorKind, BridgePropertyValue, BridgeScalingMode,
     BridgeWallpaperKind, WallpaperBridge,
@@ -55,7 +56,7 @@ async fn display_settings_commit_persists_reconciles_and_clears_stale_wallpaper_
         .unwrap();
     let done = engine.wait_for_next_reconcile();
     bridge
-        .apply_wallpaper_options("100".to_string())
+        .apply_wallpaper_options("100".to_string(), true)
         .await
         .unwrap();
     assert!(done.wait(std::time::Duration::from_secs(2)));
@@ -96,7 +97,7 @@ async fn display_settings_commit_persists_reconciles_and_clears_stale_wallpaper_
     assert_display_enabled(&next_bridge, "7", false).await;
 
     bridge
-        .apply_wallpaper_options("100".to_string())
+        .apply_wallpaper_options("100".to_string(), true)
         .await
         .unwrap();
     assert_display_enabled(&bridge, "7", false).await;
@@ -121,7 +122,7 @@ async fn control_plane_stays_responsive_when_display_setting_reconcile_is_in_fli
         .await
         .unwrap();
     bridge
-        .apply_wallpaper_options("100".to_string())
+        .apply_wallpaper_options("100".to_string(), true)
         .await
         .unwrap();
 
@@ -675,7 +676,7 @@ async fn display_settings_commit_preserves_option_edits_while_rebasing_display_a
         .await
         .unwrap();
     bridge
-        .apply_wallpaper_options("100".to_string())
+        .apply_wallpaper_options("100".to_string(), true)
         .await
         .unwrap();
 
@@ -714,7 +715,7 @@ async fn display_settings_commit_preserves_option_edits_while_rebasing_display_a
     assert!(!options.display_configurations[0].dirty);
 
     bridge
-        .apply_wallpaper_options("100".to_string())
+        .apply_wallpaper_options("100".to_string(), true)
         .await
         .unwrap();
     assert_display_enabled(&bridge, "7", false).await;
@@ -1437,7 +1438,7 @@ async fn applying_wallpaper_options_restores_existing_mirror_window_after_reconc
 
     let done = engine.wait_for_next_reconcile();
     bridge
-        .apply_wallpaper_options("100".to_string())
+        .apply_wallpaper_options("100".to_string(), true)
         .await
         .unwrap();
     assert!(done.wait(std::time::Duration::from_secs(2)));
@@ -1699,7 +1700,7 @@ async fn applying_primary_wallpaper_keeps_identity_fallback_for_previous_primary
         .unwrap();
 
     bridge
-        .apply_wallpaper_options("300".to_string())
+        .apply_wallpaper_options("300".to_string(), true)
         .await
         .unwrap();
 
@@ -1732,7 +1733,7 @@ async fn wallpaper_options_report_display_disabled_when_another_wallpaper_owns_i
         .await
         .unwrap();
     bridge
-        .apply_wallpaper_options("100".to_string())
+        .apply_wallpaper_options("100".to_string(), true)
         .await
         .unwrap();
 
@@ -1747,7 +1748,7 @@ async fn wallpaper_options_report_display_disabled_when_another_wallpaper_owns_i
         .await
         .unwrap();
     bridge
-        .apply_wallpaper_options("200".to_string())
+        .apply_wallpaper_options("200".to_string(), true)
         .await
         .unwrap();
 
@@ -1878,7 +1879,7 @@ async fn wallpaper_options_disable_draft_becomes_clean_when_another_wallpaper_ow
         .unwrap();
     bridge.select_wallpaper("100".to_string()).await.unwrap();
     bridge
-        .apply_wallpaper_options("100".to_string())
+        .apply_wallpaper_options("100".to_string(), true)
         .await
         .unwrap();
     bridge.select_wallpaper("200".to_string()).await.unwrap();
@@ -2328,6 +2329,20 @@ async fn a_display_refresh_does_not_reload_a_scene_held_to_the_battery_frame_rat
 }
 
 #[tokio::test]
+async fn a_display_refresh_does_not_reload_a_scene_held_to_the_quality_throttle() {
+    let engine = FakeEngineFacade::default();
+    let _release = EngineRelease::of(&engine);
+    let (bridge, _root) = running_scene_bridge(&engine).await;
+    bridge
+        .set_quality_throttle(vec![crate::BridgeQualityThrottleCause::Heat])
+        .await
+        .unwrap();
+    assert_eq!(engine.fps_calls().last(), Some(&(SceneHandle::new(1), 30)));
+
+    assert_refresh_keeps_the_scene(&bridge, &engine).await;
+}
+
+#[tokio::test]
 async fn a_display_refresh_does_not_reload_a_scene_muted_for_other_audio() {
     let engine = FakeEngineFacade::default();
     let (bridge, _root) = running_scene_bridge(&engine).await;
@@ -2387,6 +2402,20 @@ async fn a_reconcile_does_not_reload_a_scene_held_to_the_frame_rate_cap() {
 }
 
 #[tokio::test]
+async fn a_reconcile_does_not_reload_a_scene_held_to_the_quality_throttle() {
+    let engine = FakeEngineFacade::default();
+    let _release = EngineRelease::of(&engine);
+    let (bridge, _root) = running_scene_bridge(&engine).await;
+    bridge
+        .set_quality_throttle(vec![crate::BridgeQualityThrottleCause::Heat])
+        .await
+        .unwrap();
+    assert_eq!(engine.fps_calls().last(), Some(&(SceneHandle::new(1), 30)));
+
+    assert_reconcile_keeps_the_scene(&bridge, &engine).await;
+}
+
+#[tokio::test]
 async fn a_reconcile_does_not_reload_a_scene_muted_for_other_audio() {
     let engine = FakeEngineFacade::default();
     let (bridge, _root) = running_scene_bridge(&engine).await;
@@ -2438,7 +2467,7 @@ async fn mirror_scene_tracks_source_rebuild_settings_except_monitor_overrides() 
         .unwrap();
     let done = engine.wait_for_next_reconcile();
     bridge
-        .apply_wallpaper_options("100".to_string())
+        .apply_wallpaper_options("100".to_string(), true)
         .await
         .unwrap();
     assert!(done.wait(std::time::Duration::from_secs(2)));
@@ -2497,7 +2526,7 @@ async fn a_reported_press_comes_back_out_of_the_bridge() {
         .set_display_config_enabled("100".into(), "7".into(), true)
         .await
         .unwrap();
-    bridge.apply_wallpaper_options("100".into()).await.unwrap();
+    bridge.apply_wallpaper_options("100".into(), true).await.unwrap();
     bridge
         .set_media_integration_enabled("100".into(), true)
         .await
@@ -2553,7 +2582,7 @@ async fn an_unbound_transport_shortcut_reaches_the_scene_engine() {
         .await
         .unwrap();
     bridge
-        .apply_wallpaper_options("100".to_string())
+        .apply_wallpaper_options("100".to_string(), true)
         .await
         .unwrap();
 
@@ -2575,7 +2604,7 @@ async fn an_unbound_transport_shortcut_reaches_the_scene_engine() {
         .await
         .unwrap();
     bridge
-        .apply_wallpaper_options("100".to_string())
+        .apply_wallpaper_options("100".to_string(), true)
         .await
         .unwrap();
     assert_eq!(
@@ -2742,7 +2771,7 @@ async fn apply_primary_wallpaper(bridge: &WallpaperBridge, wallpaper_id: &str) {
         .await
         .unwrap();
     bridge
-        .apply_wallpaper_options(wallpaper_id.to_string())
+        .apply_wallpaper_options(wallpaper_id.to_string(), true)
         .await
         .unwrap();
 }

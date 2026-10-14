@@ -28,12 +28,14 @@ REGRESSION_BINARIES = {
     "static_subgraph_cache_test": False, "texture_prefetch_test": False,
     "scene_mesh_tests": False, "particle_rope_geometry_test": False,
     "particle_mouse_controlpoint_test": False, "layer_texture_reference_test": False,
+    "project_property_preview_test": False,
     "timer_tests": False, "playback_gpu_test": True, "metal_backend_test": False,
     "metal_scene_draw_smoke": True, "metal_poster_capture_test": True,
     "metal_video_texture_test": True, "unchanged_present_test": True,
     "audio_tests": False, "miniaudio_failure_paths_test": False, "sprite_animation_test": False,
     "vulkan_sample_count_smoke": False, "rendergraph_smoke": False,
     "rust_shader_bridge_test": False, "stb_image_regression_test": False,
+    "surface_health_test": False, "wallpaper_scaling_test": False,
 }
 OFFSCREEN_PROBE = "offscreen_scene_probe"
 RELOAD_PROBE = "scene_reload_cycle_probe"
@@ -54,6 +56,8 @@ REALTIME_TESTS = {
         "UnchangedPresent.ARepeatedVideoFramePresentsAgainOnlyWhenSomethingChanges",
         "UnchangedPresent.AStaticSceneStopsPresentingOnceEveryPassIsReused",
         "UnchangedPresent.OutputChangesOnAHeldVideoFramePresentOnceEach",
+        "UnchangedPresent.APropertyPreviewShowsOnAStillSceneAndWakesAnIdleOneForOneFrame",
+        "UnchangedPresent.AHistoryLoopKeepsTheClockRunningWithoutATimeUniform",
     ),
     "audio_tests": (
         "AudioResponseMonoTest.PartialSubmissionsExtendExpiryUntilACompleteBlockArrives",

@@ -7,17 +7,27 @@ struct AppLanguage: Equatable, Sendable {
   /// The language's own name. It is deliberately not translated so a user can find
   /// their language whatever the interface currently shows.
   let name: String
+  /// The Wallpaper Engine locale code a wallpaper's own label table uses for this language.
+  /// Required, so a language cannot ship without naming the table it reads.
+  let wallpaperEngineLocale: String
 
-  static let english = AppLanguage(tag: "en", name: "English")
+  static let english = AppLanguage(tag: "en", name: "English", wallpaperEngineLocale: "en-us")
 
   /// Every language the app ships, in picker order. Adding one means shipping its
   /// native and WebUI catalogs first; the steps are in docs/localization.md.
   static let supported: [AppLanguage] = [
     english,
-    AppLanguage(tag: "zh-Hans", name: "简体中文"),
-    AppLanguage(tag: "zh-Hant", name: "繁體中文"),
-    AppLanguage(tag: "ja", name: "日本語"),
+    AppLanguage(tag: "zh-Hans", name: "简体中文", wallpaperEngineLocale: "zh-chs"),
+    AppLanguage(tag: "zh-Hant", name: "繁體中文", wallpaperEngineLocale: "zh-cht"),
+    AppLanguage(tag: "ja", name: "日本語", wallpaperEngineLocale: "ja-jp"),
   ]
+
+  /// The locales a wallpaper's label table is read in, most preferred first: this language,
+  /// then English, which almost every table carries.
+  var labelLocales: [String] {
+    let english = Self.english.wallpaperEngineLocale
+    return wallpaperEngineLocale == english ? [english] : [wallpaperEngineLocale, english]
+  }
 
   static func named(_ tag: String) -> AppLanguage? {
     supported.first { $0.tag == tag }

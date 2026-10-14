@@ -190,6 +190,35 @@ final class WallpaperPresetStoreTests: XCTestCase {
     XCTAssertThrowsError(try context.store.mutations(for: boolPreset, options: options(properties: [disabled])))
   }
 
+  func testSavingKeepsTheListedPropertiesAndLeavesRuleHiddenOnesOut() async throws {
+    let context = try Context()
+    defer { context.close() }
+    var hidden = property("detail", .textInput, .string(value: "tucked away"))
+    hidden.enabled = false
+    var legacy = property("legacy", .unknown, .empty)
+    legacy.enabled = false
+    let saved = try await context.store.save(
+      name: "Listed", options: options(properties: [property("mode", .bool, .bool(value: true)), hidden, legacy]),
+      hasPendingEdits: false)
+    XCTAssertEqual(saved.properties.map(\.id), ["mode"], "A preset holds what the panel lists, and a hidden unknown type does not block saving")
+  }
+
+  func testAHiddenPropertyStaysKnownToAPresetThatNamesIt() async throws {
+    let context = try Context()
+    defer { context.close() }
+    var hidden = property("detail", .textInput, .string(value: "before"))
+    hidden.enabled = false
+    let preset = WallpaperPropertyPreset(id: UUID().uuidString, wallpaperID: "wallpaper", name: "Detail", properties: [
+      .init(id: "detail", kind: "textInput", value: .string("after"), usesDefault: false),
+    ])
+    let hiding = options(properties: [hidden])
+    XCTAssertEqual(
+      try context.store.mutations(for: preset, options: hiding, allowConditional: true).map(\.propertyID), ["detail"],
+      "A rule hiding the field now is what apply and import resolve with the preset's own mode changes")
+    XCTAssertThrowsError(try context.store.mutations(for: preset, options: hiding), "Outside that, a hidden field is disabled, not changed")
+    XCTAssertThrowsError(try context.store.mutations(for: preset, options: options(), allowConditional: true), "A field the wallpaper no longer defines is still unknown")
+  }
+
   func testCorruptArchiveCannotBeOverwrittenByNewSave() async throws {
     let context = try Context()
     defer { context.close() }
@@ -569,8 +598,12 @@ final class WallpaperPresetStoreTests: XCTestCase {
         .init(id: "detail", kind: "textInput", value: .string("after"), usesDefault: false),
         .init(id: "mode", kind: "bool", value: .bool(true), usesDefault: false),
       ])
+      var followed: [String] = []
+      store.onPropertyDraftChanged = { followed.append($0) }
       if reachable {
         try await context.store.apply(preset, options: initial, bridge: store)
+        XCTAssertGreaterThanOrEqual(followed.count, 3, "each edit of the preset and its apply reach whatever follows the draft")
+        XCTAssertEqual(Set(followed), ["wallpaper"])
         let committed = try await bridge.wallpaperOptionsSnapshot(wallpaperId: "wallpaper")
         XCTAssertEqual(WallpaperPresetValue(committed.properties[0].value), .string("after"))
         XCTAssertTrue(committed.properties[0].enabled)
@@ -677,7 +710,7 @@ private final class PresetTransactionBridge: WallpaperBridge {
     try await cancel()
   }
 
-  override func applyWallpaperOptions(wallpaperId: String) async throws -> BridgeWallpaperMutationBundle {
+  override func applyWallpaperOptions(wallpaperId: String, userInitiated: Bool) async throws -> BridgeWallpaperMutationBundle {
     try await commit()
   }
 

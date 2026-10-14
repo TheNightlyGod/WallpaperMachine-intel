@@ -801,25 +801,6 @@ impl<F> VectorExpressionAnalyzer<'_, F>
 where
     F: VectorExpressionFacts,
 {
-    /// Returns the vector width produced by a simple operand.
-    pub(crate) fn simple_width(
-        self,
-        tokens: TokenCursor<'_>,
-        range: TokenIndexRange,
-    ) -> Option<VectorWidth> {
-        let (start, end) = tokens.non_comment_range(range.start(), range.end())?;
-        if start == end {
-            let TypedToken::Identifier(name) = tokens[start].kind() else {
-                return None;
-            };
-            return self.facts.vector_width(name, start);
-        }
-        let swizzled = Self::terminal_swizzle(tokens, TokenIndexRange::from_inclusive(start, end))?;
-        self.facts
-            .vector_width(swizzled.base_name.as_str(), swizzled.base_index)
-            .map(|_width| swizzled.width)
-    }
-
     /// Returns the vector width produced by a call argument expression.
     pub(crate) fn argument_vector_width(
         self,
@@ -884,6 +865,9 @@ where
         Self::parenthesized_argument(tokens, argument)
             .is_some_and(|inner| self.argument_is_scalar_like(tokens, inner))
             || self.is_scalar_call(tokens, argument)
+            || self.is_builtin_scalar_call(tokens, argument)
+            || self.is_component_wise_scalar_call(tokens, argument)
+            || self.single_component_read(tokens, argument.start()) == Some(argument.end())
             || self.is_scalar_expression(tokens, argument)
     }
 
@@ -981,24 +965,35 @@ where
             range,
             &Self::arithmetic_operators(),
         );
-        let swizzle_operands = operands
+        let widths = operands
             .iter()
-            .filter_map(|operand| {
-                let width = self.simple_width(tokens, *operand)?;
-                (width > target_width).then_some((*operand, width))
+            .map(|operand| {
+                CallArgument::trim_from_bounds(tokens, operand.start(), operand.end())
+                    .and_then(|argument| self.argument_vector_width(tokens, argument))
             })
             .collect::<Vec<_>>();
-        if swizzle_operands.is_empty()
-            || !operands
-                .iter()
-                .any(|operand| self.simple_width(tokens, *operand) == Some(target_width))
-        {
+        let wider = operands
+            .iter()
+            .zip(&widths)
+            .filter(|(_operand, width)| width.is_some_and(|width| width > target_width))
+            .map(|(operand, _width)| *operand)
+            .collect::<Vec<_>>();
+        if wider.is_empty() || !widths.contains(&Some(target_width)) {
             return Vec::new();
         }
 
-        swizzle_operands
-            .into_iter()
-            .map(|(operand, _width)| VectorOperandSwizzle {
+        // A group whose own operands are narrowed already has the target
+        // width; narrowing it again would only repeat the swizzle.
+        wider
+            .iter()
+            .filter(|operand| {
+                !wider.iter().any(|inner| {
+                    inner != *operand
+                        && operand.start() <= inner.start()
+                        && inner.end() <= operand.end()
+                })
+            })
+            .map(|operand| VectorOperandSwizzle {
                 insertion: SourceSpan::new(
                     tokens[operand.end() - 1].span().end(),
                     tokens[operand.end() - 1].span().end(),
@@ -1082,11 +1077,18 @@ where
                     bracket_depth = bracket_depth.saturating_sub(1);
                 }
                 TypedToken::Identifier(name) => {
+                    if VectorWidth::classify_constructor(name).is_some() {
+                        return false;
+                    }
                     if let Some(close) = Self::scalar_call_end(tokens, index) {
                         if !self.call_result_scalar_like(tokens, index, close) {
                             return false;
                         }
                         index = close + 1;
+                        continue;
+                    }
+                    if let Some(field) = self.single_component_read(tokens, index) {
+                        index = field + 1;
                         continue;
                     }
                     if !self.identifier_scalar_like(tokens, index, name, paren_depth, bracket_depth)
@@ -1106,9 +1108,18 @@ where
                     }
                     return false;
                 }
+                // A member, a conditional or a vector or matrix constructor
+                // is no known scalar.
                 TypedToken::Operator(
                     Access(AccessOperator::Member)
                     | Conditional(ConditionalOperator::Question | ConditionalOperator::Colon),
+                )
+                | TypedToken::TypeMark(
+                    PrimitiveType::Vec(_)
+                    | PrimitiveType::IVec(_)
+                    | PrimitiveType::UVec(_)
+                    | PrimitiveType::BVec(_)
+                    | PrimitiveType::Mat { .. },
                 ) => return false,
                 TypedToken::Operator(
                     Relational(RelationalOperator::Less | RelationalOperator::Greater)
@@ -1174,18 +1185,96 @@ where
         let Some(name) = tokens[start].kind().source_text() else {
             return false;
         };
-        if VectorReturningFunction::classify(name).is_ok() {
-            return false;
-        }
         let Some(argument) = CallArgument::trim_from_bounds(tokens, start, close + 1) else {
             return false;
         };
+        if VectorReturningFunction::classify(name).is_ok() {
+            return self.is_component_wise_scalar_call(tokens, argument);
+        }
         if self.argument_vector_width(tokens, argument).is_some() {
             return false;
         }
         self.call_return_type(tokens, argument)
             .is_some_and(|ty| ty == VectorExpressionType::Scalar)
             || BuiltinScalarReturningFunction::NAMES.contains(&name)
+    }
+
+    /// Returns whether the whole argument is a component-wise builtin of
+    /// known scalars, which makes it a scalar too.
+    ///
+    /// Every argument counts, not only the ones that pick the result shape: a
+    /// vector anywhere broadcasts the rest, so `mix(0.0, 1.0, mask)` over a
+    /// vector mask is a vector. An identifier with no known type could be
+    /// either, which is not evidence enough to broadcast the call.
+    fn is_component_wise_scalar_call(self, tokens: TokenCursor<'_>, argument: CallArgument) -> bool {
+        if tokens[argument.start()]
+            .kind()
+            .source_text()
+            .is_none_or(|name| VectorReturningFunction::classify(name).is_err())
+        {
+            return false;
+        }
+        let Some(call) = self.whole_argument_call(tokens, argument) else {
+            return false;
+        };
+        !call.arguments.is_empty()
+            && call.arguments.iter().all(|argument| {
+                self.argument_vector_width(tokens, argument).is_none()
+                    && !self.has_unresolved_identifier(tokens, argument)
+                    && self.argument_is_scalar_like(tokens, argument)
+            })
+    }
+
+    /// Returns whether a value identifier in the argument has no known type.
+    fn has_unresolved_identifier(self, tokens: TokenCursor<'_>, argument: CallArgument) -> bool {
+        (argument.start()..=argument.end()).any(|index| {
+            let TypedToken::Identifier(name) = tokens[index].kind() else {
+                return false;
+            };
+            let names_call = tokens
+                .next_non_comment(index + 1)
+                .is_some_and(|next| tokens[next].kind().is_left_paren());
+            let names_member = tokens
+                .previous_non_comment(index)
+                .is_some_and(|previous| tokens[previous].kind().is_member_access_operator());
+            !names_call && !names_member && self.facts.expression_type(name, index).is_none()
+        })
+    }
+
+    /// Returns the field token of `name.c` when `name` at `index` is a known
+    /// vector and `c` selects exactly one of its components.
+    fn single_component_read(self, tokens: TokenCursor<'_>, index: usize) -> Option<usize> {
+        let TypedToken::Identifier(name) = tokens[index].kind() else {
+            return None;
+        };
+        if tokens
+            .previous_non_comment(index)
+            .is_some_and(|previous| tokens[previous].kind().is_member_access_operator())
+        {
+            return None;
+        }
+        let _width = self.facts.vector_width(name, index)?;
+        let dot = tokens.next_non_comment(index + 1)?;
+        if !tokens[dot].kind().is_member_access_operator() {
+            return None;
+        }
+        let field = tokens.next_non_comment(dot + 1)?;
+        let TypedToken::Identifier(component) = tokens[field].kind() else {
+            return None;
+        };
+        if !matches!(
+            component.as_bytes(),
+            [b'x' | b'y' | b'z' | b'w' | b'r' | b'g' | b'b' | b'a' | b's' | b't' | b'p' | b'q']
+        ) {
+            return None;
+        }
+        // A further access belongs to the component, not to this read.
+        if tokens.next_non_comment(field + 1).is_some_and(|next| {
+            tokens[next].kind().is_member_access_operator() || tokens[next].kind().is_left_square()
+        }) {
+            return None;
+        }
+        Some(field)
     }
 
     /// Returns the closing parenthesis for a nested call that can be treated as
@@ -1210,6 +1299,20 @@ where
                     && Self::scalar_call_end(tokens, argument.start())
                         .is_some_and(|close| close == argument.end())
             })
+    }
+
+    /// Returns whether the whole expression calls a builtin that returns a
+    /// scalar whatever its argument widths, such as `dot`, unless a visible
+    /// user overload of that name returns something else.
+    fn is_builtin_scalar_call(self, tokens: TokenCursor<'_>, argument: CallArgument) -> bool {
+        tokens[argument.start()]
+            .kind()
+            .source_text()
+            .is_some_and(|name| BuiltinScalarReturningFunction::NAMES.contains(&name))
+            && Self::scalar_call_end(tokens, argument.start()) == Some(argument.end())
+            && self
+                .call_return_type(tokens, argument)
+                .is_none_or(|ty| ty == VectorExpressionType::Scalar)
     }
 
     /// Returns a parenthesized inner expression if the whole argument is
@@ -1381,10 +1484,11 @@ impl VectorReturningFunction {
     pub(crate) fn classify(name: &str) -> Result<Self, ()> {
         let function = match name.as_bytes() {
             b"abs" | b"acos" | b"asin" | b"atan" | b"ceil" | b"cos" | b"exp" | b"exp2"
-            | b"floor" | b"fract" | b"frac" | b"inversesqrt" | b"log" | b"log2" | b"normalize"
-            | b"round" | b"sign" | b"sin" | b"sqrt" | b"tan" | b"trunc" => Self::Unary,
-            b"max" | b"min" | b"mod" | b"pow" => Self::ComponentWise,
-            b"mix" => Self::Mix,
+            | b"floor" | b"fract" | b"frac" | b"inversesqrt" | b"log" | b"log10" | b"log2"
+            | b"normalize" | b"round" | b"saturate" | b"sign" | b"sin" | b"sqrt" | b"tan"
+            | b"trunc" => Self::Unary,
+            b"atan2" | b"fmod" | b"max" | b"min" | b"mod" | b"pow" => Self::ComponentWise,
+            b"lerp" | b"mix" => Self::Mix,
             b"step" => Self::Step,
             b"smoothstep" => Self::Smoothstep,
             b"clamp" => Self::Clamp,

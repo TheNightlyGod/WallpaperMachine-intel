@@ -90,6 +90,9 @@ final class WebPanelSceneSettingsTests: XCTestCase {
         BridgeSceneUpdateModeReport(
           displayId: 5, displayName: "Display 5", wallpaperId: "sea", wallpaperTitle: "Sea",
           mode: "unknown", reasons: ["unknown_input"]),
+        BridgeSceneUpdateModeReport(
+          displayId: 6, displayName: "Display 6", wallpaperId: "ice", wallpaperTitle: "Ice",
+          mode: "stopped_after_failure", reasons: []),
       ])
 
     let settings = try XCTUnwrap(context.controller.snapshot()["settings"] as? [String: Any])
@@ -97,8 +100,12 @@ final class WebPanelSceneSettingsTests: XCTestCase {
 
     XCTAssertEqual(
       rows.map { $0["mode"] as? String },
-      ["waiting_for_event", "continuous", "user_paused", "policy_suspended", "unknown"],
-      "Each state has to survive the trip intact; an unreadable scene must not become continuous")
+      [
+        "waiting_for_event", "continuous", "user_paused", "policy_suspended", "unknown",
+        "stopped_after_failure",
+      ],
+      "Each state has to survive the trip intact; an unreadable scene must not become continuous, "
+        + "and a failure must not become a pause")
     XCTAssertEqual(rows[0]["display"] as? String, "Display 1")
     XCTAssertEqual(rows[1]["reasons"] as? [String], ["video", "audio_response"])
     XCTAssertEqual(
@@ -110,6 +117,158 @@ final class WebPanelSceneSettingsTests: XCTestCase {
     XCTAssertEqual(
       (empty["sceneUpdateModes"] as? [[String: Any]])?.isEmpty, true,
       "No scene running is an empty list, which the page words differently from unknown")
+  }
+
+  /// Retry reloads a scene on its display, so the page can only name a display that can run
+  /// one: a live physical id of an enabled display. Anything else is a stale or forged
+  /// request, and nothing may be ejected for it.
+  func testSceneRetryRejectsAnUnknownDisplayId() async throws {
+    try await withRetryPanel { panel, bridge in
+      let invalid: [Any] = [99, -7, 7.5, "7", true, NSNull(), 4_294_967_296.0]
+      for rejected in invalid {
+        do {
+          try await panel.controller.perform("sceneRetry", body: ["displayId": rejected])
+          XCTFail("A display id that names no live display must be refused: \(rejected)")
+        } catch {}
+      }
+      do {
+        try await panel.controller.perform("sceneRetry", body: [:])
+        XCTFail("A retry that names no display must be refused")
+      } catch {}
+
+      bridge.eligible = ["secondary"]
+      try await panel.store.refreshAllAsync()
+      do {
+        try await panel.controller.perform("sceneRetry", body: ["displayId": 7])
+        XCTFail("A display that is switched off has nothing to retry")
+      } catch {}
+
+      XCTAssertEqual(bridge.events, [], "A refused retry must not take a wallpaper off any display")
+    }
+  }
+
+  /// The one row that reads "stopped after a rendering failure" carries the control, and
+  /// pressing it reloads that wallpaper on that display and no other. The page and the native
+  /// side are both real here, so the id the button carries is the one the dispatcher resolves.
+  func testSceneRetryRunsTheReloadForAKnownDisplay() async throws {
+    try await withRetryPanel { panel, bridge in
+      _ = try await panel.js("document.querySelector('[data-section=\"performance\"]').click()")
+      let read = try await panel.js("""
+        return [...document.querySelectorAll('[data-key="scene-update-report"] li')].map(item => ({
+          text: [...item.childNodes].filter(node => node.nodeType === Node.TEXT_NODE)
+            .map(node => node.textContent).join('').trim(),
+          retry: [...item.querySelectorAll('button')].map(button => `${button.dataset.action} ${button.dataset.args}`),
+        }));
+        """)
+      let rows = try XCTUnwrap(read as? [[String: Any]])
+
+      XCTAssertEqual(rows.count, 2)
+      XCTAssertEqual(rows[0]["text"] as? String, "Display 7 — a: stopped after a rendering failure")
+      XCTAssertEqual(
+        rows[0]["retry"] as? [String], [#"sceneRetry {"displayId":7}"#],
+        "A scene that stopped after a failure offers Retry, naming its display")
+      XCTAssertEqual(
+        rows[1]["retry"] as? [String], [],
+        "A scene that is running has nothing to retry")
+
+      _ = try await panel.js(
+        "document.querySelector('[data-key=\"scene-update-report\"] [data-action=\"sceneRetry\"]').click()")
+      try await panel.waitUntil(timeout: 10) { bridge.events.count == 2 }
+
+      XCTAssertEqual(
+        bridge.events, ["eject primary a", "apply primary a"],
+        "Display 7 is the panel's primary display; display 8 keeps its wallpaper untouched")
+      XCTAssertEqual(bridge.assignments, ["primary": "a", "secondary": "a"])
+      XCTAssertNil(panel.controller.actionError)
+    }
+  }
+
+  /// A display that mirrors another presents a scene of its own and can stop drawing like any
+  /// other, but holds no assignment: nothing can be ejected from it. Its Retry reloads the
+  /// display it mirrors, which is the only place that wallpaper can be taken off and applied.
+  func testSceneRetryOnAMirroringDisplayReloadsTheDisplayItMirrors() async throws {
+    try await withRetryPanel(mirroring: true) { panel, bridge in
+      _ = try await panel.js("document.querySelector('[data-section=\"performance\"]').click()")
+      let read = try await panel.js("""
+        return [...document.querySelectorAll('[data-key="scene-update-report"] li')].map(item => ({
+          retry: [...item.querySelectorAll('button')].map(button => `${button.dataset.action} ${button.dataset.args}`),
+        }));
+        """)
+      let rows = try XCTUnwrap(read as? [[String: Any]])
+      XCTAssertEqual(
+        rows.map { $0["retry"] as? [String] }, [[], [#"sceneRetry {"displayId":8}"#]],
+        "The stopped scene is the mirror's, and it offers Retry")
+
+      _ = try await panel.js(
+        "document.querySelector('[data-key=\"scene-update-report\"] [data-action=\"sceneRetry\"]').click()")
+      try await panel.waitUntil(timeout: 10) { bridge.events.count == 2 }
+
+      XCTAssertEqual(
+        bridge.events, ["eject primary a", "apply primary a"],
+        "Display 8 mirrors the primary display, so the wallpaper is reloaded there and never ejected from the mirror")
+      XCTAssertEqual(bridge.assignments, ["primary": "a"])
+      XCTAssertNil(panel.controller.actionError)
+    }
+  }
+
+  /// A reload in progress disables the control instead of letting a second one queue up.
+  func testRetryIsDisabledWhileTheReloadRuns() async throws {
+    try await withRetryPanel { panel, bridge in
+      _ = try await panel.js("document.querySelector('[data-section=\"performance\"]').click()")
+      var release: CheckedContinuation<Void, Never>?
+      bridge.beforeApply = {
+        bridge.beforeApply = nil
+        await withCheckedContinuation { release = $0 }
+      }
+      _ = try await panel.js(
+        "document.querySelector('[data-key=\"scene-update-report\"] [data-action=\"sceneRetry\"]').click()")
+      try await panel.waitUntil(timeout: 10) { release != nil }
+
+      try await panel.waitJS(
+        "document.querySelector('[data-key=\"scene-update-report\"] [data-action=\"sceneRetry\"]').disabled")
+      release?.resume()
+      try await panel.waitUntil(timeout: 10) { bridge.events.count == 2 }
+      try await panel.waitJS(
+        "!document.querySelector('[data-key=\"scene-update-report\"] [data-action=\"sceneRetry\"]').disabled")
+    }
+  }
+
+  /// A real panel over a two-display bridge that applies and ejects for real. Both displays
+  /// show wallpaper `a`; display 7 (the primary) reports a scene that stopped drawing and
+  /// display 8 one that is running. With `mirroring`, display 8 shows the primary's wallpaper
+  /// by mirroring it, and it is display 8 whose scene stopped.
+  private func withRetryPanel(
+    mirroring: Bool = false,
+    _ body: (PanelFixture, DisplayTransferTestBridge) async throws -> Void
+  ) async throws {
+    let bridge = DisplayTransferTestBridge(noPointer: .init())
+    bridge.assignments = mirroring ? ["primary": "a"] : ["primary": "a", "secondary": "a"]
+    bridge.mirrors = mirroring ? ["secondary": "primary"] : [:]
+    bridge.physicalIDs = ["primary": 7, "secondary": 8]
+    bridge.sceneUpdateModes = [
+      BridgeSceneUpdateModeReport(
+        displayId: 7, displayName: "Display 7", wallpaperId: "a", wallpaperTitle: "a",
+        mode: mirroring ? "continuous" : "stopped_after_failure", reasons: mirroring ? ["video"] : []),
+      BridgeSceneUpdateModeReport(
+        displayId: 8, displayName: "Display 8", wallpaperId: "a", wallpaperTitle: "a",
+        mode: mirroring ? "stopped_after_failure" : "continuous", reasons: mirroring ? [] : ["video"]),
+    ]
+    let store = BridgeStore(bridge: bridge)
+    let panel = try PanelFixture(store: store, bridge: bridge, displayTitles: .renderer)
+    do {
+      try bridge.installProjects(in: panel.library)
+      try await store.refreshAllAsync()
+      try await panel.start()
+      try await panel.finishWelcome()
+      panel.navigation.selection = .settings
+      panel.show()
+      try await panel.waitJS("powerProbe.received.at(-1)?.page === 'settings'")
+      try await body(panel, bridge)
+    } catch {
+      await panel.shutdown()
+      throw error
+    }
+    await panel.shutdown()
   }
 
   func testSceneRendererReportNamesTheBackendInUseAndOnlyRealFallbacks() throws {

@@ -99,6 +99,7 @@ public:
     void InitUniforms(SceneNode*, uint32_t material_slot, const ExistsUniformOp&) override;
     void UpdateUniforms(SceneNode*, uint32_t material_slot, sprite_map_t&,
                         const UpdateUniformOp&) override;
+    void ForgetNode(SceneNode*) override;
     void FrameEnd() override;
     uint32_t FrameVaryingUniforms(SceneNode*, uint32_t material_slot,
                                   const std::string& camera_override) const override;

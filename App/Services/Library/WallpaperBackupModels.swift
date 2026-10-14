@@ -103,6 +103,8 @@ struct WallpaperBackupPreferences: Sendable {
         "WallpaperMachine.displaySleepAction", "WallpaperMachine.otherAudioAction",
         "WallpaperMachine.desktopCoveredAction", "WallpaperMachine.appRules",
         "WallpaperMachine.lowPowerModeAction", "WallpaperMachine.thermalAction",
+        "WallpaperMachine.lowBatteryAction", "WallpaperMachine.lowBatteryThreshold",
+        "WallpaperMachine.playOnlyOnActiveDisplay",
         "WallpaperMachine.hideAfterActivating", "WallpaperMachine.concurrentDownloads",
         "WallpaperMachine.workshopUpdateChecks", "WallpaperMachineAssetsPath",
         "WallpaperMachine.workshopFiltersCollapsed", "WallpaperMachine.installedFiltersCollapsed",
@@ -158,13 +160,14 @@ struct WallpaperBackupPreferences: Sendable {
             for (display, record) in records {
                 try identities([display])
                 guard let record = record as? [String: Any] else { throw invalid() }
-                let allowed: Set<String> = ["mode", "source", "order", "interval", "wallpaperIDs", "collectionID", "planID", "dayWallpaperID", "nightWallpaperID", "dayStart", "nightStart"]
+                let allowed: Set<String> = ["mode", "source", "order", "trigger", "interval", "wallpaperIDs", "collectionID", "planID", "dayWallpaperID", "nightWallpaperID", "dayStart", "nightStart"]
                 guard Set(record.keys).isSubset(of: allowed) else { throw invalid() }
                 for (key, item) in record {
                     switch key {
                     case "mode": guard let raw = item as? String, PlaylistMode(rawValue: raw) != nil else { throw invalid() }
                     case "source": guard let raw = item as? String, PlaylistSource(rawValue: raw) != nil else { throw invalid() }
                     case "order": guard let raw = item as? String, PlaylistOrder(rawValue: raw) != nil else { throw invalid() }
+                    case "trigger": guard let raw = item as? String, PlaylistTrigger(rawValue: raw) != nil else { throw invalid() }
                     case "interval", "dayStart", "nightStart":
                         guard let number = item as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
                               number.doubleValue == Double(number.intValue),
@@ -238,7 +241,11 @@ struct WallpaperBackupPreferences: Sendable {
         case "WallpaperMachine.displaySleepAction": guard let raw = value as? String, DisplaySleepAction(rawValue: raw) != nil else { throw invalid() }
         case "WallpaperMachine.otherAudioAction": guard let raw = value as? String, OtherAudioAction(rawValue: raw) != nil else { throw invalid() }
         case "WallpaperMachine.desktopCoveredAction": guard let raw = value as? String, DesktopCoveredAction(rawValue: raw) != nil else { throw invalid() }
-        case "WallpaperMachine.lowPowerModeAction", "WallpaperMachine.thermalAction": guard let raw = value as? String, SystemConditionAction(rawValue: raw) != nil else { throw invalid() }
+        case "WallpaperMachine.lowPowerModeAction", "WallpaperMachine.thermalAction", "WallpaperMachine.lowBatteryAction":
+            guard let raw = value as? String, SystemConditionAction(rawValue: raw) != nil else { throw invalid() }
+        case "WallpaperMachine.lowBatteryThreshold":
+            guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(), number.doubleValue == Double(number.intValue),
+                  PlaybackPreferences.lowBatteryThresholds.contains(number.intValue) else { throw invalid() }
         case "WallpaperMachine.concurrentDownloads":
             guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(), number.doubleValue == Double(number.intValue),
                   WorkshopDownloadManager.concurrentDownloadRange.contains(number.intValue) else { throw invalid() }

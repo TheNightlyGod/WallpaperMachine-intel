@@ -6,6 +6,7 @@
 #include "Fs/Fs.h"
 #include "Fs/MemBinaryStream.h"
 #include "Fs/VFS.h"
+#include "Runtime/SceneRuntimeContext.hpp"
 #include "Scene/Scene.h"
 #include "Scene/SceneCamera.h"
 #include "Scene/SceneLayerReference.hpp"
@@ -17,11 +18,15 @@
 #include "VulkanRender/SceneToRenderGraph.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <functional>
+#include <limits>
 #include <map>
 #include <memory>
 #include <string>
+#include <thread>
+#include <utility>
 #include <vector>
 
 namespace
@@ -91,12 +96,17 @@ void MountFiles(fs::VFS& vfs, std::map<std::string, std::string> extra = {}) {
     ASSERT_TRUE(vfs.Mount("/assets", std::make_unique<MemoryFs>(std::move(files))));
 }
 
+/// With `properties`, parsed with a runtime as the wallpaper is, so a layer the
+/// scene file hides is hidden for good rather than until a script says otherwise.
 std::shared_ptr<Scene> ParseScene(fs::VFS& vfs, std::string_view objects,
-                                  std::map<std::string, std::string> extra = {}) {
+                                  std::map<std::string, std::string> extra = {},
+                                  const ProjectProperties* properties = nullptr) {
     MountFiles(vfs, std::move(extra));
     audio::SoundManager sound;
     WPSceneParser       parser;
-    return parser.Parse("layer-texture", SceneJson(objects), vfs, sound);
+    return parser.Parse(
+        SceneParseRequest { .scene_id = "layer-texture", .project_properties = properties },
+        SceneJson(objects), vfs, sound);
 }
 
 const vulkan::CustomShaderPass* FindPassByNode(
@@ -208,13 +218,47 @@ Eigen::Vector2d CardCornerNdc(Scene& scene, const vulkan::CustomShaderPass& pass
 }
 
 void ExpectCardFillsItsTarget(Scene& scene, const vulkan::CustomShaderPass& pass,
-                              Eigen::Vector2d half_extent) {
-    const auto lower_left  = CardCornerNdc(scene, pass, -half_extent);
-    const auto upper_right = CardCornerNdc(scene, pass, half_extent);
+                              Eigen::Vector2d lower_left_corner, Eigen::Vector2d upper_right_corner) {
+    const auto lower_left  = CardCornerNdc(scene, pass, lower_left_corner);
+    const auto upper_right = CardCornerNdc(scene, pass, upper_right_corner);
     EXPECT_NEAR(lower_left.x(), -1.0, 1e-4);
     EXPECT_NEAR(lower_left.y(), -1.0, 1e-4);
     EXPECT_NEAR(upper_right.x(), 1.0, 1e-4);
     EXPECT_NEAR(upper_right.y(), 1.0, 1e-4);
+}
+
+void ExpectCardFillsItsTarget(Scene& scene, const vulkan::CustomShaderPass& pass,
+                              Eigen::Vector2d half_extent) {
+    ExpectCardFillsItsTarget(scene, pass, -half_extent, half_extent);
+}
+
+/// The lower-left and upper-right corners of a card mesh, in the space it is
+/// authored in.
+std::pair<Eigen::Vector2d, Eigen::Vector2d> CardCorners(const SceneMesh& mesh) {
+    const auto& vertices = mesh.GetVertexArray(0);
+    const auto  offsets  = vertices.GetAttrOffsetMap();
+    const auto  position = offsets.find(std::string(WE_IN_POSITION));
+    Eigen::Vector2d lower = Eigen::Vector2d::Constant(std::numeric_limits<double>::infinity());
+    Eigen::Vector2d upper = -lower;
+    if (position == offsets.end()) return { lower, upper };
+    for (std::size_t vertex = 0; vertex < vertices.VertexCount(); ++vertex) {
+        const float* xy = vertices.Data() + vertex * vertices.OneSize() +
+                          position->second.offset / sizeof(float);
+        lower = lower.cwiseMin(Eigen::Vector2d(xy[0], xy[1]));
+        upper = upper.cwiseMax(Eigen::Vector2d(xy[0], xy[1]));
+    }
+    return { lower, upper };
+}
+
+/// Lays a text layer out as the wallpaper's frame loop does, until the layout
+/// lands. False when it never does.
+bool PumpTextLayout(SceneRuntimeContext& runtime, std::string_view name) {
+    for (int attempt = 0; attempt < 200; ++attempt) {
+        runtime.PumpTextLayerCache();
+        if (! runtime.NodeTextDirty(name)) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return false;
 }
 
 } // namespace
@@ -279,14 +323,15 @@ TEST(LayerTextureReference, CycleIsExplicit) {
     EXPECT_EQ(ClassifyLayerTextureReferences(refs, index), kLayerTextureIllegalCycle);
 }
 
-TEST(LayerTextureReference, SelfBIsHistoryFeedback) {
+TEST(LayerTextureReference, SelfBInItsOwnEffectsIsNotAReference) {
     const auto objects = nlohmann::json::parse(R"([
       {"id":7,"name":"self","image":"image.json",
        "effects":[{"passes":[{"textures":["_rt_imageLayerComposite_7_b"]}]}]}
     ])");
     const auto index = BuildLayerObjectIndex(objects);
     const auto refs  = CollectLayerTextureRefs(objects, index, nullptr);
-    EXPECT_EQ(ClassifyLayerTextureReferences(refs, index), kLayerTextureHistoryFeedback);
+    EXPECT_TRUE(refs.empty());
+    EXPECT_TRUE(ClassifyLayerTextureReferences(refs, index).empty());
 }
 
 TEST(LayerTextureReference, FileNameIsNotALayerEvenWhenNamesMatch) {
@@ -349,7 +394,8 @@ TEST(LayerTextureReference, CompositeAddressingFollowsTheSourceLayersClampUvs) {
 }
 
 TEST(LayerTextureReference, ExternalMaterialsKeepHiddenTransitiveProducers) {
-    fs::VFS vfs;
+    const ProjectProperties properties {};
+    fs::VFS                 vfs;
     auto parsed = ParseScene(vfs, R"([
         {"id":159,"name":"source","image":"image.json","visible":false},
         {"id":161,"name":"consumer","image":"outer.json"},
@@ -359,7 +405,8 @@ TEST(LayerTextureReference, ExternalMaterialsKeepHiddenTransitiveProducers) {
        { "/outer_mat.json",
          R"({"passes":[{"shader":"genericimage","textures":["_rt_imageLayerComposite_160_a"]}]})" },
        { "/linked_mat.json",
-         R"({"passes":[{"shader":"genericimage","textures":["_rt_imageLayerComposite_159_a"]}]})" }});
+         R"({"passes":[{"shader":"genericimage","textures":["_rt_imageLayerComposite_159_a"]}]})" }},
+      &properties);
     ASSERT_NE(parsed, nullptr);
     const auto graph = sceneToRenderGraph(*parsed);
     ASSERT_NE(graph, nullptr);
@@ -705,6 +752,588 @@ TEST(LayerTextureReference, ABareComposeLayerAnotherSamplesIsDrawnOnlyIntoItsCom
     const auto unused_graph = sceneToRenderGraph(*unused);
     ASSERT_NE(unused_graph, nullptr);
     EXPECT_EQ(FindPassByNode(*unused_graph, "behind"), nullptr);
+}
+
+// A compose layer's effect may sample one of the layer's own children -- a
+// solid card a script tints, kept as a palette -- while that child is also
+// part of what the compose layer shows. Inside a compose layer the child was
+// drawn only into the compose target, never into a composite of its own, so
+// the effect found nothing to sample and was skipped on both backends.
+TEST(LayerTextureReference, AComposeLayersEffectCanSampleItsOwnChild) {
+    constexpr std::string_view kTintFrag = R"(uniform sampler2D g_Texture0;
+uniform sampler2D g_Texture1;
+varying vec2 v_TexCoord;
+void main() {
+  gl_FragColor = texture(g_Texture0, v_TexCoord) * texture(g_Texture1, v_TexCoord);
+}
+)";
+    // A child hidden for good is only its composite; one a script hides may
+    // show again without a new graph, so it keeps its place in the picture.
+    const std::array<std::pair<std::string_view, bool>, 3> visibilities { {
+        { "true", true },
+        { "false", false },
+        { R"({"script":"export function update(value) { return value; }","value":false})", true },
+    } };
+    for (const auto& [visible, in_picture] : visibilities) {
+        SCOPED_TRACE(visible);
+        const ProjectProperties properties {};
+        fs::VFS                 vfs;
+        auto                    parsed = ParseScene(vfs, std::string(R"([
+            {"id":1,"name":"container","image":"models/util/composelayer.json",
+             "size":[64,32],"origin":[32,16,0],"dependencies":[2],
+             "effects":[{"file":"effects/tint/effect.json","visible":true,
+                         "passes":[{"textures":[null,"_rt_imageLayerComposite_2_a"]}]}]},
+            {"id":2,"name":"palette","parent":1,"image":"small.json","origin":[10,5,0],
+             "visible":)") + std::string(visible) + "}]",
+          {{ "/models/util/composelayer.json",
+             R"({"passthrough":true,"material":"materials/util/composelayer.json"})" },
+           { "/materials/util/composelayer.json",
+             R"({"passes":[{"blending":"translucent","cullmode":"nocull","depthtest":"disabled","depthwrite":"disabled","shader":"genericimage","textures":["_rt_FullFrameBuffer"]}]})" },
+           { "/small.json", R"({"width":16,"height":8,"material":"mat.json"})" },
+           { "/effects/tint/effect.json",
+             R"({"name":"tint","passes":[{"material":"materials/tint.json"}]})" },
+           { "/materials/tint.json",
+             R"({"passes":[{"blending":"translucent","cullmode":"nocull","depthtest":"disabled","depthwrite":"disabled","shader":"tint","textures":[null,null]}]})" },
+           { "/shaders/tint.vert", std::string(kVert) },
+           { "/shaders/tint.frag", std::string(kTintFrag) }},
+          &properties);
+        ASSERT_NE(parsed, nullptr);
+        EXPECT_TRUE(parsed->layer_texture_error.empty()) << parsed->layer_texture_error;
+        AddScreenTarget(*parsed);
+        SceneNode* container = nullptr;
+        for (auto& child : parsed->sceneGraph->GetChildren()) {
+            if (child->Name() == "container") container = child.get();
+        }
+        ASSERT_NE(container, nullptr);
+        const auto camera = parsed->cameras.find(container->Camera());
+        ASSERT_NE(camera, parsed->cameras.end());
+        ASSERT_TRUE(camera->second->HasImgEffect());
+        const auto compose_target =
+            parsed->ResolveRenderTargetName(camera->second->GetImgEffect()->FirstTarget());
+
+        const auto graph = sceneToRenderGraph(*parsed);
+        ASSERT_NE(graph, nullptr);
+        const vulkan::CustomShaderPass* tint = nullptr;
+        for (const auto id : graph->topologicalOrder()) {
+            auto* pass = dynamic_cast<const vulkan::CustomShaderPass*>(graph->getPass(id));
+            if (pass == nullptr) continue;
+            const auto& textures = pass->desc().textures;
+            if (std::find(textures.begin(), textures.end(), GenLinkTex(2)) != textures.end())
+                tint = pass;
+        }
+        ASSERT_NE(tint, nullptr) << "the effect was given nothing to sample";
+        const auto* link = FindLinkCopy(*graph, GenLinkTex(2));
+        ASSERT_NE(link, nullptr);
+        EXPECT_EQ(link->desc().src, LayerCompositeTargetKey(2));
+
+        // The palette is its own card in its composite, and still part of the
+        // compose layer's picture wherever it shows.
+        std::vector<std::string> outputs;
+        const vulkan::CustomShaderPass* composite = nullptr;
+        for (const auto id : graph->topologicalOrder()) {
+            auto* pass = dynamic_cast<const vulkan::CustomShaderPass*>(graph->getPass(id));
+            if (pass == nullptr || pass->desc().node == nullptr ||
+                pass->desc().node->Name() != "palette")
+                continue;
+            outputs.push_back(pass->desc().output);
+            if (pass->desc().output == LayerCompositeTargetKey(2)) composite = pass;
+        }
+        auto expected = std::vector<std::string> { LayerCompositeTargetKey(2) };
+        if (in_picture) expected.push_back(compose_target);
+        EXPECT_EQ(outputs, expected);
+        ASSERT_NE(composite, nullptr);
+        ExpectCardFillsItsTarget(*parsed, *composite, { 8.0, 4.0 });
+        EXPECT_TRUE(composite->desc().node->MustProduce());
+    }
+}
+
+// A text layer is sampled like an image: a hidden title another layer scrolls
+// across a card of its own, a clock whose effect outlines what it samples. Only
+// an image layer was given a composite, though. A sampled text layer was drawn
+// through the scene camera into a screen-sized fallback, so the consumer found
+// the text wherever it sits on screen, and, hidden, it was never drawn at all.
+// Its card is laid out again whenever the text changes, so its composite moves
+// and resizes with it, one texel per unit as an image's is: a consumer may place
+// the image by its size.
+TEST(LayerTextureReference, ASampledTextLayerIsItsCardInItsOwnComposite) {
+    // With an effect the layer draws at an effect capacity larger than its
+    // card, and what is sampled is still the card. Declared as a dependency the
+    // reference is known before the text is parsed; named only in a material
+    // file it is found while the consumer is parsed.
+    for (const bool with_effect : { false, true }) {
+        for (const bool declared : { true, false }) {
+            SCOPED_TRACE(std::string(with_effect ? "with an effect" : "plain") +
+                         (declared ? ", declared" : ", found in a material"));
+            auto files = CopyEffectFiles();
+            files["/linked_mat.json"] =
+                R"({"passes":[{"blending":"translucent","cullmode":"nocull","depthtest":"disabled","depthwrite":"disabled","shader":"genericimage","textures":["_rt_imageLayerComposite_416_a"]}]})";
+            // Left-aligned in a box narrower than the text, the card overflows to
+            // the right and is not centred on the layer's origin.
+            const std::string objects =
+                std::string(R"([
+                {"id":680,"name":"marquee","image":"linked.json")") +
+                (declared ? R"(,"dependencies":[416])" : "") + R"(},
+                {"id":416,"name":"title","text":"Wind","font":"Arial","pointsize":20,
+                 "padding":0,"size":[24,40],"horizontalalign":"left",
+                 "origin":[50,20,0],"visible":false)" +
+                (with_effect ? R"(,"effects":[{"file":"effects/copy/effect.json","visible":true}])"
+                             : "") +
+                "}]";
+            const ProjectProperties properties {};
+            fs::VFS                 vfs;
+            auto parsed = ParseScene(vfs, objects, files, &properties);
+            ASSERT_NE(parsed, nullptr);
+            ASSERT_NE(parsed->runtime, nullptr);
+            EXPECT_TRUE(parsed->layer_texture_error.empty()) << parsed->layer_texture_error;
+            AddScreenTarget(*parsed);
+            auto& runtime = *parsed->runtime;
+
+            // The pass that draws the title into its composite, and the card it
+            // draws there.
+            struct Composite {
+                const vulkan::CustomShaderPass* pass { nullptr };
+                Eigen::Vector2d                 lower, upper;
+            };
+            const auto find_composite = [&](const rg::RenderGraph& graph) {
+                Composite found;
+                found.pass = FindPassByOutput(graph, LayerCompositeTargetKey(416));
+                if (found.pass == nullptr || found.pass->desc().node->Mesh() == nullptr)
+                    return found;
+                std::tie(found.lower, found.upper) =
+                    CardCorners(*found.pass->desc().node->Mesh());
+                return found;
+            };
+            const auto expect_composite_is_the_card = [&](const Composite& composite) {
+                ASSERT_NE(composite.pass, nullptr) << "the title was never drawn into a composite";
+                auto* owner = composite.pass->desc().visibility_node != nullptr
+                                        ? composite.pass->desc().visibility_node
+                                        : composite.pass->desc().node;
+                EXPECT_EQ(owner->Name(), "title");
+                EXPECT_TRUE(owner->MustProduce()) << "hidden, the title would never be drawn";
+                // The card the title shows on screen, whichever mesh draws it.
+                ASSERT_NE(owner->Mesh(), nullptr);
+                const auto [card_lower, card_upper] = CardCorners(*owner->Mesh());
+                EXPECT_NEAR(composite.lower.x(), card_lower.x(), 1e-3);
+                EXPECT_NEAR(composite.lower.y(), card_lower.y(), 1e-3);
+                EXPECT_NEAR(composite.upper.x(), card_upper.x(), 1e-3);
+                EXPECT_NEAR(composite.upper.y(), card_upper.y(), 1e-3);
+                ExpectCardFillsItsTarget(*parsed, *composite.pass, composite.lower, composite.upper);
+                const auto* target = parsed->FindRenderTarget(LayerCompositeTargetKey(416));
+                ASSERT_NE(target, nullptr);
+                EXPECT_EQ(target->width, std::lround(composite.upper.x() - composite.lower.x()));
+                EXPECT_EQ(target->height, std::lround(composite.upper.y() - composite.lower.y()));
+            };
+
+            auto graph = sceneToRenderGraph(*parsed);
+            ASSERT_NE(graph, nullptr);
+            const auto* marquee = FindPassByNode(*graph, "marquee");
+            ASSERT_NE(marquee, nullptr);
+            ASSERT_FALSE(marquee->desc().textures.empty());
+            EXPECT_EQ(marquee->desc().textures[0], GenLinkTex(416));
+            const auto* link = FindLinkCopy(*graph, GenLinkTex(416));
+            ASSERT_NE(link, nullptr) << "the marquee was given nothing to sample";
+            EXPECT_EQ(link->desc().src, LayerCompositeTargetKey(416));
+
+            const auto before = find_composite(*graph);
+            expect_composite_is_the_card(before);
+            ASSERT_NE(before.pass, nullptr);
+            ASSERT_GT(std::abs((before.lower.x() + before.upper.x()) * 0.5), 1.0)
+                << "the fixture's card must sit off the layer's origin";
+
+            // A longer title widens the card while the layer stays hidden.
+            ASSERT_TRUE(runtime.SetNodeText("title", "Wind over the river"));
+            ASSERT_TRUE(PumpTextLayout(runtime, "title"))
+                << "a hidden text layer another samples was never laid out again";
+            EXPECT_TRUE(runtime.ConsumeSceneGraphMutationFlag())
+                << "the composite outgrew its target and nothing asked for a new graph";
+            graph = sceneToRenderGraph(*parsed);
+            ASSERT_NE(graph, nullptr);
+            const auto after = find_composite(*graph);
+            expect_composite_is_the_card(after);
+            ASSERT_NE(after.pass, nullptr);
+            EXPECT_GT(after.upper.x() - after.lower.x(), before.upper.x() - before.lower.x());
+        }
+    }
+}
+
+namespace
+{
+
+/// Layer 7, an image and a text layer, with two effects that name the layer's
+/// own composite: the first, `first`, where it would take `previous`, the
+/// second, `second`, next to it. Both must read the image the chain is working
+/// on, and only another layer may make the layer produce its composite. Older
+/// editors also list the layer in its own `dependencies`, once for each name
+/// its effects bind; that does not make it a sampled layer either.
+void ExpectOwnEffectsReadTheChainInput(std::string_view first, std::string_view second) {
+    constexpr std::string_view kBlendFrag = R"(uniform sampler2D g_Texture0;
+uniform sampler2D g_Texture1;
+varying vec2 v_TexCoord;
+void main() {
+  gl_FragColor = texture(g_Texture0, v_TexCoord) * texture(g_Texture1, v_TexCoord);
+}
+)";
+    const std::array<std::pair<std::string_view, std::string_view>, 2> layers { {
+        { "image", R"("image":"image.json")" },
+        { "text", R"("text":"Wind","font":"Arial","pointsize":20,"origin":[32,16,0])" },
+    } };
+    // { sampled elsewhere, listed in its own dependencies }
+    const std::array<std::pair<bool, bool>, 4> variants { {
+        { false, false }, { false, true }, { true, false }, { true, true },
+    } };
+    for (const auto& [kind, layer] : layers) {
+        for (const auto& [sampled_elsewhere, self_dependency] : variants) {
+            SCOPED_TRACE(std::string(kind) + (sampled_elsewhere ? ", sampled elsewhere" : "") +
+                         (self_dependency ? ", in its own dependencies" : ""));
+            auto files = CopyEffectFiles();
+            files["/effects/blend/effect.json"] =
+                R"({"name":"blend","passes":[{"material":"materials/blend.json"}]})";
+            files["/materials/blend.json"] =
+                R"({"passes":[{"blending":"translucent","cullmode":"nocull","depthtest":"disabled","depthwrite":"disabled","shader":"blend","textures":[null,null]}]})";
+            files["/shaders/blend.vert"] = std::string(kVert);
+            files["/shaders/blend.frag"] = std::string(kBlendFrag);
+            files["/linked_mat.json"] =
+                R"({"passes":[{"blending":"translucent","cullmode":"nocull","depthtest":"disabled","depthwrite":"disabled","shader":"genericimage","textures":["_rt_imageLayerComposite_7_a"]}]})";
+            const std::string objects =
+                std::string(R"([{"id":7,"name":"outlined",)") + std::string(layer) +
+                (self_dependency ? R"(,"dependencies":[7,7])" : "") + R"(,
+                "effects":[
+                  {"file":"effects/copy/effect.json","visible":true,
+                   "passes":[{"textures":[")" + std::string(first) + R"("]}]},
+                  {"file":"effects/blend/effect.json","visible":true,
+                   "passes":[{"textures":[null,")" + std::string(second) + R"("]}]}]})" +
+                (sampled_elsewhere
+                     ? R"(,{"id":8,"name":"mirror","image":"linked.json","dependencies":[7]})"
+                     : "") +
+                "]";
+            const ProjectProperties properties {};
+            fs::VFS                 vfs;
+            auto parsed = ParseScene(vfs, objects, files, &properties);
+            ASSERT_NE(parsed, nullptr);
+            EXPECT_TRUE(parsed->layer_texture_error.empty()) << parsed->layer_texture_error;
+            // Its own effects do not make a layer something another samples.
+            EXPECT_EQ(parsed->layer_texture_sources.contains(7), sampled_elsewhere);
+            AddScreenTarget(*parsed);
+            SceneNode* outlined = nullptr;
+            for (auto& child : parsed->sceneGraph->GetChildren()) {
+                if (child->Name() == "outlined") outlined = child.get();
+            }
+            ASSERT_NE(outlined, nullptr);
+            const auto camera = parsed->cameras.find(outlined->Camera());
+            ASSERT_NE(camera, parsed->cameras.end());
+            ASSERT_TRUE(camera->second->HasImgEffect());
+            auto& chain = *camera->second->GetImgEffect();
+            ASSERT_EQ(chain.EffectCount(), 2u);
+
+            const auto graph = sceneToRenderGraph(*parsed);
+            ASSERT_NE(graph, nullptr);
+            const auto passes_of = [&](const SceneNode* node) {
+                std::vector<const vulkan::CustomShaderPass*> found;
+                for (const auto id : graph->topologicalOrder()) {
+                    auto* pass = dynamic_cast<const vulkan::CustomShaderPass*>(graph->getPass(id));
+                    if (pass != nullptr && pass->desc().node == node) found.push_back(pass);
+                }
+                return found;
+            };
+            const auto own = passes_of(outlined);
+            const auto first  = passes_of(chain.GetEffect(0)->nodes.front().sceneNode.get());
+            const auto second = passes_of(chain.GetEffect(1)->nodes.front().sceneNode.get());
+            ASSERT_EQ(own.size(), 1u);
+            ASSERT_EQ(first.size(), 1u);
+            ASSERT_FALSE(second.empty());
+
+            // The first effect reads the layer as drawn, before any effect...
+            ASSERT_FALSE(first[0]->desc().textures.empty());
+            EXPECT_EQ(first[0]->desc().textures[0], own[0]->desc().output);
+            // ...and the second what the first made of it, in both slots.
+            for (const auto* pass : second) {
+                ASSERT_GE(pass->desc().textures.size(), 2u);
+                EXPECT_EQ(pass->desc().textures[0], first[0]->desc().output);
+                EXPECT_EQ(pass->desc().textures[1], pass->desc().textures[0]);
+            }
+
+            const auto* link = FindLinkCopy(*graph, GenLinkTex(7));
+            if (! sampled_elsewhere) {
+                EXPECT_EQ(link, nullptr);
+                EXPECT_EQ(FindPassByOutput(*graph, LayerCompositeTargetKey(7)), nullptr)
+                    << "the layer was drawn into a composite nobody samples";
+                continue;
+            }
+            const auto* mirror = FindPassByNode(*graph, "mirror");
+            ASSERT_NE(mirror, nullptr);
+            ASSERT_FALSE(mirror->desc().textures.empty());
+            EXPECT_EQ(mirror->desc().textures[0], GenLinkTex(7));
+            ASSERT_NE(link, nullptr) << "the mirror was given nothing to sample";
+            EXPECT_EQ(link->desc().src, LayerCompositeTargetKey(7));
+            EXPECT_NE(FindPassByOutput(*graph, LayerCompositeTargetKey(7)), nullptr);
+        }
+    }
+}
+
+} // namespace
+
+// A layer's own effect may bind the layer's `_a` composite where it would
+// otherwise take `previous` -- an outline that names the text it outlines.
+// Inside the layer's chain that is the chain's buffer A, the image the effect
+// works on; the composite is what the chain ends in. Read as the composite, the
+// effect sampled a link the frame had yet to fill, so the layer drew nothing
+// and the native backend refused the scene as history feedback. Another layer
+// binding the same name still samples the finished composite.
+TEST(LayerTextureReference, ALayersOwnEffectReadsItsBufferANotItsComposite) {
+    ExpectOwnEffectsReadTheChainInput("_rt_imageLayerComposite_7_a", "_rt_imageLayerComposite_7_a");
+}
+
+// `_b` is the chain's other ping-pong buffer. The layer is drawn into `_a` and
+// every effect pass without a target of its own writes the other buffer; the
+// editor names, in the slot `previous` fills, the buffer `previous` was in when
+// the effect was set up, so `_a` and `_b` alternate along the chain (built-in
+// blur, shine and godrays; a workshop wave named `_b` in its first slot, after
+// one effect). Taken as last-frame history, the name made the native backend
+// refuse the whole scene and the wave sampled an empty link; it is the image
+// the effect works on. A name left over from before the effects were reordered
+// is still that image.
+TEST(LayerTextureReference, ALayersOwnEffectReadsItsBufferBAsTheImageItWorksOn) {
+    {
+        SCOPED_TRACE("_a then _b, as the editor alternates them");
+        ExpectOwnEffectsReadTheChainInput("_rt_imageLayerComposite_7_a",
+                                          "_rt_imageLayerComposite_7_b");
+    }
+    {
+        SCOPED_TRACE("_b in both");
+        ExpectOwnEffectsReadTheChainInput("_rt_imageLayerComposite_7_b",
+                                          "_rt_imageLayerComposite_7_b");
+    }
+}
+
+// A wallpaper whose settings offer a choice -- a theme, a language, a date
+// format -- usually ships every option as a layer and hides all but the chosen
+// one through its properties. Changing a property reloads the scene, so a layer
+// they hide cannot appear before the next parse unless a script shows it. Its
+// passes, and the effect targets they would allocate, stay out of the graph
+// until then; a layer a script drives, or one another layer samples, stays in.
+// A layer whose own effect names it, and which the editor lists in its own
+// `dependencies` for that, is not sampled by another.
+TEST(HiddenLayers, ALayerItsPropertiesHideStaysOutOfTheGraphUntilSomethingShowsIt) {
+    const ProjectProperties properties {
+        { "light", RuntimeScalarValue::Bool(true) },
+        { "dark", RuntimeScalarValue::Bool(false) },
+    };
+    auto files = CopyEffectFiles();
+    files["/linked_mat.json"] =
+        R"({"passes":[{"blending":"translucent","cullmode":"nocull","depthtest":"disabled","depthwrite":"disabled","shader":"genericimage","textures":["_rt_imageLayerComposite_6_a"]}]})";
+    fs::VFS vfs;
+    MountFiles(vfs, std::move(files));
+    audio::SoundManager sound;
+    WPSceneParser       parser;
+    auto                parsed = parser.Parse(
+        SceneParseRequest { .scene_id = "hidden-layers", .project_properties = &properties },
+        SceneJson(R"([
+        {"id":1,"name":"chosen","image":"image.json","visible":{"user":"light","value":false},
+         "effects":[{"file":"effects/copy/effect.json","visible":true}]},
+        {"id":2,"name":"unchosen","image":"image.json","visible":{"user":"dark","value":true},
+         "effects":[{"file":"effects/copy/effect.json","visible":true}]},
+        {"id":3,"name":"group","visible":{"user":"dark","value":true}},
+        {"id":4,"name":"member","image":"image.json","parent":3,
+         "effects":[{"file":"effects/copy/effect.json","visible":true}]},
+        {"id":5,"name":"scripted","image":"image.json",
+         "visible":{"script":"export function update(value) { return value; }",
+                    "user":"dark","value":true}},
+        {"id":6,"name":"source","image":"image.json","visible":{"user":"dark","value":true}},
+        {"id":7,"name":"consumer","image":"linked.json","dependencies":[6]},
+        {"id":8,"name":"self-lit","image":"image.json","visible":{"user":"dark","value":true},
+         "dependencies":[8],
+         "effects":[{"file":"effects/copy/effect.json","visible":true,
+                     "passes":[{"textures":["_rt_imageLayerComposite_8_a"]}]}]},
+        {"id":9,"name":"self-lit-off","image":"image.json","visible":false,
+         "dependencies":[9],
+         "effects":[{"file":"effects/copy/effect.json","visible":true,
+                     "passes":[{"textures":["_rt_imageLayerComposite_9_b"]}]}]}
+      ])"),
+        vfs,
+        sound);
+    ASSERT_NE(parsed, nullptr);
+    ASSERT_NE(parsed->runtime, nullptr);
+    AddScreenTarget(*parsed);
+    auto& runtime = *parsed->runtime;
+
+    // Every pass a layer owns, its effect steps included, counted by the layer
+    // whose visibility decides whether it draws.
+    const auto passes_of = [](const rg::RenderGraph& graph, std::string_view name) {
+        std::size_t count = 0;
+        for (const auto id : graph.topologicalOrder()) {
+            auto* pass = dynamic_cast<const vulkan::CustomShaderPass*>(graph.getPass(id));
+            if (pass == nullptr) continue;
+            const auto* owner = pass->desc().visibility_node != nullptr
+                                    ? pass->desc().visibility_node
+                                    : pass->desc().node;
+            if (owner != nullptr && owner->Name() == name) ++count;
+        }
+        return count;
+    };
+
+    auto graph = sceneToRenderGraph(*parsed);
+    ASSERT_NE(graph, nullptr);
+    EXPECT_GT(passes_of(*graph, "chosen"), 1u) << "the chosen layer lost its effect";
+    EXPECT_EQ(passes_of(*graph, "unchosen"), 0u) << "a layer its properties hide was drawn";
+    EXPECT_EQ(passes_of(*graph, "member"), 0u) << "a hidden group's member was drawn";
+    EXPECT_EQ(passes_of(*graph, "scripted"), 1u)
+        << "a layer whose script decides its visibility must stay in the graph";
+    EXPECT_EQ(passes_of(*graph, "source"), 1u) << "a hidden layer another samples must still draw";
+    EXPECT_EQ(passes_of(*graph, "self-lit"), 0u)
+        << "a layer its properties hide was kept for its own effect";
+    EXPECT_EQ(passes_of(*graph, "self-lit-off"), 0u)
+        << "a hidden layer was kept for its own effect";
+
+    // Showing a layer that is already in the graph changes nothing about it.
+    EXPECT_FALSE(runtime.ConsumeSceneGraphMutationFlag());
+    ASSERT_TRUE(runtime.SetNodeVisible("scripted", true));
+    EXPECT_FALSE(runtime.ConsumeSceneGraphMutationFlag());
+
+    // What `layer.visible = true` from a SceneScript reaches.
+    ASSERT_TRUE(runtime.SetNodeVisible("unchosen", true));
+    EXPECT_TRUE(runtime.ConsumeSceneGraphMutationFlag())
+        << "a script showed a layer the graph left out, and nothing asked for a new graph";
+    graph = sceneToRenderGraph(*parsed);
+    EXPECT_EQ(passes_of(*graph, "unchosen"), passes_of(*graph, "chosen"));
+    // From now on the script decides: hidden again, it keeps its passes, so a
+    // script that blinks a layer asks for one new graph and not one per blink.
+    ASSERT_TRUE(runtime.SetNodeVisible("unchosen", false));
+    ASSERT_TRUE(runtime.SetNodeVisible("unchosen", true));
+    EXPECT_FALSE(runtime.ConsumeSceneGraphMutationFlag());
+    ASSERT_TRUE(runtime.SetNodeVisible("unchosen", false));
+    graph = sceneToRenderGraph(*parsed);
+    EXPECT_EQ(passes_of(*graph, "unchosen"), passes_of(*graph, "chosen"));
+
+    // The group's member shows when the group does.
+    ASSERT_TRUE(runtime.SetNodeVisible("group", true));
+    EXPECT_TRUE(runtime.ConsumeSceneGraphMutationFlag());
+    graph = sceneToRenderGraph(*parsed);
+    EXPECT_EQ(passes_of(*graph, "member"), passes_of(*graph, "chosen"));
+    ASSERT_TRUE(runtime.SetNodeVisible("group", false));
+
+    // A property applied in place, rather than by a reload, shows the rest.
+    fs::VFS             reload_vfs;
+    MountFiles(reload_vfs, CopyEffectFiles());
+    auto in_place = parser.Parse(
+        SceneParseRequest { .scene_id = "hidden-layers", .project_properties = &properties },
+        SceneJson(R"([
+        {"id":2,"name":"unchosen","image":"image.json","visible":{"user":"dark","value":true},
+         "effects":[{"file":"effects/copy/effect.json","visible":true}]}
+      ])"),
+        reload_vfs,
+        sound);
+    ASSERT_NE(in_place, nullptr);
+    AddScreenTarget(*in_place);
+    graph = sceneToRenderGraph(*in_place);
+    EXPECT_EQ(passes_of(*graph, "unchosen"), 0u);
+    in_place->runtime->ApplyProjectPropertyOverride({ { "dark", RuntimeScalarValue::Bool(true) } });
+    in_place->runtime->Tick(1.0 / 60.0);
+    EXPECT_TRUE(in_place->runtime->ConsumeSceneGraphMutationFlag())
+        << "a property shown in place left its layer out of the graph";
+    graph = sceneToRenderGraph(*in_place);
+    EXPECT_GT(passes_of(*graph, "unchosen"), 1u);
+}
+
+// A property shown on the running scene, rather than by loading it again, takes
+// the same path a script does: the tick that applies it sees a layer appear that
+// the graph left out and asks for one new graph. Nothing else moves the graph. A
+// layer the preview hides again keeps its passes until the next build, so a layer
+// that blinks costs nothing, and the next build leaves it out once more.
+TEST(HiddenLayers, APropertyPreviewRevealsALayerWithOneGraphRebuildAndAGraphBuiltLaterLeavesTheHiddenOneOutAgain) {
+    const ProjectProperties properties {
+        { "light", RuntimeScalarValue::Bool(true) },
+        { "dark", RuntimeScalarValue::Bool(false) },
+        { "glow", RuntimeScalarValue::Bool(false) },
+    };
+    fs::VFS vfs;
+    MountFiles(vfs, CopyEffectFiles());
+    audio::SoundManager sound { audio::SoundManager::OutputBackend::Null };
+    WPSceneParser       parser;
+    auto                parsed = parser.Parse(
+        SceneParseRequest { .scene_id = "preview-reveals", .project_properties = &properties },
+        SceneJson(R"([
+        {"id":1,"name":"chosen","image":"image.json","visible":{"user":"light","value":false},
+         "effects":[{"file":"effects/copy/effect.json","visible":true}]},
+        {"id":2,"name":"unchosen","image":"image.json","visible":{"user":"dark","value":true},
+         "effects":[{"file":"effects/copy/effect.json","visible":true}]},
+        {"id":3,"name":"held","image":"image.json","visible":{"user":"glow","value":true},
+         "effects":[{"file":"effects/copy/effect.json","visible":{"user":"glow","value":true}}]}
+      ])"),
+        vfs,
+        sound);
+    ASSERT_NE(parsed, nullptr);
+    ASSERT_NE(parsed->runtime, nullptr);
+    AddScreenTarget(*parsed);
+    auto& runtime = *parsed->runtime;
+
+    const auto passes_of = [](const rg::RenderGraph& graph, std::string_view name) {
+        std::size_t count = 0;
+        for (const auto id : graph.topologicalOrder()) {
+            auto* pass = dynamic_cast<const vulkan::CustomShaderPass*>(graph.getPass(id));
+            if (pass == nullptr) continue;
+            const auto* owner = pass->desc().visibility_node != nullptr
+                                    ? pass->desc().visibility_node
+                                    : pass->desc().node;
+            if (owner != nullptr && owner->Name() == name) ++count;
+        }
+        return count;
+    };
+    // One tick, as a frame runs it, and whether it asked for a new graph.
+    const auto tick = [&runtime] {
+        runtime.Tick(1.0 / 60.0);
+        return runtime.ConsumeSceneGraphMutationFlag();
+    };
+
+    auto graph = sceneToRenderGraph(*parsed);
+    ASSERT_NE(graph, nullptr);
+    const std::size_t chosen_passes = passes_of(*graph, "chosen");
+    ASSERT_GT(chosen_passes, 1u) << "the chosen layer lost its effect";
+    ASSERT_EQ(passes_of(*graph, "unchosen"), 0u);
+    ASSERT_EQ(passes_of(*graph, "held"), 0u);
+    EXPECT_FALSE(tick());
+
+    // A property that only changes what is already shown asks for no graph.
+    runtime.PreviewProjectPropertyOverride({ { "light", RuntimeScalarValue::Bool(true) } });
+    EXPECT_FALSE(tick());
+
+    // A property that only a load can apply reveals nothing: the layer and the
+    // effect that follow the same switch stay as the scene built them.
+    const auto held = runtime.PreviewProjectPropertyOverride({ { "glow", RuntimeScalarValue::Bool(true) } });
+    EXPECT_EQ(held.deferred, std::vector<std::string> { "glow" });
+    EXPECT_FALSE(tick());
+    EXPECT_FALSE(runtime.NodeVisible("held"));
+
+    // The preview shows the layer: one tick asks for one graph, and no tick after
+    // it asks again, whether the graph has been built yet or not.
+    runtime.PreviewProjectPropertyOverride({ { "dark", RuntimeScalarValue::Bool(true) } });
+    EXPECT_TRUE(tick()) << "a preview showed a layer the graph left out and asked for no new graph";
+    EXPECT_FALSE(tick());
+    graph = sceneToRenderGraph(*parsed);
+    EXPECT_EQ(passes_of(*graph, "unchosen"), chosen_passes);
+
+    // Hidden again and shown again on the graph that has its passes: nothing is
+    // rebuilt, and the passes are still there the whole time.
+    runtime.PreviewProjectPropertyOverride({});
+    EXPECT_FALSE(tick());
+    EXPECT_FALSE(runtime.NodeVisible("unchosen"));
+    EXPECT_EQ(passes_of(*graph, "unchosen"), chosen_passes);
+    runtime.PreviewProjectPropertyOverride({ { "dark", RuntimeScalarValue::Bool(true) } });
+    EXPECT_FALSE(tick()) << "a layer the graph still draws asked for a new graph";
+
+    // A graph built while it is hidden leaves it out again: its passes and the
+    // targets they would allocate are not kept for a layer only a property shows.
+    runtime.PreviewProjectPropertyOverride({});
+    EXPECT_FALSE(tick());
+    graph = sceneToRenderGraph(*parsed);
+    EXPECT_EQ(passes_of(*graph, "unchosen"), 0u);
+    EXPECT_EQ(passes_of(*graph, "chosen"), chosen_passes);
+
+    // And showing it then asks for a graph again, once.
+    runtime.PreviewProjectPropertyOverride({ { "dark", RuntimeScalarValue::Bool(true) } });
+    EXPECT_TRUE(tick());
+    EXPECT_FALSE(tick());
+    graph = sceneToRenderGraph(*parsed);
+    EXPECT_EQ(passes_of(*graph, "unchosen"), chosen_passes);
 }
 
 // A fullscreen layer post-processes the screen, so its result has to land on

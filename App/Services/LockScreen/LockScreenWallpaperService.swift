@@ -20,6 +20,15 @@ final class LockScreenWallpaperService {
     anyRequested && screenSaverError == nil
       && (errorMessage == nil || (screenSaverRequested && lockScreenActivationError != nil))
   }
+  /// Whether the native provider has the desktop picture, or an animated lock screen is on its way
+  /// to taking it. Poster sync then stays out of the way; a screen saver chosen on its own and a
+  /// lock screen that failed to start leave the picture to the posters.
+  var claimsDesktopPicture: Bool {
+    ownsDesktopProvider || (isRequested && canRefreshAutomatically && errorMessage == nil)
+  }
+  /// Whether the choice to write the desktop picture is not the user's to make right now: from the
+  /// moment the lock screen is asked for until it has handed the desktop back, even when it failed.
+  var locksDesktopPictureChoice: Bool { isRequested || ownsDesktopProvider }
   @ObservationIgnored var beforeActivation: (() throws -> Void)?
   @ObservationIgnored var afterDeactivation: (() throws -> Void)?
 
@@ -34,12 +43,18 @@ final class LockScreenWallpaperService {
   @ObservationIgnored private let persistConfiguration: (URL, Data) throws -> Void
   @ObservationIgnored private let notifyConfigurationChanged: () -> Void
   @ObservationIgnored private let prepareExtension: () async throws -> Void
+  @ObservationIgnored private let enableExtension: () async throws -> Void
   @ObservationIgnored private let expectedExtensionBundle: URL
   @ObservationIgnored private let runningExtensionBundles: () -> [URL]
   @ObservationIgnored private let readinessTimeout: TimeInterval
   @ObservationIgnored private var work: Task<Void, Never>?
   @ObservationIgnored private var extensionPreparation: Task<Void, Error>?
   @ObservationIgnored private var copyRecoveryAttempted = false
+  /// The last activation stopped because macOS has the renderer switched off, so a Retry may
+  /// switch it on again. Cleared by any other outcome and when nothing is requested any more.
+  @ObservationIgnored private var electionRepairOffered = false
+  /// A Retry click asked for that repair; the next preparation does it, once.
+  @ObservationIgnored private var electionRepairArmed = false
   @ObservationIgnored private var monitor: Timer?
   @ObservationIgnored private var generation: UInt64 = 0
   @ObservationIgnored private var recovered = false
@@ -58,9 +73,10 @@ final class LockScreenWallpaperService {
   @ObservationIgnored private var lockScreenActivationError: String?
 
   convenience init(bridge: WallpaperBridge, contentRevision: @escaping () -> UInt64 = { 0 }) {
-    let registration = LockScreenExtensionRegistration()
+    let registration = LockScreenExtensionRegistration(processes: .live)
     self.init(
       prepareExtension: { try await registration.prepare() },
+      enableExtension: { try await registration.enableExtension() },
       notifyConfigurationChanged: {
         CFNotificationCenterPostNotification(
           CFNotificationCenterGetDarwinNotifyCenter(),
@@ -74,6 +90,7 @@ final class LockScreenWallpaperService {
 
   init(
     prepareExtension: @escaping () async throws -> Void,
+    enableExtension: @escaping () async throws -> Void = {},
     notifyConfigurationChanged: @escaping () -> Void,
     scenes: @escaping () async throws -> [BridgeLockScreenScene],
     selection: LockScreenWallpaperSelection, exchange: URL,
@@ -99,6 +116,7 @@ final class LockScreenWallpaperService {
     self.persistConfiguration = persistConfiguration
     self.notifyConfigurationChanged = notifyConfigurationChanged
     self.prepareExtension = prepareExtension
+    self.enableExtension = enableExtension
     self.expectedExtensionBundle = expectedExtensionBundle
     self.runningExtensionBundles = runningExtensionBundles
     self.readinessTimeout = readinessTimeout
@@ -138,6 +156,7 @@ final class LockScreenWallpaperService {
   func setEnabled(_ enabled: Bool) {
     guard !stopping else { return }
     isRequested = enabled
+    dropRepairOfferIfNothingIsRequested()
     updateMonitor()
     if !enabled { defaults.set(false, forKey: Self.preference) }
     refresh(retryingLockScreen: true)
@@ -148,9 +167,24 @@ final class LockScreenWallpaperService {
     cancelExtensionPreparation()
     copyRecoveryAttempted = false
     screenSaverRequested = enabled
+    dropRepairOfferIfNothingIsRequested()
     updateMonitor()
     if !enabled { defaults.set(false, forKey: Self.screenSaverPreference) }
     refresh()
+  }
+
+  /// A click on the Retry button of the lock-screen row (`lockScreen`) or the screen-saver
+  /// row. Only this asks for the election repair: the app switches the renderer back on for a
+  /// click on that button, not for the monitor, a snapshot refresh, a relaunch or a switch.
+  func retry(lockScreen: Bool) {
+    guard !stopping else { return }
+    electionRepairArmed = electionRepairOffered
+    refresh(retryingLockScreen: lockScreen)
+  }
+
+  /// The offer belongs to a failure shown in a row; with both modes off no row shows one.
+  private func dropRepairOfferIfNothingIsRequested() {
+    if !anyRequested { electionRepairOffered = false }
   }
 
   func refresh(retryingLockScreen: Bool = false) {
@@ -192,10 +226,17 @@ final class LockScreenWallpaperService {
     }
   }
 
+  static let monitorInterval: TimeInterval = 2
+
   static func scheduleMonitorTimer(_ callback: @escaping @MainActor () -> Void) -> Timer {
-    Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { _ in
+    let timer = Timer.scheduledTimer(withTimeInterval: monitorInterval, repeats: true) { _ in
       MainActor.assumeIsolated { callback() }
     }
+    // The tick only reconciles state that has no notification of its own (a battery
+    // pause, a new Space, a choice in System Settings), so a check that slides by a
+    // second is harmless and lets the system coalesce it with other wakeups.
+    timer.tolerance = monitorInterval / 2
+    return timer
   }
 
   func shutdown(restoringDesktop: () async throws -> Void = {}) async throws {
@@ -235,6 +276,9 @@ final class LockScreenWallpaperService {
     defer {
       if generation == revision {
         isBusy = false
+        // A click's repair is for the update that follows it; an update that never needed the
+        // renderer (nothing applied yet) must not leave it behind for a later refresh.
+        electionRepairArmed = false
         updateMonitor()
       }
     }
@@ -302,6 +346,7 @@ final class LockScreenWallpaperService {
           wallpaperID: record.wallpaperId, title: record.title,
           projectPath: record.projectPath, assetsPath: record.assetsPath, fps: record.fps,
           scalingMode: mode, scalingFactor: record.scalingFactor,
+          framing: LockScreenFraming(panX: record.framing.panX, panY: record.framing.panY),
           propertiesJSON: record.propertiesJson, paused: record.paused))
       }
       inputs.sort { $0.displayID < $1.displayID }
@@ -355,7 +400,14 @@ final class LockScreenWallpaperService {
         // A snapshot refresh cancels its waiter, not the shared registration work.
         // Keep the result until publication so the next waiter cannot restart it.
         if extensionPreparation == nil {
-          extensionPreparation = Task { try await prepareExtension() }
+          let repairElection = electionRepairArmed
+          extensionPreparation = Task {
+            if repairElection {
+              try await enableExtension()
+              electionRepairArmed = false
+            }
+            try await prepareExtension()
+          }
         }
         try await extensionPreparation?.value
         try Task.checkCancellation()
@@ -422,6 +474,7 @@ final class LockScreenWallpaperService {
       lastHasWebWallpapers = prepared.hasWebWallpapers
       updateStatuses(configuration, hasWebWallpapers: prepared.hasWebWallpapers)
       copyRecoveryAttempted = false
+      electionRepairOffered = false
       if isEnabled { defaults.set(true, forKey: Self.preference) }
       if screenSaverEnabled { defaults.set(true, forKey: Self.screenSaverPreference) }
     } catch is CancellationError {
@@ -446,6 +499,7 @@ final class LockScreenWallpaperService {
         } catch { failure = error }
       }
       lockScreenActivationError = nil
+      electionRepairOffered = (failure as? LockScreenWallpaperFailure)?.reason == .extensionTurnedOff
       var message = failure.localizedDescription
       do { try deactivate() } catch {
         message += " " + String(localized: "Restoration also failed: \(error.localizedDescription)")
@@ -557,12 +611,22 @@ final class LockScreenWallpaperService {
     do {
       try await awaitFrames(configuration, until: deadline)
       unconfirmed = nil
+      AppLog.info(
+        "Native lock screen: first frame acknowledged after \(waited(until: deadline)) s "
+          + "(waited from selection reload)")
     } catch is CancellationError {
       throw CancellationError()
     } catch {
       unconfirmed = nil
       throw error
     }
+  }
+
+  /// Seconds since this activation began waiting, which includes the time an interrupted wait
+  /// already spent: a wait ends `readinessTimeout` after it began, whichever refresh resumes it.
+  private func waited(until deadline: Date) -> String {
+    let began = deadline.addingTimeInterval(-readinessTimeout)
+    return LockScreenFirstFrameTiming.seconds(.seconds(max(0, Date().timeIntervalSince(began))))
   }
 
   private func awaitFrames(_ configuration: LockScreenConfiguration, until deadline: Date) async throws {
@@ -590,10 +654,13 @@ final class LockScreenWallpaperService {
     if let other = runningExtensionBundles().first(where: {
       !LockScreenExtensionDiagnostics.isSameBundle($0, expected)
     }) {
-      AppLog.error("Native extension timeout: running bundle=\(other.path), expected=\(expected.path)")
+      AppLog.error(
+        "Native extension timeout: running bundle=\(other.path), expected=\(expected.path), "
+          + "waited \(waited(until: deadline)) s")
       throw LockScreenWallpaperFailure(
         message: LockScreenExtensionDiagnostics.differentCopyMessage, reason: .differentExtensionCopy)
     }
+    AppLog.error("Native lock screen: no first frame acknowledged after \(waited(until: deadline)) s")
     throw RendererUnavailable()
   }
 
@@ -650,6 +717,8 @@ private struct LockScreenPublishInput: Equatable, Sendable {
   var fps: UInt32
   var scalingMode: Int32
   var scalingFactor: Double
+  /// Part of the input, so moving a wallpaper on its display republishes a revision.
+  var framing: LockScreenFraming
   var propertiesJSON: String?
   var paused: Bool
 }
@@ -741,7 +810,9 @@ private enum LockScreenAssetPublisher {
           projectPath: projectRevision + "/project.json", assetsPath: assetsRevision,
           previewPath: nil,
           fps: input.fps, scalingMode: input.scalingMode, scalingFactor: input.scalingFactor,
-          propertiesJSON: properties, paused: input.paused, webEntryFile: webEntry))
+          propertiesJSON: properties, paused: input.paused, webEntryFile: webEntry,
+          // A web page fills its window, so it has no position to carry.
+          framing: isWeb ? nil : input.framing))
     }
     return Prepared(
       configuration: LockScreenConfiguration(scenes: scenes),

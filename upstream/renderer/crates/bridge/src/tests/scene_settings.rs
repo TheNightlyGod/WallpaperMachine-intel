@@ -12,7 +12,7 @@
 
 use wallpaper_core::{
     SceneBackend, SceneDemandReasons, SceneRendererPreference, SceneRuntimeReport,
-    SceneUpdateMode, SceneVideoPath,
+    SceneUpdateMode, SceneVideoPath, SurfaceHealth, SurfaceStopReason,
 };
 
 use crate::{
@@ -31,6 +31,21 @@ fn report(display_id: u32, handle: u64) -> SceneRuntimeReport {
         fallback_reason: None,
         video_path: SceneVideoPath::None,
         optimization_applied: Some(true),
+        surface: None,
+    }
+}
+
+/// A surface the renderer read that is drawing normally.
+fn healthy_surface() -> SurfaceHealth {
+    SurfaceHealth::from_raw(600, 600, 0, 16, 0)
+}
+
+/// A surface the renderer read that stopped after `reason`.
+fn stopped_surface(reason: SurfaceStopReason) -> SurfaceHealth {
+    SurfaceHealth {
+        stop: Some(reason),
+        failed_frames: 1,
+        ..healthy_surface()
     }
 }
 
@@ -98,7 +113,7 @@ async fn scene_on_demand_defaults_off_and_reaches_the_engine_through_both_facade
 }
 
 #[tokio::test]
-async fn scene_renderer_defaults_to_compatibility_and_reaches_both_facade_halves() {
+async fn scene_renderer_defaults_to_native_metal_and_reaches_both_facade_halves() {
     let temp = tempfile::tempdir().unwrap();
     let store = ConfigStore::open(temp.path().to_path_buf());
     let engine = FakeEngineFacade::default();
@@ -109,20 +124,20 @@ async fn scene_renderer_defaults_to_compatibility_and_reaches_both_facade_halves
 
     assert_eq!(
         bridge.settings_snapshot().await.unwrap().scene_renderer,
-        "compatibility"
+        "native_metal_preferred"
     );
 
     let snapshot = bridge
-        .set_scene_renderer("native_metal_preferred".into())
+        .set_scene_renderer("compatibility".into())
         .await
         .unwrap()
         .settings;
-    assert_eq!(snapshot.scene_renderer, "native_metal_preferred");
+    assert_eq!(snapshot.scene_renderer, "compatibility");
     // End state only: the switch is process-wide while the rebuild is per
     // wallpaper, so the number of transitions is not a contract.
     assert_eq!(
         engine.scene_renderer_calls().last().copied(),
-        Some(SceneRendererPreference::NativeMetalPreferred),
+        Some(SceneRendererPreference::Compatibility),
         "a delegation missing from ArcEngineFacade would leave this log empty"
     );
 
@@ -135,8 +150,9 @@ async fn scene_renderer_defaults_to_compatibility_and_reaches_both_facade_halves
     restarted.bootstrap().await.unwrap();
     assert_eq!(
         restarted_engine.scene_renderer_calls().last().copied(),
-        Some(SceneRendererPreference::NativeMetalPreferred),
-        "the saved preference has to be pushed back in before anything opens"
+        Some(SceneRendererPreference::Compatibility),
+        "the saved choice has to be pushed back in before anything opens, and a \
+         return to Compatibility is not moved to the default again"
     );
 }
 
@@ -157,7 +173,7 @@ async fn an_unknown_scene_renderer_name_is_refused_and_changes_nothing() {
     );
     assert_eq!(
         bridge.settings_snapshot().await.unwrap().scene_renderer,
-        "compatibility",
+        "native_metal_preferred",
         "the saved preference must be untouched by a rejected call"
     );
 }
@@ -245,6 +261,107 @@ async fn a_user_pause_outranks_the_renderers_own_classification() {
         "user_paused",
         "a wallpaper the user paused is paused, whatever the renderer's classifier says"
     );
+}
+
+#[tokio::test]
+async fn a_scene_that_stopped_after_a_failure_reads_stopped_after_failure_unless_the_user_paused_it()
+{
+    let engine = FakeEngineFacade::default();
+    // Both kinds of stop, a healthy surface the renderer read, and one it did
+    // not read at all, each next to a renderer classification that on its own
+    // would say the scene is ticking.
+    engine.set_scene_runtime_reports(vec![
+        SceneRuntimeReport {
+            surface: Some(stopped_surface(SurfaceStopReason::FrameFailed)),
+            ..report(7, 1)
+        },
+        SceneRuntimeReport {
+            surface: Some(stopped_surface(SurfaceStopReason::GraphFailed)),
+            ..report(8, 2)
+        },
+        SceneRuntimeReport {
+            surface: Some(healthy_surface()),
+            ..report(9, 3)
+        },
+        SceneRuntimeReport {
+            surface: None,
+            update_mode: None,
+            ..report(10, 4)
+        },
+    ]);
+    let bridge = bridge(&engine);
+
+    let modes = bridge.settings_snapshot().await.unwrap().scene_update_modes;
+
+    assert_eq!(
+        modes[0].mode, "stopped_after_failure",
+        "a frame that failed is not a scene that is continuously updating"
+    );
+    assert_eq!(modes[1].mode, "stopped_after_failure");
+    assert_eq!(modes[2].mode, "continuous");
+    assert_eq!(
+        modes[3].mode, "unknown",
+        "a surface the renderer did not read is unknown, never stopped and never running"
+    );
+
+    bridge.pause_all().await.unwrap();
+    let paused = bridge.settings_snapshot().await.unwrap().scene_update_modes;
+    assert!(
+        paused.iter().all(|row| row.mode == "user_paused"),
+        "a pause the user chose outranks a stop they have not seen: {:?}",
+        paused.iter().map(|row| row.mode.as_str()).collect::<Vec<_>>()
+    );
+
+    bridge.play_all().await.unwrap();
+    let resumed = bridge.settings_snapshot().await.unwrap().scene_update_modes;
+    assert_eq!(
+        resumed[0].mode, "stopped_after_failure",
+        "lifting the pause shows the failure that was latched underneath it"
+    );
+}
+
+#[tokio::test]
+async fn a_suspended_display_outranks_a_stopped_surface() {
+    let engine = FakeEngineFacade::default();
+    engine.set_scene_runtime_reports(vec![SceneRuntimeReport {
+        surface: Some(stopped_surface(SurfaceStopReason::FrameFailed)),
+        ..report(7, 1)
+    }]);
+    let bridge = bridge(&engine);
+
+    bridge
+        .set_display_presentation_suspended("7".into(), true)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        bridge.settings_snapshot().await.unwrap().scene_update_modes[0].mode,
+        "policy_suspended",
+        "a display the app deliberately suspended is not reported as a failure"
+    );
+}
+
+#[tokio::test]
+async fn a_report_without_surface_health_keeps_its_existing_mode() {
+    let engine = FakeEngineFacade::default();
+    engine.set_scene_runtime_reports(vec![
+        SceneRuntimeReport {
+            update_mode: Some(SceneUpdateMode::WaitingForEvent),
+            surface: None,
+            ..report(7, 1)
+        },
+        SceneRuntimeReport {
+            update_mode: Some(SceneUpdateMode::Continuous),
+            surface: None,
+            ..report(8, 2)
+        },
+    ]);
+    let bridge = bridge(&engine);
+
+    let modes = bridge.settings_snapshot().await.unwrap().scene_update_modes;
+
+    assert_eq!(modes[0].mode, "waiting_for_event");
+    assert_eq!(modes[1].mode, "continuous");
 }
 
 #[tokio::test]

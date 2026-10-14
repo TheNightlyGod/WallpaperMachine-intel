@@ -149,6 +149,16 @@ Playback, backend, host and startup areas are in
   read positions outside the canvas), but named layers take cursor events only
   while the cursor is inside it, so letterbox bars never trigger a layer whose box
   crosses the canvas edge.
+  The picture can also be positioned inside its slack (`WallpaperFraming`, the
+  trailing `pan_x`/`pan_y` of `ComputeWallpaperScalingLayout`); the mapping derives
+  from `layout.viewport_px` alone, so the pointer follows the position with no mapping
+  of its own. `WallpaperScaling.CursorMappingFollowsThePannedPresentation` in
+  `wallpaper_scaling_test` (CPU only, run by `check_renderer.py`) requires the window's
+  left edge to map to the camera's left edge at a pan of 0 and the right edges to meet
+  at 1, with the drawn content rectangle and the clip unchanged.
+  `.DefaultPanIsBitExactWithTheCentredLayout` compares every mode against an in-test
+  copy of the old centring arithmetic, so the default can never move a wallpaper by a
+  pixel; a change to the layout function's arithmetic order has to keep it green.
 - **`engine.screenResolution`** has its own setter:
   `SceneWallpaper::publishScreenResolution` reports the display's pixels on scene
   attach and whenever the surface is replaced. `RenderInitInfo::width`/`height`
@@ -239,10 +249,11 @@ All in `script_runtime_compat_test` and `scene_schema_tests` unless noted.
   false}`, or a combo `condition`) holds the editor's value only as a default: the parser builds the effect when the
   property's current value says so, by the layer-visibility rule
   (`ResolveBoolSetting`), and keeps the authored value for a property the project
-  does not declare. A settings change reloads the scene, so this is decided at
-  parse time with no per-frame cost; a scripted effect `visible` keeps its
-  authored value. Reading only the default left colour modes and effect toggles
-  in customizable wallpapers doing nothing.
+  does not declare. It is decided at parse time with no per-frame cost: a live
+  property preview holds the property at the loaded value (see *Load-only
+  properties* below) and Apply changes reloads. A scripted effect `visible`
+  keeps its authored value. Reading only the default left colour modes and
+  effect toggles in customizable wallpapers doing nothing.
 - **Alignment anchors under dynamic transforms** — `SceneSchema.ImageAlignmentAnchorSurvivesScriptedOriginAndScale`,
   `ScriptRuntimeCompat.RotatedAnchoredLayerTurnsAboutItsAnchor` and
   `.ScriptedRingBarsHangOutwardFromTheirCircle`, plus `nodes.txt` translate diffs
@@ -313,7 +324,25 @@ All in `script_runtime_compat_test` and `scene_schema_tests` unless noted.
   loader builds the template from the bare model: visible (copies start as copies
   of it) and as large as the model's picture when the model states no size
   (`SceneSchema.ALayerCreatedFromAWorkshopModelIsSizedByItsPictureAndShows`); a
-  zero-sized hidden template makes every lazily created layer invisible.
+  zero-sized hidden template makes every lazily created layer invisible. A
+  scene layer using the model registers as its template, but one with an effect
+  chain (its own camera) or child layers cannot be copied, which is common for
+  the script's own layer: the lazy loader then builds the model's own layer once
+  and it replaces that registration
+  (`ScriptRuntimeCompat.CreateLayerBuildsTheModelsOwnLayerWhenTheLayerUsingItCannotBeCopied`;
+  a model that loads into such a shape fails once and is not reloaded,
+  `.CreateLayerDoesNotReloadAModelThatLoadsIntoALayerItCannotCopy`).
+  Refusing it threw `Unable to create layer` from `init` and logged
+  `createLayer unsupported template shape`.
+  `thisScene.destroyLayer` (a layer or its name) removes a layer a script
+  created: it leaves the scene graph and the runtime's registries at once, so the
+  layer object the script still holds reaches nothing and a second call answers
+  false, while the node is freed only once the graph has been rebuilt without it
+  (`ScriptRuntimeCompat.DestroyLayerRemovesALayerTheScriptCreated`,
+  `.ADestroyedLayerIsFreedOnlyOnceTheGraphNoLongerDrawsIt`). A layer from the
+  scene file, or one named by index, stays and the call answers false. Without
+  it, a script that rebuilds its layers when a setting changes threw
+  `not a function` before building the new set.
 - **Timeline events** — `ScriptRuntimeCompat.*Timeline*Event*`, `*Marker*`,
   `GlobalAnimationListenersRunOncePerMarkerWhateverIsBound`,
   `GlobalOnlyAnimationListenerSeesTheCurrentTickTime` and
@@ -379,6 +408,103 @@ All in `script_runtime_compat_test` and `scene_schema_tests` unless noted.
   avoid recomputing sources but still repair changed destinations in the
   original phases; a failed registration releases only its new
   subscriptions/values and restores existing mask/puppet identity.
+- **Authored defaults versus loaded values** — `project_property_preview_test`
+  (CPU only, in the `check_renderer.py` gate). A scene loads with the project's
+  defaults under the user's saved choices, and `SceneParseRequest::authored_project_properties`
+  (set by `MainHandler::loadScene`; null means the loaded table is also the
+  authored one) keeps the defaults apart, as `SceneRuntimeBootstrap` does for the
+  runtime. `ApplyProjectPropertyOverride(document)` takes a whole document: the
+  declared defaults with exactly these values over them, so a property the
+  document leaves out is at its default again whatever the scene loaded with, and
+  `ResetProjectPropertyOverride()` is the empty document. Both return the sorted
+  names whose value in effect changed (a change of kind counts). The test pins
+  the table arithmetic and, through the real `WPSceneParser`, every way a
+  property reaches a scene: a flag and a choice with a user condition (layer
+  visibility), a slider (`g_UserAlpha`) and a colour (`g_Color4`) on an image
+  layer, a bound text, and a bound material constant. For each, loading with a
+  saved choice, applying a document and returning leaves visibility, every
+  material constant and the text bit for bit equal to a fresh parse of the
+  authored table, and applying a document equals loading with it. The fixture
+  makes the authored and the saved value differ on every layer, so a return that
+  stops at the loaded values fails. A document adds no time-advancing work
+  (`DescribeTimeAdvancingWork` stays 0 for a still scene), so the on-demand idle
+  analysis is unchanged. A name the scene loaded with but the project does not
+  declare keeps its last value until the next load; callers send only declared ids.
+- **Load-only properties** — `project_property_preview_test`
+  (`LoadOnlyProperties.*`, CPU only). Almost every property is a live binding, so
+  a document reaches the scene on its next tick. Two readers decide once, while
+  the scene loads, and a built effect or a filled material slot is not redone:
+  a `usertextures` slot that names a `scenetexture` property
+  (`UserTexturePropertyName`, noted by `LoadMaterial`) and an effect whose
+  `visible` is bound to a property, plain or with a combo `condition`
+  (`UserPropertyName`, noted by `ResolveUserEffectVisibility`, image and text
+  objects). Building every hidden effect would cost passes and memory, so these
+  stay load-only. The parser calls `NoteLoadOnlyProperty(name)`, which records
+  the value the name was read with (absent when the table did not name it);
+  `LoadOnlyProperties()` lists the names. `PreviewProjectPropertyOverride(document)`
+  is `ApplyProjectPropertyOverride` with every noted name forced back to that
+  value for every consumer of it, live ones included (`glow` here also shows a
+  layer, and the layer stays put), and lists the names the document asked
+  something else for as `deferred`: a document that leaves out a name the scene
+  loaded with a saved choice defers it too, and asking for the loaded value again
+  defers nothing. A scripted effect `visible`, an effect with a plain value, a
+  property nothing reads and a live slider note nothing. One test builds the
+  scene again with the new values to show the effect set and the slot texture
+  differ, which is why a running scene cannot take them.
+- **Sound layer volume follows its slider** — `project_property_preview_test`
+  (`SoundLayerVolume.*`, CPU only, a fake sound stream and a null-backend sound
+  manager, so no audio device is opened). `WPSoundParser::Parse` read a
+  slider-bound volume once, so a sound layer could not follow a property change.
+  `WPSoundParser::BindVolumeProperty` resolves the bound property like any other
+  slider setting (the authored volume while the project declares no such
+  property) and sets `WPSoundStream::SetVolume`, an atomic store the audio thread
+  already reads, so a sound layer is not load-only and costs nothing per frame.
+  The volume follows a property, clamps above full, and returns to the project's
+  own volume on the empty document, on a reset and after a saved choice, never to
+  the saved choice or to the volume the layer carries in the scene. An undeclared,
+  unnamed or non-numeric property leaves it alone. A document refreshes every
+  property, so only a change of the bound property moves the volume: an unrelated
+  edit does not undo a volume a script set with `SetSoundLayerVolume`. A released
+  stream is not touched, and the real `Parse` binds a user-bound volume and leaves
+  a plain number alone. Audible output on real hardware is not checked.
+- **A property document on a running scene** — `project_property_preview_test`
+  (`ScenePropertyPreview.*`, CPU only, no surface or window),
+  `HiddenLayers.APropertyPreviewRevealsALayerWithOneGraphRebuildAndAGraphBuiltLaterLeavesTheHiddenOneOutAgain`
+  in `layer_texture_reference_test` (CPU) and
+  `MetalSceneDraw.APropertyPreviewChangesThePixelsAndAnEmptyDocumentRestoresThemByteForByte`
+  in `metal_scene_draw_smoke` (private textures, skips without a Metal device).
+  The wallpaper property `project_property_preview_json` carries a flat JSON
+  object; `MainHandler` parses it, never touches the saved override JSON and stages
+  it in `RenderHandler`'s latest-wins slot, and `CMD_APPLY_PROJECT_PROPERTIES`
+  (posted only when the slot was empty, and dispatched in `onMessageReceived`, where
+  a missing case silently drops a command) shows it on the render thread with
+  `PreviewProjectPropertyOverride`. The tests send documents through
+  `SceneWallpaper::setPropertyString` to scenes that have a runtime and nothing to
+  draw: a document reaches the runtime, a load-only property stays put and a name
+  left out is the project's own value; a burst of 500 documents queued while the
+  render thread is held inside the first (a listener that waits) runs the runtime
+  twice and handles two commands, the first and the last (the test-only
+  `PropertyPreviewCommandsHandled` counts them, so a command per document fails); a
+  document that is not a JSON object, or one that arrives before any scene exists,
+  changes nothing and is not kept for the scene that arrives next; a second scene
+  with the same property names shows its own loaded values and the first is not
+  touched again; a preview adds no time-advancing work. On the graph, a preview that
+  reveals a layer the graph left out makes one tick raise the mutation flag once, a
+  held property reveals nothing, hiding the layer again and showing it again on the
+  same graph raise nothing, a graph built while it is hidden leaves it out again and
+  showing it then raises the flag once more. On Metal, a slider-bound alpha changes
+  the picture with no new graph, a switch that shows a layer rebuilds the graph
+  exactly once and draws the picture a fresh load with the same values draws, and
+  the empty document brings the first frame back byte for byte, twice over, without
+  another graph. On a live surface (`unchanged_present_test`, the Compatibility
+  backend on a layer no window owns, timing-shaped and named in `REALTIME_TESTS`),
+  `UnchangedPresent.APropertyPreviewShowsOnAStillSceneAndWakesAnIdleOneForOneFrame`
+  sends a slider through the property: a still scene whose passes are all reused
+  submits exactly one frame, presents a different picture and goes back to
+  repeating, and with the on-demand clock the stopped scene draws exactly one frame
+  and goes back to sleep. A paused scene showing the change on resume comes from the
+  same per-command frame request and is not exercised; a preview on a real display,
+  and the hitch of a revealed layer compiling new pipelines, are not checked.
 - **Scene commits in headless tests** — `scene_schema_tests` helpers wait for
   posted work with a render-looper round trip (`beginSurfaceReconfigure`) and a
   main-looper one (installing a pointer callback replays from the main looper)
@@ -417,6 +543,27 @@ All in `script_runtime_compat_test` and `scene_schema_tests` unless noted.
   the source layer says `"clampuvs": false` and clamps when it is true or absent;
   otherwise a model whose UVs run far outside 0..1 smears the composite's edge
   texels into solid bands.
+- **Layers a wallpaper's properties hide** — `HiddenLayers.ALayerItsPropertiesHideStaysOutOfTheGraphUntilSomethingShowsIt`
+  in `layer_texture_reference_test` (CPU, in the gate) and
+  `MetalSceneDraw.ALayerItsPropertiesHideHoldsNoImagesUntilAScriptShowsIt` in
+  `metal_scene_draw_smoke`. A layer hidden by a visibility only a reload changes
+  (authored, or bound to one of the wallpaper's properties, on the layer or an
+  ancestor) has no passes in the graph: on both backends it holds no effect
+  images, loads no textures and costs what a dropped layer costs. A
+  script-driven visibility stays in the graph, and so does a hidden layer another
+  layer samples, with its ancestors; a layer named only in its own
+  `dependencies` is not one. A script writing `visible` takes the layer
+  over: showing a left-out layer, or a property applied or previewed in place
+  showing one, marks the graph mutated, the rebuilt graph draws it exactly as the
+  property would, and a layer a script has written is never left out again, so
+  blinking it rebuilds nothing. A layer only a preview showed has no such owner: a
+  graph built while it is hidden leaves it out again. A left-out layer that was
+  the scene output's first writer leaves its load and clear to the first layer
+  drawn: with clearing off that layer still loads instead of discarding
+  (`RenderGraph.aHiddenFirstWriterLeftOutKeepsTheSceneOutputsLoadAndClear` in
+  `rendergraph_smoke`). Customizable wallpapers ship every theme, language and
+  format as a layer; keeping their hidden effect chains cost gigabytes of
+  targets and a render pass per hidden first-use clear every frame.
 - **Layer as texture** — `layer_texture_reference_test` (CPU, in the gate):
   `_rt_imageLayerComposite_<id>[_a|_b]` forward refs, duplicate names, missing
   targets, cycles, history `_b`, file names vs layer names, invisible sources
@@ -435,6 +582,67 @@ All in `script_runtime_compat_test` and `scene_schema_tests` unless noted.
     its card covers its whole target (`ABareComposeLayerAnotherSamplesIsDrawnOnlyIntoItsComposite`).
     A mask that paints that background back over later layers otherwise has
     nothing to sample, and native Metal falls back.
+  - A sampled layer inside a compose layer is drawn into its own composite as
+    well as into the compose layer's picture, so the compose layer's own effect
+    can sample its child (`AComposeLayersEffectCanSampleItsOwnChild`; pixels on
+    the native backend in `MetalSceneDraw.AComposeLayersEffectSamplesItsOwnChild`).
+    Drawn only into the compose target, the child had no composite: the graph
+    logged `link tex <id> not found` and native Metal fell back at prepare.
+    Hidden for good (authored or by a property) it is only its composite; hidden
+    by a script it keeps its draw into the picture, since nothing rebuilds the
+    graph when the script shows it again. The same rule decides whether a
+    sampled top-level layer keeps its on-screen draw.
+  - A sampled text layer is its card in its own composite, as an image is
+    (`ASampledTextLayerIsItsCardInItsOwnComposite`; pixels on the native backend
+    in `MetalSceneDraw.AHiddenTextLayerAnotherSamplesIsItsCardInItsComposite`).
+    With effects the card is the chain's final card, not the larger capacity
+    the chain renders at, and a card aligned to one side of an overflowed box is
+    framed off the layer's origin. A relayout moves the composite camera with
+    the card and resizes the target to keep one texel per unit, since a consumer
+    may place the image by its size (`g_Texture1Resolution`); only a size change
+    in texels costs a new graph. A hidden sampled text is still laid out when
+    its text changes. Before, a text layer had no composite of its own: drawn
+    through the scene camera into a screen-sized fallback it sat wherever it is
+    on screen, and hidden it was never drawn, so a marquee of a hidden song
+    title showed nothing.
+  - A layer's own effect binding the layer's `_a` composite (or the bare name)
+    reads the chain's buffer A, the image `previous` names at that point (the
+    layer before any effect, for the first), and does not make the layer a
+    sampled one; other layers binding the name still get the final composite
+    (`ALayersOwnEffectReadsItsBufferANotItsComposite`, image and text layers,
+    with and without another consumer; pixels on the native backend in
+    `MetalSceneDraw.ALayersOwnEffectReadsItsBufferANotItsComposite`). Read as the
+    composite, the effect sampled a link the frame filled only after it: the
+    compatibility renderer logged `slot 0 (_rt_link_<id>) has no image` and the
+    layer drew nothing (a clock whose outline effect names its own text), and
+    native Metal refused the scene as history feedback. Built-in blur, shine and
+    godrays carry the same names, `_a` and `_b` alternating along the chain, in
+    the slot their effect binds to `previous`; that binding wins.
+  - A self `_b` in the layer's own effects is that same input, not last-frame
+    history (`ALayersOwnEffectReadsItsBufferBAsTheImageItWorksOn`, the editor's
+    `_a`-then-`_b` alternation and `_b` in both effects;
+    `SelfBInItsOwnEffectsIsNotAReference`; pixels on the native backend in
+    `MetalSceneDraw.ALayersOwnEffectReadsItsBufferBAsTheImageItWorksOn`). The
+    editor names the buffer `previous` was in when the effect was set up: the
+    layer is drawn into `_a` and each effect pass without a target of its own
+    moves to the other buffer, so a name can be stale after effects are
+    reordered. Wallpaper Engine keeps last-frame images in an effect's own
+    `unique` buffers filled by a `copy` command (motion blur), not in these.
+    Taken as history, the name made native Metal refuse the scene, and an
+    effect naming `_b` in its first slot without a `bind` (a wave after an
+    audio-bar effect) logged `slot 0 (_rt_link_<id>) has no image` on the
+    compatibility renderer. A self `_b` outside the layer's effects still
+    refuses the scene.
+  - Older editors also list the layer in its own `dependencies`, once for each
+    self name its effects bind. A dependency names no slot, so it cannot ask
+    for the last frame, and a layer waits on nothing of its own; whatever it
+    does sample of itself is a texture name. The self entry is skipped: it
+    gives the layer no composite and keeps no hidden layer in the graph
+    (`ALayersOwnEffectReadsItsBufferANotItsComposite` and
+    `ALayersOwnEffectReadsItsBufferBAsTheImageItWorksOn` with and without it;
+    `HiddenLayers.ALayerItsPropertiesHideStaysOutOfTheGraphUntilSomethingShowsIt`).
+    Recorded, it drew the layer's last effect pass a second time every frame,
+    into a composite nobody sampled.
   - A linked composite's size is never folded into the material as a zero at
     parse time (the card padding divides by it and every texture coordinate of
     the consumer's card becomes `NaN`), and nothing stale is folded in its place:
@@ -563,7 +771,12 @@ All in `script_runtime_compat_test` and `scene_schema_tests` unless noted.
     exempt (the frame's prepass clears it first). `RenderTargetLifetime.OnlyTargetsReadBeforeTheFrameWritesThemKeepTheirOwnImage`
     and `.CarriedOverKeysAreTheOnesReadBeforeTheirFirstWrite` cover the graph,
     `PlaybackGPU.CarriedTargetsShareTheirImageWithNoOtherTarget` the reservation.
-    It costs exactly those buffers' memory.
+    It costs exactly those buffers' memory. Native Metal keeps every carried-over
+    target in an image of its own for the life of the graph, so it draws these too
+    (`MetalSceneDraw.ALayerReadingThePreviousFrameSeesExactlyThePreviousFrame`:
+    the first frame reads the cleared buffer, each later one the frame before,
+    byte-identical with scene optimisation off and on), and reports the loop as
+    a reason to keep the clock running.
 - **Render-target reuse correctness** — `static_subgraph_cache_test` (reuse
   verdicts, copy elision, alias resolution, and `OnlyWritersOfCacheableTargetsAreSampled`:
   both backends sample only the passes `Plan` reads, and an unsampled pass cannot
@@ -754,7 +967,11 @@ Rust regressions in `crates/shader/tests` (`legalize`, `preprocess`,
   narrowing and scalar initializer conversion. Floating remainder uses a
   generated typed helper accepted by Naga, preserving truncating remainder and
   single evaluation of its operands. Active `#undef` directives remove macros
-  across includes; inactive branches leave them intact. Generated NV12 members
+  across includes; inactive branches leave them intact. A directive keyword ends
+  at its first non-identifier character, so `#if(A == B)` and `#endif// note`
+  are conditionals, and only an `#include <path>` body opens angle brackets, so
+  a `<` comparison keeps a trailing `//` comment out of its `#if` expression.
+  Generated NV12 members
   create and bind a uniform block even when a material has no authored scalar
   uniforms. It also absorbs idioms author shaders inherit from the permissive
   path they were written against, each of which otherwise drops a whole effect
@@ -763,10 +980,29 @@ Rust regressions in `crates/shader/tests` (`legalize`, `preprocess`,
   `legacy_builtins` renames them; mixed-width vector operands inside a call
   argument truncate to that expression's narrowest operand, while sampler
   coordinate arguments stay with the texture strategy that narrows them to the
-  sampler's dimensionality; and a parenthesized comparison used as an arithmetic
-  operand is converted with `float(...)`. Known and not handled: logical-not
-  applied to a float (`!someFloat`), which still rejects Wallpaper Engine's own
-  `clipping_mask` effect.
+  sampler's dimensionality; a declaration or assignment truncates its wider
+  operands whether they sit next to a call, a constructor or a parenthesized
+  group (`round(v2) * v4`, `(CAST2(500) / res4) * s`); a scalar operand of `pow`,
+  `mix` and the other broadcasting builtins broadcasts when it is a
+  component-wise builtin of known scalars or a one-component read
+  (`pow(abs(c), color)`, legacy `saturate`/`lerp`/`fmod` spellings included);
+  a whole call of a builtin that always returns a scalar (`dot`, `length`,
+  `distance`) is a scalar unless a user overload of that name says otherwise,
+  so `vec2 proj = dot(a, b);` broadcasts;
+  a scalar stored into a vector by plain `=` broadcasts, and a returned value
+  converts to the declared return type the same way (`vec3 f() { vec4 c; return
+  c; }` keeps `.xyz`); a comparison stored into a float lvalue (`x += a < b;`,
+  `x = a < b;`) becomes `1.0`/`0.0`, while a conditional whose condition
+  compares (`a < b ? 1.0 : 2.0`) stays the number it selects; and a parenthesized
+  comparison used as an arithmetic operand is converted with `float(...)`.
+  A global initializer that reads a runtime value (a uniform, a texture, a stage
+  input, a mutable global or a user function) runs at the start of `main`:
+  strict GLSL rejects it on a `const` global and silently drops it on a mutable
+  one, which then reads zero. Constant initializers stay constant expressions.
+  A statement that follows a JSON annotation or a `#define` is analyzed like any
+  other; before, it took that token for its type and every repair skipped it.
+  Known and not handled: logical-not applied to a float (`!someFloat`), which
+  still rejects Wallpaper Engine's own `clipping_mask` effect.
 - **Legacy effect shader interfaces** — `pipeline` tests: array varyings reserve
   all element locations; unambiguous user function parameters narrow wider vector
   arguments; a whole vector variable assigned to a narrower one keeps its leading
@@ -802,7 +1038,26 @@ Rust regressions in `crates/shader/tests` (`legalize`, `preprocess`,
   different address on Metal than the host wrote it to. The swizzle follows reads
   reached through `#define` aliases (written inside `main` by the audio-bars
   shader family) and through array-parameter specialization, not just direct
-  ones.
+  ones. A `float` element is one component, so a further subscript
+  (`g_AudioSpectrum64Left[i / 4][i % 4]`) selects the element itself.
+- **Matrix `inverse` reaches Metal through a generated helper** — Naga's MSL
+  writer has no `inverse()`, so a stage that inverted a matrix failed native
+  translation (`metal translation of '<shader>' failed`), which dropped the
+  effect or sent the whole wallpaper to the compatibility renderer: the stock
+  `perspective` and `lightshafts` effects with any combos, and `reflection`,
+  `clouds` and `waterwaves` with `PERSPECTIVE=1`, which undo `squareToQuad` in
+  the vertex stage. The `compatibility_functions` strategy renames builtin
+  `inverse` calls to `_we_Inverse` and emits mat2/mat3/mat4
+  adjugate-over-determinant overloads behind `#ifdef _WE_POLYFILL_INVERSE`,
+  else `#define _we_Inverse inverse`.
+  `NagaCompiler` defines the macro only for MSL, so SPIR-V keeps `GLSL.std.450`
+  `MatrixInverse` and stays byte-identical, and no pipeline revision bump was
+  needed. A shader that declares its own `inverse` keeps it.
+  `matrix_inverse_of_every_square_size_compiles_to_metal_and_stays_native_in_spirv`
+  (`naga_metal`) covers translation and the unchanged SPIR-V;
+  `MetalSceneDraw.MatrixInversesOfEverySizeAreTranslatedAndDrawnExactly` draws
+  each size's round-trip residual on the native backend, where one wrong
+  cofactor sign turns its channel black.
 - **A sampler slot's `combo` answers whether the material bound a texture there**,
   which is not the same as whether the slot is bound. An annotation's `default`
   exists so an unused sampler still reads something sane; `WPSceneParser` binds

@@ -18,10 +18,34 @@ extension WebPanelController {
     }
   }
 
+  /// The wallpapers the load journal held back, each with the sentence the page shows beside its
+  /// Try again button. The sentence is worded here so the page never assembles a localized one.
+  func heldWallpapersSnapshot() -> [[String: Any]] {
+    store.heldWallpaperIDs.map { id in
+      let title = store.librarySnapshot.wallpapers.first { $0.id == id }?.title ?? id
+      return ["id": id, "title": title, "message": Self.heldWallpaperMessage(title: title)]
+    }
+  }
+
+  static func heldWallpaperMessage(title: String) -> String {
+    String(
+      localized:
+        "“\(title)” was not restored: WallpaperMachine quit unexpectedly twice in a row while loading it. Nothing was deleted."
+    )
+  }
+
+  /// The one-time prompt the page should show now, if any (`SupportPromptStore`). Without a
+  /// telemetry service there is nothing to offer, so that prompt never comes up.
+  func pendingPrompt() -> SupportPromptStore.Prompt? {
+    store.supportPrompt?.pendingPrompt(
+      welcomeSeen: welcomeSeen, telemetryOn: store.telemetry?.isEnabled ?? true)
+  }
+
   /// Register native dependencies without materializing a page payload while hidden.
   func trackSnapshotDependencies() {
     _ = store.appSnapshot
-    _ = store.supportPrompt?.isPending
+    _ = pendingPrompt()
+    _ = store.telemetry?.preferences.state
     _ = store.librarySnapshot
     _ = store.history.entries
     _ = store.libraryRefreshRevision
@@ -63,11 +87,14 @@ extension WebPanelController {
     _ = workshop.totalCount
     _ = workshop.isLoading
     _ = workshop.hasLoaded
+    _ = workshop.isDegraded
     _ = workshop.errorMessage
     _ = workshop.sceneAssetsReady
     _ = workshop.sceneAssetsURL
     _ = workshop.sceneAssetsFailure
     _ = workshop.downloadRequests
+    _ = workshop.applyIntents
+    _ = workshop.applyNotes
     _ = workshop.downloadPersistenceError
     _ = workshop.username
     _ = workshop.suggestedAccount
@@ -86,6 +113,7 @@ extension WebPanelController {
     trackPixivDependencies()
     trackBackupDependencies()
     trackCompatibilityDependencies()
+    trackLetterboxDependencies()
     _ = updater.state
     _ = downloader.savedAccount
     _ = downloader.rememberSessionWhileRunning
@@ -180,7 +208,7 @@ extension WebPanelController {
   {
     var measured: [String: WebPanelPropertyAsset] = [:]
     for property in options.properties
-    where property.kind == .file || property.kind == .directory {
+    where property.enabled && (property.kind == .file || property.kind == .directory) {
       guard case .string(let path) = property.value, !path.isEmpty else { continue }
       if let cached = propertyAssets[options.wallpaperId]?[property.id], cached.path == path {
         measured[property.id] = cached
@@ -236,6 +264,7 @@ extension WebPanelController {
     var content: UInt64
     var refresh: UInt64
     var metrics: UInt64
+    var covers: UInt64
     var updates: UInt64
     var energy: UInt64
     var target: String
@@ -251,26 +280,40 @@ extension WebPanelController {
   private func librarySection() -> LibrarySection {
     let key = LibrarySectionKey(content: store.libraryPresentationRevision,
       refresh: store.libraryRefreshRevision, metrics: libraryMetrics.contentRevision,
-      updates: workshop.updates.availableRevision, energy: store.wallpaperEnergyRatings?.revision ?? 0,
+      covers: libraryCovers.contentRevision, updates: workshop.updates.availableRevision,
+      energy: store.wallpaperEnergyRatings?.revision ?? 0,
       target: navigation.targetDisplayID, language: appLanguage.effective.tag)
     if let cached = librarySectionCache, cached.key == key { return cached }
     let null = NSNull()
-    var previews: [String: URL] = [:]
+    let revision = store.libraryRefreshRevision
+    var previewFiles: [String: URL] = [:]
+    for entry in store.librarySnapshot.wallpapers {
+      if let path = entry.previewPath { previewFiles[entry.id] = URL(fileURLWithPath: path) }
+    }
+    // Read in the background; the section is rebuilt once a stamp is new or moved.
+    let covers = libraryCovers.stamps(for: previewFiles, revision: revision)
     let metrics = libraryMetrics.metrics(
-      for: store.librarySnapshot.wallpapers.map(\.id), revision: store.libraryRefreshRevision)
+      for: store.librarySnapshot.wallpapers.map(\.id), revision: revision)
     let updates = workshop.updates.available
     let wallpapers: [[String: Any]] = store.librarySnapshot.wallpapers.map { entry in
       var preview: Any = null
-      if let path = entry.previewPath {
-        previews[entry.id] = URL(fileURLWithPath: path)
-        var components = URLComponents()
-        components.scheme = "mwe-ui"
-        components.host = "preview"
-        components.path = "/" + entry.id
-        preview = components.url?.absoluteString as Any? ?? null
+      var thumbnail: Any = null
+      var animated: Any = null
+      if let file = previewFiles[entry.id] {
+        preview = Self.libraryAddress(host: "preview", id: entry.id) as Any? ?? null
+        // Tiles show the cached still, asked for under the preview file's stamp so that it is
+        // asked for again only when the file changed; only a preview that can move offers the file
+        // itself to play. Until the stamp is read there is no cover yet, and the page shows
+        // nothing rather than the full-size preview.
+        if let stamp = covers[entry.id] {
+          thumbnail = Self.libraryAddress(host: "library-thumbnail", id: entry.id, stamp: stamp) as Any? ?? null
+        }
+        if Self.previewAnimates(file) { animated = preview }
       }
       return [
         "id": entry.id, "title": entry.title, "kind": Self.kind(entry.kind), "preview": preview,
+        "thumbnail": thumbnail, "coverPending": previewFiles[entry.id] != nil && covers[entry.id] == nil,
+        "animated": animated,
         "active": store.isWallpaperActive(id: entry.id, displayId: navigation.targetDisplayID),
         "supported": entry.supported,
         // Folder size, date added, staff approval and the manifest's Workshop-style tags
@@ -287,7 +330,9 @@ extension WebPanelController {
         "updatedAt": updates[entry.id]?.timeUpdated.map { $0.timeIntervalSince1970 * 1000 } as Any? ?? null,
       ]
     }
-    assets.previews = previews
+    // The same files are served whole as the preview and as the small cover tiles show.
+    assets.previews = previewFiles
+    assets.libraryThumbnails = previewFiles
     let result = LibrarySection(key: key, revision: UUID().uuidString, wallpapers: wallpapers)
     librarySectionCache = result
     return result
@@ -314,7 +359,7 @@ extension WebPanelController {
     }
     assets.pixivThumbnails = pixivThumbnails
     var propertyImages: [String: URL] = [:]
-    for property in store.wallpaperOptionsSnapshot?.properties ?? [] {
+    for property in store.wallpaperOptionsSnapshot?.properties ?? [] where property.enabled {
       for image in PropertyImageCache.sources(in: property.labelHtml).values {
         propertyImages[PropertyImageCache.key(for: image)] = image
       }
@@ -385,6 +430,7 @@ extension WebPanelController {
         "bytesReceived": job.bytesReceived as Any? ?? null,
         "bytesExpected": job.bytesExpected as Any? ?? null,
         "bytesPerSecond": job.bytesPerSecond as Any? ?? null,
+        "secondsRemaining": job.secondsRemaining as Any? ?? null,
         // The sign-in handoff has no prompt yet; the dialog must stay open through it.
         "authenticating": job.isPending && !job.isQueued && worker.isAuthenticating,
         "cancelled": job.isCancelled,
@@ -393,6 +439,7 @@ extension WebPanelController {
         "securePrompt": worker.prompt == .password, "challenge": challenge as Any? ?? null,
         "warning": worker.sessionWarning as Any? ?? null,
         "wallpaperEngineOwnership": worker.wallpaperEngineOwnership.rawValue,
+        "applyOnArrival": workshop.appliesOnArrival(job.id),
       ]
     }
     let downloadRequests: [[String: Any]] = workshop.downloadRequests.map { request in
@@ -403,6 +450,7 @@ extension WebPanelController {
         "thumbnail": request.item.flatMap(Self.thumbnailAddress) as Any? ?? null,
         "account": request.account, "rememberSession": request.rememberSession,
         "stage": workshop.stage(for: request).rawValue, "paused": request.isPaused,
+        "applyOnArrival": workshop.appliesOnArrival(request.id),
       ]
     }
     let loading: Bool
@@ -464,13 +512,30 @@ extension WebPanelController {
     // What Playback shows as in effect right now, beside the saved choices.
     let lowPowerMode = ProcessInfo.processInfo.isLowPowerModeEnabled
     let thermalState = Self.thermalState(ProcessInfo.processInfo.thermalState)
+    // What the engine holds the frame rate to and why, so the page names the cause and does not
+    // work the ceiling out again.
+    let effectiveFrameRateCap: Any = settings.effectiveFrameRateCap.map { Int($0) } as Any? ?? null
+    let qualityThrottle = Self.qualityThrottle(settings.qualityThrottle)
     let focusAction = FocusFilterState.shared.selection?.target.kind.rawValue
       ?? FocusFilterState.shared.action?.rawValue ?? "keepRunning"
+    // The charge is null on a Mac without an internal battery, which is how the page knows to
+    // leave the low-battery rows out.
+    let playbackChoicesSnapshot: [String: Any] = [
+      "lowBatteryAction": playback.lowBatteryAction.rawValue,
+      "lowBatteryThreshold": playback.lowBatteryThreshold,
+      "batteryPercent": BatteryReading.read()?.percent as Any? ?? null,
+      "playOnlyOnActiveDisplay": playback.playsOnlyOnActiveDisplay,
+      "wallpapersMuted": playback.wallpapersMuted,
+      // The animated lock screen sets the desktop picture itself, so the choice waits for it.
+      "writeDesktopPicture": playback.writesDesktopPicture,
+      "desktopPictureLocked": lock?.locksDesktopPictureChoice ?? false,
+    ]
     // The sections are built separately: as one literal, the Swift compiler on the
     // macOS 15 release runner gives up type-checking it in reasonable time.
     let settingsSnapshot: [String: Any] = [
       "launchAtLogin": settings.launchAtLoginEnabled,
       "launchAtLoginAvailable": settings.launchAtLoginAvailable,
+      "launchAtLoginNeedsApproval": settings.launchAtLoginNeedsApproval,
       "verboseLogging": settings.verboseLogging,
       "videoBackend": settings.videoBackend, "videoBackends": videoBackends,
       "contentPacing": settings.contentPacingEnabled,
@@ -491,6 +556,7 @@ extension WebPanelController {
       "onBatteryPower": settings.onBatteryPower,
       "frameRateCap": settings.frameRateCap.map { Int($0) } as Any? ?? null,
       "frameRateCapMax": Self.frameRateCapMax(settings),
+      "effectiveFrameRateCap": effectiveFrameRateCap, "qualityThrottle": qualityThrottle,
       "displaySleepAction": playback.displaySleepAction.rawValue,
       "otherAudioAction": playback.otherAudioAction.rawValue,
       "desktopCoveredAction": playback.desktopCoveredAction.rawValue,
@@ -510,6 +576,10 @@ extension WebPanelController {
       "refreshDesktopPicture": playback.refreshesDesktopPicturePeriodically,
       "hotkeys": hotKeyRows,
       "hideAfterActivating": hidesAfterActivating,
+      "telemetry": store.telemetry?.isEnabled ?? false, "telemetryAvailable": store.telemetry != nil,
+      "telemetryLastSent": store.telemetry?.lastSentAt.map { $0.timeIntervalSince1970 * 1000 } as Any? ?? null,
+      "inspectWebWallpapers": WebWallpaperInspection.isEnabled(defaults: defaults),
+      "livePropertyEdits": LivePropertyEditing.isEnabled(defaults: defaults),
       "lockScreenEnabled": lock?.isRequested ?? false, "lockScreenAvailable": lock != nil,
       "lockScreenBusy": lock?.isBusy ?? false, "lockScreenStatus": lock?.status
         ?? (LockScreenConfiguration.isSupportedBySystem
@@ -549,6 +619,10 @@ extension WebPanelController {
       "maxPages": WorkshopStore.maxPages,
       "loading": workshop.isLoading, "loaded": workshop.hasLoaded,
       "error": workshop.errorMessage as Any? ?? null,
+      // The grid shows the one item a pasted link or id named, which no filter applies to.
+      "lookup": workshop.committedQuery?.itemID != nil,
+      // The list was found from the links on a Steam page whose markup changed: it may be incomplete.
+      "degraded": workshop.isDegraded,
       "source": workshopSource,
       // The Steam page listing what is on show, for Open on Steam.
       "steamURL": workshop.browseURL.absoluteString,
@@ -560,6 +634,8 @@ extension WebPanelController {
       let next = playlists.nextChange[display].map { $0.timeIntervalSince1970 * 1000 } as Any? ?? null
       var value = Self.organizationPlaylistSnapshot(playlist)
       value["nextChange"] = next
+      // The playlist waits because the user removed this display's wallpaper.
+      value["held"] = playlists.holds[display] != nil
       value["skipped"] = (playlists.skipped[display] ?? [:]).sorted { $0.key < $1.key }.map { id, failure in
         ["id": id, "message": failure.message,
          "retryAfter": failure.retryAfter.timeIntervalSince1970 * 1000] as [String: Any]
@@ -583,11 +659,16 @@ extension WebPanelController {
       ?? (libraryError == dismissedLibraryError ? nil : libraryError)
       ?? (store.latestBridgeErrorRevision > dismissedErrorRevision
         ? store.latestBridgeErrorMessage : nil)
-    let options: Any? = store.wallpaperOptionsSnapshot.map {
-      Self.options(
-        $0, titles: titles, assets: measuredAssets(for: $0),
-        errors: propertyPathErrors[$0.wallpaperId] ?? [:],
-        delivery: store.webWallpaperDeliveryStatus?(), sceneMedia: store.sceneMediaAvailability?())
+    let options: Any? = store.wallpaperOptionsSnapshot.map { value in
+      // The displays macOS's own video player draws this wallpaper on, which cannot be moved.
+      let nativePlayerDisplays = Set(
+        settings.videoBackends.filter { $0.wallpaperId == value.wallpaperId && $0.backend == "native" }
+          .map(\.displayId))
+      return Self.options(
+        value, titles: titles, assets: measuredAssets(for: value),
+        errors: propertyPathErrors[value.wallpaperId] ?? [:],
+        delivery: store.webWallpaperDeliveryStatus?(), sceneMedia: store.sceneMediaAvailability?(),
+        nativePlayerDisplays: nativePlayerDisplays)
     }
     return [
       "version": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
@@ -616,10 +697,11 @@ extension WebPanelController {
       ],
       "previewAvailable": store.openPreview != nil,
       "hostStates": hostStatesSnapshot(),
+      "held": heldWallpapersSnapshot(),
       "libraryRevision": library.revision,
       "filtersCollapsed": filtersCollapsed,
       "welcomeSeen": welcomeSeen,
-      "supportPromptPending": store.supportPrompt?.isPending == true && presentationAllowsUpdates(),
+      "pendingPrompt": (presentationAllowsUpdates() ? pendingPrompt()?.rawValue : nil) as Any? ?? null,
       "dragSelectLearned": dragSelectLearned,
       "displays": displays,
       "playlists": playlistSnapshot, "playlistIntervals": DisplayPlaylist.intervals,
@@ -631,12 +713,15 @@ extension WebPanelController {
       "backup": backupSnapshot(),
       "imagePlacement": imagePlacementSnapshot(),
       "wallpaperCompatibility": compatibilitySnapshot()["wallpaperCompatibility"] ?? null,
+      "videoLetterbox": letterboxSnapshot() as Any? ?? null,
       "options": options ?? null,
-      "settings": settingsSnapshot,
+      "settings": settingsSnapshot.merging(playbackChoicesSnapshot) { _, new in new },
       "workshop": workshopSnapshot, "workshopUpdates": updatesSnapshot,
       "pixiv": pixivSnapshot(),
       "setup": setupSnapshot,
       "downloads": downloads, "downloadRequests": downloadRequests,
+      // Why a wallpaper that arrived through Download and apply was left alone, by item id.
+      "applyNotes": workshop.applyNotes,
       "downloadSlots": workshop.downloader.slotLimit,
       "account": workshop.suggestedAccount,
       "savedAccount": workshop.downloader.savedAccount as Any? ?? null,
@@ -812,6 +897,17 @@ extension WebPanelController {
     }
   }
 
+  /// The names the page knows the reduced-quality reasons by, in the order the bridge reports them.
+  static func qualityThrottle(_ causes: [BridgeQualityThrottleCause]) -> [String] {
+    causes.map { cause in
+      switch cause {
+      case .lowPowerMode: "lowPowerMode"
+      case .heat: "heat"
+      case .lowBattery: "lowBattery"
+      }
+    }
+  }
+
   static func scaling(_ value: BridgeScalingMode) -> String {
     switch value {
     case .none: "none"
@@ -839,7 +935,8 @@ extension WebPanelController {
     _ value: BridgeWallpaperOptionsSnapshot, titles: ResolvedDisplayTitles,
     assets: [String: WebPanelPropertyAsset], errors: [String: String],
     delivery: WebWallpaperHost.DeliveryStatus? = nil,
-    sceneMedia: SystemMediaAvailability? = nil
+    sceneMedia: SystemMediaAvailability? = nil,
+    nativePlayerDisplays: Set<UInt32> = []
   ) -> [String: Any] {
     let null = NSNull()
     // Only a running host can say whether anything is being delivered. With no
@@ -881,15 +978,26 @@ extension WebPanelController {
       "volume": value.volume, "muted": value.muted,
       "audioResponseEnabled": value.audioResponseEnabled,
       "mediaIntegrationEnabled": value.mediaIntegrationEnabled,
+      // The page is not given a property a rule hides, yet its modified value still reaches the
+      // wallpaper, so Restore all defaults needs to know of it. A chosen file keeps its own Clear.
+      "hiddenModified": value.properties.contains {
+        !$0.enabled && $0.dirty && $0.kind != .file && $0.kind != .directory
+      },
       "displays": value.displayConfigurations.map { row -> [String: Any] in
-        [
+        let physicalID = ResolvedDisplayTitles.liveDisplayID(row.displayId, title: row.title)
+        return [
           "id": row.displayId, "title": titles.title(row.title, displayId: row.displayId),
           "enabled": row.enabled,
           "scalingMode": scaling(row.scalingMode), "scalingFactor": row.scalingFactor,
+          // Where the wallpaper sits on this display, as fractions of the room around it. The
+          // native video player draws a video centred whatever these say, so the page is told.
+          "panX": row.framing.panX, "panY": row.framing.panY,
+          "nativePlayer": physicalID.map { nativePlayerDisplays.contains($0) } ?? false,
           "fps": row.targetFps, "maxFps": row.maxFps,
         ]
       },
-      "properties": value.properties.map { property -> [String: Any] in
+      // A property a visibility rule hides is not listed; the bridge still reports it.
+      "properties": value.properties.filter(\.enabled).map { property -> [String: Any] in
         let kind: String
         switch property.kind {
         case .bool: kind = "boolean"
@@ -900,7 +1008,8 @@ extension WebPanelController {
         case .combo: kind = "combo"
         case .color: kind = "color"
         case .textInput: kind = "textInput"
-        case .text, .group, .unknown: kind = "text"
+        case .group: kind = "group"
+        case .text, .unknown: kind = "text"
         }
         var row: [String: Any] = [
           "id": property.id, "kind": kind, "label": plainLabel(property.labelHtml),
@@ -912,7 +1021,7 @@ extension WebPanelController {
           "min": property.slider?.min ?? 0, "max": property.slider?.max ?? 1,
           "step": property.slider?.step ?? 0.01,
           "options": property.comboOptions.map {
-            ["label": $0.label, "value": propertyValue($0.value)]
+            ["label": engineTokenLabel($0.label) ?? $0.label, "value": propertyValue($0.value)]
           },
         ]
         guard property.kind == .file || property.kind == .directory else { return row }
@@ -969,6 +1078,7 @@ extension WebPanelController {
   static func plainLabel(_ html: String) -> String {
     // The editor writes this token in place of the scheme colour it adds to every scene.
     if html == "ui_browse_properties_scheme_color" { return String(localized: "Scheme color") }
+    if let words = engineTokenLabel(html) { return words }
     let spaced = html.replacingOccurrences(
       of: "<(br|hr|/p|/div|/li|/tr|/h[1-6])\\b[^>]*>", with: " ",
       options: [.regularExpression, .caseInsensitive])
@@ -982,6 +1092,60 @@ extension WebPanelController {
       .replacingOccurrences(of: "&amp;", with: "&")
       .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
       .trimmingCharacters(in: .whitespacesAndNewlines)
+  }
+
+  /// `mwe-ui://<host>/<id>`, the panel-local address of a library wallpaper's preview file
+  /// (`preview` for the file itself, `library-thumbnail` for its cached still). A still carries
+  /// the stamp of the file (`LibraryPreviewFetcher.coverStamp`), so a preview that was replaced is
+  /// not shown from the page's old image and one that was not keeps its address.
+  static func libraryAddress(host: String, id: String, stamp: UInt64? = nil) -> String? {
+    var components = URLComponents()
+    components.scheme = "mwe-ui"
+    components.host = host
+    components.path = "/" + id
+    if let stamp { components.queryItems = [URLQueryItem(name: "v", value: String(stamp))] }
+    return components.url?.absoluteString
+  }
+
+  /// Whether the preview file can hold an animation, judged by its extension alone so that
+  /// building a snapshot never touches the disk. A `.png` that is an APNG shows as a still.
+  static func previewAnimates(_ file: URL) -> Bool {
+    ["gif", "webp", "apng"].contains(file.pathExtension.lowercased())
+  }
+
+  /// Leading words of a built-in token that name the editor screen it came from, not the thing.
+  private static let engineTokenAreaWords: Set<String> = [
+    "editor", "browse", "settings", "workshop", "properties", "user", "scene", "options", "tags",
+    "type", "effect", "preset", "layer", "importer", "gizmo", "context", "menu", "modal", "welcome",
+  ]
+  /// Trailing words that only say the token was a heading or caption.
+  private static let engineTokenGenericWords: Set<String> = ["title", "label", "text"]
+  private static let engineTokenMaxLength = 96
+
+  /// The words for one of Wallpaper Engine's own `ui_…` label tokens, which a project that
+  /// carries no text for them leaves as the label or combo choice. Nil for anything else:
+  /// author prose, markup, or a token too long to be the editor's. Presentation only; the
+  /// stored label and the choice's value are never rewritten. The words are English; the
+  /// panel translates them when the same phrase is a catalog entry.
+  static func engineTokenLabel(_ text: String) -> String? {
+    let token = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard token.utf8.count <= engineTokenMaxLength, token.hasPrefix("ui_") else { return nil }
+    let body = token.dropFirst(3)
+    guard !body.isEmpty,
+      body.unicodeScalars.allSatisfy({
+        $0.isASCII && ($0 == "_" || $0.properties.isAlphabetic || ("0"..."9").contains($0))
+      })
+    else { return nil }
+    var words = body.split(separator: "_").map(String.init)
+    while words.count > 1, engineTokenAreaWords.contains(words[0].lowercased()) {
+      words.removeFirst()
+    }
+    while words.count > 1, let last = words.last, engineTokenGenericWords.contains(last.lowercased()) {
+      words.removeLast()
+    }
+    guard !words.isEmpty else { return nil }
+    let joined = words.joined(separator: " ")
+    return joined.prefix(1).uppercased() + joined.dropFirst()
   }
 
   static func workshopItem(_ value: WorkshopItem) -> [String: Any] {

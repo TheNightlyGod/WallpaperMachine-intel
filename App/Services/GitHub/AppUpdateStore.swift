@@ -32,6 +32,12 @@ final class AppUpdateStore {
     @ObservationIgnored private var installationTask: (any AppUpdateInstallationTask)?
     @ObservationIgnored private var installAttempt: UInt64 = 0
     @ObservationIgnored private var retryCancellationInProgress = false
+    @ObservationIgnored private var installCancellationInProgress = false
+
+    /// An installer has been started and is waiting for this app to quit, so a quit now
+    /// is the update's. False while the update is still being prepared: a Quit chosen
+    /// then cancels the preparation and is the user's.
+    var isInstallPending: Bool { installScheduled && installationTask != nil }
 
     init(currentVersion: String = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "",
          client: any AppUpdateClient = GitHubReleaseClient(),
@@ -302,19 +308,39 @@ final class AppUpdateStore {
         throw AppUpdateIssue(code: .configuration, detail: String(localized: "No downloaded update is ready to install."))
     }
 
+    /// Stops the installer helper that is waiting for this app to quit, at once. For a quit
+    /// that was refused: the helper would otherwise replace the app whenever it did quit,
+    /// possibly much later. The update stays downloaded and About offers the install again.
+    /// A no-op when no helper is waiting or one is already being stopped, so it can be
+    /// called more than once.
+    func cancelPendingInstall() async {
+        guard installScheduled, installationTask != nil, !installCancellationInProgress else { return }
+        installWatchdog?.cancel()
+        installWatchdog = nil
+        await stopInstallationHelper()
+    }
+
+    /// The watchdog must not cancel itself on the way here: the helper's own wait for it
+    /// to end runs on the calling task and stops sleeping once that task is cancelled.
+    private func stopInstallationHelper() async {
+        guard installScheduled, !installCancellationInProgress, let installation = installationTask else { return }
+        installCancellationInProgress = true
+        defer { installCancellationInProgress = false }
+        let ended = await installation.cancel()
+        if ended {
+            installationTask = nil
+            installScheduled = false
+        }
+        fail(.install, AppUpdateIssue(code: .unknown, detail: String(localized: "Install timed out: the app did not quit and relaunch.")))
+    }
+
     private func armInstallWatchdog() {
         installWatchdog?.cancel()
         let timeout = installTimeout
         installWatchdog = Task { [weak self] in
             try? await Task.sleep(for: timeout)
-            guard let self, !Task.isCancelled, self.installScheduled else { return }
-            guard let installation = self.installationTask else { return }
-            let ended = await installation.cancel()
-            if ended {
-                self.installationTask = nil
-                self.installScheduled = false
-            }
-            self.fail(.install, AppUpdateIssue(code: .unknown, detail: String(localized: "Install timed out: the app did not quit and relaunch.")))
+            guard let self, !Task.isCancelled else { return }
+            await self.stopInstallationHelper()
         }
     }
 }

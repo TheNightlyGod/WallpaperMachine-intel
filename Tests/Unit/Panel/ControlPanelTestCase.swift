@@ -81,6 +81,47 @@ class LayoutSnapshotBridge: WallpaperBridge {
   @MainActor var frameRateCapCalls: [UInt32?] = []
   @MainActor var hostStartupCalls: [(display: UInt32, wallpaper: String, revision: UInt64, admission: UInt64?, ready: Bool)] = []
   @MainActor var bundleProvider: (@MainActor () -> BridgeSnapshotBundle)?
+  /// Wallpapers the panel asked to release from the load journal's hold, in order.
+  @MainActor var releaseHeldCalls: [String] = []
+  /// What a release throws instead of answering, for a test that needs the bridge to refuse it.
+  @MainActor var releaseHeldFailure: Error?
+  /// The label-language lists the app sent, in order. `onLabelLanguages` runs when one arrives,
+  /// as the bridge's own relabelling would, and `failLabelLanguages` makes the request fail.
+  @MainActor var labelLanguageCalls: [[String]] = []
+  @MainActor var onLabelLanguages: (@MainActor ([String]) -> Void)?
+  @MainActor var failLabelLanguages = false
+
+  override func setLabelLanguages(locales: [String]) async throws {
+    try await recordLabelLanguages(locales)
+  }
+
+  /// The wallpapers the panel asked to restore every default for, in order. `restoreAllProvider`
+  /// answers with the state the engine would report afterwards.
+  @MainActor var restoreAllCalls: [String] = []
+  @MainActor var restoreAllProvider: (@MainActor (String) -> BridgeWallpaperMutationBundle)?
+
+  override func restoreAllPropertyDefaults(wallpaperId: String) async throws
+    -> BridgeWallpaperMutationBundle
+  {
+    try await restoreAll(wallpaperId)
+  }
+
+  @MainActor private func restoreAll(_ id: String) throws -> BridgeWallpaperMutationBundle {
+    restoreAllCalls.append(id)
+    guard let provider = restoreAllProvider else { throw CancellationError() }
+    return provider(id)
+  }
+
+  @MainActor private func recordLabelLanguages(_ locales: [String]) throws {
+    labelLanguageCalls.append(locales)
+    if failLabelLanguages { throw CancellationError() }
+    onLabelLanguages?(locales)
+  }
+  /// Scale-factor edits the panel sends, in order.
+  @MainActor var scalingFactorCalls: [(wallpaperId: String, displayId: String, factor: Double)] = []
+  /// Stands in for the engine's reply to a scale-factor edit. Without one the usual bundle is
+  /// returned, which needs the wallpaper's options in the snapshot.
+  @MainActor var scalingFactorReply: (@MainActor (_ wallpaperId: String, _ displayId: String, _ factor: Double) throws -> BridgeWallpaperMutationBundle)?
 
   override func setBatteryMode(mode: BridgeBatteryMode) async throws -> BridgeSnapshotBundle {
     try await reply { $0.batteryModeCalls.append(mode) }
@@ -99,6 +140,29 @@ class LayoutSnapshotBridge: WallpaperBridge {
     try await reply {
       $0.hostStartupCalls.append((displayId, wallpaperId, startupRevision, nativeAdmissionKey, ready))
     }
+  }
+
+  override func releaseHeldWallpaper(wallpaperId: String) async throws -> BridgeSnapshotBundle {
+    try await releaseReply(wallpaperId)
+  }
+
+  @MainActor private func releaseReply(_ wallpaperId: String) throws -> BridgeSnapshotBundle {
+    releaseHeldCalls.append(wallpaperId)
+    if let releaseHeldFailure { throw releaseHeldFailure }
+    return try reply { _ in }
+  }
+
+  override func editScalingFactor(wallpaperId: String, displayId: String, factor: Double) async throws -> BridgeWallpaperMutationBundle {
+    try await recordScalingFactor(wallpaperId: wallpaperId, displayId: displayId, factor: factor)
+  }
+
+  @MainActor private func recordScalingFactor(wallpaperId: String, displayId: String, factor: Double) throws -> BridgeWallpaperMutationBundle {
+    scalingFactorCalls.append((wallpaperId, displayId, factor))
+    if let scalingFactorReply { return try scalingFactorReply(wallpaperId, displayId, factor) }
+    guard let bundle = bundleProvider?() ?? snapshot, let options = bundle.wallpaperOptions else { throw CancellationError() }
+    return BridgeWallpaperMutationBundle(
+      app: bundle.app, library: bundle.library, wallpaperOptions: options,
+      monitorInformation: bundle.monitorInformation, settings: bundle.settings)
   }
 
   @MainActor private func reply(_ record: @MainActor (LayoutSnapshotBridge) -> Void) throws -> BridgeSnapshotBundle {
@@ -124,9 +188,18 @@ class LayoutSnapshotBridge: WallpaperBridge {
     pendingOptions.removeFirst().resume(returning: value)
   }
 
+  /// How many times the store re-read every snapshot from the bridge.
+  var snapshotReads = 0
+
   override func allSnapshots() async throws -> BridgeSnapshotBundle {
+    snapshotReads += 1
     guard let snapshot else { throw CancellationError() }
     return snapshot
+  }
+
+  /// A rescan of the library answers with whatever `bundleProvider` (or `snapshot`) holds.
+  override func refreshLibrary() async throws -> BridgeSnapshotBundle {
+    try await reply { _ in }
   }
 }
 
@@ -247,7 +320,8 @@ final class PanelFixture {
   let library: URL
 
   init(store: BridgeStore, bridge: LayoutSnapshotBridge, displayTitles: DisplayTitleResolver,
-    pixivTransport: (any PixivTransport)? = nil, spaces: WallpaperSpaceMonitor? = nil) throws {
+    pixivTransport: (any PixivTransport)? = nil, spaces: WallpaperSpaceMonitor? = nil,
+    letterbox: VideoLetterboxStore? = nil) throws {
     self.store = store
     self.bridge = bridge
     library = root.appendingPathComponent("Library", isDirectory: true)
@@ -333,7 +407,8 @@ final class PanelFixture {
           directory: root.appendingPathComponent("pixiv-thumbnails"), fetcher: PreviewFetcher { _ in image })),
       appLanguage: .english(), playback: PlaybackPreferences(defaults: defaults), playlists: playlists,
       hotKeys: HotKeyPreferences(defaults: defaults), collections: collections, presets: presets,
-      backup: backup, imagePlacement: imagePlacement, compatibility: compatibility, automations: automations, spaces: self.spaces)
+      backup: backup, imagePlacement: imagePlacement, compatibility: compatibility, letterbox: letterbox,
+      automations: automations, spaces: self.spaces)
     controller.signInToPixiv = { nil }
     web = controller.makeWebView()
     web.setFrameSize(NSSize(width: 960, height: 640))
@@ -437,6 +512,14 @@ final class PanelFixture {
 
   func quiet() async throws { try await Task.sleep(for: .milliseconds(120)) }
 
+  /// What the bridge answers the next time the store reads every snapshot: the store's own
+  /// snapshots with `settings` swapped in.
+  func reportFromBridge(_ settings: BridgeSettingsSnapshot) {
+    bridge.snapshot = BridgeSnapshotBundle(
+      app: store.appSnapshot, library: store.librarySnapshot, wallpaperOptions: nil,
+      monitorInformation: store.monitorInformationSnapshot, settings: settings)
+  }
+
   func configureDisplays() {
     store.settingsSnapshot.displays = ["primary", "secondary"].map { id in
       BridgeDisplaySettingsRow(
@@ -461,8 +544,8 @@ final class PanelFixture {
         displayConfigurations: [
           BridgeDisplayConfigRow(
             displayId: display, title: display, enabled: true, scalingMode: .fill,
-            scalingFactor: 1, targetFps: fps, maxFps: 60, muted: false, volume: volume,
-            dirty: false, canRestoreDefaults: false)
+            scalingFactor: 1, framing: .centered, targetFps: fps, maxFps: 60, muted: false,
+            volume: volume, dirty: false, canRestoreDefaults: false)
         ], audioResponseEnabled: false, volume: volume)
     }
     store.wallpaperOptionsSnapshot = bridge.options["first"]

@@ -1,4 +1,5 @@
 mod capture;
+pub mod device_watch;
 
 use std::{
     borrow::Cow,
@@ -6,6 +7,7 @@ use std::{
     error::Error,
     fmt::{Display, Formatter},
     sync::Arc,
+    time::Duration,
 };
 
 pub use capture::{DefaultAudioResponseController, PlatformAudioCaptureBackend};
@@ -445,12 +447,36 @@ pub trait AudioCaptureBackend {
     fn is_running(&self) -> bool;
 }
 
+/// How long to wait before each further attempt to bring the tap back after a
+/// rebuild failed. The first attempt is immediate; these are the retries, so a
+/// rebuild is tried four times in all before it is left to the next scene or
+/// demand change.
+pub const RESTART_RETRY_DELAYS: [Duration; 3] = [
+    Duration::from_millis(500),
+    Duration::from_millis(1000),
+    Duration::from_millis(1500),
+];
+
+/// What [`AudioCaptureController::restart_capture`] did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RestartOutcome {
+    /// Nothing was rebuilt: nobody wants capture right now, it is suspended, or
+    /// it was never running.
+    NotRunning,
+    /// The tap was stopped and started again.
+    Restarted,
+}
+
 pub struct AudioCaptureController<B: AudioCaptureBackend> {
     consumer: Arc<dyn AudioFrameConsumer>,
     backend: B,
     enabled_handles: HashSet<SceneHandle>,
     suspended: bool,
     external_consumers: bool,
+    /// A rebuild stopped the tap and could not start it again. Capture is still
+    /// wanted, so the next [`AudioCaptureController::restart_capture`] starts
+    /// it without a device change having to be seen again.
+    restart_pending: bool,
 }
 
 impl<B: AudioCaptureBackend> AudioCaptureController<B> {
@@ -462,6 +488,7 @@ impl<B: AudioCaptureBackend> AudioCaptureController<B> {
             enabled_handles: HashSet::new(),
             suspended: false,
             external_consumers: false,
+            restart_pending: false,
         }
     }
 
@@ -573,15 +600,59 @@ impl<B: AudioCaptureBackend> AudioCaptureController<B> {
         &self.backend
     }
 
+    /// Stops the tap and starts it again, for a change underneath it such as a
+    /// new default output device.
+    ///
+    /// Only a tap that is running is rebuilt, and only while capture is wanted.
+    /// Permission was granted when it first started, so a rebuild never asks
+    /// again; a controller that is suspended, has no consumers or was never
+    /// started does nothing and starts fresh when it is next needed. If the tap
+    /// stops but cannot start again, the error is returned and the next call
+    /// tries to start it again, so a caller can retry without a second device
+    /// change. Any scene or demand change that starts capture also heals it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AudioCaptureError`] when stopping or starting the tap fails.
+    pub fn restart_capture(&mut self) -> Result<RestartOutcome, AudioCaptureError> {
+        if !self.wants_capture() {
+            self.restart_pending = false;
+            return Ok(RestartOutcome::NotRunning);
+        }
+        if self.backend.is_running() {
+            self.backend.stop()?;
+            self.restart_pending = true;
+        } else if !self.restart_pending {
+            return Ok(RestartOutcome::NotRunning);
+        }
+        if !self.backend.has_permission()? {
+            self.restart_pending = false;
+            return Ok(RestartOutcome::NotRunning);
+        }
+        self.backend.start(Arc::clone(&self.consumer))?;
+        self.restart_pending = false;
+        Ok(RestartOutcome::Restarted)
+    }
+
+    /// Whether a tap should be running right now: capture is not suspended
+    /// and a scene or another consumer needs it. A change of output device
+    /// matters only then, so this is what a caller watching for one keys off.
+    #[must_use]
+    pub fn wants_capture(&self) -> bool {
+        !self.suspended && (self.external_consumers || !self.enabled_handles.is_empty())
+    }
+
     fn sync_capture_state(&mut self) -> Result<(), AudioCaptureError> {
-        let should_run = !self.suspended
-            && (self.external_consumers || !self.enabled_handles.is_empty());
+        let should_run = self.wants_capture();
         if should_run {
             if !self.backend.is_running() && self.backend.has_permission()? {
                 self.backend.start(Arc::clone(&self.consumer))?;
             }
         } else if self.backend.is_running() {
             self.backend.stop()?;
+        }
+        if !should_run || self.backend.is_running() {
+            self.restart_pending = false;
         }
         Ok(())
     }
@@ -956,6 +1027,128 @@ mod capture_controller_tests {
         controller.set_demand(true, false).unwrap();
         assert!(!controller.is_capturing());
         assert_eq!(controller.active_scene_count(), 2);
+    }
+
+    #[test]
+    fn restart_rebuilds_a_running_capture_once() {
+        let mut controller =
+            AudioCaptureController::new(Arc::new(TestConsumer), TestBackend::default());
+        controller
+            .set_scene_capturing(SceneHandle::new(1), true)
+            .unwrap();
+        controller
+            .set_scene_capturing(SceneHandle::new(2), true)
+            .unwrap();
+        assert_eq!(controller.backend().starts, 1, "two scenes share one tap");
+
+        assert_eq!(controller.restart_capture().unwrap(), RestartOutcome::Restarted);
+
+        assert!(controller.is_capturing());
+        assert_eq!(controller.backend().stops, 1, "the old tap is released first");
+        assert_eq!(controller.backend().starts, 2, "one new tap serves both scenes");
+        assert_eq!(controller.active_scene_count(), 2);
+    }
+
+    #[test]
+    fn restart_is_a_no_op_while_stopped() {
+        let mut controller =
+            AudioCaptureController::new(Arc::new(TestConsumer), TestBackend::default());
+        assert_eq!(controller.restart_capture().unwrap(), RestartOutcome::NotRunning);
+        assert_eq!((controller.backend().starts, controller.backend().stops), (0, 0));
+
+        // Capture is wanted but waiting for authorization: a device change
+        // must not start it, because starting is what asks for permission.
+        let backend = TestBackend { permission_pending: true, ..TestBackend::default() };
+        let mut waiting = AudioCaptureController::new(Arc::new(TestConsumer), backend);
+        waiting.set_scene_capturing(SceneHandle::new(1), true).unwrap();
+        assert_eq!(waiting.restart_capture().unwrap(), RestartOutcome::NotRunning);
+        assert_eq!(waiting.backend().starts, 0);
+        assert!(!waiting.is_capturing());
+    }
+
+    #[test]
+    fn restart_is_a_no_op_while_suspended() {
+        let mut controller =
+            AudioCaptureController::new(Arc::new(TestConsumer), TestBackend::default());
+        controller
+            .set_scene_capturing(SceneHandle::new(1), true)
+            .unwrap();
+        controller.set_demand(true, false).unwrap();
+        assert!(!controller.is_capturing());
+        let (starts, stops) = (controller.backend().starts, controller.backend().stops);
+
+        assert_eq!(controller.restart_capture().unwrap(), RestartOutcome::NotRunning);
+
+        assert_eq!((controller.backend().starts, controller.backend().stops), (starts, stops));
+        controller.set_demand(false, false).unwrap();
+        assert!(controller.is_capturing(), "resuming starts a tap on the current device");
+    }
+
+    #[test]
+    fn a_failed_restart_leaves_capture_stopped_and_the_next_sync_starts_it() {
+        let mut controller =
+            AudioCaptureController::new(Arc::new(TestConsumer), TestBackend::default());
+        controller
+            .set_scene_capturing(SceneHandle::new(1), true)
+            .unwrap();
+        controller.backend.fail_start = true;
+
+        let error = controller.restart_capture().unwrap_err();
+
+        assert_eq!(error, AudioCaptureError::Platform("start failed".into()));
+        assert!(!controller.is_capturing(), "the old tap is gone and no new one started");
+        assert_eq!(controller.active_scene_count(), 1, "the scene keeps its claim on capture");
+        controller.set_demand(false, false).unwrap();
+        assert!(controller.is_capturing(), "the next scene or demand change heals it");
+    }
+
+    #[test]
+    fn a_failed_restart_can_be_retried_without_another_device_change() {
+        let mut controller =
+            AudioCaptureController::new(Arc::new(TestConsumer), TestBackend::default());
+        controller
+            .set_scene_capturing(SceneHandle::new(1), true)
+            .unwrap();
+        controller.backend.fail_start = true;
+        assert!(controller.restart_capture().is_err());
+        assert!(!controller.is_capturing());
+
+        assert_eq!(controller.restart_capture().unwrap(), RestartOutcome::Restarted);
+
+        assert!(controller.is_capturing());
+        assert_eq!(controller.backend().starts, 2);
+        assert_eq!(
+            controller.restart_capture().unwrap(),
+            RestartOutcome::Restarted,
+            "a healthy tap is rebuilt again on the next device change"
+        );
+        assert_eq!(controller.backend().starts, 3);
+    }
+
+    #[test]
+    fn a_pending_restart_is_dropped_once_nobody_wants_capture() {
+        for release in [
+            |controller: &mut AudioCaptureController<TestBackend>| {
+                controller.set_scene_capturing(SceneHandle::new(1), false).unwrap();
+            },
+            |controller: &mut AudioCaptureController<TestBackend>| {
+                controller.set_demand(true, false).unwrap();
+            },
+        ] {
+            let mut controller =
+                AudioCaptureController::new(Arc::new(TestConsumer), TestBackend::default());
+            controller
+                .set_scene_capturing(SceneHandle::new(1), true)
+                .unwrap();
+            controller.backend.fail_start = true;
+            assert!(controller.restart_capture().is_err());
+
+            release(&mut controller);
+            assert_eq!(controller.restart_capture().unwrap(), RestartOutcome::NotRunning);
+
+            assert!(!controller.is_capturing());
+            assert_eq!(controller.backend().starts, 1, "a stale retry never starts a tap");
+        }
     }
 
     #[test]

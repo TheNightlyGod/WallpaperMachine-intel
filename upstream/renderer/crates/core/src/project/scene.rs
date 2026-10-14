@@ -224,6 +224,59 @@ impl Display for ScalingMode {
     }
 }
 
+/// Where the presented wallpaper sits inside the room its display leaves around
+/// it.
+///
+/// Each axis is a fraction of that room: `0.0` puts the wallpaper's leading
+/// edge on the display's (left, and top), `1.0` its trailing edge (right, and
+/// bottom) and `0.5` centres it. The room is the display minus the wallpaper,
+/// so one fraction places a wallpaper that leaves bars (Fit, Original size, a
+/// scale factor below 1) and one that overflows the display (Fill, a scale
+/// factor above 1) alike, and an axis with no room is unmoved by any value.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SceneFraming {
+    /// Horizontal fraction, `0.0` (left) to `1.0` (right).
+    pub pan_x: f64,
+    /// Vertical fraction, `0.0` (top) to `1.0` (bottom).
+    pub pan_y: f64,
+}
+
+impl SceneFraming {
+    /// The wallpaper in the middle of its display on both axes.
+    pub const CENTERED: Self = Self {
+        pan_x: 0.5,
+        pan_y: 0.5,
+    };
+
+    /// Whether both axes are finite fractions between 0 and 1.
+    #[must_use]
+    pub fn is_valid(self) -> bool {
+        (0.0..=1.0).contains(&self.pan_x) && (0.0..=1.0).contains(&self.pan_y)
+    }
+
+    /// Rejects a framing the renderer must never see.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError::InvalidInput`] if an axis is not a finite fraction
+    /// between 0 and 1.
+    pub fn validate(self) -> Result<(), EngineError> {
+        if self.is_valid() {
+            Ok(())
+        } else {
+            Err(EngineError::InvalidInput(
+                "framing must be fractions between 0 and 1".to_string(),
+            ))
+        }
+    }
+}
+
+impl Default for SceneFraming {
+    fn default() -> Self {
+        Self::CENTERED
+    }
+}
+
 /// Desired wallpaper scene configuration for one display.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug, PartialEq)]
@@ -240,6 +293,8 @@ pub struct SceneDesc {
     pub scaling_mode: ScalingMode,
     /// Initial positive wallpaper scaling factor.
     pub scaling_factor: f64,
+    /// Initial position of the wallpaper inside the room its display leaves.
+    pub framing: SceneFraming,
     /// Whether the renderer should start in a paused state.
     pub paused: bool,
     /// Whether scene audio-response properties should be enabled.
@@ -274,6 +329,7 @@ impl SceneDesc {
             fps: 60,
             scaling_mode: ScalingMode::default(),
             scaling_factor: 1.0,
+            framing: SceneFraming::default(),
             paused: false,
             audio_response_enabled: false,
             media_integration_enabled: false,
@@ -309,6 +365,7 @@ impl SceneDesc {
             fps,
             scaling_mode: ScalingMode::default(),
             scaling_factor: 1.0,
+            framing: SceneFraming::default(),
             paused,
             audio_response_enabled: false,
             media_integration_enabled: false,
@@ -352,6 +409,7 @@ impl SceneDesc {
                 "scaling factor must be finite and greater than zero".to_string(),
             ));
         }
+        self.framing.validate()?;
         Ok(())
     }
 
@@ -380,6 +438,13 @@ impl SceneDesc {
     #[must_use]
     pub fn with_scaling_factor(mut self, scaling_factor: f64) -> Self {
         self.scaling_factor = scaling_factor;
+        self
+    }
+
+    /// Sets the initial position inside the room the display leaves.
+    #[must_use]
+    pub fn with_framing(mut self, framing: SceneFraming) -> Self {
+        self.framing = framing;
         self
     }
 
@@ -464,6 +529,7 @@ impl SceneDesc {
             && self.fps == other.fps
             && self.scaling_mode == other.scaling_mode
             && (self.scaling_factor - other.scaling_factor).abs() <= f64::EPSILON
+            && self.framing == other.framing
             && self.audio_response_enabled == other.audio_response_enabled
             && self.media_integration_enabled == other.media_integration_enabled
             && self.audio_volume == other.audio_volume
@@ -494,6 +560,8 @@ pub struct SceneTemplate {
     pub scaling_mode: ScalingMode,
     /// Initial positive wallpaper scaling factor.
     pub scaling_factor: f64,
+    /// Initial position of the wallpaper inside the room its display leaves.
+    pub framing: SceneFraming,
     /// Whether the renderer should start in a paused state.
     pub paused: bool,
     /// Whether scene audio-response properties should be enabled.
@@ -527,6 +595,7 @@ impl SceneTemplate {
             fps: 60,
             scaling_mode: ScalingMode::default(),
             scaling_factor: 1.0,
+            framing: SceneFraming::default(),
             paused: false,
             audio_response_enabled: false,
             media_integration_enabled: false,
@@ -547,6 +616,7 @@ impl SceneTemplate {
             fps: scene.fps,
             scaling_mode: scene.scaling_mode,
             scaling_factor: scene.scaling_factor,
+            framing: scene.framing,
             paused: scene.paused,
             audio_response_enabled: scene.audio_response_enabled,
             media_integration_enabled: scene.media_integration_enabled,
@@ -568,6 +638,7 @@ impl SceneTemplate {
             fps: self.fps,
             scaling_mode: self.scaling_mode,
             scaling_factor: self.scaling_factor,
+            framing: self.framing,
             paused: self.paused,
             audio_response_enabled: self.audio_response_enabled,
             media_integration_enabled: self.media_integration_enabled,
@@ -600,6 +671,7 @@ impl SceneTemplate {
                 "scaling factor must be finite and greater than zero".to_string(),
             ));
         }
+        self.framing.validate()?;
         Ok(())
     }
 }
@@ -613,6 +685,7 @@ pub struct SceneTemplateBuilder {
     fps: u32,
     scaling_mode: ScalingMode,
     scaling_factor: f64,
+    framing: SceneFraming,
     paused: bool,
     audio_response_enabled: bool,
     media_integration_enabled: bool,
@@ -649,6 +722,13 @@ impl SceneTemplateBuilder {
     #[must_use]
     pub fn scaling_factor(mut self, scaling_factor: f64) -> Self {
         self.scaling_factor = scaling_factor;
+        self
+    }
+
+    /// Sets the initial position inside the room the display leaves.
+    #[must_use]
+    pub fn framing(mut self, framing: SceneFraming) -> Self {
+        self.framing = framing;
         self
     }
 
@@ -720,6 +800,7 @@ impl SceneTemplateBuilder {
             fps: self.fps,
             scaling_mode: self.scaling_mode,
             scaling_factor: self.scaling_factor,
+            framing: self.framing,
             paused: self.paused,
             audio_response_enabled: self.audio_response_enabled,
             media_integration_enabled: self.media_integration_enabled,
@@ -799,6 +880,7 @@ pub struct SceneDescBuilder {
     fps: u32,
     scaling_mode: ScalingMode,
     scaling_factor: f64,
+    framing: SceneFraming,
     paused: bool,
     audio_response_enabled: bool,
     media_integration_enabled: bool,
@@ -835,6 +917,13 @@ impl SceneDescBuilder {
     #[must_use]
     pub fn scaling_factor(mut self, scaling_factor: f64) -> Self {
         self.scaling_factor = scaling_factor;
+        self
+    }
+
+    /// Sets the initial position inside the room the display leaves.
+    #[must_use]
+    pub fn framing(mut self, framing: SceneFraming) -> Self {
+        self.framing = framing;
         self
     }
 
@@ -920,6 +1009,7 @@ impl SceneDescBuilder {
                 "scaling factor must be finite and greater than zero".to_string(),
             ));
         }
+        self.framing.validate()?;
 
         Ok(SceneDesc {
             display: self.display,
@@ -928,6 +1018,7 @@ impl SceneDescBuilder {
             fps: self.fps,
             scaling_mode: self.scaling_mode,
             scaling_factor: self.scaling_factor,
+            framing: self.framing,
             paused: self.paused,
             audio_response_enabled: self.audio_response_enabled,
             media_integration_enabled: self.media_integration_enabled,
@@ -969,7 +1060,7 @@ impl SceneResult {
 
 #[cfg(test)]
 mod tests {
-    use super::{ScalingMode, SceneDesc, SceneHandle, SceneResult, SceneTemplate};
+    use super::{ScalingMode, SceneDesc, SceneFraming, SceneHandle, SceneResult, SceneTemplate};
     use crate::{DisplayDesc, EngineError};
 
     #[test]
@@ -1027,6 +1118,144 @@ mod tests {
     #[test]
     fn scaling_mode_defaults_to_fill() {
         assert_eq!(ScalingMode::default(), ScalingMode::Fill);
+    }
+
+    const FRAMING_MESSAGE: &str = "framing must be fractions between 0 and 1";
+
+    fn off_the_map_framings() -> Vec<SceneFraming> {
+        let mut framings = Vec::new();
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.1, 1.1] {
+            framings.push(SceneFraming {
+                pan_x: bad,
+                pan_y: 0.5,
+            });
+            framings.push(SceneFraming {
+                pan_x: 0.5,
+                pan_y: bad,
+            });
+        }
+        framings
+    }
+
+    fn assert_framing_rejected(error: EngineError) {
+        match error {
+            EngineError::InvalidInput(message) => assert_eq!(message, FRAMING_MESSAGE),
+            other => panic!("expected invalid input, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn descriptors_and_templates_default_to_centred_framing() {
+        let display = DisplayDesc::new(1, 0, 0, 1920, 1080, 1.0);
+        let centred = SceneFraming {
+            pan_x: 0.5,
+            pan_y: 0.5,
+        };
+
+        assert_eq!(SceneFraming::default(), centred);
+        assert_eq!(
+            SceneDesc::new(display.clone(), "/p.json", "/assets", 60, false).framing,
+            centred
+        );
+        assert_eq!(
+            SceneDesc::builder(display, "/p.json")
+                .build()
+                .expect("scene should build")
+                .framing,
+            centred
+        );
+        assert_eq!(
+            SceneTemplate::builder("/p.json")
+                .build()
+                .expect("template should build")
+                .framing,
+            centred
+        );
+    }
+
+    #[test]
+    fn framing_accepts_both_ends_of_each_axis() {
+        for (pan_x, pan_y) in [(0.0, 0.0), (1.0, 1.0), (0.0, 1.0), (1.0, 0.0), (0.25, 0.75)] {
+            let framing = SceneFraming { pan_x, pan_y };
+
+            assert!(framing.is_valid(), "{pan_x}/{pan_y} should be a position");
+            SceneTemplate::builder("/p.json")
+                .framing(framing)
+                .build()
+                .expect("template should accept it");
+            SceneDesc::builder(DisplayDesc::new(1, 0, 0, 1920, 1080, 1.0), "/p.json")
+                .framing(framing)
+                .build()
+                .expect("scene should accept it");
+        }
+    }
+
+    #[test]
+    fn framing_off_the_display_is_rejected_by_every_entry_point() {
+        let display = DisplayDesc::new(1, 0, 0, 1920, 1080, 1.0);
+        for framing in off_the_map_framings() {
+            assert!(!framing.is_valid(), "{framing:?} is not a position");
+            assert_framing_rejected(framing.validate().expect_err("framing should be refused"));
+            assert_framing_rejected(
+                SceneDesc::builder(display.clone(), "/p.json")
+                    .framing(framing)
+                    .build()
+                    .expect_err("scene builder should refuse"),
+            );
+            assert_framing_rejected(
+                SceneTemplate::builder("/p.json")
+                    .framing(framing)
+                    .build()
+                    .expect_err("template builder should refuse"),
+            );
+            assert_framing_rejected(
+                SceneDesc::new(display.clone(), "/p.json", "/assets", 60, false)
+                    .with_framing(framing)
+                    .validate()
+                    .expect_err("scene validate should refuse"),
+            );
+            let mut template = SceneTemplate::builder("/p.json")
+                .build()
+                .expect("template should build");
+            template.framing = framing;
+            assert_framing_rejected(template.validate().expect_err("template validate should refuse"));
+        }
+    }
+
+    #[test]
+    fn only_a_different_framing_makes_another_wallpaper() {
+        let display = DisplayDesc::new(1, 0, 0, 1920, 1080, 1.0);
+        let scene = SceneDesc::new(display.clone(), "/p.json", "/assets", 60, false);
+
+        let moved = scene.clone().with_framing(SceneFraming {
+            pan_x: 0.1,
+            pan_y: 0.5,
+        });
+        assert!(!scene.same_wallpaper(&moved));
+        assert!(!moved.same_wallpaper(&scene));
+
+        let mut elsewhere = scene.clone();
+        elsewhere.display = DisplayDesc::new(2, 1920, 0, 2560, 1440, 2.0);
+        elsewhere.paused = true;
+        assert!(scene.same_wallpaper(&elsewhere));
+        assert!(scene.same_wallpaper(&scene.clone()));
+    }
+
+    #[test]
+    fn template_round_trip_keeps_framing() {
+        let framing = SceneFraming {
+            pan_x: 0.2,
+            pan_y: 0.9,
+        };
+        let template = SceneTemplate::builder("/p.json")
+            .framing(framing)
+            .build()
+            .expect("template should build");
+
+        let scene = template.for_display(DisplayDesc::new(1, 0, 0, 1920, 1080, 1.0));
+        assert_eq!(scene.framing, framing);
+        assert_eq!(SceneTemplate::from_scene_desc(&scene).framing, framing);
+        assert_eq!(SceneTemplate::from_scene_desc(&scene), template);
     }
 
     #[test]

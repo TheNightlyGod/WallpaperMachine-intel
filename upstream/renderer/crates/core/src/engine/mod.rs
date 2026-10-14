@@ -5,8 +5,10 @@ mod messages;
 mod runtime;
 mod snapshot;
 mod state;
+mod surface_recovery;
 
 pub use audio_requirement::AudioRequirementCallback;
+pub use surface_recovery::{RecoveryOutcome, RecoveryReason, RecoveryStep};
 use std::{
     collections::HashSet,
     sync::{Arc, Mutex},
@@ -39,7 +41,7 @@ use crate::{
         AudioVolume, InterleavedStereoF32, MonoPcmF32,
     },
     owe::backend::{AudioSpectrum128, OweBackend},
-    project::{ScalingMode, SceneDesc, SceneHandle, SceneResult, SerdeValudeExt},
+    project::{ScalingMode, SceneDesc, SceneFraming, SceneHandle, SceneResult, SerdeValudeExt},
     window::{MouseButtonEdges, MouseButtonTracker, MouseButtons, NormalizedMousePosition},
 };
 
@@ -64,6 +66,19 @@ pub struct DisplaySnapshotEntry {
     pub window_active: bool,
     /// The wallpaper assigned to this display, if any.
     pub assignment: Option<WallpaperAssignment>,
+}
+
+/// What came of showing a property document on a scene.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PropertyPreview {
+    /// The scene shows the document: this call sent it, or an earlier one had
+    /// and nothing has loaded the scene since.
+    Shown,
+    /// The scene draws a different wallpaper than the one the document was made
+    /// for, so nothing was sent. The caller's idea of what the handle draws was
+    /// out of date, which a reconcile that was still under way explains; there
+    /// is nothing to show on that scene and nothing to retry.
+    OtherWallpaper,
 }
 
 /// Rust entry point for controlling wallpaper scenes.
@@ -598,6 +613,56 @@ impl WallpaperEngine {
             .await
     }
 
+    /// Sets where a scene's presented wallpaper sits inside the room its
+    /// display leaves around it.
+    ///
+    /// Applied live: the project is not reparsed, the renderer is not rebuilt
+    /// and video keeps playing. The scene keeps the position across a rebuild
+    /// of the same wallpaper, and a different wallpaper takes the position of
+    /// its own descriptor.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if either axis of `framing` is not a finite fraction
+    /// between 0 and 1, actor communication fails, or the renderer rejects the
+    /// update. Nothing is sent to the renderer for an invalid framing.
+    pub async fn set_framing(
+        &self,
+        handle: SceneHandle,
+        framing: SceneFraming,
+    ) -> Result<(), EngineError> {
+        framing.validate()?;
+
+        self.ask_actor(messages::SetFraming { handle, framing })
+            .await
+    }
+
+    /// Shows a scene at `framing` while a drag is under way, without making it
+    /// the scene's position.
+    ///
+    /// The renderer follows live like [`Self::set_framing`], but the scene's
+    /// stored state is left alone and no engine snapshot is published, so a
+    /// caller can send one per step. The drag must end with
+    /// [`Self::set_framing`] (the same value commits it); a drag that does not
+    /// leaves the renderer on the shown position until the next commit, or
+    /// until the renderer is rebuilt, which goes back to the committed one.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if either axis of `framing` is not a finite fraction
+    /// between 0 and 1, actor communication fails, or the renderer rejects the
+    /// update. Nothing is sent to the renderer for an invalid framing.
+    pub async fn preview_framing(
+        &self,
+        handle: SceneHandle,
+        framing: SceneFraming,
+    ) -> Result<(), EngineError> {
+        framing.validate()?;
+
+        self.ask_actor(messages::PreviewFraming { handle, framing })
+            .await
+    }
+
     /// Live-updates the target FPS for one scene.
     ///
     /// # Errors
@@ -665,6 +730,29 @@ impl WallpaperEngine {
         suspended_displays: Vec<u32>,
     ) -> Result<(), EngineError> {
         self.ask_actor(messages::SetAllPaused { paused, suspended_displays }).await
+    }
+
+    /// Brings back the surface of the scene on `display_id` after it stopped
+    /// drawing, by the next rung of that scene's recovery ladder (a surface
+    /// reconfigure, then a renderer rebuild), without waiting.
+    ///
+    /// The engine heals a scene that reports a failed frame on its own; this is
+    /// for the callers that know something it does not, such as the check
+    /// after a wake ([`RecoveryReason::Stalled`]). A request spends the scene's
+    /// current budget and is refused once it is spent, so a caller cannot loop;
+    /// loading the wallpaper afresh gives the scene a new renderer and a new
+    /// budget. Paused scenes stay paused.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of the attempt when it failed. The next rung is then
+    /// already scheduled, unless the budget is spent.
+    pub async fn recover_surface(
+        &self,
+        display_id: u32,
+        reason: RecoveryReason,
+    ) -> Result<RecoveryOutcome, EngineError> {
+        self.ask_actor(messages::RecoverSurface { display_id, reason }).await
     }
 
     /// Turns renderer counting on or off for the whole process.
@@ -1068,15 +1156,64 @@ impl WallpaperEngine {
         handle: SceneHandle,
         json: T,
     ) -> Result<(), EngineError> {
-        let json = json.into();
-        let flat_json = serde_json::from_str::<Value>(&json)
-            .map_err(|e| EngineError::InvalidInput(e.to_string()))?
-            .flatten()?;
-        let flat_json = serde_json::to_string(&flat_json)
-            .map_err(|e| EngineError::InvalidInput(e.to_string()))?;
+        let flat_json = flat_property_document(&json.into())?;
 
         self.ask_actor(messages::SetPropertyOverride { handle, flat_json })
             .await
+    }
+
+    /// Shows a project property document on an open scene without keeping it.
+    ///
+    /// The document is the whole property state to show, like the one
+    /// [`Self::set_property_override`] takes: the project's declared defaults
+    /// with exactly these values over them, so a property it leaves out is back
+    /// at its declared default. Unlike that call it does not load the scene
+    /// again, saves nothing and publishes no snapshot: the scene's runtime state
+    /// and stored template stay as they were, so a caller can send one document
+    /// per step of an edit and an edit that is abandoned leaves nothing for the
+    /// next reconcile to rebuild. The shown state is gone as soon as the scene
+    /// is loaded again for any reason, and the scene then shows its saved
+    /// look. A property the scene reads only while it loads stays at the
+    /// value the scene loaded with.
+    ///
+    /// `scene_path` is the project file of the wallpaper the document was made
+    /// for. A handle names a display's scene, and a reconcile that is still
+    /// under way can put another wallpaper on it; this call is handled after
+    /// that reconcile, so the scene is checked then, and one that draws another
+    /// wallpaper is left alone and reported as
+    /// [`PropertyPreview::OtherWallpaper`]. A document for one wallpaper never
+    /// reaches another, whatever property names they share.
+    ///
+    /// The engine also knows what each scene was last shown, because it owns
+    /// the renderer that shows it and replaces it: a scene that already shows
+    /// the document is not told again, and a scene that was loaded again, for
+    /// any reason, is, so a caller can ask after every edit without tracking
+    /// which scenes were rebuilt.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the JSON cannot be parsed/flattened, actor
+    /// communication fails, or the renderer rejects the document. The document
+    /// is checked before the actor is asked, so a malformed one never reaches
+    /// the renderer.
+    pub async fn preview_property_override<S, T>(
+        &self,
+        handle: SceneHandle,
+        scene_path: S,
+        json: T,
+    ) -> Result<PropertyPreview, EngineError>
+    where
+        S: Into<String> + Send,
+        T: Into<String> + Send,
+    {
+        let flat_json = flat_property_document(&json.into())?;
+
+        self.ask_actor(messages::PreviewPropertyOverride {
+            handle,
+            expected_scene_path: scene_path.into(),
+            flat_json,
+        })
+        .await
     }
 
     /// Clears project property overrides for an open scene.
@@ -1093,6 +1230,15 @@ impl WallpaperEngine {
     async fn poll_mouse_state(&self, state: MousePollState) -> Result<(), EngineError> {
         self.ask_actor(messages::PollMouseState { state }).await
     }
+}
+
+/// Parses a property document and flattens it into the one-level JSON object
+/// the renderer reads, the same way for every call that hands the renderer one.
+fn flat_property_document(json: &str) -> Result<String, EngineError> {
+    let flat = serde_json::from_str::<Value>(json)
+        .map_err(|e| EngineError::InvalidInput(e.to_string()))?
+        .flatten()?;
+    serde_json::to_string(&flat).map_err(|e| EngineError::InvalidInput(e.to_string()))
 }
 
 struct DisplaySnapshot<'a> {
@@ -1435,6 +1581,36 @@ mod tests {
             "expected scaling factor {} to be within f64::EPSILON of 1.25",
             state.scaling_factor
         );
+    }
+
+    #[test]
+    fn scene_runtime_state_initial_uses_descriptor_framing() {
+        let default_state = SceneRuntimeState::try_from(&crate::project::SceneDesc::new(
+            crate::DisplayDesc::new(1, 0, 0, 1920, 1080, 1.0),
+            "/tmp/project.json",
+            "/tmp/assets",
+            60,
+            false,
+        ))
+        .expect("state should build");
+        assert_eq!(default_state.framing, SceneFraming::default());
+
+        let framing = SceneFraming {
+            pan_x: 0.1,
+            pan_y: 0.9,
+        };
+        let desc = crate::project::SceneDesc::builder(
+            crate::DisplayDesc::new(1, 0, 0, 1920, 1080, 1.0),
+            "/tmp/project.json",
+        )
+        .assets_path("/tmp/assets")
+        .framing(framing)
+        .build()
+        .expect("scene should build");
+
+        let state = SceneRuntimeState::try_from(&desc).expect("state should build");
+
+        assert_eq!(state.framing, framing);
     }
 
     #[test]
@@ -2023,6 +2199,91 @@ mod tests {
         assert_eq!(actor.state.displays_by_handle.get(&handle), Some(&key));
     }
 
+    fn actor_for_display_reports(model: DisplayStateModel) -> EngineActor {
+        let state = EngineState::with_display_model(model);
+        let snapshots = Arc::new(EngineSnapshotPublisher::new(
+            state.snapshot(),
+            Arc::new(Mutex::new(MouseButtonTracker::new())),
+        ));
+        let prepared = <EngineActor as kameo::actor::Spawn>::prepare();
+        EngineActor::new(
+            OweBackend,
+            Arc::new(|_handle| {}),
+            state,
+            snapshots,
+            prepared.actor_ref().downgrade(),
+        )
+    }
+
+    #[test]
+    fn a_display_report_where_the_primary_has_no_pixels_leaves_a_running_scene_alone() {
+        let template = crate::project::SceneTemplate::builder("/tmp/primary.json")
+            .build()
+            .unwrap();
+        let mut model = DisplayStateModel::from_config(crate::WallpaperEngineConfig {
+            displays: vec![crate::DisplayConfig {
+                selector: crate::DisplaySelector::Primary,
+                window_active: true,
+                wallpaper: Some(crate::WallpaperAssignment::Direct(template)),
+            }],
+        })
+        .unwrap();
+        model.records[0].live_display = Some(crate::DisplayDesc::new(1, 0, 0, 1920, 1080, 1.0));
+        model.records[0].runtime_open = true;
+        let mut actor = actor_for_display_reports(model);
+        let before = actor.state.display_records[0].model.clone();
+
+        let in_flux = crate::DisplayDesc::new(1, 0, 0, 0, 0, 1.0);
+        actor
+            .apply_display_report(in_flux.clone(), vec![in_flux])
+            .expect("a report in flux is not an error");
+
+        assert_eq!(actor.state.display_records[0].model, before);
+    }
+
+    #[test]
+    fn a_secondary_display_without_pixels_is_left_out_until_it_reports_a_size() {
+        let mut actor = actor_for_display_reports(
+            DisplayStateModel::from_config(crate::WallpaperEngineConfig::default()).unwrap(),
+        );
+        let primary = crate::DisplayDesc::new(1, 0, 0, 1920, 1080, 1.0);
+        let connecting = |width, height| {
+            crate::DisplayDesc::with_identity(
+                7,
+                crate::DisplayIdentity {
+                    uuid: Some("external".to_string()),
+                    ..crate::DisplayIdentity::default()
+                },
+                1920,
+                0,
+                width,
+                height,
+                1.0,
+            )
+        };
+
+        actor
+            .apply_display_report(primary.clone(), vec![primary.clone(), connecting(0, 0)])
+            .expect("a connecting display must not fail the refresh");
+        assert_eq!(actor.state.display_records.len(), 1);
+        assert_eq!(
+            actor.state.display_records[0].model.live_display,
+            Some(primary.clone())
+        );
+
+        actor
+            .apply_display_report(primary.clone(), vec![primary, connecting(2560, 1440)])
+            .unwrap();
+        assert_eq!(actor.state.display_records.len(), 2);
+        assert!(
+            actor
+                .state
+                .display_records
+                .iter()
+                .any(|record| record.model.live_display == Some(connecting(2560, 1440)))
+        );
+    }
+
     #[test]
     fn display_record_blank_when_active_without_assignment() {
         let record = DisplayRuntimeRecord {
@@ -2547,6 +2808,202 @@ mod tests {
             err,
             EngineError::InvalidInput(_) | EngineError::Platform(_)
         ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn set_framing_refuses_a_position_off_the_display_before_asking_the_actor() {
+        let engine = engine_with_display_records(Vec::new());
+        let handle = SceneHandle::new(u64::MAX);
+
+        for (pan_x, pan_y) in [
+            (f64::NAN, 0.5),
+            (0.5, f64::NAN),
+            (f64::INFINITY, 0.5),
+            (0.5, f64::NEG_INFINITY),
+            (-0.1, 0.5),
+            (0.5, 1.5),
+        ] {
+            let err = engine
+                .set_framing(handle, SceneFraming { pan_x, pan_y })
+                .await
+                .expect_err("an invalid framing should be refused");
+            // The unknown handle would have produced a different message had the
+            // request reached the actor.
+            assert!(
+                matches!(&err, EngineError::InvalidInput(message)
+                    if message == "framing must be fractions between 0 and 1"),
+                "{pan_x}/{pan_y} gave {err:?}"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn set_framing_forwards_a_valid_position_to_the_actor() {
+        let engine = engine_with_display_records(Vec::new());
+
+        for framing in [
+            SceneFraming::default(),
+            SceneFraming {
+                pan_x: 0.0,
+                pan_y: 1.0,
+            },
+        ] {
+            let err = engine
+                .set_framing(SceneHandle::new(u64::MAX), framing)
+                .await
+                .expect_err("unknown handle should fail");
+            assert!(
+                matches!(&err, EngineError::InvalidInput(message)
+                    if message.contains("unknown scene handle")),
+                "{framing:?} gave {err:?}"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn preview_framing_refuses_a_position_off_the_display_before_asking_the_actor() {
+        let engine = engine_with_display_records(Vec::new());
+        let handle = SceneHandle::new(u64::MAX);
+
+        for (pan_x, pan_y) in [
+            (f64::NAN, 0.5),
+            (0.5, f64::NAN),
+            (f64::INFINITY, 0.5),
+            (0.5, f64::NEG_INFINITY),
+            (-0.1, 0.5),
+            (0.5, 1.5),
+        ] {
+            let err = engine
+                .preview_framing(handle, SceneFraming { pan_x, pan_y })
+                .await
+                .expect_err("an invalid framing should be refused");
+            // The unknown handle would have produced a different message had the
+            // request reached the actor.
+            assert!(
+                matches!(&err, EngineError::InvalidInput(message)
+                    if message == "framing must be fractions between 0 and 1"),
+                "{pan_x}/{pan_y} gave {err:?}"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn preview_framing_forwards_a_valid_position_to_the_actor() {
+        let engine = engine_with_display_records(Vec::new());
+
+        for framing in [
+            SceneFraming::default(),
+            SceneFraming {
+                pan_x: 0.0,
+                pan_y: 1.0,
+            },
+        ] {
+            let err = engine
+                .preview_framing(SceneHandle::new(u64::MAX), framing)
+                .await
+                .expect_err("unknown handle should fail");
+            assert!(
+                matches!(&err, EngineError::InvalidInput(message)
+                    if message.contains("unknown scene handle")),
+                "{framing:?} gave {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_property_document_reaches_the_renderer_as_one_flat_object() {
+        for (document, flat) in [
+            ("{}", "{}"),
+            (
+                r#"{"example":{"inner":true},"count":1.5,"label":"demo"}"#,
+                r#"{"count":1.5,"example_inner":true,"label":"demo"}"#,
+            ),
+            // A cleared text property is the empty string, not a missing one.
+            (r#"{"text":null}"#, r#"{"text":""}"#),
+            // Whitespace and key order are the caller's, the renderer's input is not.
+            (
+                "  { \"b\" : 2,\n \"a\" : { \"c\" : false } }  ",
+                r#"{"a_c":false,"b":2}"#,
+            ),
+        ] {
+            assert_eq!(
+                flat_property_document(document).expect("a valid document"),
+                flat,
+                "{document}"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn preview_property_override_refuses_a_document_that_is_not_an_object_before_asking_the_actor(
+    ) {
+        let engine = engine_with_display_records(Vec::new());
+        let handle = SceneHandle::new(u64::MAX);
+
+        for document in [
+            "[]",
+            "1",
+            r#""text""#,
+            "null",
+            r#"{"broken":[1,2,3]}"#,
+            "{",
+            "",
+        ] {
+            let err = engine
+                .preview_property_override(handle, "/library/1/project.json", document)
+                .await
+                .expect_err("a malformed document should be refused");
+            // The unknown handle would have produced a different message had the
+            // document reached the actor.
+            assert!(
+                matches!(&err, EngineError::InvalidInput(message)
+                    if !message.contains("unknown scene handle")),
+                "{document:?} gave {err:?}"
+            );
+            // The same refusal as the call that loads the scene again, so an
+            // editor cannot show a document that Apply would then refuse.
+            let loaded = engine
+                .set_property_override(handle, document)
+                .await
+                .expect_err("the loading call refuses the same document");
+            assert_eq!(err.to_string(), loaded.to_string(), "{document:?}");
+        }
+
+        let err = engine
+            .preview_property_override(handle, "/library/1/project.json", "[]")
+            .await
+            .expect_err("an array root should be refused");
+        assert!(
+            matches!(&err, EngineError::InvalidInput(message)
+                if message == "override root must be a JSON object"),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn preview_property_override_flattens_nested_documents_and_forwards_a_valid_one_to_the_actor(
+    ) {
+        let engine = engine_with_display_records(Vec::new());
+
+        for document in [
+            "{}",
+            r#"{"alpha":0.5}"#,
+            r#"{"example":{"inner":true},"label":null}"#,
+        ] {
+            let err = engine
+                .preview_property_override(
+                    SceneHandle::new(u64::MAX),
+                    "/library/1/project.json",
+                    document,
+                )
+                .await
+                .expect_err("unknown handle should fail");
+            assert!(
+                matches!(&err, EngineError::InvalidInput(message)
+                    if message.contains("unknown scene handle")),
+                "{document:?} gave {err:?}"
+            );
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

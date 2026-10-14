@@ -1,9 +1,11 @@
-# First-run guide and support prompt
+# First-run guide and one-time prompts
 
-Two one-time offers on a Mac that has not seen them: the welcome guide that covers
-the first window, and a single request to star or support the project after the
-first downloaded wallpaper is applied. Each is shown once and remembered natively.
-The panel they appear in is described in [control panel](control-panel.md).
+One-time offers on a Mac that has not seen them: the welcome guide that covers the
+first window, a single request to star or support the project after the first
+downloaded wallpaper is applied, a later request for a GitHub star, and one question
+about [performance data](telemetry.md) for someone who finished the guide before it
+had that switch. Each is shown once and remembered natively. The panel they appear
+in is described in [control panel](control-panel.md).
 
 ## First run
 
@@ -55,11 +57,14 @@ committed; later pages have **Back**, and decision pages have **Skip**:
    no preset leaves every tile unchecked with a **Custom** note. They are drafts:
    **Continue** sends only what changed as `setting` / `renderScale` and `setting`
    / `frameRateCap`, **Skip** discards them.
-4. **Preferences.** Launch at login and Keep windows in place when clicking the
-   wallpaper are switches. **On battery** is a menu: Keep running, Reduced quality
+4. **Preferences.** Launch at login, Keep windows in place when clicking the
+   wallpaper and [Send performance data](telemetry.md) (off) are switches. **On battery** is a menu: Keep running, Reduced quality
    or Pause. They are drafts: **Continue** commits only the ones that changed
    (`setting` actions, including `batteryMode`), **Skip** discards them. Launch at
-   login is disabled with its reason while the app is outside Applications.
+   login is disabled with its reason while the app is outside Applications. When the
+   user has switched the app off in System Settings → General → Login Items, the row
+   keeps its switch and adds a note to allow it there; Settings → General also offers a
+   button that opens Login Items.
    Started at login, the app stays in the menu bar without opening the panel,
    unless this guide is unfinished or the renderer failed to start
    (`ControlPanelLaunch`). When renderer settings are unavailable the page says so
@@ -106,7 +111,9 @@ The download must have finished installing, and applying must have succeeded and
 reported a new active display assignment. Downloads alone, local imports, failed
 applies, startup restoration, playlist changes, automatic update reloads and
 reapplying an already active wallpaper do not qualify. **Apply changes** also
-qualifies when it first enables the downloaded wallpaper on a display.
+qualifies when it first enables the downloaded wallpaper on a display, and so does
+[Download and apply](workshop-downloads.md#download-and-apply) once its wallpaper
+has arrived, because it applies as the user's own choice.
 
 Eligibility survives quitting between download and apply. If the panel is hidden,
 the [welcome guide](#first-run) or sign-in is open, another dialog is active, or a
@@ -116,3 +123,28 @@ defers hiding for this first offer. Only a displayed offer consumes the one-time
 flag; after that it never returns automatically, including after quitting or
 updating. Opening a link neither stars the repository nor makes a payment; the user
 finishes that action in their browser. See [Supporter details](../../SPONSORS.md).
+
+## Star prompt and the performance data question
+
+`SupportPromptStore` schedules all three prompts and names at most one in the
+snapshot's `pendingPrompt`; `WebUI/support-prompt.js` shows it in the same dialog with
+the same waiting rules as above. When several are due, the order is the performance
+data question, then the support prompt, then the star prompt, and no prompt appears on
+the same calendar day as another.
+
+- **Like WallpaperMachine?** asks once for a GitHub star from someone who did not
+  choose **Star on GitHub** in the support prompt or in Settings → About. It waits
+  until 14 days after the first day the panel was opened with a build that counts it,
+  and until the panel has been on screen on at least 5 different days. For an existing
+  user the 14 days start at the update. Someone who never downloads a wallpaper, and
+  so never sees the support prompt, gets it too.
+- **Send performance data?** asks once someone who finished the welcome guide before
+  it had the switch. **Send performance data** turns it on; **What is sent** opens
+  [telemetry.md](telemetry.md) on GitHub without closing the dialog. Reaching the
+  guide's Preferences page, or choosing in Settings, counts as having been asked; someone
+  who leaves the guide before that page is asked once afterwards.
+
+Settings → About also has **Share WallpaperMachine…**, the system share menu with the
+website's home page (the Chinese page for either Chinese app language), and **Star on
+GitHub**. A wallpaper's details offer **Share…** for Workshop wallpapers; see
+[control panel](control-panel.md#sharing-a-wallpaper).

@@ -91,7 +91,7 @@ final class WallpaperDisplayLayoutStore {
 }
 
 enum WallpaperDisplayLayoutError: LocalizedError {
-    case invalidLayout, missingLayout, noWallpapers, sameDisplay, changed, pendingEdits
+    case invalidLayout, missingLayout, noWallpapers, sameDisplay, changed, pendingEdits, noEligibleDisplays
     case unavailableDisplay(String), unavailableWallpaper(String)
     case restored(String), incomplete(String, String)
 
@@ -103,6 +103,7 @@ enum WallpaperDisplayLayoutError: LocalizedError {
         case .sameDisplay: String(localized: "Choose two different independent displays.")
         case .changed: String(localized: "The display assignments changed. Review the displays and try again.")
         case .pendingEdits: String(localized: "Apply or revert wallpaper edits before changing a display layout.")
+        case .noEligibleDisplays: String(localized: "Enable at least one independent display before applying a wallpaper to all displays.")
         case .unavailableDisplay(let title): String(localized: "The display “\(title)” is disconnected, disabled or mirrored. Connect and enable it as an independent display.")
         case .unavailableWallpaper(let id): String(localized: "The wallpaper “\(id)” is unavailable. Restore it to the library before applying this layout.")
         case .restored(let reason): String(localized: "The layout could not be applied. Previous wallpapers were restored. \(reason)")

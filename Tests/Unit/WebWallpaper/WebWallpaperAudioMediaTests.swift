@@ -85,6 +85,157 @@ final class WebWallpaperAudioMediaTests: XCTestCase {
     pump.setSubscribed(false, for: ObjectIdentifier(page))
   }
 
+  // MARK: - silence cadence
+
+  func testSilenceCadenceRepeatsAClearedFrameThroughTheSettleWindowThenAtOneHertz() {
+    var cadence = WebWallpaperSilenceCadence()
+    let start = ContinuousClock.now
+    let silent = Self.spectrum(generation: 8, level: 0)
+    cadence.recordNew(at: start)
+
+    // The pump polls at about 30 Hz; step in 33 ms like it does.
+    let step = Duration.milliseconds(33)
+    var repeats: [Duration] = []
+    for index in 1...121 {
+      let elapsed = step * index
+      if cadence.shouldRepeat(silent, at: start.advanced(by: elapsed)) { repeats.append(elapsed) }
+    }
+
+    let inWindow = repeats.filter { $0 < .milliseconds(1500) }
+    XCTAssertEqual(inWindow.count, 45, "every poll until the settle window closes repeats, so a decay can finish")
+    let afterwards = repeats.filter { $0 >= .milliseconds(1500) }
+    XCTAssertEqual(afterwards.count, 2, "between 1.5 s and 4 s the keep-alive fires twice")
+    let gaps = zip(repeats.filter { $0 >= .milliseconds(1485) }, afterwards).map { $1 - $0 }
+    XCTAssertTrue(
+      gaps.allSatisfy { $0 >= .seconds(1) && $0 < .milliseconds(1034) },
+      "the keep-alive is spaced one second from the previous repeat, not from the sound")
+  }
+
+  func testSilenceCadenceNeedsAGenerationToRepeatAndForgetsItOnReset() {
+    var cadence = WebWallpaperSilenceCadence()
+    let now = ContinuousClock.now
+    let silent = Self.spectrum(generation: 8, level: 0)
+
+    XCTAssertFalse(
+      cadence.shouldRepeat(silent, at: now), "nothing has been delivered yet, so there is nothing to repeat")
+    cadence.recordNew(at: now)
+    XCTAssertTrue(cadence.shouldRepeat(silent, at: now.advanced(by: .milliseconds(33))))
+    cadence.reset()
+    XCTAssertFalse(
+      cadence.shouldRepeat(silent, at: now.advanced(by: .milliseconds(66))),
+      "after a reset the next delivery has to come from a new generation")
+    XCTAssertFalse(
+      cadence.shouldRepeat(
+        BridgeAudioSpectrum(generation: 9, stereo: false, bins: []), at: now.advanced(by: .seconds(5))))
+  }
+
+  func testPumpRepeatsAZeroFrameWhileTheAnalyserStaysQuiet() {
+    let clock = FakeClock()
+    var current = Self.spectrum(generation: 7, level: 0.5)
+    let pump = WebWallpaperAudioPump(read: { current }, now: { clock.now })
+    var delivered: [UInt64] = []
+    pump.onSpectrum = { delivered.append($0.generation) }
+
+    pump.pollOnce()
+    XCTAssertEqual(delivered, [7])
+
+    // The analyser clears once and then goes silent without a new generation.
+    current = Self.spectrum(generation: 8, level: 0)
+    clock.advance(.milliseconds(33))
+    pump.pollOnce()
+    XCTAssertEqual(delivered, [7, 8])
+
+    for _ in 0..<40 {
+      clock.advance(.milliseconds(33))
+      pump.pollOnce()
+    }
+    XCTAssertEqual(
+      delivered, [7, 8] + [UInt64](repeating: 8, count: 40),
+      "inside the settle window the cleared frame follows every poll")
+
+    clock.advance(.milliseconds(280))  // 1.6 s after the cleared frame
+    pump.pollOnce()
+    XCTAssertEqual(delivered.count, 42, "a poll that comes right after the last repeat has nothing to say")
+
+    clock.advance(.milliseconds(900))  // 2.5 s
+    pump.pollOnce()
+    XCTAssertEqual(delivered.count, 43, "the keep-alive is one frame a second")
+    clock.advance(.milliseconds(100))
+    pump.pollOnce()
+    XCTAssertEqual(delivered.count, 43)
+
+    // Sound returns: the new generation is delivered, and a frame with signal is
+    // never repeated.
+    current = Self.spectrum(generation: 9, level: 0.4)
+    clock.advance(.milliseconds(100))
+    pump.pollOnce()
+    XCTAssertEqual(delivered.last, 9)
+    XCTAssertEqual(delivered.count, 44)
+    for _ in 0..<5 {
+      clock.advance(.milliseconds(33))
+      pump.pollOnce()
+    }
+    XCTAssertEqual(delivered.count, 44, "a spectrum with signal is delivered once")
+
+    // And the next silence starts a fresh settle window.
+    current = Self.spectrum(generation: 10, level: 0)
+    clock.advance(.milliseconds(33))
+    pump.pollOnce()
+    clock.advance(.milliseconds(33))
+    pump.pollOnce()
+    XCTAssertEqual(Array(delivered.suffix(2)), [10, 10])
+  }
+
+  func testAFrameWithSignalIsNeverRepeated() {
+    let clock = FakeClock()
+    var bins = [Float](repeating: 0, count: 128)
+    bins[127] = 0.0001  // one barely audible band is still a real analysis
+    var current = BridgeAudioSpectrum(generation: 3, stereo: true, bins: bins)
+    let pump = WebWallpaperAudioPump(read: { current }, now: { clock.now })
+    var delivered: [UInt64] = []
+    pump.onSpectrum = { delivered.append($0.generation) }
+
+    for _ in 0..<400 {  // about 13 s of polling
+      pump.pollOnce()
+      clock.advance(.milliseconds(33))
+    }
+    XCTAssertEqual(delivered, [3], "replaying a stale spectrum would show sound that has stopped")
+
+    current = Self.spectrum(generation: 4, level: 0.25)
+    for _ in 0..<100 {
+      pump.pollOnce()
+      clock.advance(.milliseconds(33))
+    }
+    XCTAssertEqual(delivered, [3, 4])
+  }
+
+  func testStoppingResetsTheCadenceSoANewSubscriberGetsItsFirstFrame() async throws {
+    let clock = FakeClock()
+    let pump = WebWallpaperAudioPump(
+      read: { Self.spectrum(generation: 8, level: 0) },
+      interval: .milliseconds(1), now: { clock.now },
+      wait: { _ in try await Task.sleep(for: .seconds(3600)) })
+    var delivered: [UInt64] = []
+    pump.onSpectrum = { delivered.append($0.generation) }
+    let first = NSObject()
+    let second = NSObject()
+
+    pump.setSubscribed(true, for: ObjectIdentifier(first))
+    try await poll { delivered.count == 1 }
+    clock.advance(.seconds(2))
+    pump.pollOnce()
+    XCTAssertEqual(delivered.count, 2, "settled silence still reaches the page once a second")
+
+    // Past the settle window and right after a repeat, a plain repeat would be
+    // refused; a page that has just subscribed must not wait for the next one.
+    pump.setSubscribed(false, for: ObjectIdentifier(first))
+    XCTAssertFalse(pump.isPolling)
+    clock.advance(.milliseconds(100))
+    pump.setSubscribed(true, for: ObjectIdentifier(second))
+    try await poll { delivered.count == 3 }
+    pump.setSubscribed(false, for: ObjectIdentifier(second))
+  }
+
   // MARK: - media relay
 
   func testProviderConsumersReturnToZeroWhenEveryPageLeaves() {
@@ -254,6 +405,10 @@ final class WebWallpaperAudioMediaTests: XCTestCase {
 
   // MARK: - helpers
 
+  private static func spectrum(generation: UInt64, level: Float) -> BridgeAudioSpectrum {
+    BridgeAudioSpectrum(generation: generation, stereo: false, bins: [Float](repeating: level, count: 128))
+  }
+
   private static let thumbnail = SystemMediaThumbnail(
     pngBase64DataURL: "data:image/png;base64,iVBORw0KGgo=",
     primaryColor: "rgb(10, 20, 30)", secondaryColor: "rgb(40, 50, 60)",
@@ -297,4 +452,13 @@ final class FakeSystemMediaProvider: SystemMediaProvider {
     onPlaybackChanged?(playback)
     if let timeline { onTimelineChanged?(timeline) }
   }
+}
+
+/// A clock the test moves by hand, so a cadence that lasts seconds is checked
+/// in microseconds and never depends on how busy the machine is.
+@MainActor
+final class FakeClock {
+  private(set) var now = ContinuousClock.now
+
+  func advance(_ duration: Duration) { now = now.advanced(by: duration) }
 }

@@ -48,6 +48,27 @@ channels, capture falls back to a mono tap: left and right are then equal, and n
 reports that as stereo. The spectrum's `stereo` flag describes how the PCM was submitted,
 not whether the content happens to differ.
 
+## Output device changes
+
+Capture is rebuilt when the default output device changes, for example when
+headphones or a USB audio interface are connected or removed. The change is
+reported after 300 ms without further changes, so a Bluetooth device that
+announces a switch several times produces one rebuild. Only a running tap is
+rebuilt: nothing happens while capture is stopped, paused or waiting for
+permission, and a paused display starts a tap on the current device when it
+resumes. A rebuild never asks for permission again. The app watches for the change
+only while capture is wanted, from the moment a scene that reads audio or a web page
+starts it until the last one stops or capture is suspended, so a Mac whose wallpapers
+never read audio has no watcher and a device switch writes nothing to the log.
+
+If the new tap cannot be started, it is tried again after 0.5, 1 and 1.5
+seconds; a newer device change replaces the pending retries, and a tap that has
+started in the meantime is left alone. After the last failure the log says the tap
+could not be rebuilt, and it starts again at the next scene or demand change; no
+alert is shown. These steps are written to the application log with the
+`[wallpaper-core audio]` prefix. While the tap is down, the analysis treats the
+input as stale after 250 ms and the spectrum falls to zero.
+
 ## What wallpapers receive
 
 Wallpapers are authored against Wallpaper Engine's numbers, so the analysis
@@ -77,7 +98,7 @@ Scenes receive the values as analysed; web pages receive them clamped to 0.0–1
 | Path | Notes |
 | --- | --- |
 | Shader spectrum effects | Authored audio-reactive shaders |
-| Web `wallpaperRegisterAudioListener()` | 64 bands per channel, one shared delivery pump capped at 30 Hz |
+| Web `wallpaperRegisterAudioListener()` | 64 bands per channel, one shared delivery pump capped at 30 Hz; a cleared spectrum keeps arriving through silence (every poll for 1.5 s, then once a second) so pages that smooth per callback finish decaying ([details](web-wallpapers.md#audio-response)) |
 | SceneScript `engine.registerAudioBuffers()` | 16, 32 and 64 bands |
 | Particle emitters | Box and sphere emitters with audio frequency, bounds and exponent settings |
 
@@ -91,6 +112,9 @@ Scenes receive the values as analysed; web pages receive them clamped to 0.0–1
 Synthetic offscreen checks cover the analysis against tone measurements
 (`AudioResponseMonoTest`, see [renderer testing](../testing/renderer.md)), audio-driven
 shader color and SceneScript scale. Device-free controller and bridge tests cover web-only
-capture startup, permission, shared ownership, suspension and shutdown; offscreen WebKit
-tests cover listener delivery. Live capture and desktop behavior require a separately
-authorized manual check.
+capture startup, permission, shared ownership, suspension and shutdown, and the
+[output device rebuild](#output-device-changes): the debounce, the controller restart,
+the retry delays and superseded retries. Offscreen WebKit tests cover listener
+delivery. Live capture and desktop behavior require a separately authorized manual
+check; that includes the CoreAudio listener itself and a real device switch, which no
+unit test can exercise.

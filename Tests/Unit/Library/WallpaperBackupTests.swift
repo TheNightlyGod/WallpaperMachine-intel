@@ -461,6 +461,7 @@ final class WallpaperBackupTests: XCTestCase {
             $0.source = .collection
             $0.collectionID = collection.id
             $0.interval = 45
+            $0.trigger = .unlock
         }
         let plan = try playlists.savePlan(from: "display-one", name: "Night plan")
         let placement = try StillImagePlacement(x: 0.2, y: 0.7, zoom: 1.5)
@@ -482,6 +483,8 @@ final class WallpaperBackupTests: XCTestCase {
         let restoredPlaylists = PlaylistStore(defaults: targetDefaults)
         XCTAssertEqual(restoredPlaylists.plan(id: plan.id), plan)
         XCTAssertEqual(restoredPlaylists.playlist(for: "display-one").collectionID, collection.id)
+        XCTAssertEqual(restoredPlaylists.playlist(for: "display-one").trigger, .unlock, "a playlist that changes on unlock restores as one")
+        XCTAssertEqual(restoredPlaylists.plan(id: plan.id)?.playlist.trigger, .unlock)
         XCTAssertEqual(StillImagePlacementStore(defaults: targetDefaults, library: destination.appendingPathComponent("Library"))
             .placement(wallpaperID: "image-test", displayID: "display-one"), placement)
     }
@@ -589,6 +592,73 @@ final class WallpaperBackupTests: XCTestCase {
         try JSONSerialization.data(withJSONObject: manifest).write(to: package.appendingPathComponent("manifest.json"))
     }
 
+    func testLowBatteryChoicesAreBackedUpAndOnlyOfferedValuesRestore() throws {
+        let preferences = try defaults()
+        preferences.set("stop", forKey: "WallpaperMachine.lowBatteryAction")
+        preferences.set(30, forKey: "WallpaperMachine.lowBatteryThreshold")
+        let export = try WallpaperBackupPreferences(defaults: preferences, domainName: domainName(for: preferences))
+        for (key, expected) in [("WallpaperMachine.lowBatteryAction", "stop" as Any), ("WallpaperMachine.lowBatteryThreshold", 30 as Any)] {
+            let stored = try WallpaperBackupPreferences.decode(XCTUnwrap(export.values[key], key))
+            try WallpaperBackupPreferences.validate(stored, forKey: key)
+            XCTAssertEqual("\(stored)", "\(expected)")
+        }
+        let conditionKeys = ["WallpaperMachine.lowPowerModeAction", "WallpaperMachine.thermalAction", "WallpaperMachine.lowBatteryAction"]
+        for key in conditionKeys {
+            for action in ["keepRunning", "reduceQuality", "pause", "stop"] {
+                XCTAssertNoThrow(try WallpaperBackupPreferences.validate(action, forKey: key), "\(action) for \(key)")
+            }
+        }
+        for level in [10, 20, 30] {
+            XCTAssertNoThrow(try WallpaperBackupPreferences.validate(NSNumber(value: level), forKey: "WallpaperMachine.lowBatteryThreshold"))
+        }
+        for key in conditionKeys {
+            // "reducedQuality" is the on-battery mode's name, not a condition action.
+            for action: Any in ["nap", "", "reducedQuality", 1, true] {
+                XCTAssertThrowsError(try WallpaperBackupPreferences.validate(action, forKey: key), "\(action) for \(key)")
+            }
+        }
+        for level: Any in [0, 15, 25, 31, -20, 20.5, "20", true, NSNumber(value: 1e30)] {
+            XCTAssertThrowsError(try WallpaperBackupPreferences.validate(level, forKey: "WallpaperMachine.lowBatteryThreshold"), "\(level)")
+        }
+    }
+
+    func testPlayingOnlyOnTheActiveDisplayIsBackedUpAndOnlyABooleanRestores() throws {
+        let preferences = try defaults()
+        preferences.set(true, forKey: "WallpaperMachine.playOnlyOnActiveDisplay")
+        let export = try WallpaperBackupPreferences(defaults: preferences, domainName: domainName(for: preferences))
+        let key = "WallpaperMachine.playOnlyOnActiveDisplay"
+
+        let stored = try WallpaperBackupPreferences.decode(XCTUnwrap(export.values[key], key))
+        try WallpaperBackupPreferences.validate(stored, forKey: key)
+        XCTAssertEqual(stored as? Bool, true)
+        for value: Any in [true, false] {
+            XCTAssertNoThrow(try WallpaperBackupPreferences.validate(value, forKey: key), "\(value)")
+        }
+        for value: Any in ["yes", 1, 0, 2.5, NSNull(), ["true"]] {
+            XCTAssertThrowsError(try WallpaperBackupPreferences.validate(value, forKey: key), "\(value)")
+        }
+    }
+
+    /// Muting every wallpaper is local to this Mac: a backup never carries it, and a package that
+    /// claims to cannot silence a Mac whose owner did not ask.
+    func testMutingEveryWallpaperIsNeitherBackedUpNorRestored() async throws {
+        let original = try fixture()
+        original.set(true, forKey: "WallpaperMachine.wallpapersMuted")
+        original.set(true, forKey: "WallpaperMachine.playOnlyOnActiveDisplay")
+        let export = try WallpaperBackupPreferences(defaults: original, domainName: domainName(for: original))
+        XCTAssertNotNil(export.values["WallpaperMachine.playOnlyOnActiveDisplay"], "a neighbouring playback choice is backed up")
+        XCTAssertNil(export.values["WallpaperMachine.wallpapersMuted"])
+
+        let live = try defaults()
+        try WallpaperBackupService(supportRoot: source).export(to: package, includeLibrary: true, preferences: export)
+        let service = WallpaperBackupService(supportRoot: destination)
+        try replaceManifestPreference("WallpaperMachine.playOnlyOnActiveDisplay", value: false)
+        XCTAssertNoThrow(try service.preview(package: package, preferences: .init(defaults: live, domainName: domainName(for: live))),
+                         "an allowed playback choice in the same package is fine")
+        try replaceManifestPreference("WallpaperMachine.wallpapersMuted", value: true)
+        XCTAssertThrowsError(try service.preview(package: package, preferences: .init(defaults: live, domainName: domainName(for: live))))
+    }
+
     func testStructuredPreferenceRejectionPreservesPendingAndLiveArchive() async throws {
         let original = try fixture()
         let live = try defaults()
@@ -606,6 +676,9 @@ final class WallpaperBackupTests: XCTestCase {
             ("WallpaperMachine.collections", Data(#"[{"id":"x","name":"Missing members"}]"#.utf8)),
             ("WallpaperMachine.playlistPlans", Data(#"[{"id":"p","name":"Bad","playlist":{"mode":"unknown"}}]"#.utf8)),
             ("WallpaperMachine.playlists", Data(#"{"screen":{"wallpaperIDs":["a"],"interval":0}}"#.utf8)),
+            ("WallpaperMachine.playlists", Data(#"{"screen":{"mode":"rotate","trigger":"weekly"}}"#.utf8)),
+            ("WallpaperMachine.playlists", Data(#"{"screen":{"mode":"rotate","trigger":5}}"#.utf8)),
+            ("WallpaperMachine.playlistPlans", Data(#"[{"id":"p","name":"Bad","playlist":{"mode":"rotate","trigger":"weekly"}}]"#.utf8)),
             ("WallpaperMachine.imagePlacements", Data(#"{"version":1,"placements":{"w":{"screen":{"x":2,"y":0.5,"zoom":1}}}}"#.utf8)),
             ("WallpaperMachine.imagePlacements", Data(#"{"version":2,"placements":{}}"#.utf8)),
             ("WallpaperMachine.hotKeys", Data(#"{"togglePlayback":{"keyCode":"oops","modifiers":0,"label":"P"}}"#.utf8)),

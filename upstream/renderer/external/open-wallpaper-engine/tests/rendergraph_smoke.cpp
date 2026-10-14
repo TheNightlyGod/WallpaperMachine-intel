@@ -1351,6 +1351,41 @@ TEST(RenderGraph, defaultOutputUsesSceneClearEnabledWhileNonDefaultWritesAlpha) 
     REQUIRE(!clear_pass->desc().write_alpha);
 }
 
+// A layer hidden by a visibility only a reload changes is left out of the
+// graph. While it was in, it could be the scene output's first writer: with
+// clearing off that writer neither cleared nor drew, so the first layer drawn
+// loaded what the frame began with, and leaving the hidden one out must not
+// make that layer discard it. With clearing on the first layer drawn clears,
+// as the hidden one's clear did before it.
+TEST(RenderGraph, aHiddenFirstWriterLeftOutKeepsTheSceneOutputsLoadAndClear) {
+    for (const bool clear : { false, true }) {
+        for (const bool hidden_first : { true, false }) {
+            SCOPED_TRACE(std::string(clear ? "clearing" : "not clearing") +
+                         (hidden_first ? ", hidden first" : ", hidden after"));
+            Scene scene;
+            installDefaultTargets(scene);
+            scene.clearEnabled = clear;
+            auto hidden = makeNode("left_out_writer");
+            hidden->SetVisible(false);
+            hidden->SetVisibilitySettled(true);
+            auto drawn = makeNode("first_drawn_writer");
+            if (hidden_first) scene.sceneGraph->AppendChild(hidden);
+            scene.sceneGraph->AppendChild(drawn);
+            if (! hidden_first) scene.sceneGraph->AppendChild(hidden);
+
+            const auto graph  = wallpaper::sceneToRenderGraph(scene);
+            const auto passes = graphPasses(*graph);
+            REQUIRE(std::none_of(passes.begin(), passes.end(), [](const auto& pass) {
+                return pass.name == "left_out_writer";
+            }));
+            const auto* first = findCustomPass(passes, "first_drawn_writer");
+            REQUIRE(first->desc().output == SpecTex_Default);
+            EXPECT_EQ(first->desc().clear_on_first_use, clear);
+            EXPECT_EQ(first->desc().preserve_target_contents, ! clear && hidden_first);
+        }
+    }
+}
+
 TEST(RenderGraph, postProcessesAppendPassesAndCopiesAfterSceneGraph) {
     Scene scene;
     installDefaultTargets(scene);

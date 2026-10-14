@@ -20,9 +20,10 @@ class VFS;
 
 /// Authored "layer as texture" names. Wallpaper Engine writes the composite of
 /// another layer as `_rt_imageLayerComposite_<id>` with an optional `_a` / `_b`
-/// ping-pong suffix. `_a` (or no suffix) is that layer's produced output;
-/// `_b` on the same layer is the other ping-pong buffer, which is last-frame
-/// history.
+/// ping-pong suffix. `_a` (or no suffix) is that layer's produced output.
+/// Inside the layer's own effect chain both are the chain's ping-pong buffers,
+/// the image the effect works on (`IsOwnEffectChainInput`); a self `_b`
+/// anywhere else is still taken as last-frame history.
 inline constexpr std::string_view kLayerTextureMissingTarget =
     "a texture names a layer that does not exist";
 inline constexpr std::string_view kLayerTextureDuplicateName =
@@ -73,6 +74,16 @@ std::optional<int32_t> ParseImageLayerCompositeId(std::string_view name,
 
 bool IsImageLayerCompositeName(std::string_view name);
 
+/// Whether `name`, bound by an effect of layer `layer_id` itself, is one of that
+/// chain's ping-pong buffers, `_a` (or the bare name) or `_b`: the image the
+/// effect works on, the one `previous` names (for the first effect, the layer
+/// before any effect). The editor writes the buffer `previous` was in when the
+/// effect was set up, so the suffix alternates along the chain and can be stale
+/// after effects are reordered; either way it is the effect's input. The layer's
+/// composite is what its chain ends in, so read here it could only be a
+/// texture the same frame has yet to draw. Other layers binding the same name
+/// still get the composite.
+bool IsOwnEffectChainInput(std::string_view name, int32_t layer_id);
 
 /// Resolve one authored texture string. File names still go through VFS: a
 /// unique layer name is only treated as a layer if no material file exists.

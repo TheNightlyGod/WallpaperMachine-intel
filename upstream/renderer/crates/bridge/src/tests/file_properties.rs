@@ -63,7 +63,7 @@ async fn bridge_with_paths(paths: BridgePaths) -> WallpaperBridge {
         .set_display_config_enabled("300".into(), "7".into(), true)
         .await
         .unwrap();
-    bridge.apply_wallpaper_options("300".into()).await.unwrap();
+    bridge.apply_wallpaper_options("300".into(), true).await.unwrap();
     bridge
 }
 

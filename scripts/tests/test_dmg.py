@@ -17,7 +17,7 @@ from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SCRIPTS))
-from lib import dmg  # noqa: E402
+from lib import bundle_contract, dmg  # noqa: E402
 
 VERSION = "1.2.3"
 ALIAS_FIXED = ">h28pI2shI64pII4s4shhI2s10s"
@@ -230,16 +230,48 @@ class DiskImageRoundTripTests(unittest.TestCase):
         self.addCleanup(subprocess.run, ["hdiutil", "detach", "-force", mount], capture_output=True)
         return mount
 
+    @staticmethod
+    def accept(app):
+        """A contract that passes: the test bundle is a bare executable, not the real app."""
+        return []
+
     def test_the_image_verifies_for_its_version_only(self):
-        dmg.verify(self.image, VERSION)
+        dmg.verify(self.image, VERSION, contract=self.accept)
         with self.assertRaisesRegex(dmg.DiskImageError, "not 9.9.9"):
-            dmg.verify(self.image, "9.9.9")
+            dmg.verify(self.image, "9.9.9", contract=self.accept)
+
+    def test_the_contract_runs_on_the_app_inside_the_mounted_image(self):
+        seen = []
+
+        def contract(app):
+            app = Path(app)
+            seen.append((app.name, app.parent != Path(self.scratch.name) / "input", os.path.ismount(app.parent),
+                         (app / "Contents/Info.plist").is_file()))
+            return ["the signature adds an entitlement"]
+
+        self.assertEqual(dmg.verify(self.image, VERSION, contract=contract), ["the signature adds an entitlement"])
+        self.assertEqual(seen, [(dmg.APPLICATION, True, True, True)])
+
+    def test_a_contract_failure_in_the_image_fails_verification_and_detaches_it(self):
+        def contract(app):
+            raise bundle_contract.BundleContractError("the extension lost its sandbox")
+
+        with self.assertRaisesRegex(dmg.DiskImageError, f"{dmg.image_name(VERSION)}: the extension lost its sandbox"):
+            dmg.verify(self.image, VERSION, contract=contract)
+        self.assertNotIn(str(self.image), self.attached_images())
+
+    def test_by_default_the_image_must_satisfy_the_real_bundle_contract(self):
+        with self.assertRaisesRegex(dmg.DiskImageError, "embeds no extension"):
+            dmg.verify(self.image, VERSION)
+
+    @staticmethod
+    def attached_images():
+        listing = plistlib.loads(subprocess.run(["hdiutil", "info", "-plist"], check=True, capture_output=True).stdout)
+        return [entry.get("image-path") for entry in listing.get("images", [])]
 
     def test_verification_leaves_nothing_attached(self):
-        dmg.verify(self.image, VERSION)
-        listing = plistlib.loads(subprocess.run(["hdiutil", "info", "-plist"], check=True, capture_output=True).stdout)
-        attached = [entry.get("image-path") for entry in listing.get("images", [])]
-        self.assertNotIn(str(self.image), attached)
+        dmg.verify(self.image, VERSION, contract=self.accept)
+        self.assertNotIn(str(self.image), self.attached_images())
 
     def test_the_window_places_the_app_beside_applications_over_the_background(self):
         mount = self.mounted()

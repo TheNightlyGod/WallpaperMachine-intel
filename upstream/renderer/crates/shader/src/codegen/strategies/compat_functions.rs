@@ -6,7 +6,10 @@ use super::{
     COMPATIBILITY_FUNCTIONS, CodegenStage, CodegenStrategy, Emitable, GENERAL_POLICIES,
     LEGACY_BUILTINS, StrategyContext,
 };
-use crate::{ShaderResult, ShaderStageKind};
+use crate::{
+    ShaderResult, ShaderStageKind,
+    codegen::{Fixup, declarations::functions::MATRIX_INVERSE_HELPER},
+};
 
 /// Requests generated helper functions only when source references them.
 struct CompatibilityFunctionsStrategy;
@@ -41,6 +44,15 @@ impl Emitable for CompatibilityFunctionsStrategy {
                         .context()
                         .declarations
                         .require_perform_lighting_functions();
+                }
+                // Renamed for every target; only a compiler whose writer lacks
+                // the builtin defines the macro that makes the name a helper.
+                "inverse" if !context.context().declarations.has_user_function("inverse") => {
+                    let context = context.context();
+                    context
+                        .fixups
+                        .push(Fixup::replace(call.name_span(), MATRIX_INVERSE_HELPER));
+                    context.declarations.require_matrix_inverse_functions();
                 }
                 _ => {}
             }

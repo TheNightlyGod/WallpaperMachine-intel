@@ -49,6 +49,28 @@ final class WorkshopStoreTests: XCTestCase {
     XCTAssertEqual(store.items.first?.kind, .video)
   }
 
+  /// Recently updated is Steam's `lastupdated` order. It must reach Steam as that key together
+  /// with the search text and tags, and the page it answers with is shown.
+  func testRecentlyUpdatedSortAsksSteamForLastUpdatedWithTheSearchAndTags() async throws {
+    let fixture = try Fixture()
+    defer { fixture.remove() }
+    let store = fixture.store
+    store.searchText = "forest"
+    store.kind = .scene
+    store.sort = .updated
+    store.tags = ["Nature"]
+    let values = URLComponents(url: store.browseURL, resolvingAgainstBaseURL: false)?.queryItems ?? []
+    XCTAssertEqual(values.first { $0.name == "browsesort" }?.value, "lastupdated")
+    XCTAssertEqual(values.first { $0.name == "searchtext" }?.value, "forest")
+    XCTAssertEqual(values.filter { $0.name == "requiredtags[]" }.compactMap(\.value), ["Scene", "Nature"])
+    store.search()
+    try await fixture.reply(
+      text: "forest", kind: .scene, sort: .updated, page: 1,
+      body: pageHTML(id: "301", title: "Updated today", page: 1, pages: 2, count: 31), tags: ["Nature"])
+    try await finished(store)
+    assertPage(store, id: "301", page: 1, pages: 2, count: 31)
+  }
+
   func testDefaultsMatchWallpaperEngineSidebarAndExclusionsReachSteam() async throws {
     let fixture = try Fixture()
     defer { fixture.remove() }
@@ -1082,6 +1104,100 @@ final class WorkshopDownloadIntentTests: XCTestCase {
     XCTAssertEqual(records.map(\.id), [video.id])
   }
 
+  // MARK: Reinstall
+
+  private func assertReinstallRefused(
+    _ id: String, _ fixture: Fixture, file: StaticString = #filePath, line: UInt = #line
+  ) async {
+    do {
+      try await fixture.store.requestReinstall(id: id, rememberSession: false, bridge: fixture.bridge)
+      XCTFail("Reinstalling \(id) must be refused", file: file, line: line)
+    } catch {
+      XCTAssertTrue(error is WallpaperActionError, "\(error)", file: file, line: line)
+    }
+    XCTAssertTrue(fixture.store.downloadRequests.isEmpty, file: file, line: line)
+    XCTAssertTrue(fixture.store.downloader.downloads.isEmpty, file: file, line: line)
+  }
+
+  /// A picture imported from disk or a folder renamed by hand has no Workshop page to download
+  /// again, so Steam is not even asked.
+  func testReinstallAsksSteamOnlyAboutAWorkshopItem() async throws {
+    let stub = WorkshopDetailsStub()
+    defer { stub.invalidate() }
+    stub.rows["222"] = WorkshopDetailsStub.row("222", title: "Video fixture", tags: ["Video"])
+    let fixture = try makeFixture(service: stub.service)
+    for id in ["image-photo.png", "my wallpaper", "0", "", "12a"] {
+      await assertReinstallRefused(id, fixture)
+    }
+    XCTAssertEqual(stub.requests, [])
+  }
+
+  /// A wallpaper Steam removed cannot be fetched again, and the copy the user still has stays.
+  func testReinstallOfAnItemSteamNoLongerServesLeavesTheInstalledCopyAlone() async throws {
+    let stub = WorkshopDetailsStub()
+    defer { stub.invalidate() }
+    let installed = ClientPaths.libraryURL.appendingPathComponent("222", isDirectory: true)
+    try FileManager.default.createDirectory(at: installed, withIntermediateDirectories: true)
+    try Data("keep".utf8).write(to: installed.appendingPathComponent("movie.mp4"))
+    let fixture = try makeFixture(service: stub.service)
+    try await makeSetupReady(fixture)
+    fixture.store.username = "localtest"
+
+    await assertReinstallRefused("222", fixture)
+    XCTAssertEqual(stub.requests, [["222"]], "Steam was asked once, about this item only")
+    XCTAssertEqual(try Data(contentsOf: installed.appendingPathComponent("movie.mp4")), Data("keep".utf8))
+  }
+
+  func testReinstallRefusesAWallpaperThatIsAnApplication() async throws {
+    let stub = WorkshopDetailsStub()
+    defer { stub.invalidate() }
+    stub.rows["222"] = WorkshopDetailsStub.row("222", title: "A program", tags: ["Application"])
+    let fixture = try makeFixture(service: stub.service)
+    try await makeSetupReady(fixture)
+    fixture.store.username = "localtest"
+    await assertReinstallRefused("222", fixture)
+  }
+
+  /// What Steam serves now is what is downloaded, through the ordinary queue; asking again while
+  /// that download runs neither asks Steam again nor queues the item twice.
+  func testReinstallQueuesWhatSteamServesNowAndIgnoresARepeat() async throws {
+    let stub = WorkshopDetailsStub()
+    defer { stub.invalidate() }
+    stub.rows["222"] = WorkshopDetailsStub.row("222", title: "Current title", tags: ["Video"])
+    let fixture = try makeFixture(service: stub.service)
+    try await makeSetupReady(fixture)
+    fixture.store.username = "localtest"
+
+    try await fixture.store.requestReinstall(id: "222", rememberSession: false, bridge: fixture.bridge)
+    XCTAssertEqual(fixture.store.downloader.downloads.map(\.id), ["222"])
+    XCTAssertEqual(fixture.store.downloader.downloads.first?.item?.title, "Current title")
+    XCTAssertTrue(fixture.store.downloadRequests.isEmpty)
+    XCTAssertEqual(fixture.store.selectedDownloadID, "222")
+
+    try await fixture.store.requestReinstall(id: "222", rememberSession: false, bridge: fixture.bridge)
+    XCTAssertEqual(fixture.store.downloader.downloads.map(\.id), ["222"])
+    XCTAssertEqual(stub.requests, [["222"]], "A download already under way is not looked up again")
+  }
+
+  /// Without SteamCMD or an account the reinstall waits like any download, and clicking it again
+  /// leaves that one request where the user continues it.
+  func testReinstallWaitsForSetupLikeAnyDownloadAndIgnoresARepeat() async throws {
+    let stub = WorkshopDetailsStub()
+    defer { stub.invalidate() }
+    stub.rows["222"] = WorkshopDetailsStub.row("222", title: "Current title", tags: ["Video"])
+    let fixture = try makeFixture(service: stub.service)
+
+    try await fixture.store.requestReinstall(id: "222", rememberSession: false, bridge: fixture.bridge)
+    XCTAssertEqual(fixture.store.downloadRequests.map(\.id), ["222"])
+    XCTAssertEqual(fixture.store.downloadRequests.first?.item?.title, "Current title")
+    XCTAssertEqual(try stage(fixture.store), .setup)
+    XCTAssertTrue(fixture.store.downloader.downloads.isEmpty)
+
+    try await fixture.store.requestReinstall(id: "222", rememberSession: false, bridge: fixture.bridge)
+    XCTAssertEqual(fixture.store.downloadRequests.map(\.id), ["222"])
+    XCTAssertEqual(stub.requests, [["222"]])
+  }
+
   private struct Fixture {
     let store: WorkshopStore
     let bridge: BridgeStore
@@ -1092,6 +1208,7 @@ final class WorkshopDownloadIntentTests: XCTestCase {
   /// scene assets readiness is injected so this machine's Steam install cannot change the ladder.
   private func makeFixture(
     sceneAssetsReady: Bool = false,
+    service: WorkshopService = WorkshopService(),
     sceneAssetsLocation: @escaping @MainActor () -> URL = { ClientPaths.assetsURL },
     sceneAssetsAvailable: (@MainActor (URL) -> Bool)? = nil
   ) throws -> Fixture {
@@ -1104,7 +1221,7 @@ final class WorkshopDownloadIntentTests: XCTestCase {
       sessionDirectory: home.appendingPathComponent("SteamSession", isDirectory: true),
       runtimeProvider: IntentRuntimeProvider())
     let store = WorkshopStore(
-      downloader: downloader, supportDirectory: home, defaults: defaults,
+      service: service, downloader: downloader, supportDirectory: home, defaults: defaults,
       runtimeProvider: IntentRuntimeProvider(), sceneAssetsLocation: sceneAssetsLocation,
       sceneAssetsAvailable: sceneAssetsAvailable ?? { _ in sceneAssetsReady })
     let fixture = Fixture(
@@ -1131,6 +1248,113 @@ final class WorkshopDownloadIntentTests: XCTestCase {
       }
       try await Task.sleep(for: .milliseconds(2))
     }
+  }
+}
+
+/// Answers Steam's public item-details endpoint from a table, so looking up a Workshop item never
+/// leaves the process, and records the ids each request asked about.
+final class WorkshopDetailsStub: @unchecked Sendable {
+  private let lock = NSLock()
+  private var table: [String: [String: Any]] = [:]
+  private var asked: [[String]] = []
+  private let identifier = UUID().uuidString
+  private let session: URLSession
+
+  /// The rows Steam would answer with, by item id. An id with no row is answered as removed.
+  var rows: [String: [String: Any]] {
+    get { lock.withLock { table } }
+    set { lock.withLock { table = newValue } }
+  }
+  /// The ids of each request, in order.
+  var requests: [[String]] { lock.withLock { asked } }
+  var service: WorkshopService { WorkshopService(session: session) }
+
+  init() {
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [WorkshopDetailsProtocol.self]
+    configuration.httpAdditionalHeaders = ["X-Workshop-Details-Test": identifier]
+    configuration.urlCache = nil
+    configuration.timeoutIntervalForRequest = 5
+    session = URLSession(configuration: configuration)
+    WorkshopDetailsProtocol.register(identifier, self)
+  }
+
+  func invalidate() {
+    session.invalidateAndCancel()
+    WorkshopDetailsProtocol.remove(identifier)
+  }
+
+  static func row(_ id: String, title: String, tags: [String]) -> [String: Any] {
+    [
+      "result": 1, "consumer_app_id": WorkshopApp.id, "publishedfileid": id, "title": title,
+      "tags": tags.map { ["tag": $0] }, "file_size": "4096", "subscriptions": 3,
+      "time_updated": 1_700_000_000,
+    ]
+  }
+
+  fileprivate func answer(_ body: Data) -> Data {
+    let fields = String(decoding: body, as: UTF8.self).split(separator: "&")
+    let ids = fields.compactMap { field -> String? in
+      let pair = field.split(separator: "=", maxSplits: 1)
+      return pair.count == 2 && pair[0].hasPrefix("publishedfileids[") ? String(pair[1]) : nil
+    }
+    let details = lock.withLock { () -> [[String: Any]] in
+      asked.append(ids)
+      return ids.map { table[$0] ?? ["publishedfileid": $0, "result": 9] }
+    }
+    let reply: [String: Any] = ["response": ["result": 1, "resultcount": details.count, "publishedfiledetails": details]]
+    return (try? JSONSerialization.data(withJSONObject: reply)) ?? Data()
+  }
+}
+
+private final class WorkshopDetailsProtocol: URLProtocol, @unchecked Sendable {
+  private static let registryLock = NSLock()
+  nonisolated(unsafe) private static var stubs: [String: WorkshopDetailsStub] = [:]
+
+  static func register(_ identifier: String, _ stub: WorkshopDetailsStub) {
+    registryLock.withLock { stubs[identifier] = stub }
+  }
+  static func remove(_ identifier: String) {
+    _ = registryLock.withLock { stubs.removeValue(forKey: identifier) }
+  }
+
+  // Installed only in the stub's own session: claim everything so nothing can reach the network.
+  override class func canInit(with request: URLRequest) -> Bool { true }
+  override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+  override func startLoading() {
+    let stub = Self.registryLock.withLock {
+      Self.stubs[request.value(forHTTPHeaderField: "X-Workshop-Details-Test") ?? ""]
+    }
+    guard let stub else {
+      client?.urlProtocol(self, didFailWithError: URLError(.resourceUnavailable))
+      return
+    }
+    let body = stub.answer(Self.body(of: request))
+    let response = HTTPURLResponse(
+      url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1",
+      headerFields: ["Content-Type": "application/json"])!
+    client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+    client?.urlProtocol(self, didLoad: body)
+    client?.urlProtocolDidFinishLoading(self)
+  }
+
+  override func stopLoading() {}
+
+  /// A POST body reaches a protocol as a stream.
+  private static func body(of request: URLRequest) -> Data {
+    if let body = request.httpBody { return body }
+    guard let stream = request.httpBodyStream else { return Data() }
+    stream.open()
+    defer { stream.close() }
+    var data = Data()
+    var buffer = [UInt8](repeating: 0, count: 4096)
+    while stream.hasBytesAvailable {
+      let count = stream.read(&buffer, maxLength: buffer.count)
+      guard count > 0 else { break }
+      data.append(buffer, count: count)
+    }
+    return data
   }
 }
 

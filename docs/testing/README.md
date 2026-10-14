@@ -69,7 +69,7 @@ with an installed newer interpreter (for example, `python3.12`).
 | Python script tests | `scripts/tests/` | `python3 scripts/test.py` (runs first, before Xcode) |
 | Swift unit/integration | `Tests/Unit/<Domain>/` | `python3 scripts/test.py` (`WallpaperMachineTests`); `--only <TestClass>` for a subset |
 | XCUITest (desktop) | `Tests/UI/` | `python3 scripts/test.py --ui` — opt-in only |
-| Media/device integration | `Tests/Unit/NativeVideo/` | `WALLPAPER_MACHINE_MEDIA_TESTS=1 python3 scripts/test.py` — opt-in only |
+| Media/device integration | `Tests/Unit/NativeVideo/`, `Tests/Unit/Library/VideoLetterboxProbeMediaTests.swift` | `WALLPAPER_MACHINE_MEDIA_TESTS=1 python3 scripts/test.py` — opt-in only |
 | Live Steam pages / native SteamCMD install | `Tests/Unit/Workshop/WorkshopTests.swift`, `Tests/Unit/Steam/SteamCMDLiveInstallTests.swift` | `WALLPAPER_MACHINE_NETWORK_TESTS=1 python3 scripts/test.py` — opt-in only |
 | Rust crates | `upstream/renderer/crates/` | `python3 scripts/check_rust.py` runs the isolated release checks and reports exclusions/skips; individual Cargo commands remain available |
 | C++ renderer tests | `upstream/renderer/external/open-wallpaper-engine` | `python3 scripts/check_renderer.py` uses one `REGRESSION_BINARIES` registry for build, execution and the verdict, plus image/reload probes. Some test binaries (`scene_schema_tests`, `script_runtime_compat_test`, `mouse_input_test` and others) are not in that list and are built and run by hand; [renderer.md](renderer.md#ccmake-test-binaries) lists them and the commands |
@@ -103,9 +103,9 @@ non-desktop gate there without opening a Terminal window; remove the job
 afterwards. Standalone isolated checks do not replace the app-hosted gate.
 
 `Tests/Unit/` is grouped by domain, mirroring `App/Services/`: Appearance,
-Automation, Desktop, Diagnostics, GitHub, Library, Localization, LockScreen,
-NativeVideo, Panel, Pixiv, Playlist, Preview, Steam, SystemMedia, UserAssets,
-WebWallpaper, Workshop; shared fixtures live in `Support/`.
+Automation, Desktop, Diagnostics, GitHub, Library, Lifecycle, Localization,
+LockScreen, NativeVideo, Panel, Pixiv, Playlist, Preview, Steam, SystemMedia,
+UserAssets, WebWallpaper, Workshop; shared fixtures live in `Support/`.
 
 ### Opt-in layers
 
@@ -120,7 +120,12 @@ invites a pointless re-run.
   sent to an output device that does not exist, which is how a failed audio
   output is reproduced. It still opens no window, changes no wallpaper, opens
   no real audio output and configures no audio session; it is not a desktop
-  test and not a substitute for one.
+  test and not a substitute for one. `VideoLetterboxProbeMediaTests` is in the
+  same layer: it writes small H.264 clips with black bars at known rows and
+  decodes frames back through `AVAssetImageGenerator`, so its bar edges are
+  measured on lossy output that a different codec or decoder path can move by
+  a few rows. The probe's logic (injected frames, unreadable files, timeout,
+  cancellation, replaced files) stays in the routine `VideoLetterboxProbeTests`.
 - `WALLPAPER_MACHINE_NETWORK_TESTS=1` — the two `testLive…` cases in
   `WorkshopTests` fetch Steam's real community pages. Steam's page *format*
   stays covered offline: `decodePage` runs against recorded markup in

@@ -39,8 +39,10 @@ bool ObjectVisibleRoot(const nlohmann::json& object) {
     return true;
 }
 
-void HarvestTextureString(std::string_view value, int32_t consumer_id, const LayerObjectIndex& index,
-                          fs::VFS* vfs, std::vector<LayerTextureRef>& out) {
+void HarvestTextureString(std::string_view value, int32_t consumer_id, bool in_own_effects,
+                          const LayerObjectIndex& index, fs::VFS* vfs,
+                          std::vector<LayerTextureRef>& out) {
+    if (in_own_effects && IsOwnEffectChainInput(value, consumer_id)) return;
     auto resolved = ResolveLayerTextureName(std::string(value), index, vfs);
     if (! resolved.is_layer || resolved.source_id == 0) return;
     LayerCompositeSlot slot = LayerCompositeSlot::None;
@@ -52,19 +54,29 @@ void HarvestTextureString(std::string_view value, int32_t consumer_id, const Lay
     });
 }
 
+/// `in_own_effects`: `node` is inside the consumer's own `effects`, where its
+/// `_a` and `_b` name the chain's buffers rather than the layer.
 void HarvestTextures(const nlohmann::json& node, int32_t consumer_id, const LayerObjectIndex& index,
-                     fs::VFS* vfs, std::vector<LayerTextureRef>& out) {
+                     fs::VFS* vfs, std::vector<LayerTextureRef>& out, bool in_own_effects = false) {
     if (node.is_object()) {
         if (node.contains("textures") && node.at("textures").is_array()) {
             for (const auto& item : node.at("textures")) {
-                if (item.is_string()) HarvestTextureString(item.get<std::string>(), consumer_id, index, vfs, out);
+                if (item.is_string()) {
+                    HarvestTextureString(
+                        item.get<std::string>(), consumer_id, in_own_effects, index, vfs, out);
+                }
             }
         }
         if (node.contains("dependencies") && node.at("dependencies").is_array()) {
             for (const auto& item : node.at("dependencies")) {
                 if (! item.is_number_integer()) continue;
                 const auto source_id = item.get<int32_t>();
-                if (source_id == 0) continue;
+                // The editor lists the layers the object's textures name; older
+                // versions list the layer itself too, once for each name its own
+                // effects bind. An id carries no slot, so it cannot ask for the
+                // last frame, and the layer waits on nothing of its own: whatever
+                // it does sample of itself is a texture name, harvested above.
+                if (source_id == 0 || source_id == consumer_id) continue;
                 out.push_back(LayerTextureRef {
                     .consumer_id = consumer_id,
                     .source_id   = source_id,
@@ -73,12 +85,15 @@ void HarvestTextures(const nlohmann::json& node, int32_t consumer_id, const Laye
             }
         }
         for (const auto& item : node.items()) {
-            HarvestTextures(item.value(), consumer_id, index, vfs, out);
+            HarvestTextures(item.value(), consumer_id, index, vfs, out,
+                            in_own_effects || item.key() == "effects");
         }
         return;
     }
     if (node.is_array()) {
-        for (const auto& item : node) HarvestTextures(item, consumer_id, index, vfs, out);
+        for (const auto& item : node) {
+            HarvestTextures(item, consumer_id, index, vfs, out, in_own_effects);
+        }
     }
 }
 
@@ -132,6 +147,10 @@ std::optional<int32_t> ParseImageLayerCompositeId(std::string_view name, LayerCo
 
 bool IsImageLayerCompositeName(std::string_view name) {
     return ParseImageLayerCompositeId(name).has_value();
+}
+
+bool IsOwnEffectChainInput(std::string_view name, int32_t layer_id) {
+    return layer_id != 0 && ParseImageLayerCompositeId(name) == layer_id;
 }
 
 LayerObjectIndex BuildLayerObjectIndex(const nlohmann::json& objects) {

@@ -1,11 +1,12 @@
 #[cfg(test)]
-use std::{sync::mpsc::Receiver, time::Duration};
+use std::sync::mpsc::Receiver;
 use std::{
     sync::{
         Arc,
         mpsc::{self, Sender},
     },
     thread,
+    time::Duration,
 };
 
 #[cfg(test)]
@@ -17,10 +18,13 @@ use futures_util::future::{BoxFuture, FutureExt};
 use wallpaper_core::project::SceneTemplate;
 use wallpaper_core::{
     AudioSpectrum128, DisplaySelector, DisplaySnapshotEntry, EngineError, FirstFrameCallback,
-    SceneBackend, SceneDemandReasons, SceneRendererPreference, SceneUpdateMode,
-    WallpaperAssignment, WallpaperEngine,
-    media::audio::{AudioCaptureBackend, AudioCaptureController, AudioVolume, PlatformAudioCaptureBackend},
-    project::{ScalingMode, SceneDesc, SceneHandle, SceneResult},
+    PropertyPreview, RecoveryOutcome, RecoveryReason, SceneBackend, SceneDemandReasons,
+    SceneRendererPreference, SceneUpdateMode, WallpaperAssignment, WallpaperEngine,
+    media::audio::{
+        AudioCaptureBackend, AudioCaptureController, AudioVolume, PlatformAudioCaptureBackend,
+        RESTART_RETRY_DELAYS, RestartOutcome, device_watch::OutputDeviceWatcher,
+    },
+    project::{ScalingMode, SceneDesc, SceneFraming, SceneHandle, SceneResult},
     render::RendererSurfaceCounters,
 };
 
@@ -102,6 +106,36 @@ pub trait EngineFacade: Send + Sync + 'static {
     fn set_audio_capture_enabled(&self, handle: SceneHandle, enabled: bool) -> EngineFuture<()>;
     fn set_scaling_mode(&self, handle: SceneHandle, mode: ScalingMode) -> EngineFuture<()>;
     fn set_scaling_factor(&self, handle: SceneHandle, factor: f64) -> EngineFuture<()>;
+    /// Live-moves the presented wallpaper inside the room its display leaves
+    /// around it. Nothing is rebuilt, and the engine refuses a position that
+    /// is not a fraction between 0 and 1.
+    fn set_framing(&self, handle: SceneHandle, framing: SceneFraming) -> EngineFuture<()>;
+    /// Shows a scene at a position while a drag is under way, without making it
+    /// the scene's position: the renderer follows, the engine's stored state
+    /// does not, and a later `set_framing` commits it. The engine refuses a
+    /// position that is not a fraction between 0 and 1.
+    fn preview_framing(&self, handle: SceneHandle, framing: SceneFraming) -> EngineFuture<()>;
+    /// Shows a scene a whole property document while an edit is under way,
+    /// without making it the scene's look: the renderer follows, the engine's
+    /// stored state does not, so the next time the scene is loaded it shows
+    /// what is saved. The document is the complete state to show (`{}` is the
+    /// project's authored defaults), and the engine refuses one that is not a
+    /// JSON object.
+    ///
+    /// `scene_path` is the project file of the wallpaper the document was made
+    /// for. A handle names a display's scene, which a reconcile still under way
+    /// can have given to another wallpaper; the engine checks what the scene
+    /// draws when it handles the request and answers
+    /// [`PropertyPreview::OtherWallpaper`], sending nothing, when it is not that
+    /// wallpaper. The engine also knows what each scene was last shown, so a
+    /// scene that already shows the document is not told again and one that was
+    /// loaded again is.
+    fn preview_property_override(
+        &self,
+        handle: SceneHandle,
+        scene_path: String,
+        flat_json: String,
+    ) -> EngineFuture<PropertyPreview>;
     fn set_fps(&self, handle: SceneHandle, fps: u32) -> EngineFuture<()>;
     /// Live-updates one scene's internal rasterization scale. Resizes render
     /// targets in place; it must not reparse the project or reopen video.
@@ -256,6 +290,25 @@ pub trait EngineFacade: Send + Sync + 'static {
     fn scene_runtime_reports(&self) -> Vec<SceneRuntimeReport> {
         Vec::new()
     }
+    /// Asks the engine to bring back the surface of the scene on `display_id`
+    /// by the next rung of that scene's recovery ladder, without waiting for the
+    /// rung's delay.
+    ///
+    /// Required to be forwarded by every wrapper: the default answers that no
+    /// scene was found, so a wrapper that drops this call turns every repair it
+    /// is asked for into a quiet no-op.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of the attempt when the engine tried and failed.
+    fn recover_surface(
+        &self,
+        display_id: u32,
+        reason: RecoveryReason,
+    ) -> EngineFuture<RecoveryOutcome> {
+        let _ = (display_id, reason);
+        async move { Ok(RecoveryOutcome::NoScene) }.boxed()
+    }
     /// The most recent process-wide audio analysis, or `None` when no analysis
     /// has been produced yet.
     ///
@@ -306,7 +359,7 @@ impl RealEngineFacade {
 /// which reports its first frame once. Waiting on such a display could only
 /// end in the 90-second timeout, which then rolled back a wallpaper that was
 /// playing.
-fn displays_awaiting_first_frame(live: &[DisplaySnapshotEntry], scenes: &[SceneDesc]) -> Vec<u32> {
+pub(crate) fn displays_awaiting_first_frame(live: &[DisplaySnapshotEntry], scenes: &[SceneDesc]) -> Vec<u32> {
     scenes
         .iter()
         .filter(|scene| {
@@ -462,6 +515,15 @@ impl EngineFacade for RealEngineFacade {
         self.engine.scene_runtime_reports()
     }
 
+    fn recover_surface(
+        &self,
+        display_id: u32,
+        reason: RecoveryReason,
+    ) -> EngineFuture<RecoveryOutcome> {
+        let engine = self.engine.clone();
+        async move { engine.recover_surface(display_id, reason).await }.boxed()
+    }
+
     fn current_audio_spectrum(&self) -> Result<Option<AudioSpectrum128>, EngineError> {
         self.engine.current_audio_spectrum()
     }
@@ -566,6 +628,31 @@ impl EngineFacade for RealEngineFacade {
     fn set_scaling_factor(&self, handle: SceneHandle, factor: f64) -> EngineFuture<()> {
         let engine = self.engine.clone();
         async move { engine.set_scaling_factor(handle, factor).await }.boxed()
+    }
+
+    fn set_framing(&self, handle: SceneHandle, framing: SceneFraming) -> EngineFuture<()> {
+        let engine = self.engine.clone();
+        async move { engine.set_framing(handle, framing).await }.boxed()
+    }
+
+    fn preview_framing(&self, handle: SceneHandle, framing: SceneFraming) -> EngineFuture<()> {
+        let engine = self.engine.clone();
+        async move { engine.preview_framing(handle, framing).await }.boxed()
+    }
+
+    fn preview_property_override(
+        &self,
+        handle: SceneHandle,
+        scene_path: String,
+        flat_json: String,
+    ) -> EngineFuture<PropertyPreview> {
+        let engine = self.engine.clone();
+        async move {
+            engine
+                .preview_property_override(handle, scene_path, flat_json)
+                .await
+        }
+        .boxed()
     }
 
     fn set_fps(&self, handle: SceneHandle, fps: u32) -> EngineFuture<()> {
@@ -697,9 +784,196 @@ pub(crate) fn apply_audio_capture_demand<B: AudioCaptureBackend>(
         .map_err(|error| format!("Audio response could not update: {error}. Check WallpaperMachine in System Settings > Privacy & Security > Screen & System Audio Recording."))
 }
 
+/// What the audio worker does next about a changed output device.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RestartAction {
+    /// Nothing more to do: the tap was rebuilt, was not running, or the
+    /// request was superseded.
+    Done,
+    /// The tap could not be started; try again after `delay`.
+    RetryIn {
+        delay: Duration,
+        generation: u64,
+        attempt: usize,
+    },
+    /// Every retry failed. The next scene or demand change starts the tap.
+    GaveUp,
+}
+
+/// Which output-device change a scheduled retry belongs to. A newer change
+/// starts a new generation, so a retry left over from an older one is ignored
+/// instead of tearing down a tap the newer change has since rebuilt.
+#[derive(Debug, Default)]
+pub(crate) struct AudioRestartState {
+    generation: u64,
+}
+
+impl AudioRestartState {
+    fn begin(&mut self) -> u64 {
+        self.generation += 1;
+        self.generation
+    }
+
+    fn is_current(&self, generation: u64) -> bool {
+        self.generation == generation
+    }
+}
+
+/// The default output device changed: rebuild the tap if one is running.
+///
+/// Shared by the production worker and device-free regressions, like
+/// [`apply_audio_capture_demand`].
+pub(crate) fn handle_output_device_change<B: AudioCaptureBackend>(
+    controller: &mut AudioCaptureController<B>,
+    state: &mut AudioRestartState,
+) -> RestartAction {
+    let generation = state.begin();
+    if controller.is_capturing() {
+        log::info!(
+            "[wallpaper-core audio] default output device changed; rebuilding the system audio tap"
+        );
+    } else {
+        log::info!(
+            "[wallpaper-core audio] default output device changed; no system audio tap is running"
+        );
+    }
+    attempt_audio_restart(controller, generation, 0)
+}
+
+/// A retry scheduled by an earlier [`RestartAction::RetryIn`] came due.
+///
+/// It does nothing when a newer device change has started, or when capture is
+/// running again because a scene or demand change started it in the meantime.
+pub(crate) fn handle_audio_restart_retry<B: AudioCaptureBackend>(
+    controller: &mut AudioCaptureController<B>,
+    state: &AudioRestartState,
+    generation: u64,
+    attempt: usize,
+) -> RestartAction {
+    if !state.is_current(generation) || controller.is_capturing() {
+        return RestartAction::Done;
+    }
+    attempt_audio_restart(controller, generation, attempt)
+}
+
+fn attempt_audio_restart<B: AudioCaptureBackend>(
+    controller: &mut AudioCaptureController<B>,
+    generation: u64,
+    attempt: usize,
+) -> RestartAction {
+    match controller.restart_capture() {
+        Ok(RestartOutcome::Restarted | RestartOutcome::NotRunning) => RestartAction::Done,
+        Err(error) => match RESTART_RETRY_DELAYS.get(attempt) {
+            Some(&delay) => {
+                log::warn!(
+                    "[wallpaper-core audio] system audio tap rebuild attempt {} failed: {error}; retrying in {} ms",
+                    attempt + 1,
+                    delay.as_millis()
+                );
+                RestartAction::RetryIn { delay, generation, attempt: attempt + 1 }
+            }
+            None => {
+                log::warn!(
+                    "[wallpaper-core audio] system audio tap could not be rebuilt after {} attempts: {error}; it restarts at the next scene or demand change",
+                    attempt + 1
+                );
+                RestartAction::GaveUp
+            }
+        },
+    }
+}
+
+/// Asks the worker to try again after `delay`, from a short-lived thread so the
+/// worker itself never sleeps.
+fn schedule_audio_restart(action: RestartAction, events: &Sender<AudioCaptureCommand>) {
+    let RestartAction::RetryIn { delay, generation, attempt } = action else {
+        return;
+    };
+    let events = events.clone();
+    let spawned = thread::Builder::new()
+        .name("wallpaper-bridge-audio-retry".to_string())
+        .spawn(move || {
+            thread::sleep(delay);
+            let _ = events.send(AudioCaptureCommand::RetryRestart { generation, attempt });
+        });
+    if let Err(error) = spawned {
+        log::warn!("[wallpaper-core audio] could not schedule a system audio tap retry: {error}");
+    }
+}
+
+/// Starts an output-device watcher for the worker. Without one the tap is
+/// still started and stopped as before; only the rebuild on a device change is
+/// lost.
+fn watch_output_device(events: Sender<AudioCaptureCommand>) -> Option<OutputDeviceWatcher> {
+    let on_change = Arc::new(move || {
+        let _ = events.send(AudioCaptureCommand::OutputDeviceChanged);
+    });
+    match OutputDeviceWatcher::start(on_change) {
+        Ok(watcher) => Some(watcher),
+        Err(error) => {
+            log::warn!(
+                "[wallpaper-core audio] could not watch the default output device: {error}; the system audio tap is not rebuilt when it changes"
+            );
+            None
+        }
+    }
+}
+
+/// Holds the output-device watcher exactly while capture is wanted.
+///
+/// A watcher is a subscriber and a parked thread, and every default-output
+/// change wakes it and writes a log line. A process whose wallpapers never read
+/// audio has no tap to rebuild, so it carries none: one starts when capture
+/// becomes wanted and is dropped when it no longer is, which also keeps the
+/// HAL listener unregistered until audio is first used.
+///
+/// It acts only when "wanted" changes. A start that failed (already logged) is
+/// therefore not attempted again on every command, only the next time capture
+/// is wanted after it was not.
+pub(crate) struct OutputWatchGate<W> {
+    watcher: Option<W>,
+    wanted: bool,
+}
+
+impl<W> Default for OutputWatchGate<W> {
+    fn default() -> Self {
+        Self { watcher: None, wanted: false }
+    }
+}
+
+impl<W> OutputWatchGate<W> {
+    /// Brings the watcher in line with whether capture is wanted now. `start`
+    /// runs only on the change to wanted.
+    pub(crate) fn sync(&mut self, wanted: bool, start: impl FnOnce() -> Option<W>) {
+        if wanted == self.wanted {
+            return;
+        }
+        self.wanted = wanted;
+        self.watcher = if wanted { start() } else { None };
+    }
+
+    /// Whether a watcher is running.
+    #[cfg(test)]
+    pub(crate) fn is_watching(&self) -> bool {
+        self.watcher.is_some()
+    }
+}
+
+/// Ends the worker thread when the last handle to it goes away. The worker
+/// holds a sender of its own for the device watcher and retries, so the
+/// channel closing is no longer the signal.
+struct AudioWorkerLifetime(Sender<AudioCaptureCommand>);
+
+impl Drop for AudioWorkerLifetime {
+    fn drop(&mut self) {
+        let _ = self.0.send(AudioCaptureCommand::Shutdown);
+    }
+}
+
 #[derive(Clone)]
 struct AudioCaptureWorker {
     sender: Sender<AudioCaptureCommand>,
+    _lifetime: Arc<AudioWorkerLifetime>,
 }
 
 enum AudioCaptureCommand {
@@ -715,6 +989,11 @@ enum AudioCaptureCommand {
     RetainScenes {
         reply: tokio::sync::oneshot::Sender<Result<(), String>>,
     },
+    /// The default output device changed (debounced).
+    OutputDeviceChanged,
+    /// A scheduled attempt to bring the tap back after a failed rebuild.
+    RetryRestart { generation: u64, attempt: usize },
+    Shutdown,
 }
 
 enum AudioCaptureRequest {
@@ -725,12 +1004,19 @@ enum AudioCaptureRequest {
 impl AudioCaptureWorker {
     fn spawn(engine: WallpaperEngine) -> Self {
         let (sender, receiver) = mpsc::channel::<AudioCaptureCommand>();
+        let events = sender.clone();
+        let lifetime = Arc::new(AudioWorkerLifetime(sender.clone()));
         thread::Builder::new()
             .name("wallpaper-bridge-audio-capture".to_string())
             .spawn(move || {
                 let mut controller = PlatformAudioCaptureBackend::new()
                     .map(|backend| AudioCaptureController::new(Arc::new(engine.clone()), backend))
                     .map_err(|error| error.to_string());
+                // Declared after the controller, so it is dropped first and no
+                // device change can arrive while the tap is being released. It
+                // holds a watcher only while capture is wanted.
+                let mut output_watch = OutputWatchGate::<OutputDeviceWatcher>::default();
+                let mut restart = AudioRestartState::default();
                 while let Ok(command) = receiver.recv() {
                     let (request, reply) = match command {
                         AudioCaptureCommand::SetEnabled { handle, enabled, reply } =>
@@ -738,6 +1024,23 @@ impl AudioCaptureWorker {
                         AudioCaptureCommand::SetDemand { demand, reply } =>
                             (Some(AudioCaptureRequest::Demand(demand)), reply),
                         AudioCaptureCommand::RetainScenes { reply } => (None, reply),
+                        AudioCaptureCommand::OutputDeviceChanged => {
+                            if let Ok(controller) = controller.as_mut() {
+                                let action = handle_output_device_change(controller, &mut restart);
+                                schedule_audio_restart(action, &events);
+                            }
+                            continue;
+                        }
+                        AudioCaptureCommand::RetryRestart { generation, attempt } => {
+                            if let Ok(controller) = controller.as_mut() {
+                                let action = handle_audio_restart_retry(
+                                    controller, &restart, generation, attempt,
+                                );
+                                schedule_audio_restart(action, &events);
+                            }
+                            continue;
+                        }
+                        AudioCaptureCommand::Shutdown => break,
                     };
                     let result = (|| {
                         let controller = controller.as_mut().map_err(|error| error.clone())?;
@@ -766,11 +1069,16 @@ impl AudioCaptureWorker {
                         }
                         Ok(())
                     })();
+                    if let Ok(controller) = controller.as_ref() {
+                        output_watch.sync(controller.wants_capture(), || {
+                            watch_output_device(events.clone())
+                        });
+                    }
                     let _ = reply.send(result);
                 }
             })
             .expect("audio capture worker thread should start");
-        Self { sender }
+        Self { sender, _lifetime: lifetime }
     }
 
     async fn set_enabled(&self, handle: SceneHandle, enabled: bool) -> Result<(), String> {
@@ -850,8 +1158,22 @@ pub struct FakeEngineFacade {
     audio_capture_failure: Arc<ArcSwap<Option<String>>>,
     scaling_mode_calls: Arc<ArcSwap<Vec<(SceneHandle, ScalingMode)>>>,
     scaling_factor_calls: Arc<ArcSwap<Vec<(SceneHandle, f64)>>>,
+    framing_calls: Arc<ArcSwap<Vec<(SceneHandle, SceneFraming)>>>,
+    preview_framing_calls: Arc<ArcSwap<Vec<(SceneHandle, SceneFraming)>>>,
+    preview_property_calls: Arc<ArcSwap<Vec<(SceneHandle, String)>>>,
+    /// Property previews the fake engine declined because the scene on the
+    /// handle draws another wallpaper: the handle and the project file the
+    /// document was made for.
+    declined_property_previews: Arc<ArcSwap<Vec<(SceneHandle, String)>>>,
+    /// What each fake renderer was last shown by a property preview, by its
+    /// display, like the real renderer's own record: gone when a reconcile opens
+    /// the display's scene afresh or loads it again.
+    shown_property_documents: Arc<std::sync::Mutex<std::collections::HashMap<u32, String>>>,
+    framing_failure: Arc<ArcSwap<Option<String>>>,
+    property_preview_failure: Arc<ArcSwap<Option<String>>>,
     fps_calls: Arc<ArcSwap<Vec<(SceneHandle, u32)>>>,
     render_scale_calls: Arc<ArcSwap<Vec<(SceneHandle, f32)>>>,
+    render_scale_failure: Arc<ArcSwap<Option<String>>>,
     content_pacing_enabled: Arc<ArcSwap<bool>>,
     shared_video_decode_enabled: Arc<ArcSwap<bool>>,
     shared_video_decode_counts: Arc<ArcSwap<(u32, u32)>>,
@@ -860,6 +1182,12 @@ pub struct FakeEngineFacade {
     scene_video_plane_sampling_calls: Arc<ArcSwap<Vec<bool>>>,
     scene_renderer_calls: Arc<ArcSwap<Vec<SceneRendererPreference>>>,
     scene_runtime_reports: Arc<ArcSwap<Vec<SceneRuntimeReport>>>,
+    /// Readings handed out one per read before the stored value is used again,
+    /// so a test can say how a scene changes between two looks without a clock.
+    scene_runtime_report_script: Arc<std::sync::Mutex<std::collections::VecDeque<Vec<SceneRuntimeReport>>>>,
+    display_snapshot_script: Arc<std::sync::Mutex<std::collections::VecDeque<Vec<DisplaySnapshotEntry>>>>,
+    recover_calls: Arc<ArcSwap<Vec<(u32, RecoveryReason)>>>,
+    recover_result: Arc<ArcSwap<Option<Result<RecoveryOutcome, String>>>>,
     audio_spectrum: Arc<ArcSwap<Option<AudioSpectrum128>>>,
     mouse_poll_calls: Arc<ArcSwap<Vec<()>>>,
     mouse_poll_block: Arc<SegQueue<ReconcileBlockGate>>,
@@ -940,6 +1268,18 @@ struct ReconcileBlockGate {
     release_rx: Receiver<()>,
 }
 
+/// The next scripted reading: each is handed out once, in order, and the last
+/// stays. `None` when nothing is scripted.
+#[cfg(test)]
+fn next_scripted<T: Clone>(script: &std::sync::Mutex<std::collections::VecDeque<T>>) -> Option<T> {
+    let mut script = script.lock().unwrap_or_else(|error| error.into_inner());
+    if script.len() > 1 {
+        script.pop_front()
+    } else {
+        script.front().cloned()
+    }
+}
+
 #[cfg(test)]
 fn load_log<T: Clone>(log: &ArcSwap<Vec<T>>) -> Vec<T> {
     log.load_full().as_ref().clone()
@@ -983,6 +1323,55 @@ impl ReconcileDone {
 
 #[cfg(test)]
 impl FakeEngineFacade {
+    /// What the scene on `handle` draws now: the descriptor the last reconcile
+    /// gave the display the snapshot puts the handle on. Like the real engine's
+    /// handle, it stays with the display when the wallpaper on it changes.
+    fn scene_behind(&self, handle: SceneHandle) -> Option<SceneDesc> {
+        let display_id = self
+            .snapshot
+            .load()
+            .iter()
+            .find(|entry| entry.handle == Some(handle))?
+            .desc
+            .display_id;
+        self.rendered_scenes
+            .load()
+            .iter()
+            .find(|scene| scene.display.display_id == display_id)
+            .cloned()
+    }
+
+    /// The engine replaces a display's renderer on its own, as a surface
+    /// recovery after a wake or a failed frame does: nothing is reconciled and
+    /// nobody is told, and the new renderer shows what the scene was loaded with.
+    pub fn rebuild_renderer_of(&self, display_id: u32) {
+        self.shown_property_documents
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&display_id);
+    }
+
+    /// Forgets what a display's renderer was shown when a reconcile gives it a
+    /// scene the engine opens afresh or loads again, which is what a descriptor
+    /// that is not the same wallpaper means. A scene the engine keeps keeps it.
+    fn keep_previewed_documents(&self, before: &[SceneDesc], after: &[SceneDesc]) {
+        self.shown_property_documents
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .retain(|display_id, _| {
+                let find = |scenes: &'_ [SceneDesc]| {
+                    scenes
+                        .iter()
+                        .find(|scene| scene.display.display_id == *display_id)
+                        .cloned()
+                };
+                match (find(before), find(after)) {
+                    (Some(before), Some(after)) => before.same_wallpaper(&after),
+                    _ => false,
+                }
+            });
+    }
+
     /// Reports a press the way the engine does when a wallpaper calls
     /// `engine.openUserShortcut`. Returns false when nothing is installed,
     /// which is the failure this exists to catch.
@@ -1233,6 +1622,36 @@ impl FakeEngineFacade {
         self.scene_runtime_reports.store(Arc::new(reports));
     }
 
+    /// Makes the next reads of the scene reports return `readings` in order,
+    /// one per read, and then the last of them for every read after. The
+    /// stored value is used again only once the script is empty.
+    pub fn script_scene_runtime_reports(&self, readings: Vec<Vec<SceneRuntimeReport>>) {
+        *self
+            .scene_runtime_report_script
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = readings.into();
+    }
+
+    /// As [`Self::script_scene_runtime_reports`], for the display snapshot.
+    pub fn script_display_snapshots(&self, readings: Vec<Vec<DisplaySnapshotEntry>>) {
+        *self
+            .display_snapshot_script
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = readings.into();
+    }
+
+    /// Every surface repair the engine was asked for, in order.
+    #[must_use]
+    pub fn recover_calls(&self) -> Vec<(u32, RecoveryReason)> {
+        load_log(&self.recover_calls)
+    }
+
+    /// What every later [`EngineFacade::recover_surface`] call answers. Left
+    /// unset the fake reports a repair by a surface reconfigure.
+    pub fn set_recover_result(&self, result: Result<RecoveryOutcome, String>) {
+        self.recover_result.store(Arc::new(Some(result)));
+    }
+
     /// Sets what the next spectrum read returns. `None` is "no analysis yet".
     pub fn set_audio_spectrum(&self, spectrum: Option<AudioSpectrum128>) {
         self.audio_spectrum.store(Arc::new(spectrum));
@@ -1246,6 +1665,41 @@ impl FakeEngineFacade {
     #[must_use]
     pub fn scaling_factor_calls(&self) -> Vec<(SceneHandle, f64)> {
         load_log(&self.scaling_factor_calls)
+    }
+
+    /// Every position the fake was asked to apply live, in order. A call that
+    /// was refused is in here too: it is what the bridge asked for.
+    #[must_use]
+    pub fn framing_calls(&self) -> Vec<(SceneHandle, SceneFraming)> {
+        load_log(&self.framing_calls)
+    }
+
+    /// Every position the fake was asked to show for a drag in progress, in
+    /// order. A preview moves nothing the fake stores, which is the point: it
+    /// is a call the bridge makes, not a change of the scene's position.
+    #[must_use]
+    pub fn preview_framing_calls(&self) -> Vec<(SceneHandle, SceneFraming)> {
+        load_log(&self.preview_framing_calls)
+    }
+
+    /// Every property document the fake renderers were told to show while an
+    /// edit is under way, in order, as the flat JSON the renderer would
+    /// receive. A document the renderer refused is in here too: it was sent. One
+    /// the engine declined because the scene draws another wallpaper
+    /// ([`Self::declined_property_previews`]) and one the scene already shows
+    /// are not, because the real engine does not send them either. Showing a
+    /// document moves nothing the fake stores.
+    #[must_use]
+    pub fn preview_property_calls(&self) -> Vec<(SceneHandle, String)> {
+        load_log(&self.preview_property_calls)
+    }
+
+    /// Every property preview the fake engine declined because the scene on the
+    /// handle draws another wallpaper than the one the document was made for, in
+    /// order, with the project file it was made for.
+    #[must_use]
+    pub fn declined_property_previews(&self) -> Vec<(SceneHandle, String)> {
+        load_log(&self.declined_property_previews)
     }
 
     #[must_use]
@@ -1315,6 +1769,26 @@ impl FakeEngineFacade {
     pub fn fail_next_disable_capture(&self) {
         self.disable_capture_failure
             .store(Arc::new(Some("audio disable failed".into())));
+    }
+
+    /// The next live position change is refused by the renderer and leaves the
+    /// running scene where it was.
+    pub fn fail_next_framing(&self) {
+        self.framing_failure
+            .store(Arc::new(Some("framing failed".into())));
+    }
+
+    /// The next live render-scale change is refused by the renderer.
+    pub fn fail_next_render_scale(&self) {
+        self.render_scale_failure
+            .store(Arc::new(Some("render scale failed".into())));
+    }
+
+    /// The next property document shown on a scene is refused by the
+    /// renderer, which leaves the scene as it was.
+    pub fn fail_next_property_preview(&self) {
+        self.property_preview_failure
+            .store(Arc::new(Some("property preview failed".into())));
     }
 
     pub fn fail_next_close(&self) {
@@ -1492,6 +1966,8 @@ impl EngineFacade for FakeEngineFacade {
                     )
                 })
                 .collect();
+            let before = fake.rendered_scenes.load_full();
+            fake.keep_previewed_documents(&before, &scenes);
             fake.rendered_scenes.store(Arc::new(scenes));
             complete_reconcile_waiters(&fake.reconcile_done);
             Ok(results)
@@ -1515,6 +1991,9 @@ impl EngineFacade for FakeEngineFacade {
     }
 
     fn display_snapshot(&self) -> Vec<DisplaySnapshotEntry> {
+        if let Some(scripted) = next_scripted(&self.display_snapshot_script) {
+            return scripted;
+        }
         self.snapshot.load_full().as_ref().clone()
     }
 
@@ -1524,6 +2003,10 @@ impl EngineFacade for FakeEngineFacade {
             if let Some(message) = fake.close_failure.swap(Arc::new(None)).as_ref() {
                 return Err(EngineError::Platform(message.clone()));
             }
+            fake.shown_property_documents
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clear();
             fake.publish_snapshot(|current| {
                 let mut next = current.to_vec();
                 for display in &mut next {
@@ -1763,6 +2246,77 @@ impl EngineFacade for FakeEngineFacade {
         .boxed()
     }
 
+    fn set_framing(&self, handle: SceneHandle, framing: SceneFraming) -> EngineFuture<()> {
+        let fake = self.clone();
+        async move {
+            push_log(&fake.framing_calls, (handle, framing));
+            if let Some(message) = fake.framing_failure.swap(Arc::new(None)).as_ref() {
+                return Err(EngineError::Platform(message.clone()));
+            }
+            fake.update_direct_assignment(handle, |template| {
+                template.framing = framing;
+            });
+            fake.update_direct_assignment_after_refresh(handle, |template| {
+                template.framing = framing;
+            });
+            Ok(())
+        }
+        .boxed()
+    }
+
+    fn preview_framing(&self, handle: SceneHandle, framing: SceneFraming) -> EngineFuture<()> {
+        let fake = self.clone();
+        async move {
+            push_log(&fake.preview_framing_calls, (handle, framing));
+            Ok(())
+        }
+        .boxed()
+    }
+
+    fn preview_property_override(
+        &self,
+        handle: SceneHandle,
+        scene_path: String,
+        flat_json: String,
+    ) -> EngineFuture<PropertyPreview> {
+        let fake = self.clone();
+        async move {
+            // The real engine looks at the scene when it handles the request,
+            // not when it was made.
+            let drawn = fake.scene_behind(handle).ok_or_else(|| {
+                EngineError::InvalidInput(format!("unknown scene handle {}", handle.raw()))
+            })?;
+            if drawn.scene_path != scene_path {
+                push_log(&fake.declined_property_previews, (handle, scene_path));
+                return Ok(PropertyPreview::OtherWallpaper);
+            }
+            let display_id = drawn.display.display_id;
+            let already_shown = fake
+                .shown_property_documents
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .get(&display_id)
+                .is_some_and(|shown| *shown == flat_json);
+            if already_shown {
+                return Ok(PropertyPreview::Shown);
+            }
+            push_log(&fake.preview_property_calls, (handle, flat_json.clone()));
+            let mut shown = fake
+                .shown_property_documents
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if let Some(message) = fake.property_preview_failure.swap(Arc::new(None)).as_ref() {
+                // A refused update leaves the renderer's record empty, so
+                // asking again sends the document.
+                shown.remove(&display_id);
+                return Err(EngineError::Platform(message.clone()));
+            }
+            shown.insert(display_id, flat_json);
+            Ok(PropertyPreview::Shown)
+        }
+        .boxed()
+    }
+
     fn set_fps(&self, handle: SceneHandle, fps: u32) -> EngineFuture<()> {
         let fake = self.clone();
         async move {
@@ -1782,6 +2336,9 @@ impl EngineFacade for FakeEngineFacade {
         let fake = self.clone();
         async move {
             push_log(&fake.render_scale_calls, (handle, scale));
+            if let Some(message) = fake.render_scale_failure.swap(Arc::new(None)).as_ref() {
+                return Err(EngineError::Platform(message.clone()));
+            }
             Ok(())
         }
         .boxed()
@@ -1821,7 +2378,25 @@ impl EngineFacade for FakeEngineFacade {
     }
 
     fn scene_runtime_reports(&self) -> Vec<SceneRuntimeReport> {
+        if let Some(scripted) = next_scripted(&self.scene_runtime_report_script) {
+            return scripted;
+        }
         self.scene_runtime_reports.load().as_ref().clone()
+    }
+
+    fn recover_surface(
+        &self,
+        display_id: u32,
+        reason: RecoveryReason,
+    ) -> EngineFuture<RecoveryOutcome> {
+        push_log(&self.recover_calls, (display_id, reason));
+        let result = self.recover_result.load_full().as_ref().clone().unwrap_or(Ok(
+            RecoveryOutcome::Recovered {
+                step: wallpaper_core::RecoveryStep::Reconfigure,
+                attempt: 1,
+            },
+        ));
+        async move { result.map_err(EngineError::Render) }.boxed()
     }
 
     fn current_audio_spectrum(&self) -> Result<Option<AudioSpectrum128>, EngineError> {

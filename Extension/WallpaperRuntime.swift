@@ -110,6 +110,57 @@ enum WallpaperRuntime {
     return context
   }
 
+  private static let onceLock = NSLock()
+  private static var onceKeys = Set<String>()
+
+  /// True the first time `key` is passed in this process; for logging one line per kind of event.
+  static func firstTime(_ key: String) -> Bool {
+    onceLock.lock()
+    defer { onceLock.unlock() }
+    return onceKeys.insert(key).inserted
+  }
+
+  /// Logs the field names of a request (never what they hold) the first time each distinct
+  /// shape of `kind` arrives in this process. The request types are private, and a later
+  /// decision about them needs to know what real requests carry; see
+  /// `LockScreenRequestShape`.
+  static func logRequestShape(_ kind: String, _ request: Any?) {
+    guard let request else { return }
+    // Deeper than the default: the system wraps the payload in one or two private layers.
+    let labels = LockScreenRequestShape.labels(of: request, maxDepth: 6)
+    guard firstTime("request-shape-\(kind)-" + labels.joined(separator: ",")) else { return }
+    log(
+      "Request shape \(kind): \(String(describing: type(of: request))) "
+        + LockScreenRequestShape.summary(labels))
+  }
+
+  /// Compares the protocol this extension exports with the system's own declaration, once per
+  /// process, and logs `XPC protocol matches the system` or `XPC protocol drift`. The check
+  /// cannot change behavior: a system without the protocol or the runtime lookup is logged and
+  /// skipped.
+  static func verifyXPCProtocol(ours: Protocol) {
+    guard firstTime("xpc-protocol-check") else { return }
+    guard let system = objc_getProtocol("WallpaperExtensionKit.WallpaperExtensionXPCProtocol")
+    else {
+      log("XPC protocol check skipped: the system does not declare WallpaperExtensionXPCProtocol.")
+      return
+    }
+    guard let theirs = LockScreenXPCDrift.encodings(of: system),
+      let mine = LockScreenXPCDrift.encodings(of: ours)
+    else {
+      log("XPC protocol check skipped: the runtime does not report method type encodings.")
+      return
+    }
+    let report = LockScreenXPCDrift.compare(ours: mine, system: theirs)
+    if report.isClean {
+      log("XPC protocol matches the system (\(theirs.count) selectors)")
+    } else {
+      log(
+        "XPC protocol drift: missing=\(report.missing) extra=\(report.extra) "
+          + "differing=\(report.differing)")
+    }
+  }
+
   /// Treat an unavailable audit token or signature lookup as an untrusted caller.
   static func accepts(_ connection: NSXPCConnection) -> Bool {
     guard connection.responds(to: NSSelectorFromString("auditToken")) else { return false }

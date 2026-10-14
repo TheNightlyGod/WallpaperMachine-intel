@@ -33,6 +33,13 @@ pub struct AppConfig {
     /// `video_backend` it has no predecessor key to migrate from.
     #[serde(default)]
     pub scene_renderer: SceneRendererModeCfg,
+    /// Whether this config has been through the one-time move to Native Metal
+    /// preferred as the default scene renderer. Absent (false) in a config
+    /// written before that change, where `scene_renderer` holds the old default
+    /// more often than a choice; see [`AppConfig::migrate_legacy_keys`]. Older
+    /// builds ignore the key.
+    #[serde(default)]
+    pub native_metal_default_applied: bool,
     #[serde(default)]
     pub quality: QualityCfg,
     #[serde(default)]
@@ -53,6 +60,7 @@ impl Default for AppConfig {
             experimental: ExperimentalCfg::default(),
             video_backend: VideoBackendModeCfg::default(),
             scene_renderer: SceneRendererModeCfg::default(),
+            native_metal_default_applied: true,
             quality: QualityCfg::default(),
             monitors: Vec::new(),
             monitor_settings: Vec::new(),
@@ -82,20 +90,24 @@ pub enum VideoBackendModeCfg {
 
 /// Which renderer draws a scene wallpaper.
 ///
-/// `Compatibility` is the established Vulkan/MoltenVK path, which supports
-/// every scene. `NativeMetalPreferred` asks for the native Metal backend where
+/// `NativeMetalPreferred`, the default, asks for the native Metal backend where
 /// the whole scene falls inside the subset it can draw, and falls back to
 /// Compatibility as a whole scene otherwise, so the choice is a preference
-/// rather than a guarantee.
+/// rather than a guarantee. `Compatibility` is the Vulkan/MoltenVK path, which
+/// supports every scene, for every scene.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SceneRendererModeCfg {
-    #[default]
     Compatibility,
+    #[default]
     NativeMetalPreferred,
 }
 
 /// Internal rasterization size and frame rate the renderer targets.
+///
+/// This is the reduced-quality profile. The battery mode applies it while the
+/// Mac is on battery, and a quality throttle the host asks for applies it too;
+/// both lower what runs without touching what the user saved.
 ///
 /// `render_scale` is the fraction of the display's native pixel grid the scene
 /// is actually rasterized at. It is not window scaling and not wallpaper
@@ -518,7 +530,18 @@ impl AppConfig {
     /// Pause-on-battery and the battery quality-profile switch folded into
     /// [`PowerCfg::on_battery`]. Pause wins when both legacy flags are set.
     /// An explicit `on_battery`, including `keep_running`, wins over either.
+    ///
+    /// Native Metal preferred became the default scene renderer once it drew
+    /// every scene the compatibility renderer did. A config written before then
+    /// stores `compatibility` whether or not anyone chose it, so it moves to the
+    /// new default once; the marker it gains keeps any later choice, including
+    /// a return to Compatibility, from being moved again.
     pub fn migrate_legacy_keys(&mut self) {
+        if !self.native_metal_default_applied {
+            self.scene_renderer = SceneRendererModeCfg::NativeMetalPreferred;
+            self.native_metal_default_applied = true;
+        }
+
         let legacy_native = self.experimental.legacy_native_video_backend.take();
         if legacy_native == Some(true) && self.video_backend == VideoBackendModeCfg::Compatibility {
             self.video_backend = VideoBackendModeCfg::NativePreferred;
@@ -535,18 +558,36 @@ impl AppConfig {
         }
     }
 
-    /// The render scale in force right now: the battery profile's while
-    /// reduced quality is selected and the machine is on battery, the user's
-    /// otherwise.
+    /// The render scale in force right now.
+    ///
+    /// A throttle takes the lower of the user's scale and the profile's, so
+    /// asking for less work can never raise quality above what the user
+    /// chose, and adding a throttle to the battery profile never raises it
+    /// either. The battery profile alone keeps the profile's scale as is, even
+    /// when that is higher than a lower saved scale; with neither held the
+    /// user's scale runs.
     #[must_use]
-    pub fn effective_render_scale(&self, on_battery: bool) -> f32 {
-        let scale = if self.power.on_battery == BatteryModeCfg::ReducedQuality && on_battery {
-            self.quality.battery.render_scale
+    pub fn effective_render_scale(&self, in_force: QualityInForce) -> f32 {
+        let preferred = clamp_render_scale(self.quality.render_scale);
+        let profile = clamp_render_scale(self.quality.battery.render_scale);
+        let scale = if in_force.throttled {
+            preferred.min(profile)
+        } else if in_force.battery_profile {
+            profile
         } else {
-            self.quality.render_scale
+            preferred
         };
         clamp_render_scale(scale)
     }
+}
+
+/// Which reasons for the reduced-quality profile hold right now.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct QualityInForce {
+    /// Reduced quality is the saved battery mode and the Mac is on battery.
+    pub battery_profile: bool,
+    /// The host asked for less work, whatever the power source.
+    pub throttled: bool,
 }
 
 /// Confines a render scale to the range the renderer honours.

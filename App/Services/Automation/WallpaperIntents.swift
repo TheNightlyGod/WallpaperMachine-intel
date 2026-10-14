@@ -62,6 +62,39 @@ struct ToggleWallpaperPlaybackIntent: AppIntent {
     }
 }
 
+struct MuteWallpapersIntent: AppIntent {
+    static let title: LocalizedStringResource = "Mute Wallpapers"
+    static let description: IntentDescription? = IntentDescription(
+        "Silences every wallpaper without changing their saved sound settings.")
+
+    func perform() async throws -> some IntentResult {
+        try await AppAutomation.shared.perform(.mute)
+        return .result()
+    }
+}
+
+struct UnmuteWallpapersIntent: AppIntent {
+    static let title: LocalizedStringResource = "Unmute Wallpapers"
+    static let description: IntentDescription? = IntentDescription(
+        "Lets every wallpaper play its saved sound again after Mute Wallpapers.")
+
+    func perform() async throws -> some IntentResult {
+        try await AppAutomation.shared.perform(.unmute)
+        return .result()
+    }
+}
+
+struct ToggleWallpaperMuteIntent: AppIntent {
+    static let title: LocalizedStringResource = "Mute or Unmute Wallpapers"
+    static let description: IntentDescription? = IntentDescription(
+        "Silences every wallpaper, or lets them play their saved sound again when they are already silenced.")
+
+    func perform() async throws -> some IntentResult {
+        try await AppAutomation.shared.perform(.toggleMute)
+        return .result()
+    }
+}
+
 struct NextWallpaperIntent: AppIntent {
     static let title: LocalizedStringResource = "Next Wallpaper"
     static let description: IntentDescription? = IntentDescription(
@@ -90,10 +123,44 @@ struct PreviousWallpaperIntent: AppIntent {
     }
 }
 
+/// Where Random Wallpaper draws from.
+enum RandomWallpaperSource: String, AppEnum {
+    case all, favorites
+
+    static let typeDisplayRepresentation: TypeDisplayRepresentation = "Choose from"
+    static let caseDisplayRepresentations: [RandomWallpaperSource: DisplayRepresentation] = [
+        .all: "All wallpapers", .favorites: "Favorites",
+    ]
+
+    var pool: AutomationCommand.RandomPool {
+        switch self {
+        case .all: .all
+        case .favorites: .favorites
+        }
+    }
+}
+
+struct RandomWallpaperIntent: AppIntent {
+    static let title: LocalizedStringResource = "Random Wallpaper"
+    static let description: IntentDescription? = IntentDescription(
+        "Changes a chosen display to a random wallpaper other than the one it shows, or the target display when none is chosen.")
+
+    @Parameter(title: "Display")
+    var display: WallpaperDisplayEntity?
+
+    @Parameter(title: "Choose from", default: .all)
+    var source: RandomWallpaperSource
+
+    func perform() async throws -> some IntentResult {
+        try await AppAutomation.shared.perform(.random(display: display?.id, pool: source.pool))
+        return .result()
+    }
+}
+
 struct ApplyWallpaperIntent: AppIntent {
     static let title: LocalizedStringResource = "Apply Wallpaper"
     static let description: IntentDescription? = IntentDescription(
-        "Applies an installed wallpaper to a chosen display, or the target display when none is chosen.")
+        "Applies an installed wallpaper to a chosen display, to every display, or to the target display when none is chosen.")
 
     @Parameter(title: "Wallpaper")
     var wallpaper: WallpaperEntity
@@ -101,14 +168,21 @@ struct ApplyWallpaperIntent: AppIntent {
     @Parameter(title: "Display")
     var display: WallpaperDisplayEntity?
 
+    /// Wins over a chosen display: the wallpaper goes on every enabled independent display,
+    /// all of them or none.
+    @Parameter(title: "On all displays", default: false)
+    var allDisplays: Bool
+
     static var parameterSummary: some ParameterSummary {
         Summary("Apply \(\.$wallpaper)") {
             \.$display
+            \.$allDisplays
         }
     }
 
     func perform() async throws -> some IntentResult {
-        try await AppAutomation.shared.perform(.apply(wallpaperID: wallpaper.id, display: display?.id))
+        try await AppAutomation.shared.perform(
+            allDisplays ? .applyEverywhere(wallpaperID: wallpaper.id) : .apply(wallpaperID: wallpaper.id, display: display?.id))
         return .result()
     }
 }
@@ -132,9 +206,17 @@ struct WallpaperMachineShortcuts: AppShortcutsProvider {
             phrases: ["Play or pause \(.applicationName)", "Play or pause wallpapers in \(.applicationName)"],
             shortTitle: "Play or Pause", systemImageName: "playpause")
         AppShortcut(
+            intent: ToggleWallpaperMuteIntent(),
+            phrases: ["Mute or unmute wallpapers in \(.applicationName)", "Mute wallpapers with \(.applicationName)"],
+            shortTitle: "Mute or Unmute", systemImageName: "speaker.slash")
+        AppShortcut(
             intent: NextWallpaperIntent(),
             phrases: ["Next wallpaper in \(.applicationName)", "Change wallpaper with \(.applicationName)"],
             shortTitle: "Next Wallpaper", systemImageName: "forward")
+        AppShortcut(
+            intent: RandomWallpaperIntent(),
+            phrases: ["Random wallpaper in \(.applicationName)", "Pick a random wallpaper with \(.applicationName)"],
+            shortTitle: "Random Wallpaper", systemImageName: "shuffle")
         AppShortcut(
             intent: ApplyWallpaperIntent(),
             phrases: ["Apply a wallpaper with \(.applicationName)"],

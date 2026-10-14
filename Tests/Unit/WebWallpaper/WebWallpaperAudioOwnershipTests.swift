@@ -29,7 +29,7 @@ final class WebWallpaperAudioOwnershipTests: XCTestCase {
     private func descriptor(_ display: UInt32, source: UInt32) -> BridgeWebWallpaper {
         BridgeWebWallpaper(displayId: display, startupRevision: 0, displayKey: String(display), audioSourceDisplayId: source,
             wallpaperId: "same-project", title: "Test", projectPath: "/fixture", entryFile: "index.html",
-            fps: 30, paused: false, volume: 1, muted: false, audioResponseEnabled: true,
+            fps: 30, renderScale: 1, paused: false, volume: 1, muted: false, audioResponseEnabled: true,
             mediaIntegrationEnabled: false, propertiesJson: "{}")
     }
 }

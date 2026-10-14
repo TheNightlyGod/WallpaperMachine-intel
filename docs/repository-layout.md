@@ -28,15 +28,22 @@ App/                               WallpaperMachine application target sources o
   Services/<Domain>/               domain logic and stores, one folder per domain:
     Appearance/                    AppTheme.swift: theme preference model and store
     Automation/                    keyboard shortcuts, App Intents, links, weekday/solar/appearance selection rules,
-                                   and temporary Focus choices with restoration
+                                   temporary Focus choices with restoration, and the menu bar menu's layout
+                                   (StatusMenuModel: flat for one display, a submenu per display for more)
     Desktop/                       multi-display copy/swap and recovery, desktop picture APIs, original-wallpaper ledger,
                                    scoped poster sync, read-only Space topology, presentation policy, playback rules,
-                                   system conditions and display refresh
-    Diagnostics/                   runtime diagnostics session, diagnostics report, counter sampling, energy readout
-                                   and per-wallpaper energy ratings
+                                   system conditions, display refresh and the screen shape of a display id
+    Diagnostics/                   runtime diagnostics session, diagnostics report, session ledger, counter sampling, energy readout,
+                                   memory-pressure log and per-wallpaper energy ratings
     GitHub/                        GitHub release client, update models, update store, installer, what's-new records
     Library/                       ClientPaths (owns the app-support layout), import/deletion, still-image wallpapers,
-                                   collections, presets, history, compatibility checks, backup and restore
+                                   collections, presets, history, compatibility checks, the video black-bar check, backup and restore
+    Lifecycle/                     why the app is quitting (QuitReason, the power-off notice), how long each quit stage takes
+                                   (QuitTimings), the deadline each stage gets (QuitSupervisor, QuitMode, the exit fuse)
+                                   and SIGTERM/SIGHUP as a quit (TerminationSignalRelay);
+                                   ProcessSignals makes a broken pipe a write error;
+                                   the one-copy-per-library lock and the second launch's hand-over
+                                   (InstanceLock, SingleInstance)
     Localization/                  AppLanguage.swift: shipped-language registry and the language preference store
     LockScreen/                    lock-screen selection overrides, extension registration and configuration publishing
     NativeVideo/                   AVFoundation video backend: admission, player and host window
@@ -44,9 +51,11 @@ App/                               WallpaperMachine application target sources o
     Playlist/                      per-display playlists: model, planner, store and the scheduler that switches wallpapers
     Preview/                       isolated live preview inputs, lifecycle, WebKit and scene/video surfaces
     Steam/                         SteamCMD runtime discovery and setup state
-    Support/                       the support prompt shown after a downloaded wallpaper is applied
+    Support/                       the one-time prompts: support after a downloaded wallpaper is applied,
+                                   the later star request and the performance data question
     SystemMedia/                   shared now-playing session (MediaRemote, Music/Spotify
                                    AppleScript fallback) and artwork for Web and Scene media integration
+    Telemetry/                     Send performance data: report schema, frame windows, local spool, upload
     UserAssets/                    importing, watching and picking for file/directory wallpaper properties;
                                    owns the app's copies under <support>/UserAssets/ and the derived,
                                    regenerable <project>/.mwe-user-assets/ bridge a page can read
@@ -60,7 +69,7 @@ Extension/                         WallpaperMachineExtension sources, Info.plist
                                    its own string catalog (Localizable.xcstrings), third-party notice
 Shared/                            contracts compiled into both targets: lock-screen configuration, status and surface
                                    lifecycle, web-wallpaper protocol and screen-saver surface, RuntimeCounters,
-                                   WallpaperPresentationAuthority
+                                   WallpaperPresentationAuthority, display power and its re-check burst
 WebUI/                             HTML/CSS/JS control panel; bundled verbatim as the app resource folder WebUI
   app-icons/                       Dock icon variants (the Settings icon picker and the Dock icon)
   locales/                         one panel catalog module per shipped language (zh-Hans.js, zh-Hant.js, ja.js), registered in i18n.js
@@ -75,7 +84,8 @@ docs/                              all project documentation; see docs/README.md
 scripts/                           developer command line; Python only
   lib/                             shared helpers (glyphs.py status markers, paths.py repo paths,
                                    xcode.py quiet runner: full tool output to artifacts/, failures on screen,
-                                   dmg.py drag-to-install disk image, wordmark.py logo outlines for brand.py)
+                                   dmg.py drag-to-install disk image, bundle_contract.py signed entitlements and
+                                   Info.plist keys of the built app, wordmark.py logo outlines for brand.py)
   tests/                           unit tests for the scripts, run by scripts/test.py
 Formula/                           mwe-ffmpeg.rb: the LGPL-2.1-or-later FFmpeg build the app links (scripts/install_ffmpeg.py)
 Packaging/dmg/                     disk-image window background (background.png, @2x); generated by scripts/brand.py --dmg

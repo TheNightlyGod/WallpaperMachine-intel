@@ -4,12 +4,16 @@
 #include "Fs/VFS.h"
 #include "Runtime/DynamicValue.hpp"
 #include "Runtime/SceneRuntimeContext.hpp"
+#include "Runtime/SceneSettingResolver.hpp"
 #include "Utils/Logging.h"
 #include "wpscene/WPSoundObject.h"
+
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <optional>
 #include <random>
 #include <string>
 #include <string_view>
@@ -188,6 +192,37 @@ void WPSoundParser::Parse(const wpscene::WPSoundObject& obj, fs::VFS& vfs, audio
     auto stream = std::make_shared<WPSoundStream>(obj.sound, vfs, config);
     if (runtime != nullptr) {
         runtime->RegisterSoundLayer(obj.name, stream);
+        // The read above is the volume the layer starts with; this keeps it in
+        // step with the slider afterwards.
+        BindVolumeProperty(*runtime, stream, obj.volume_user, obj.volume);
     }
     sm.MountStream(stream);
+}
+
+void WPSoundParser::BindVolumeProperty(SceneRuntimeContext& runtime,
+                                       std::weak_ptr<WPSoundStream> stream,
+                                       std::string_view property, float authored_volume) {
+    if (property.empty()) return;
+
+    // The same binding every other slider-driven setting resolves, so the layer
+    // sees the property exactly as a fresh load would: the authored volume while
+    // the project declares no such property, the property's value once it does.
+    const nlohmann::json setting { { "user", std::string(property) },
+                                   { "value", authored_volume } };
+    // The last value the property gave. Every property is refreshed whenever a
+    // document is applied, so an unchanged one must not undo a volume a script
+    // has set since.
+    auto applied = std::make_shared<std::optional<float>>();
+    runtime.RegisterDynamicValueListener(
+        ResolveFloatSetting(runtime, setting),
+        [stream = std::move(stream), applied](const DynamicValue& value) {
+            if (value.getType() != DynamicValue::UnderlyingType::Float &&
+                value.getType() != DynamicValue::UnderlyingType::Int) {
+                return;
+            }
+            const float volume = value.getFloat();
+            if (applied->has_value() && **applied == volume) return;
+            *applied = volume;
+            if (const auto live = stream.lock()) live->SetVolume(volume);
+        });
 }

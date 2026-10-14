@@ -2,13 +2,15 @@ import Foundation
 
 /// What a global keyboard shortcut does.
 enum HotKeyAction: String, CaseIterable, Sendable {
-    case togglePlayback, previousWallpaper, nextWallpaper, openControlPanel
+    case togglePlayback, toggleMute, previousWallpaper, nextWallpaper, randomWallpaper, openControlPanel
 
     var command: AutomationCommand {
         switch self {
         case .togglePlayback: .togglePlayback
+        case .toggleMute: .toggleMute
         case .nextWallpaper: .next(display: nil)
         case .previousWallpaper: .previous(display: nil)
+        case .randomWallpaper: .random(display: nil, pool: .all)
         case .openControlPanel: .open(page: nil)
         }
     }
@@ -20,14 +22,18 @@ enum HotKeyAction: String, CaseIterable, Sendable {
         case .nextWallpaper: 2
         case .openControlPanel: 3
         case .previousWallpaper: 4
+        case .randomWallpaper: 5
+        case .toggleMute: 6
         }
     }
 
     var title: String {
         switch self {
         case .togglePlayback: String(localized: "Play or pause wallpapers")
+        case .toggleMute: String(localized: "Mute or unmute wallpapers")
         case .nextWallpaper: String(localized: "Next wallpaper")
         case .previousWallpaper: String(localized: "Previous wallpaper")
+        case .randomWallpaper: String(localized: "Random wallpaper")
         case .openControlPanel: String(localized: "Open the control panel")
         }
     }

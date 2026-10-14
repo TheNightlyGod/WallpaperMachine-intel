@@ -268,6 +268,9 @@ struct ParseContext {
     std::unordered_map<int32_t, std::string>                object_runtime_names;
     std::unordered_map<std::string, uint32_t>               text_name_counts;
     std::unordered_set<int32_t>                             referenced_layer_ids;
+    /// The card each text layer shows, for a composite registered only once
+    /// a later consumer turns out to sample the layer.
+    std::unordered_map<int32_t, TextLayerRenderFrame>       text_cards;
 
     ShaderValueMap             global_base_uniforms;
     std::shared_ptr<SceneNode> effect_camera_node;
@@ -345,6 +348,13 @@ const nlohmann::json& UnwrapSettingValue(const nlohmann::json& value) {
 
 bool HasDynamicSetting(const nlohmann::json& value) {
     return value.is_object() && (value.contains("script") || value.contains("user"));
+}
+
+/// A visibility only a reload changes: the authored value, or one of the
+/// wallpaper's own properties, which reparse the scene when they change.
+/// Anything handed to a script can change from one frame to the next.
+bool VisibilitySettledBy(const nlohmann::json& setting) {
+    return ! setting.is_object() || ! setting.contains("script");
 }
 
 bool HasUpdateScript(const nlohmann::json& value) {
@@ -597,6 +607,7 @@ void ParseLayerNodes(ParseContext& context, const nlohmann::json& objects) {
                                    layer.dynamic_visible ? layer.visible_setting
                                                          : nlohmann::json(layer.visible),
                                    runtime_name));
+            node->SetVisibilitySettled(VisibilitySettledBy(layer.visible_setting));
             // Typed parents get their timeline when their real object is
             // parsed; registering it on the placeholder creates a second clock.
             RegisterNodeOriginSetting(*context.scene->runtime, node.get(), runtime_name,
@@ -1279,6 +1290,13 @@ bool LoadMaterial(fs::VFS& vfs, const wpscene::WPMaterial& wpmat, Scene* pScene,
         pScene != nullptr && pScene->runtime != nullptr ? &pScene->runtime->projectProperties()
                                                         : nullptr;
     ApplySystemUserTextures(base_textures, wpmat.usertextures, properties);
+    // The slot is decided here and a built material is not rebuilt, so a running
+    // scene holds the property at this value.
+    if (pScene != nullptr && pScene->runtime != nullptr) {
+        for (const auto& user_texture : wpmat.usertextures) {
+            pScene->runtime->NoteLoadOnlyProperty(UserTexturePropertyName(user_texture));
+        }
+    }
 
     std::unordered_map<std::string, ImageHeader> texHeaders;
 
@@ -1607,8 +1625,70 @@ Eigen::Vector2f ResolveTextEffectCapacity(const wpscene::WPTextObject& obj,
     return capacity.cwiseMin(max_capacity);
 }
 
+/// A layer another layer samples draws into a composite of its own, `extent`
+/// texels, through a camera that frames the layer's card in its own texture
+/// space: the card fills the target, and where the layer sits in the scene --
+/// its transform, the scene camera, parallax -- does not reach the image.
+/// `camera_node` puts that camera on the card's centre.
+SceneCamera& RegisterLayerComposite(ParseContext& context, int32_t id, SceneNode& node,
+                                    std::array<int32_t, 2> extent, bool clamp_uvs,
+                                    std::shared_ptr<SceneNode> camera_node) {
+    node.SetMustProduce(true);
+    const auto key = LayerCompositeTargetKey(id);
+    if (! context.scene->HasRenderTarget(key)) {
+        // A consumer may tile a layer texture across a model (UVs far outside
+        // 0..1). Clamping that smears the edge texels into solid bands; the
+        // layer's own `clampuvs` decides, like a packaged texture's flag.
+        const auto wrap = clamp_uvs ? TextureWrap::CLAMP_TO_EDGE : TextureWrap::REPEAT;
+        context.scene->renderTargets[key] = SceneRenderTarget {
+            .width = extent[0], .height = extent[1], .allowReuse = true,
+            .sample = { wrap, wrap, TextureFilter::LINEAR, TextureFilter::LINEAR },
+            .format = context.scene->hdr ? TextureFormat::RGBA16F : TextureFormat::RGBA8,
+        };
+    }
+    auto camera = std::make_shared<SceneCamera>(extent[0], extent[1], -1.0f, 1.0f);
+    camera->SetLayerLocal(true);
+    camera->AttatchNode(std::move(camera_node));
+    auto& registered = context.scene->cameras[LayerCompositeCameraKey(id)];
+    registered = std::move(camera);
+    return *registered;
+}
+
+/// A sampled text layer's composite is the card it shows: its text, or with
+/// effects the final card of the chain, never the larger capacity the chain
+/// renders at. Aligned to one side of a box the text overflows, that card is
+/// not centred on the layer's origin, and every relayout may move and resize
+/// it (`SceneRuntimeContext::FitTextLayerComposite`), so the camera has a node
+/// of its own and frames the card exactly.
+void RegisterTextComposite(ParseContext& context, const wpscene::WPTextObject& object,
+                           SceneNode& node, const TextLayerRenderFrame& card) {
+    auto camera_node = std::make_shared<SceneNode>();
+    camera_node->SetTranslate(Eigen::Vector3f(card.center.x(), card.center.y(), 0.0f));
+    auto& camera = RegisterLayerComposite(context,
+                                          object.id,
+                                          node,
+                                          ResolveTextRenderExtent(card.size, context),
+                                          object.clampuvs,
+                                          std::move(camera_node));
+    camera.SetWidth(std::max(1.0f, card.size.x()));
+    camera.SetHeight(std::max(1.0f, card.size.y()));
+    camera.Update();
+}
+
+/// An effect of layer `layer_id` naming the layer's own `_a` or `_b` composite
+/// reads the chain's current buffer, `chain_input`, as `previous` does: the
+/// layer's composite is what this chain is about to produce. A clock's outline
+/// bound that way otherwise sampled an empty link every frame and drew nothing.
+void BindOwnEffectChainInput(wpscene::WPMaterial& material, int32_t layer_id,
+                             const std::string& chain_input) {
+    for (auto& texture : material.textures) {
+        if (IsOwnEffectChainInput(texture, layer_id)) texture = chain_input;
+    }
+}
+
 void AttachEffectsToNode(ParseContext& context,
                          SceneNode& node,
+                         int32_t layer_id,
                          SceneMesh& final_mesh,
                          std::span<const wpscene::WPImageEffect> effects,
                          const std::string& runtime_name,
@@ -1697,16 +1777,20 @@ void RegisterLayerAlpha(ParseContext& context, std::string_view runtime_name,
 // An effect a user property switches on or off is built only when the
 // property's current value -- a preset or the user's choice, by the same rule
 // as a layer's visibility -- says so. The scene file's value is the editor's
-// default. A property change reloads the scene, so deciding here suffices.
+// default. It is decided here, when the scene loads: building every hidden
+// effect would cost passes and memory, so a running scene holds the property at
+// this value (SceneRuntimeContext::NoteLoadOnlyProperty) and a changed one
+// takes a reload.
 void ResolveUserEffectVisibility(ParseContext& context,
                                  std::vector<wpscene::WPImageEffect>& effects,
                                  std::string_view runtime_name) {
     if (context.scene->runtime == nullptr) return;
+    auto& runtime = *context.scene->runtime;
     for (auto& effect : effects) {
         if (effect.visible_setting.is_null()) continue;
         effect.visible =
-            ResolveBoolSetting(*context.scene->runtime, effect.visible_setting, runtime_name)
-                ->getBool();
+            ResolveBoolSetting(runtime, effect.visible_setting, runtime_name)->getBool();
+        runtime.NoteLoadOnlyProperty(UserPropertyName(effect.visible_setting));
     }
 }
 
@@ -1805,6 +1889,7 @@ void ParseTextObj(ParseContext& context, wpscene::WPTextObject& obj) {
                                obj.dynamic_visible ? obj.visible_setting
                                                    : nlohmann::json(obj.visible),
                                runtime_name));
+        node->SetVisibilitySettled(VisibilitySettledBy(obj.visible_setting));
         context.scene->runtime->RegisterTextLayer(runtime_name, std::move(text_state));
         RegisterLayerAlpha(context, runtime_name,
                            obj.field_bindings.contains("alpha") ? obj.field_bindings.at("alpha")
@@ -1857,6 +1942,7 @@ void ParseTextObj(ParseContext& context, wpscene::WPTextObject& obj) {
         if (! obj.effects.empty()) {
             AttachEffectsToNode(context,
                                 *node,
+                                obj.id,
                                 effect_final_mesh,
                                 obj.effects,
                                 runtime_name,
@@ -1867,6 +1953,11 @@ void ParseTextObj(ParseContext& context, wpscene::WPTextObject& obj) {
                                 { obj.parallaxDepth[0], obj.parallaxDepth[1] },
                                 /* copy_background */ true,
                                 /* preserve_effect_fbo_resolution */ true);
+        }
+        const auto& card = obj.effects.empty() ? render_frame : effect_final_frame;
+        context.text_cards[obj.id] = card;
+        if (context.referenced_layer_ids.contains(obj.id)) {
+            RegisterTextComposite(context, obj, *node, card);
         }
     } else {
         LoadAlignment(*node, anchor, layout_size);
@@ -2163,6 +2254,7 @@ void RegisterMaterialConstants(ParseContext& context, std::shared_ptr<SceneMater
 
 void AttachEffectsToNode(ParseContext& context,
                          SceneNode& node,
+                         int32_t layer_id,
                          SceneMesh& final_mesh,
                          std::span<const wpscene::WPImageEffect> effects,
                          const std::string& runtime_name,
@@ -2298,6 +2390,7 @@ void AttachEffectsToNode(ParseContext& context,
                     }
                 }
             }
+            BindOwnEffectChainInput(wpmat, layer_id, inRT);
             if (wpmat.textures.empty()) wpmat.textures.resize(1);
             if (wpmat.textures.at(0).empty()) wpmat.textures[0] = inRT;
 
@@ -3128,25 +3221,8 @@ void BuildBloomPostProcess(ParseContext& context, const wpscene::WPScene& sc) {
 
 void RegisterImageComposite(ParseContext& context, const wpscene::WPImageObject& object,
                              SceneNode& node) {
-    node.SetMustProduce(true);
-    const auto extent = ResolveImageRenderExtent(object, context);
-    const auto key = LayerCompositeTargetKey(object.id);
-    if (! context.scene->HasRenderTarget(key)) {
-        // A consumer may tile a layer texture across a model (UVs far outside
-        // 0..1). Clamping that smears the edge texels into solid bands; the
-        // layer's own `clampuvs` decides, like a packaged texture's flag.
-        const auto wrap = object.clampuvs ? TextureWrap::CLAMP_TO_EDGE : TextureWrap::REPEAT;
-        context.scene->renderTargets[key] = SceneRenderTarget {
-            .width = extent[0], .height = extent[1], .allowReuse = true,
-            .sample = { wrap, wrap, TextureFilter::LINEAR, TextureFilter::LINEAR },
-            .format = context.scene->hdr ? TextureFormat::RGBA16F : TextureFormat::RGBA8,
-        };
-    }
-    // A layer texture is its card, independent of its position in the scene.
-    auto camera = std::make_shared<SceneCamera>(extent[0], extent[1], -1.0f, 1.0f);
-    camera->SetLayerLocal(true);
-    camera->AttatchNode(context.effect_camera_node);
-    context.scene->cameras[LayerCompositeCameraKey(object.id)] = std::move(camera);
+    RegisterLayerComposite(context, object.id, node, ResolveImageRenderExtent(object, context),
+                           object.clampuvs, context.effect_camera_node);
 }
 
 void InitContext(ParseContext& context, fs::VFS& vfs, wpscene::WPScene& sc) {
@@ -3173,6 +3249,9 @@ void InitContext(ParseContext& context, fs::VFS& vfs, wpscene::WPScene& sc) {
             .canvas_height      = scene.ortho[1],
             .project_properties = *context.request->project_properties,
         };
+        if (context.request->authored_project_properties != nullptr) {
+            bootstrap.authored_project_properties = *context.request->authored_project_properties;
+        }
         scene.runtime = CreateSceneRuntimeContext(std::move(bootstrap));
         scene.runtime->AttachScene(&scene);
         if (sc.general.dynamic_clearcolor) {
@@ -3342,6 +3421,7 @@ void ParseImageObj(ParseContext& context, wpscene::WPImageObject& img_obj) {
                                wpimgobj.dynamic_visible ? wpimgobj.visible_setting
                                                         : nlohmann::json(wpimgobj.visible),
                                runtime_name));
+        spImgNode->SetVisibilitySettled(VisibilitySettledBy(wpimgobj.visible_setting));
         RegisterNodeOriginSetting(*context.scene->runtime, spImgNode.get(), runtime_name,
                                   wpimgobj.origin_setting);
         if (wpimgobj.dynamic_scale) {
@@ -3757,6 +3837,7 @@ void ParseImageObj(ParseContext& context, wpscene::WPImageObject& img_obj) {
                         }
                     }
                 }
+                BindOwnEffectChainInput(wpmat, wpimgobj.id, inRT);
                 if (wpmat.textures.size() == 0) wpmat.textures.resize(1);
                 if (wpmat.textures.at(0).empty()) {
                     wpmat.textures[0] = inRT;
@@ -3968,6 +4049,7 @@ void ParseParticleObj(ParseContext& context, wpscene::WPParticleObject& wppartob
                                    wppartobj.dynamic_visible ? wppartobj.visible_setting
                                                              : nlohmann::json(wppartobj.visible),
                                    runtime_name));
+            spNode->SetVisibilitySettled(VisibilitySettledBy(wppartobj.visible_setting));
             RegisterNodeOriginSetting(*context.scene->runtime, spNode.get(), runtime_name,
                                       wppartobj.origin_setting);
             if (wppartobj.dynamic_scale) {
@@ -4320,6 +4402,7 @@ void RegisterCommonNodeBindings(ParseContext& context, SceneNode& node, std::str
         ResolveBoolSetting(*context.scene->runtime,
                            obj.dynamic_visible ? obj.visible_setting : nlohmann::json(obj.visible),
                            std::string(runtime_name)));
+    node.SetVisibilitySettled(VisibilitySettledBy(obj.visible_setting));
     RegisterNodeOriginSetting(*context.scene->runtime, &node, runtime_name,
                               obj.origin_setting, animate_origin);
     if (obj.dynamic_scale) {
@@ -4686,6 +4769,11 @@ std::optional<std::string> TexturePropertyTextureName(const std::string& value) 
     return name;
 }
 
+std::string_view wallpaper::UserTexturePropertyName(const wpscene::WPUserTexture& user_texture) {
+    // A typed slot (`system`, ...) names something the runtime supplies.
+    return user_texture.type.empty() ? std::string_view(user_texture.name) : std::string_view {};
+}
+
 void wallpaper::ApplySystemUserTextures(std::vector<std::string>&                  textures,
                                         const std::vector<wpscene::WPUserTexture>& usertextures,
                                         const ProjectProperties*                   properties) {
@@ -4697,8 +4785,7 @@ void wallpaper::ApplySystemUserTextures(std::vector<std::string>&               
         std::string replacement;
         if (wpscene::IsSystemUserTexture(user_texture)) {
             replacement = user_texture.name;
-        } else if (properties != nullptr && user_texture.type.empty() &&
-                   ! user_texture.name.empty()) {
+        } else if (properties != nullptr && ! UserTexturePropertyName(user_texture).empty()) {
             // The bare-string form names one of this wallpaper's properties. An
             // unset property is the author's own default, so the slot keeps it.
             const auto property = properties->find(user_texture.name);
@@ -4987,10 +5074,17 @@ std::shared_ptr<Scene> WPSceneParser::Parse(const SceneParseRequest& request,
             bool already_parsed = false;
             for (const auto& object : wp_objs) {
                 const auto* image = std::get_if<wpscene::WPImageObject>(&object);
-                if (image == nullptr || image->id != id) continue;
+                const auto* text  = std::get_if<wpscene::WPTextObject>(&object);
+                if ((image == nullptr || image->id != id) && (text == nullptr || text->id != id))
+                    continue;
                 if (const auto node = context.layer_nodes.find(id);
                     node != context.layer_nodes.end() && node->second != nullptr) {
-                    RegisterImageComposite(context, *image, *node->second);
+                    if (image != nullptr) {
+                        RegisterImageComposite(context, *image, *node->second);
+                    } else if (const auto card = context.text_cards.find(id);
+                               card != context.text_cards.end()) {
+                        RegisterTextComposite(context, *text, *node->second, card->second);
+                    }
                 }
                 already_parsed = true;
                 break;

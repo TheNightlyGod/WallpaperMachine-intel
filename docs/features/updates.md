@@ -20,11 +20,28 @@ menu-bar app can run for weeks (a Mac that slept through the interval checks as
 soon as it wakes), and on **Check for Updates**. Unattended checks only discover
 updates: one alert offers **View Update**, which opens About, or **Later**; an
 update the user has already downloaded offers **Restart to Update** instead. Each
-version is offered once per launch, and no alert appears while the What's New
-window is open (a later check offers it). Downloading still requires **Download
+version is offered once per launch. Downloading still requires **Download
 Update**. The status menu keeps an entry for an available update (**WallpaperMachine
 x.y.z Available…**, which opens About) or a downloaded one (**Restart to Update to
 x.y.z**), so **Later** only dismisses the alert.
+
+The alert is modal and brings the app forward, so it waits for a moment that it
+would not interrupt (`UpdatePromptGate`). It is held while wallpapers are
+suspended (display asleep, session locked, or an app rule or the Focus filter
+pausing them), while any display's wallpaper is paused because a full-screen app
+or other windows cover it, while the What's New window is open and while the app
+quits. The signals are the ones [Playback](performance.md#playback) describes:
+with **When windows cover the desktop** on **Keep running**, only a display
+fully hidden by a full-screen app holds it, and with **Pause** a maximized window
+does too. A display paused only because **Only play on the display I’m using** is on
+and the pointer is elsewhere does not hold it; a full-screen app or covering windows on
+that display still do. When the control panel is the key
+window the alert is allowed even while wallpapers are paused, since the person is
+already in the app. A held alert does not count as offered: it appears once, with no
+new network check, when wallpapers present again, when What's New closes or when the
+control panel becomes key, and the log notes `update prompt deferred: <reason>` when
+it starts waiting. Nothing else changes while it waits: the status menu entry is already
+there, and **Check for Updates…** is never held.
 
 ### What a check reads
 
@@ -155,6 +172,8 @@ enabled only after cancellation confirms the old helper has stopped.
 `Tests/Unit/GitHub/AppUpdateTests.swift` covers checking, the manifest and API
 paths, rate limits, asset selection, digest verification, installing from a real
 disk image and the replacement helper's success, failure and locking.
+`UpdatePromptGateTests` covers when the unattended alert is held and that a held
+one is offered exactly once afterwards.
 
 ## After an update
 

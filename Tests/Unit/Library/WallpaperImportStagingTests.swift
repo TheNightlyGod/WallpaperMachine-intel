@@ -61,6 +61,22 @@ final class WallpaperImportStagingTests: XCTestCase {
         XCTAssertNotNil(try FileManager.default.attributesOfItem(atPath: linked.path)[.type])
     }
 
+    func testImportStagingIsKeptOutOfBackupsWhileFilesAreCopied() async throws {
+        let source = root.appendingPathComponent("wallpaper.html")
+        try Data("<!doctype html><title>fixture</title>".utf8).write(to: source)
+        let library = root.appendingPathComponent("Library")
+        let observed = StagingFlagLog()
+        let parent: URL = root
+        let report = try await WallpaperImportService().importItems([source], into: library, duplicates: .skip) { _ in
+            observed.record(stagingIn: parent)
+        }
+        XCTAssertEqual(report.importedIDs.count, 1, report.failures.joined(separator: "\n"))
+        XCTAssertEqual(observed.flags, [true], "the copy in progress is skipped by a running backup")
+        XCTAssertFalse(library.isKeptOutOfBackups, "the finished library stays backed up")
+        let installed = try XCTUnwrap(report.importedIDs.first)
+        XCTAssertFalse(library.appendingPathComponent(installed).isKeptOutOfBackups)
+    }
+
     @MainActor
     func testShutdownWaitsForCancelledImportStagingToDisappear() async throws {
         let source = root.appendingPathComponent("wallpaper.html")
@@ -82,5 +98,18 @@ final class WallpaperImportStagingTests: XCTestCase {
         try FileManager.default.createSymbolicLink(at: library, withDestinationURL: target)
         XCTAssertEqual(WallpaperImportService.stagingRoot(forLibrary: library),
                        target.deletingLastPathComponent().resolvingSymlinksInPath())
+    }
+}
+
+/// What the import's staging folder reported each time the import announced progress.
+private final class StagingFlagLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var readings: [Bool] = []
+    var flags: [Bool] { lock.withLock { readings } }
+
+    func record(stagingIn parent: URL) {
+        let staging = ((try? FileManager.default.contentsOfDirectory(atPath: parent.path)) ?? [])
+            .filter { $0.hasPrefix(WallpaperImportService.stagingPrefix) }
+        lock.withLock { readings.append(contentsOf: staging.map { parent.appendingPathComponent($0).isKeptOutOfBackups }) }
     }
 }

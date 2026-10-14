@@ -35,7 +35,8 @@ enum class SceneDemandReason : uint32_t
     DynamicMesh = 1u << 7,
     /// Puppet or skeletal transforms are written per frame.
     Puppet = 1u << 8,
-    /// A pass reads a target it also writes.
+    /// A pass reads a target it also writes, or the frame reads a target
+    /// before writing it, so each frame's picture feeds the next.
     Feedback = 1u << 9,
     /// A text layer's content is produced from a bound value that re-evaluates
     /// on its own -- a script, which may be a clock or a date.

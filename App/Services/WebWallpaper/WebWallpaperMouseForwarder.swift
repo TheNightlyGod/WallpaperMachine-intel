@@ -78,6 +78,144 @@ struct WebWallpaperMouseRouting {
     }
 }
 
+/// Spacing policy for the pointer moves forwarded to a page, kept apart from
+/// AppKit so it is testable with explicit timestamps.
+///
+/// A mouse reports up to 1000 positions a second, and every forwarded move costs
+/// the main thread a rebuilt event and a hit test inside WebKit, long before the
+/// page could draw more than one frame from it. Per window, a move after a quiet
+/// stretch goes through at once (the leading edge, so a flick that starts
+/// from rest is never delayed), moves inside the interval are held with only the
+/// newest kept, and the held one is delivered when the interval ends (the
+/// trailing edge, so the pointer always comes to rest where it stopped).
+struct WebWallpaperMoveThrottle {
+    enum Outcome: Equatable {
+        /// Nothing went through inside the interval: deliver this move now.
+        case deliverNow
+        /// Keep this move as the newest. The delay is set for the first held
+        /// move of a burst only, so one timer serves the whole burst.
+        case hold(scheduleFlushAfter: TimeInterval?)
+    }
+
+    private struct State {
+        var lastDelivery: TimeInterval
+        var holding = false
+    }
+
+    private var windows: [Int: State] = [:]
+
+    /// Judges a move that arrived at `now` (any monotonic clock the caller uses
+    /// consistently, in seconds). A `deliverNow` verdict counts as the delivery;
+    /// it also supersedes a move held earlier, which the caller drops.
+    mutating func offer(window: Int, at now: TimeInterval, interval: TimeInterval) -> Outcome {
+        guard var state = windows[window], now - state.lastDelivery < interval else {
+            windows[window] = State(lastDelivery: now)
+            return .deliverNow
+        }
+        let first = !state.holding
+        state.holding = true
+        windows[window] = state
+        guard first else { return .hold(scheduleFlushAfter: nil) }
+        let remaining = interval - (now - state.lastDelivery)
+        return .hold(scheduleFlushAfter: min(interval, remaining))
+    }
+
+    /// A held move was delivered at `now`: the window's next interval starts
+    /// from it, and nothing is held any more.
+    mutating func delivered(window: Int, at now: TimeInterval) {
+        windows[window] = State(lastDelivery: now)
+    }
+
+    /// Forgets a window that no longer exists or whose held move was discarded.
+    mutating func cancel(window: Int) {
+        windows[window] = nil
+    }
+
+    mutating func reset() {
+        windows = [:]
+    }
+}
+
+/// Holds the newest move per window while `WebWallpaperMoveThrottle` is
+/// spacing deliveries, and delivers it when the interval ends or when anything
+/// that must see the pointer's real position arrives first.
+///
+/// The events are already rebased into their wallpaper window, so replaying a
+/// held one later still lands on the position it was observed at. Presses,
+/// drags, releases, scrolls and exits are never held; the forwarder calls
+/// `flush(window:)` before each of them so a gesture never sees a stale pointer
+/// and an exit always follows the last move.
+@MainActor
+final class WebWallpaperMoveCoalescer {
+    private var throttle = WebWallpaperMoveThrottle()
+    private var pending: [Int: NSEvent] = [:]
+    private var flushTasks: [Int: Task<Void, Never>] = [:]
+    private let deliver: @MainActor (Int, NSEvent) -> Bool
+    private let now: @MainActor () -> TimeInterval
+    private let wait: @Sendable (TimeInterval) async throws -> Void
+
+    /// - Parameters:
+    ///   - deliver: hands a move to the page of the window with that number;
+    ///     false when the window is gone.
+    ///   - now: the clock `flush` stamps a delivery with, on the same timeline
+    ///     as `NSEvent.timestamp` (seconds since boot).
+    init(
+        deliver: @escaping @MainActor (Int, NSEvent) -> Bool,
+        now: @escaping @MainActor () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+        wait: (@Sendable (TimeInterval) async throws -> Void)? = nil
+    ) {
+        self.deliver = deliver
+        self.now = now
+        self.wait = wait ?? { try await Task.sleep(for: .seconds($0)) }
+    }
+
+    /// Whether a move is waiting for its interval to end.
+    func hasPending(window: Int) -> Bool { pending[window] != nil }
+
+    func move(_ event: NSEvent, window: Int, interval: TimeInterval) {
+        switch throttle.offer(window: window, at: event.timestamp, interval: interval) {
+        case .deliverNow:
+            discardPending(window: window)
+            _ = deliver(window, event)
+        case .hold(let flushAfter):
+            pending[window] = event
+            if let flushAfter { scheduleFlush(window: window, after: flushAfter) }
+        }
+    }
+
+    /// Delivers the held move of `window`, if any, right now.
+    func flush(window: Int) {
+        guard let event = pending.removeValue(forKey: window) else { return }
+        flushTasks.removeValue(forKey: window)?.cancel()
+        throttle.delivered(window: window, at: now())
+        if !deliver(window, event) { throttle.cancel(window: window) }
+    }
+
+    /// Drops every held move and timer, for a monitor that is being removed.
+    func reset() {
+        for task in flushTasks.values { task.cancel() }
+        flushTasks = [:]
+        pending = [:]
+        throttle.reset()
+    }
+
+    private func discardPending(window: Int) {
+        pending[window] = nil
+        flushTasks.removeValue(forKey: window)?.cancel()
+    }
+
+    private func scheduleFlush(window: Int, after delay: TimeInterval) {
+        flushTasks[window]?.cancel()
+        flushTasks[window] = Task { @MainActor [weak self, wait] in
+            do { try await wait(delay) } catch { return }
+            // A gesture, a newer move past the interval or a reset may have
+            // taken the held move while this wake-up was queued.
+            guard !Task.isCancelled else { return }
+            self?.flush(window: window)
+        }
+    }
+}
+
 /// Mirrors desktop pointer input into web wallpaper pages. The wallpaper
 /// windows stay mouse-transparent so Finder keeps owning icons and the system
 /// keeps its own click handling; a global event monitor observes the same
@@ -103,6 +241,11 @@ final class WebWallpaperMouseForwarder: WebWallpaperPointerMonitoring {
     private var routing = WebWallpaperMouseRouting()
     private var layers: [Int: Int] = [:]
     private var reportedMissingWindow = false
+    private lazy var moves = WebWallpaperMoveCoalescer { [weak self] number, event in
+        guard let window = self?.windows().first(where: { $0.windowNumber == number }) else { return false }
+        window.page.deliverMouse(event)
+        return true
+    }
 
     init(windows: @escaping @MainActor () -> [WebWallpaperWindow]) {
         self.windows = windows
@@ -121,6 +264,7 @@ final class WebWallpaperMouseForwarder: WebWallpaperPointerMonitoring {
             self.monitor = nil
             routing.reset()
             layers.removeAll()
+            moves.reset()
         }
     }
 
@@ -141,19 +285,34 @@ final class WebWallpaperMouseForwarder: WebWallpaperPointerMonitoring {
         case .ignore:
             break
         case .deliver(let number):
-            deliver(event, screenPoint: screenPoint, to: number, in: windows)
+            deliver(event, kind: kind, screenPoint: screenPoint, to: number, in: windows)
         case .exit(let number):
-            windows.first { $0.windowNumber == number }?.page.deliverMouseExit()
+            forwardExit(from: number, in: windows)
         case .exitThenDeliver(let exit, let number):
-            windows.first { $0.windowNumber == exit }?.page.deliverMouseExit()
-            deliver(event, screenPoint: screenPoint, to: number, in: windows)
+            forwardExit(from: exit, in: windows)
+            deliver(event, kind: kind, screenPoint: screenPoint, to: number, in: windows)
         }
     }
 
-    private func deliver(_ event: NSEvent, screenPoint: NSPoint, to number: Int, in windows: [WebWallpaperWindow]) {
+    /// The exit follows the last move the pointer made, so a held one goes first.
+    private func forwardExit(from number: Int, in windows: [WebWallpaperWindow]) {
+        moves.flush(window: number)
+        windows.first { $0.windowNumber == number }?.page.deliverMouseExit()
+    }
+
+    /// Moves are paced to the page's rate; everything else reaches the page at
+    /// once, after the held move so the page sees the pointer where it really is.
+    private func deliver(
+        _ event: NSEvent, kind: WebWallpaperMouseRouting.Kind, screenPoint: NSPoint, to number: Int,
+        in windows: [WebWallpaperWindow]
+    ) {
         guard let window = windows.first(where: { $0.windowNumber == number }) else { return }
         let local = window.convertPoint(fromScreen: screenPoint)
-        if let synthesized = Self.rebase(event, to: window, at: local) {
+        guard let synthesized = Self.rebase(event, to: window, at: local) else { return }
+        if case .move = kind {
+            moves.move(synthesized, window: number, interval: window.page.pointerMoveInterval)
+        } else {
+            moves.flush(window: number)
             window.page.deliverMouse(synthesized)
         }
     }

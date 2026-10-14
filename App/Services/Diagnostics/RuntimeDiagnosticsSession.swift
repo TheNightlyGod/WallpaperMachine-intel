@@ -47,6 +47,11 @@ struct RuntimeDiagnosticsRequest: Equatable {
 /// - The session has a duration, so a forgotten switch cannot keep counting.
 /// - Nothing is emitted per frame. One aggregated report is produced when the
 ///   caller asks for it, by pulling both sides.
+///
+/// The renderer's counters have one other user: the frame windows of **Send
+/// performance data** (`TelemetrySampler`), which turn on only the renderer half.
+/// A run that sets `WALLPAPER_MACHINE_DIAGNOSTICS` opens none of them, so this
+/// session's counts are never mixed with theirs.
 @MainActor
 final class RuntimeDiagnosticsSession {
     private let store: BridgeStore

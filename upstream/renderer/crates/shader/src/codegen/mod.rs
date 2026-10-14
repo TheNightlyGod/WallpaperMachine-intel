@@ -95,6 +95,7 @@ impl Codegen {
                 declarations::functions::CompatibilityFunctionRequests::default(),
             video_sampling_functions:
                 declarations::functions::VideoSamplingFunctionRequests::default(),
+            global_initializers: Vec::new(),
             interface_layout,
             resource_layout,
         };

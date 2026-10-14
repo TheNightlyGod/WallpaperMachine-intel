@@ -91,6 +91,17 @@ class WPSoundParser {
 public:
     static void Parse(const wpscene::WPSoundObject&, fs::VFS&, audio::SoundManager&,
                       SceneRuntimeContext* runtime = nullptr);
+
+    // Makes `stream`'s volume follow the project property `property` for as long
+    // as the scene runs, so a slider moved on a running scene is heard without
+    // loading it again. `authored_volume` is the volume the layer carries when
+    // the project does not declare the property. A property that is not a number
+    // leaves the volume alone, and a change to any other property does too, so a
+    // volume a script set stays until its own slider moves. It costs nothing per
+    // frame: the stream reads an atomic the property writes only when it changes,
+    // and a stream that is gone is not touched.
+    static void BindVolumeProperty(SceneRuntimeContext& runtime, std::weak_ptr<WPSoundStream> stream,
+                                   std::string_view property, float authored_volume);
 };
 
 } // namespace wallpaper

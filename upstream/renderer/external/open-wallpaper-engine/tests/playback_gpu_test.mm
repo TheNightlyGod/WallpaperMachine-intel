@@ -3073,7 +3073,10 @@ TEST_F(PlaybackGPU, PlainVideoPresentsThroughTheFinalViewportByteForByte) {
     ASSERT_TRUE(owned->prepared());
     auto& video = *owned; owned_passes.push_back(std::move(owned));
 
-    struct Case { const char* name; WallpaperScalingMode mode; uint32_t w, h; double display_scale, user_scale; };
+    struct Case {
+        const char* name; WallpaperScalingMode mode; uint32_t w, h; double display_scale, user_scale;
+        double pan_x = 0.5, pan_y = 0.5;
+    };
     const std::array cases {
         Case {"fit, letterboxed, enlarged", WallpaperScalingMode::FIT, 64, 64, 1.0, 1.0},
         Case {"fill, cropped, enlarged", WallpaperScalingMode::FILL, 64, 64, 1.0, 1.0},
@@ -3084,6 +3087,13 @@ TEST_F(PlaybackGPU, PlainVideoPresentsThroughTheFinalViewportByteForByte) {
         Case {"fill with the user's scale", WallpaperScalingMode::FILL, 50, 30, 1.0, 0.7},
         Case {"unscaled with the user's scale", WallpaperScalingMode::NONE, 50, 30, 1.0, 1.3},
         Case {"same size", WallpaperScalingMode::STRETCH, kWidth, kHeight, 1.0, 1.0},
+        // Positioned: the same layout function places the picture anywhere in its
+        // slack, and the direct present, the copy and the poster must agree there.
+        Case {"fill, panned to the leading edges", WallpaperScalingMode::FILL, 64, 64, 1.0, 1.0, 0.0, 0.0},
+        Case {"fill, panned to the trailing edges", WallpaperScalingMode::FILL, 64, 64, 1.0, 1.0, 1.0, 1.0},
+        Case {"fit, panned to the trailing edge", WallpaperScalingMode::FIT, 64, 64, 1.0, 1.0, 1.0, 1.0},
+        Case {"fit on a 2x display, panned to the top", WallpaperScalingMode::FIT, 30, 40, 2.0, 1.0, 0.5, 0.0},
+        Case {"unscaled with the user's scale, panned", WallpaperScalingMode::NONE, 70, 50, 1.0, 1.3, 0.25, 0.75},
     };
     struct Source { const char* name; ImageParameters image; VkSampler sampler; };
     const std::array sources {
@@ -3096,7 +3106,8 @@ TEST_F(PlaybackGPU, PlainVideoPresentsThroughTheFinalViewportByteForByte) {
         SCOPED_TRACE(std::string(source.name) + "; " + c.name);
         Bind(video, as_frame(source.image, source.sampler));
         const auto layout = ComputeWallpaperScalingLayout(c.mode, kWidth, kHeight, c.w, c.h,
-                                                          c.display_scale, c.user_scale);
+                                                          c.display_scale, c.user_scale,
+                                                          c.pan_x, c.pan_y);
         rr.wallpaper_viewport = MakeWallpaperViewport(layout);
         rr.wallpaper_scissor = MakeWallpaperScissor(layout);
         const auto target = PrivateTarget(static_cast<uint32_t>(layout.scissor_px.width),
@@ -3115,6 +3126,37 @@ TEST_F(PlaybackGPU, PlainVideoPresentsThroughTheFinalViewportByteForByte) {
             return reference;
         };
         const auto reference = compare(true);
+        // The picture sits where the layout says. Bars are the clear colour, so
+        // the first and last rows and columns that differ from it are the
+        // picture's footprint in the window: a pan that is silently dropped
+        // moves it, and fails here.
+        {
+            const std::array<uint8_t, 4> clear {64, 128, 191, 255};
+            const auto width = static_cast<int32_t>(target.extent.width);
+            const auto height = static_cast<int32_t>(target.extent.height);
+            int32_t first_x = width, last_x = -1, first_y = height, last_y = -1;
+            for (int32_t y = 0; y < height; ++y) for (int32_t x = 0; x < width; ++x) {
+                const auto at = (static_cast<size_t>(y) * width + x) * 4;
+                if (std::equal(clear.begin(), clear.end(), reference.begin() + at)) continue;
+                first_x = std::min(first_x, x); last_x = std::max(last_x, x);
+                first_y = std::min(first_y, y); last_y = std::max(last_y, y);
+            }
+            const auto& v = layout.viewport_px;
+            EXPECT_EQ(first_x, std::max(0, v.x));
+            EXPECT_EQ(last_x, std::min(width, v.x + v.width) - 1);
+            EXPECT_EQ(first_y, std::max(0, v.y));
+            EXPECT_EQ(last_y, std::min(height, v.y + v.height) - 1);
+        }
+        // A pan that has room to move changes the pixels; one that does not
+        // (Stretch, or an axis the picture fills exactly) leaves them alone.
+        if (c.pan_x != 0.5 || c.pan_y != 0.5) {
+            const auto centred = ComputeWallpaperScalingLayout(c.mode, kWidth, kHeight, c.w, c.h,
+                                                               c.display_scale, c.user_scale);
+            rr.wallpaper_viewport = MakeWallpaperViewport(centred);
+            EXPECT_FALSE(PresentFrame(video, final, pre, target, format, false));
+            EXPECT_NE(Read(target), reference);
+            rr.wallpaper_viewport = MakeWallpaperViewport(layout);
+        }
         // Not a degenerate picture: the source's texels reached the target.
         std::set<Color> colors;
         for (size_t i = 0; i + 3 < reference.size(); i += 4)

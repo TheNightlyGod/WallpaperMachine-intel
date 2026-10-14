@@ -485,6 +485,14 @@ impl<'tokens> ExpressionFacts<'tokens> {
             return;
         }
         self.collect_range(TokenIndexRange::new(start, semicolon));
+        // The value a `return` hands back is an expression of its own; read
+        // with the keyword, none of its operands are.
+        if self.tokens[start].kind().is_keyword(KeywordType::Return)
+            && let Some(value) = self.tokens.next_non_comment(start + 1)
+            && value < semicolon
+        {
+            self.collect_range(TokenIndexRange::new(value, semicolon));
+        }
         let range = TokenIndexRange::new(start, semicolon);
         let Some(expression) = ExpressionFact::collect(self.tokens, range) else {
             return;
@@ -963,7 +971,7 @@ impl StatementFacts<'_, '_> {
     /// Collects all top-level and nested statements in source order.
     fn collect_all(&mut self) {
         let mut cursor = 0usize;
-        while let Some(start) = self.tokens.next_non_comment(cursor) {
+        while let Some(start) = self.tokens.next_statement_start(cursor) {
             let Some(end) = self.collect_at(start) else {
                 cursor = start + 1;
                 continue;
@@ -990,7 +998,7 @@ impl StatementFacts<'_, '_> {
         let end = self.tokens.scope_end_after(open);
         let mut cursor = open + 1;
         while cursor < end.saturating_sub(1) {
-            let Some(start) = self.tokens.next_non_comment(cursor) else {
+            let Some(start) = self.tokens.next_statement_start(cursor) else {
                 break;
             };
             if start >= end.saturating_sub(1) {

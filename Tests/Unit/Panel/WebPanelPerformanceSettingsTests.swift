@@ -45,6 +45,148 @@ final class WebPanelPerformanceSettingsTests: XCTestCase {
     XCTAssertEqual(context.playback.desktopCoveredAction, .keepRunning)
   }
 
+  func testLowBatteryActionIsSavedAndAnUnknownValueRefused() async throws {
+    let context = try Context()
+    defer { context.tearDown() }
+
+    try await context.controller.perform(
+      "setting", body: ["key": "lowBatteryAction", "value": "stop"])
+    XCTAssertEqual(context.playback.lowBatteryAction, .stop)
+
+    for bad: Any in ["sometimes", "mute", 1, true] {
+      do {
+        try await context.controller.perform(
+          "setting", body: ["key": "lowBatteryAction", "value": bad])
+        XCTFail("\(bad) is not a low-battery action")
+      } catch {}
+    }
+    XCTAssertEqual(context.playback.lowBatteryAction, .stop, "A refused value leaves the saved one alone")
+  }
+
+  func testLowBatteryLevelAcceptsOnlyTheOfferedLevels() async throws {
+    let context = try Context()
+    defer { context.tearDown() }
+
+    for level in [10, 30, 20] {
+      try await context.controller.perform(
+        "setting", body: ["key": "lowBatteryThreshold", "value": level])
+      XCTAssertEqual(context.playback.lowBatteryThreshold, level)
+    }
+    context.playback.lowBatteryThreshold = 10
+    for bad: Any in [15, 9, 31, 20.5, "20", true, NSNull()] {
+      do {
+        try await context.controller.perform(
+          "setting", body: ["key": "lowBatteryThreshold", "value": bad])
+        XCTFail("\(bad) is not an offered low-battery level")
+      } catch {}
+    }
+    XCTAssertEqual(context.playback.lowBatteryThreshold, 10, "Refused levels leave the saved one alone")
+  }
+
+  func testPlayOnlyOnTheActiveDisplayAcceptsABooleanAndRefusesAnythingElse() async throws {
+    let context = try Context()
+    defer { context.tearDown() }
+
+    try await context.controller.perform(
+      "setting", body: ["key": "playOnlyOnActiveDisplay", "value": true])
+    XCTAssertTrue(context.playback.playsOnlyOnActiveDisplay)
+
+    for bad: Any in ["true", "on", 1, NSNull()] {
+      do {
+        try await context.controller.perform(
+          "setting", body: ["key": "playOnlyOnActiveDisplay", "value": bad])
+        XCTFail("\(bad) is not a boolean")
+      } catch {}
+    }
+    XCTAssertTrue(context.playback.playsOnlyOnActiveDisplay, "A refused value leaves the saved one alone")
+
+    let settings = try XCTUnwrap(context.controller.snapshot()["settings"] as? [String: Any])
+    XCTAssertEqual(settings["playOnlyOnActiveDisplay"] as? Bool, true)
+
+    try await context.controller.perform(
+      "setting", body: ["key": "playOnlyOnActiveDisplay", "value": false])
+    XCTAssertFalse(context.playback.playsOnlyOnActiveDisplay)
+    let after = try XCTUnwrap(context.controller.snapshot()["settings"] as? [String: Any])
+    XCTAssertEqual(after["playOnlyOnActiveDisplay"] as? Bool, false)
+  }
+
+  /// The stored name of the new choice is one letter away from the battery mode's, so a swap of
+  /// the two must fail here and not in someone's saved settings.
+  func testReducedQualityIsAcceptedForTheThreeConditionsAndRefusedElsewhere() async throws {
+    let context = try Context()
+    defer { context.tearDown() }
+
+    for key in ["lowPowerModeAction", "thermalAction", "lowBatteryAction"] {
+      try await context.controller.perform("setting", body: ["key": key, "value": "reduceQuality"])
+    }
+    XCTAssertEqual(context.playback.lowPowerModeAction, .reduceQuality)
+    XCTAssertEqual(context.playback.thermalAction, .reduceQuality)
+    XCTAssertEqual(context.playback.lowBatteryAction, .reduceQuality)
+
+    // The battery mode's own name is not a condition choice.
+    for key in ["lowPowerModeAction", "thermalAction", "lowBatteryAction"] {
+      do {
+        try await context.controller.perform("setting", body: ["key": key, "value": "reducedQuality"])
+        XCTFail("\(key) must not accept the battery mode's name")
+      } catch {}
+    }
+    // The condition choice is not a battery mode or a choice for any other rule.
+    for key in ["batteryMode", "displaySleepAction", "otherAudioAction", "desktopCoveredAction"] {
+      do {
+        try await context.controller.perform("setting", body: ["key": key, "value": "reduceQuality"])
+        XCTFail("\(key) has no reduced-quality choice")
+      } catch {}
+    }
+    XCTAssertEqual(context.playback.lowPowerModeAction, .reduceQuality)
+    XCTAssertEqual(context.playback.thermalAction, .reduceQuality)
+    XCTAssertEqual(context.playback.lowBatteryAction, .reduceQuality)
+    XCTAssertEqual(context.playback.displaySleepAction, .pause, "A refused value leaves the saved one alone")
+    XCTAssertTrue(context.bridge.batteryModes.isEmpty)
+  }
+
+  func testSnapshotPublishesTheEffectiveCeilingAndTheThrottleCauses() throws {
+    let context = try Context()
+    defer { context.tearDown() }
+    context.store.settingsSnapshot.frameRateCap = 45
+    context.store.settingsSnapshot.effectiveFrameRateCap = 24
+    context.store.settingsSnapshot.qualityThrottle = [.heat, .lowPowerMode]
+
+    let throttled = try XCTUnwrap(context.controller.snapshot()["settings"] as? [String: Any])
+
+    XCTAssertEqual(throttled["effectiveFrameRateCap"] as? Int, 24)
+    XCTAssertEqual(throttled["qualityThrottle"] as? [String], ["heat", "lowPowerMode"])
+    XCTAssertEqual(throttled["frameRateCap"] as? Int, 45, "The saved cap stays the saved cap")
+
+    context.store.settingsSnapshot.effectiveFrameRateCap = nil
+    context.store.settingsSnapshot.qualityThrottle = [.lowBattery]
+    let lowBattery = try XCTUnwrap(context.controller.snapshot()["settings"] as? [String: Any])
+    XCTAssertEqual(lowBattery["qualityThrottle"] as? [String], ["lowBattery"])
+
+    context.store.settingsSnapshot.frameRateCap = nil
+    context.store.settingsSnapshot.qualityThrottle = []
+    let free = try XCTUnwrap(context.controller.snapshot()["settings"] as? [String: Any])
+    XCTAssertTrue(free["effectiveFrameRateCap"] is NSNull, "No ceiling is null, not zero")
+    XCTAssertEqual((free["qualityThrottle"] as? [String])?.isEmpty, true)
+  }
+
+  func testSnapshotPublishesTheLowBatteryChoicesAndAChargeOnlyWhenThereIsABattery() throws {
+    let context = try Context()
+    defer { context.tearDown() }
+    context.playback.lowBatteryAction = .pause
+    context.playback.lowBatteryThreshold = 30
+
+    let settings = try XCTUnwrap(context.controller.snapshot()["settings"] as? [String: Any])
+
+    XCTAssertEqual(settings["lowBatteryAction"] as? String, "pause")
+    XCTAssertEqual(settings["lowBatteryThreshold"] as? Int, 30)
+    // Whether this Mac has a battery is the Mac's business; the page needs the key either way,
+    // and a charge it can show or null that hides the rows.
+    let charge = try XCTUnwrap(settings["batteryPercent"], "The key must always be present")
+    if !(charge is NSNull) {
+      XCTAssertTrue((0...100).contains(try XCTUnwrap(charge as? Int)))
+    }
+  }
+
   func testUnknownVideoBackendIsRefusedInsteadOfSilentlyDefaulting() async throws {
     let context = try Context()
     defer { context.tearDown() }

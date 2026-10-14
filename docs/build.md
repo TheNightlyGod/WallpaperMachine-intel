@@ -231,6 +231,8 @@ bundle is absent.
    `codesign --verify --deep --strict`. Release builds use the project
    certificate; see [Release signing](#release-signing). Nothing is notarized;
    see [../LICENSING.md](../LICENSING.md#signing-and-notarization).
+   A valid signature does not say what it signs, so the bundle is then read back
+   against its [contract](#bundle-contract).
 5. **Dependency audit.** Every binary is re-scanned. A remaining Homebrew-prefixed
    load command fails with `Unbundled dependency: …`; an `@rpath` dependency with
    no matching file in `Contents/Frameworks` fails with `Missing bundled
@@ -250,7 +252,8 @@ bundle is absent.
    volume icon is the app's `AppIcon.icns`.
 7. **Verification and checksum.** The image is mounted read-only and out of
    sight: the bundle in it must be `app.wallpapermachine` at the version the name
-   claims and pass `codesign --verify --deep --strict`, and the `Applications`
+   claims, pass `codesign --verify --deep --strict` and meet the same
+   [contract](#bundle-contract) as the build, and the `Applications`
    link and the window layout must be there. Only then is
    `WallpaperMachine-<version>-arm64.dmg.sha256` written, in the format
    `shasum -a 256 -c` reads. The in-app updater depends on the image name; see
@@ -267,6 +270,42 @@ the palette changes. Finder draws icon labels in black on a custom background
 whatever the appearance, so the art stays light. `scripts/tests/test_dmg.py`
 covers the `.DS_Store` writers and builds and verifies an image of a small signed
 bundle; no test can run Finder.
+
+### Bundle contract
+
+[`scripts/lib/bundle_contract.py`](../scripts/lib/bundle_contract.py) reads the
+signed facts back from the artifact itself, after signing (step 4) and again on
+the app inside the mounted image (step 7), because re-signing or copying can drop
+an entitlement or an Info.plist key without breaking the signature. The lock
+screen would then just never start on the user's Mac. Any of these exits 1 with
+`MISSING … does not match its signing and Info.plist contract:` and one line per
+finding:
+
+- **Extension** (every `Contents/Extensions/*.appex`; at least one must exist):
+  `com.apple.security.app-sandbox` must be signed in as `true`, and every key and
+  value of [`Extension/WallpaperExtension.entitlements`](../Extension/WallpaperExtension.entitlements)
+  must be in its signature. That file is the source of truth; no key list is
+  repeated in the script, so a new exception added to the file is enforced with
+  no script change. Its `CFBundleIdentifier` must be
+  `app.wallpapermachine.wallpaper-extension` and `EXAppExtensionAttributes` must
+  declare the `com.apple.wallpaper` extension point.
+- **Host app:** `CFBundleIdentifier` `app.wallpapermachine`; non-empty
+  `NSAppleEventsUsageDescription` and `NSAudioCaptureUsageDescription` (without
+  them macOS does not show the permission prompts); `CFBundleURLTypes` registering
+  the `wallpapermachine` scheme; `LSMinimumSystemVersion` at least the
+  `MACOSX_DEPLOYMENT_TARGET` in `project.yml` (packaging may raise it, never lower
+  it). The host must not be sandboxed.
+- **Signing:** the app and the extension must both be signed, and both ad hoc or
+  neither. When neither is ad hoc their team identifiers must match (a self-signed
+  certificate such as the project's has none, and two absent teams match).
+
+Entitlements the signature adds beyond the repository file are only a
+`WARN`, because Xcode and signing profiles inject some; a debuggable build's
+`com.apple.security.get-task-allow` is the usual one. Tests:
+`scripts/tests/test_bundle_contract.py` (a synthetic bundle with injected
+signature readers, plus the readers against small binaries signed with
+`codesign`) and `scripts/tests/test_dmg.py` (the contract runs on the mounted
+app).
 
 ### Release signing
 

@@ -47,7 +47,7 @@ async fn scene_media_requires_consent_and_clears_on_disable() {
     bridge.inject_scene_project_for_test("301", "Scene",
         r#"{"type":"scene","title":"Scene","file":"scene.json"}"#).await;
     bridge.set_display_config_enabled("301".into(), "7".into(), true).await.unwrap();
-    bridge.apply_wallpaper_options("301".into()).await.unwrap();
+    bridge.apply_wallpaper_options("301".into(), true).await.unwrap();
     let snapshot = BridgeMediaSnapshot { title: "Track".into(), playback_state: 0, ..Default::default() };
     bridge.update_scene_media("301".into(), snapshot.clone()).await.unwrap();
     assert!(engine.media_calls().is_empty());
@@ -101,7 +101,7 @@ async fn web_bridge(engine: &FakeEngineFacade) -> WallpaperBridge {
         .set_display_config_enabled("300".into(), "7".into(), true)
         .await
         .unwrap();
-    bridge.apply_wallpaper_options("300".into()).await.unwrap();
+    bridge.apply_wallpaper_options("300".into(), true).await.unwrap();
     bridge
 }
 
@@ -250,7 +250,7 @@ async fn a_web_listener_counts_beside_a_scene_that_reads_no_audio() {
     engine.set_snapshot(vec![display_snapshot(7), scene_display]);
     bridge.inject_scene_wallpaper_config_for_test("400", "Scene").await;
     bridge.set_display_config_enabled("400".into(), "9".into(), true).await.unwrap();
-    bridge.apply_wallpaper_options("400".into()).await.unwrap();
+    bridge.apply_wallpaper_options("400".into(), true).await.unwrap();
     assert_eq!(audio_consumers(&bridge).await, 0, "neither the page nor the scene consumes yet");
 
     bridge.set_web_audio_subscribed("300".into(), 7, true).await.unwrap();
@@ -517,7 +517,7 @@ async fn scene_media_events_fan_out_only_to_opted_in_handles() {
         .set_display_config_enabled("100".into(), "7".into(), true)
         .await
         .unwrap();
-    bridge.apply_wallpaper_options("100".into()).await.unwrap();
+    bridge.apply_wallpaper_options("100".into(), true).await.unwrap();
 
     bridge
         .submit_system_media_event(r#"{"type":"mediaPlaybackChanged","state":0}"#.into())
@@ -599,7 +599,7 @@ async fn scene_media_handles_follow_consent_so_nothing_reads_the_player_without_
         .set_display_config_enabled("100".into(), "7".into(), true)
         .await
         .unwrap();
-    bridge.apply_wallpaper_options("100".into()).await.unwrap();
+    bridge.apply_wallpaper_options("100".into(), true).await.unwrap();
 
     assert!(
         bridge.system_media_scene_handles().await.unwrap().is_empty(),
@@ -660,7 +660,7 @@ async fn paused_and_suspended_scenes_stop_consuming_media_but_keep_their_consent
         .set_display_config_enabled("100".into(), "7".into(), true)
         .await
         .unwrap();
-    bridge.apply_wallpaper_options("100".into()).await.unwrap();
+    bridge.apply_wallpaper_options("100".into(), true).await.unwrap();
     bridge
         .set_media_integration_enabled("100".into(), true)
         .await
@@ -754,7 +754,7 @@ async fn one_suspended_display_stops_only_its_own_scene_on_every_entry_point() {
             .await
             .unwrap();
     }
-    bridge.apply_wallpaper_options("100".into()).await.unwrap();
+    bridge.apply_wallpaper_options("100".into(), true).await.unwrap();
     bridge
         .set_media_integration_enabled("100".into(), true)
         .await
@@ -944,4 +944,362 @@ async fn video_plane_sampling_defaults_off_and_survives_a_restart() {
         Some(true),
         "a process-wide renderer switch lives in C, so a saved opt-in has to be pushed back in"
     );
+}
+
+/// The tap is rebuilt when the default output device changes. The listener that
+/// reports the change is `CoreAudio` glue and needs a device, so these replay
+/// the worker's decisions through the production handlers and the real
+/// controller with a scripted backend.
+mod output_device_change {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use wallpaper_core::media::audio::{
+        AudioCaptureBackend, AudioCaptureController, AudioCaptureError, AudioFrameConsumer,
+        InterleavedStereoF32, MonoPcmF32, RESTART_RETRY_DELAYS,
+    };
+
+    use super::{FakeEngineFacade, web_bridge};
+    use crate::engine::{
+        AudioCaptureDemand, AudioRestartState, OutputWatchGate, RestartAction,
+        apply_audio_capture_demand, handle_audio_restart_retry, handle_output_device_change,
+    };
+
+    struct NullConsumer;
+
+    impl AudioFrameConsumer for NullConsumer {
+        fn submit_audio_frames(&self, _: InterleavedStereoF32<'_>) -> Result<(), AudioCaptureError> {
+            Ok(())
+        }
+        fn submit_mono_audio_frames(&self, _: MonoPcmF32<'_>) -> Result<(), AudioCaptureError> {
+            Ok(())
+        }
+    }
+
+    /// A tap that always has permission and whose next `failing_starts` start
+    /// attempts fail, as a start does while the new device is still settling.
+    /// The count is shared so a test can change it while the controller owns
+    /// the backend.
+    #[derive(Default)]
+    struct ScriptedBackend {
+        running: bool,
+        starts: usize,
+        stops: usize,
+        start_attempts: usize,
+        failing_starts: Arc<AtomicUsize>,
+    }
+
+    impl AudioCaptureBackend for ScriptedBackend {
+        fn has_permission(&self) -> Result<bool, AudioCaptureError> {
+            Ok(true)
+        }
+        fn request_permission(&mut self) -> Result<bool, AudioCaptureError> {
+            Ok(true)
+        }
+        fn start(&mut self, _: Arc<dyn AudioFrameConsumer>) -> Result<(), AudioCaptureError> {
+            self.start_attempts += 1;
+            let failing = self.failing_starts.load(Ordering::SeqCst);
+            if failing > 0 {
+                self.failing_starts.store(failing - 1, Ordering::SeqCst);
+                return Err(AudioCaptureError::Platform(
+                    "AudioDeviceStart failed (OSStatus=-10851)".into(),
+                ));
+            }
+            self.running = true;
+            self.starts += 1;
+            Ok(())
+        }
+        fn stop(&mut self) -> Result<(), AudioCaptureError> {
+            if std::mem::take(&mut self.running) {
+                self.stops += 1;
+            }
+            Ok(())
+        }
+        fn is_running(&self) -> bool {
+            self.running
+        }
+    }
+
+    type Controller = AudioCaptureController<ScriptedBackend>;
+
+    fn controller() -> (Controller, Arc<AtomicUsize>) {
+        let backend = ScriptedBackend::default();
+        let failing_starts = Arc::clone(&backend.failing_starts);
+        (AudioCaptureController::new(Arc::new(NullConsumer), backend), failing_starts)
+    }
+
+    fn web_demand(suspended: bool) -> AudioCaptureDemand {
+        AudioCaptureDemand { suspended, external_consumers: true }
+    }
+
+    /// A web-only session: no scene handle, only a page that asked for audio.
+    fn web_only_controller() -> (Controller, Arc<AtomicUsize>) {
+        let (mut controller, failing_starts) = controller();
+        apply_audio_capture_demand(&mut controller, web_demand(false)).unwrap();
+        assert!(controller.is_capturing());
+        (controller, failing_starts)
+    }
+
+    /// Follows the retry chain the worker would schedule until it stops,
+    /// returning the delays it asked for.
+    fn run_retries(
+        controller: &mut Controller,
+        state: &AudioRestartState,
+        mut action: RestartAction,
+    ) -> (Vec<std::time::Duration>, RestartAction) {
+        let mut delays = Vec::new();
+        while let RestartAction::RetryIn { delay, generation, attempt } = action {
+            delays.push(delay);
+            action = handle_audio_restart_retry(controller, state, generation, attempt);
+        }
+        (delays, action)
+    }
+
+    #[tokio::test]
+    async fn output_device_change_restarts_capture_for_a_web_only_session() {
+        let engine = FakeEngineFacade::default();
+        let bridge = web_bridge(&engine).await;
+        bridge.set_web_audio_subscribed("300".into(), 7, true).await.unwrap();
+        // What the audio worker was asked to do for that page, replayed.
+        let (mut controller, _) = controller();
+        for demand in engine.audio_capture_demands() {
+            apply_audio_capture_demand(&mut controller, demand).unwrap();
+            controller.retain_scenes(&[]).unwrap();
+        }
+        assert!(controller.is_capturing(), "the page alone owns a running tap");
+        assert_eq!(controller.backend().starts, 1);
+
+        let mut state = AudioRestartState::default();
+        let action = handle_output_device_change(&mut controller, &mut state);
+
+        assert_eq!(action, RestartAction::Done);
+        assert!(controller.is_capturing(), "capture follows the new device");
+        assert_eq!(
+            (controller.backend().stops, controller.backend().starts),
+            (1, 2),
+            "the tap bound to the old device is released and a new one started"
+        );
+    }
+
+    #[test]
+    fn a_device_change_without_running_capture_does_nothing() {
+        let mut state = AudioRestartState::default();
+
+        let (mut idle, _) = controller();
+        assert_eq!(handle_output_device_change(&mut idle, &mut state), RestartAction::Done);
+        assert_eq!((idle.backend().start_attempts, idle.backend().stops), (0, 0));
+
+        let (mut paused, _) = web_only_controller();
+        apply_audio_capture_demand(&mut paused, web_demand(true)).unwrap();
+        assert!(!paused.is_capturing());
+        let (attempts, stops) = (paused.backend().start_attempts, paused.backend().stops);
+        assert_eq!(handle_output_device_change(&mut paused, &mut state), RestartAction::Done);
+        assert_eq!(
+            (paused.backend().start_attempts, paused.backend().stops),
+            (attempts, stops),
+            "a paused display must not wake the tap"
+        );
+        apply_audio_capture_demand(&mut paused, web_demand(false)).unwrap();
+        assert!(paused.is_capturing(), "resuming starts on whatever device is current");
+    }
+
+    #[test]
+    fn retries_use_the_three_delays_then_give_up() {
+        let (mut controller, failing_starts) = web_only_controller();
+        failing_starts.store(usize::MAX, Ordering::SeqCst);
+        let mut state = AudioRestartState::default();
+
+        let first = handle_output_device_change(&mut controller, &mut state);
+        let (delays, last) = run_retries(&mut controller, &state, first);
+
+        assert_eq!(delays, RESTART_RETRY_DELAYS, "each retry waits its own delay, in order");
+        assert_eq!(last, RestartAction::GaveUp);
+        assert_eq!(
+            controller.backend().start_attempts,
+            1 + 1 + RESTART_RETRY_DELAYS.len(),
+            "the first tap, the immediate rebuild and then one try per delay, no more"
+        );
+        assert!(!controller.is_capturing());
+
+        // Giving up leaves the heal to the next scene or demand change.
+        failing_starts.store(0, Ordering::SeqCst);
+        apply_audio_capture_demand(&mut controller, web_demand(false)).unwrap();
+        assert!(controller.is_capturing());
+    }
+
+    #[test]
+    fn a_retry_that_succeeds_ends_the_chain() {
+        let (mut controller, failing_starts) = web_only_controller();
+        failing_starts.store(2, Ordering::SeqCst);
+        let mut state = AudioRestartState::default();
+
+        let first = handle_output_device_change(&mut controller, &mut state);
+        let (delays, last) = run_retries(&mut controller, &state, first);
+
+        assert_eq!(delays, RESTART_RETRY_DELAYS[..2], "it stops asking once the tap is back");
+        assert_eq!(last, RestartAction::Done);
+        assert!(controller.is_capturing());
+        assert_eq!(controller.backend().stops, 1, "the retry started a tap; it did not rebuild one");
+    }
+
+    #[test]
+    fn a_newer_device_change_invalidates_a_pending_retry() {
+        let (mut controller, failing_starts) = web_only_controller();
+        failing_starts.store(2, Ordering::SeqCst);
+        let mut state = AudioRestartState::default();
+
+        let RestartAction::RetryIn { generation: stale, attempt, .. } =
+            handle_output_device_change(&mut controller, &mut state)
+        else {
+            panic!("the first rebuild fails and asks for a retry");
+        };
+        // A second change arrives before that retry is due, and fails too.
+        let RestartAction::RetryIn { generation: current, .. } =
+            handle_output_device_change(&mut controller, &mut state)
+        else {
+            panic!("the second rebuild also fails and asks for a retry");
+        };
+        assert_ne!(stale, current);
+        assert!(!controller.is_capturing());
+        let attempts = controller.backend().start_attempts;
+
+        assert_eq!(
+            handle_audio_restart_retry(&mut controller, &state, stale, attempt),
+            RestartAction::Done,
+            "the older change's retry is superseded"
+        );
+        assert_eq!(controller.backend().start_attempts, attempts, "it started nothing");
+
+        assert_eq!(
+            handle_audio_restart_retry(&mut controller, &state, current, 1),
+            RestartAction::Done,
+            "the newer change's retry still runs"
+        );
+        assert!(controller.is_capturing());
+    }
+
+    #[test]
+    fn a_retry_never_tears_down_a_tap_that_started_in_the_meantime() {
+        let (mut controller, failing_starts) = web_only_controller();
+        failing_starts.store(1, Ordering::SeqCst);
+        let mut state = AudioRestartState::default();
+        let RestartAction::RetryIn { generation, attempt, .. } =
+            handle_output_device_change(&mut controller, &mut state)
+        else {
+            panic!("the rebuild fails and asks for a retry");
+        };
+
+        // A page asks for audio again before the retry is due.
+        apply_audio_capture_demand(&mut controller, web_demand(false)).unwrap();
+        assert!(controller.is_capturing());
+        let (starts, stops) = (controller.backend().starts, controller.backend().stops);
+
+        assert_eq!(
+            handle_audio_restart_retry(&mut controller, &state, generation, attempt),
+            RestartAction::Done
+        );
+        assert_eq!(
+            (controller.backend().starts, controller.backend().stops),
+            (starts, stops),
+            "a healthy tap is left alone"
+        );
+    }
+    /// A stand-in for the real watcher that counts how many are alive.
+    struct LiveWatcher(Arc<AtomicUsize>);
+
+    impl Drop for LiveWatcher {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    /// What the worker does after each command: key the watcher off the
+    /// controller. `fail` makes the start return nothing, as a failed one does.
+    fn sync_watch(
+        gate: &mut OutputWatchGate<LiveWatcher>,
+        controller: &Controller,
+        alive: &Arc<AtomicUsize>,
+        starts: &Arc<AtomicUsize>,
+        fail: bool,
+    ) {
+        gate.sync(controller.wants_capture(), || {
+            starts.fetch_add(1, Ordering::SeqCst);
+            if fail {
+                return None;
+            }
+            alive.fetch_add(1, Ordering::SeqCst);
+            Some(LiveWatcher(Arc::clone(alive)))
+        });
+    }
+
+    #[test]
+    fn the_output_watcher_exists_only_while_capture_is_wanted() {
+        let (mut controller, _) = controller();
+        let mut gate = OutputWatchGate::default();
+        let (alive, starts) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+
+        // A process whose wallpapers never read audio never holds a watcher,
+        // however many commands the worker sees.
+        for _ in 0..3 {
+            controller.retain_scenes(&[]).unwrap();
+            sync_watch(&mut gate, &controller, &alive, &starts, false);
+        }
+        assert_eq!((starts.load(Ordering::SeqCst), alive.load(Ordering::SeqCst)), (0, 0));
+        assert!(!gate.is_watching());
+
+        apply_audio_capture_demand(&mut controller, web_demand(false)).unwrap();
+        sync_watch(&mut gate, &controller, &alive, &starts, false);
+        sync_watch(&mut gate, &controller, &alive, &starts, false);
+        assert!(gate.is_watching(), "a tap that may need rebuilding has a watcher");
+        assert_eq!(starts.load(Ordering::SeqCst), 1, "one watcher, not one per command");
+
+        // Suspended: nothing runs, so a device change has nothing to rebuild.
+        apply_audio_capture_demand(&mut controller, web_demand(true)).unwrap();
+        sync_watch(&mut gate, &controller, &alive, &starts, false);
+        assert!(!gate.is_watching());
+        assert_eq!(alive.load(Ordering::SeqCst), 0, "the watcher is released, not parked");
+
+        apply_audio_capture_demand(&mut controller, web_demand(false)).unwrap();
+        sync_watch(&mut gate, &controller, &alive, &starts, false);
+        assert!(gate.is_watching());
+        assert_eq!(starts.load(Ordering::SeqCst), 2);
+        assert_eq!(alive.load(Ordering::SeqCst), 1);
+
+        // The last consumer leaving releases it too.
+        apply_audio_capture_demand(
+            &mut controller,
+            AudioCaptureDemand { suspended: false, external_consumers: false },
+        )
+        .unwrap();
+        sync_watch(&mut gate, &controller, &alive, &starts, false);
+        assert!(!gate.is_watching());
+        assert_eq!(alive.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn a_watcher_that_could_not_start_is_tried_again_only_when_capture_is_wanted_anew() {
+        let (mut controller, _) = controller();
+        let mut gate = OutputWatchGate::default();
+        let (alive, starts) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+
+        apply_audio_capture_demand(&mut controller, web_demand(false)).unwrap();
+        for _ in 0..5 {
+            sync_watch(&mut gate, &controller, &alive, &starts, true);
+        }
+        assert_eq!(
+            starts.load(Ordering::SeqCst),
+            1,
+            "a failed start is logged once, not on every command"
+        );
+        assert!(!gate.is_watching());
+
+        apply_audio_capture_demand(&mut controller, web_demand(true)).unwrap();
+        sync_watch(&mut gate, &controller, &alive, &starts, true);
+        apply_audio_capture_demand(&mut controller, web_demand(false)).unwrap();
+        sync_watch(&mut gate, &controller, &alive, &starts, false);
+        assert_eq!(starts.load(Ordering::SeqCst), 2);
+        assert!(gate.is_watching(), "the next time capture is wanted it is tried again");
+    }
 }

@@ -68,4 +68,17 @@ final class DiagnosticsRedactorTests: XCTestCase {
         XCTAssertEqual(redact("token expired"), "token expired")
         XCTAssertEqual(redact("password=alice"), "password=<redacted>")
     }
+
+    func testBetaIdentifierValueIsRedacted() {
+        let redact = redactor().redact
+        XCTAssertEqual(
+            redact("Is First Party:   No\nBeta Identifier:  A26873F6-7C45-588D-9E9C-CE7DAA8C4997\nResource Coalition: 3199"),
+            "Is First Party:   No\nBeta Identifier:  <redacted>\nResource Coalition: 3199")
+        XCTAssertEqual(redact("beta identifier: 1234"), "beta identifier: <redacted>")
+        XCTAssertEqual(redact("Beta Identifier:"), "Beta Identifier:", "a line with no value has nothing to hide")
+        XCTAssertEqual(
+            redact("the Beta Identifier: field is removed"),
+            "the Beta Identifier: field is removed",
+            "only the report's own line, which starts it, is a value")
+    }
 }

@@ -911,7 +911,8 @@ final class ControlPanelShellTests: ControlPanelTestCase {
         await new Promise(resolve => setTimeout(resolve, 30));
         return { prefs: region.querySelectorAll('[data-pref]').length, value: select.value };
         """) as? [String: Any]
-      XCTAssertEqual(preferences?["prefs"] as? Int, 3)
+      // Launch at login, On battery, Keep windows in place and Send performance data.
+      XCTAssertEqual(preferences?["prefs"] as? Int, 4)
       XCTAssertEqual(preferences?["value"] as? String, "pause")
       XCTAssertEqual(panel.bridge.batteryModeCalls, [], "Changing the menu is a draft")
 
@@ -1048,6 +1049,50 @@ final class ControlPanelShellTests: ControlPanelTestCase {
     }
   }
 
+  /// A scene whose renderer stopped after a failure is not paused and not still
+  /// starting, even when it never drew a first frame: both of those would send the
+  /// user looking for something they did not do. It is also the one reading with
+  /// something to do about it, so it, and only it, offers Retry.
+  func testASceneThatStoppedAfterAFailureIsNeverWordedAsAPauseOrAsStarting() async throws {
+    try await withPanel { panel in
+      try await panel.finishWelcome()
+      let lines = try await panel.js("""
+        const base = await window.webkit.messageHandlers.native.postMessage({action:'ready'});
+        const report = (displayId, mode, reasons) => ({displayId, display:`Display ${displayId}`,
+          wallpaperId:`w${displayId}`, wallpaperTitle:`Wallpaper ${displayId}`, mode, reasons});
+        window.wallpaperUI.receive({...base, page:'settings', settings:{...base.settings, sceneUpdateModes:[
+          report(1, 'stopped_after_failure', ['no_frame_yet']),
+          report(2, 'stopped_after_failure', ['video']),
+          report(3, 'user_paused', []),
+          report(4, 'continuous', ['no_frame_yet']),
+        ]}});
+        document.querySelector('[data-section="performance"]').click();
+        return [...document.querySelectorAll('[data-key="scene-update-report"] li')].map(item => ({
+          text: [...item.childNodes].filter(node => node.nodeType === Node.TEXT_NODE).map(node => node.textContent).join('').trim(),
+          retry: [...item.querySelectorAll('button')].map(button => `${button.dataset.action} ${button.dataset.args}`),
+        }));
+        """) as? [[String: Any]]
+
+      let rows = try XCTUnwrap(lines)
+      XCTAssertEqual(rows.count, 4)
+      let text = rows.map { $0["text"] as? String ?? "" }
+      XCTAssertEqual(
+        text[0], "Display 1 — Wallpaper 1: stopped after a rendering failure",
+        "A scene that failed before its first frame is stopped, not starting")
+      XCTAssertEqual(
+        text[1], "Display 2 — Wallpaper 2: stopped after a rendering failure",
+        "Why the clock was needed is moot once the scene has stopped")
+      XCTAssertTrue(text[2].hasSuffix("paused by you"), text[2])
+      XCTAssertTrue(
+        text[3].hasSuffix("starting — no frame drawn yet"),
+        "A scene that is genuinely starting keeps its own wording: \(text[3])")
+      XCTAssertEqual(
+        rows.map { $0["retry"] as? [String] },
+        [[#"sceneRetry {"displayId":1}"#], [#"sceneRetry {"displayId":2}"#], [], []],
+        "Both stopped scenes, including the one that never drew, offer Retry for their own display; a pause or a start is not a fault to retry")
+    }
+  }
+
   func testSettingsSnapshotPreservesActiveDraftDisclosureAndScroll() async throws {
     try await withPanel { panel in
       try await panel.finishWelcome()
@@ -1077,6 +1122,133 @@ final class ControlPanelShellTests: ControlPanelTestCase {
       XCTAssertEqual(result?["disclosure"] as? Bool, true)
       XCTAssertEqual(result?["scrolled"] as? Bool, true)
       XCTAssertEqual(result?["scrollKept"] as? Bool, true)
+    }
+  }
+
+  /// Reduced quality for Low Power Mode, a hot Mac and a low battery shares the battery profile's
+  /// scale and frame rate, so those rows follow any of the four choices, and the page names the
+  /// reason the quality is lower: heat first, then Low Power Mode, a low battery and the battery.
+  func testReducedQualityShowsItsProfileAndNamesItsCause() async throws {
+    try await withPanel { panel in
+      try await panel.finishWelcome()
+      let result = try await panel.js("""
+        const base = await window.webkit.messageHandlers.native.postMessage({action:'ready'});
+        const quiet = {...base.settings, renderScaleSupported:true, renderScale:0.75, preferredRenderScale:1,
+          batteryMode:'keepRunning', lowPowerModeAction:'keepRunning', thermalAction:'keepRunning',
+          lowBatteryAction:'keepRunning', batteryPercent:null, onBatteryPower:false, qualityThrottle:[]};
+        window.wallpaperUI.receive({...base, page:'settings', settings:quiet});
+        document.querySelector('[data-section="performance"]').click();
+        const look = overrides => {
+          window.wallpaperUI.receive({...base, page:'settings', settings:{...quiet, ...overrides}});
+          const key = name => document.querySelector(`[data-key="${name}"]`);
+          return {
+            profile: Boolean(key('battery-scale')) && Boolean(key('battery-fps')) && Boolean(document.querySelector('[data-setting="batteryTargetFps"]')),
+            cause: key('reduced-quality-state') ? key('reduced-quality-state').querySelector('.settings-status').dataset.cause : null,
+            status: key('reduced-quality-state')?.querySelector('.settings-status').textContent ?? null,
+            effective: key('render-scale-effective')?.querySelector('.settings-status').textContent ?? null,
+            thermalNote: document.getElementById('settings-note-thermal')?.textContent ?? null,
+          };
+        };
+        const offered = name => [...document.querySelectorAll(`select[data-setting="${name}"] option`)].map(option => option.value);
+        const out = {
+          none: look({}),
+          batteryMode: look({batteryMode:'reducedQuality'}),
+          lowPowerChosen: look({lowPowerModeAction:'reduceQuality'}),
+          heatChosen: look({thermalAction:'reduceQuality'}),
+          lowBatteryChosenWithoutABattery: look({lowBatteryAction:'reduceQuality'}),
+          lowBatteryChosen: look({lowBatteryAction:'reduceQuality', batteryPercent:50}),
+          heat: look({thermalAction:'reduceQuality', qualityThrottle:['heat']}),
+          lowPower: look({lowPowerModeAction:'reduceQuality', qualityThrottle:['lowPowerMode']}),
+          lowBattery: look({lowBatteryAction:'reduceQuality', batteryPercent:10, qualityThrottle:['lowBattery']}),
+          battery: look({batteryMode:'reducedQuality', onBatteryPower:true}),
+          heatAndLowPower: look({thermalAction:'reduceQuality', lowPowerModeAction:'reduceQuality', qualityThrottle:['lowPowerMode', 'heat']}),
+          heatAndBattery: look({thermalAction:'reduceQuality', batteryMode:'reducedQuality', onBatteryPower:true, qualityThrottle:['heat']}),
+        };
+        window.wallpaperUI.receive({...base, page:'settings', settings:{...quiet, batteryPercent:50}});
+        out.offered = {lowPowerModeAction:offered('lowPowerModeAction'), thermalAction:offered('thermalAction'),
+          lowBatteryAction:offered('lowBatteryAction'), batteryMode:offered('batteryMode'), displaySleepAction:offered('displaySleepAction')};
+        return out;
+        """) as? [String: Any]
+
+      let cases = try XCTUnwrap(result)
+      func look(_ name: String) throws -> [String: Any] {
+        try XCTUnwrap(cases[name] as? [String: Any], name)
+      }
+      XCTAssertEqual(try look("none")["profile"] as? Bool, false, "No reduced choice, no profile to edit")
+      XCTAssertNil(try look("none")["status"] as? String)
+      for name in ["batteryMode", "lowPowerChosen", "heatChosen", "lowBatteryChosen"] {
+        XCTAssertEqual(try look(name)["profile"] as? Bool, true, "\(name) chose Reduced quality")
+      }
+      XCTAssertEqual(
+        try look("lowBatteryChosenWithoutABattery")["profile"] as? Bool, false,
+        "A Mac without a battery never shows the low-battery choice, so it cannot ask for the profile")
+
+      // Chosen but nothing holds: the generic reading, and the scale is not claimed as reduced.
+      XCTAssertEqual(try look("heatChosen")["cause"] as? String, "")
+      XCTAssertEqual(try look("heat")["cause"] as? String, "heat")
+      XCTAssertEqual(try look("lowPower")["cause"] as? String, "lowPowerMode")
+      XCTAssertEqual(try look("lowBattery")["cause"] as? String, "lowBattery")
+      XCTAssertEqual(try look("battery")["cause"] as? String, "battery")
+      XCTAssertEqual(try look("heatAndLowPower")["cause"] as? String, "heat", "Heat is named before Low Power Mode")
+      XCTAssertEqual(try look("heatAndBattery")["cause"] as? String, "heat", "A throttle is named before the battery")
+
+      // Effective now fills the engine's scale and the saved one into whichever sentence names the
+      // cause, so a reading with a placeholder left in it or a missing value is the failure.
+      for name in ["heatChosen", "heat", "lowPower", "lowBattery", "battery"] {
+        let text = try XCTUnwrap(
+          try look(name)["effective"] as? String, "Effective now is shown while 75% differs from 100%")
+        XCTAssertTrue(text.contains("75%") && text.contains("100%"), text)
+        XCTAssertFalse(text.contains("{"), "\(name) left a placeholder unfilled: \(text)")
+        XCTAssertFalse(
+          try XCTUnwrap(try look(name)["status"] as? String, name).isEmpty, "\(name) says nothing about the quality in use")
+      }
+      for name in ["none", "heatChosen"] {
+        let note = try XCTUnwrap(try look(name)["thermalNote"] as? String, "\(name) shows the note for the heat row")
+        XCTAssertFalse(note.contains("{"), "\(name) left a placeholder unfilled: \(note)")
+      }
+
+      let offered = try XCTUnwrap(cases["offered"] as? [String: [String]])
+      for name in ["lowPowerModeAction", "thermalAction", "lowBatteryAction"] {
+        XCTAssertEqual(offered[name], ["keepRunning", "reduceQuality", "pause", "stop"], name)
+      }
+      XCTAssertEqual(
+        offered["batteryMode"], ["keepRunning", "reducedQuality", "pause"],
+        "The battery mode keeps its own name")
+      XCTAssertEqual(offered["displaySleepAction"], ["pause", "stop"])
+    }
+  }
+
+  /// A display's frame rate is held to the ceiling the engine reports, whatever lowered it, so the
+  /// note appears for a throttle as it did for the battery profile.
+  func testDisplayFrameRateNoteCountsTheThrottle() async throws {
+    try await withPanel { panel in
+      try await panel.finishWelcome()
+      let result = try await panel.js("""
+        const base = await window.webkit.messageHandlers.native.postMessage({action:'ready'});
+        const displays = [{...base.displays[0], id:'primary', enabled:true, fps:30, maxFps:60}];
+        const look = overrides => {
+          window.wallpaperUI.receive({...base, page:'settings', displays, settings:{...base.settings, ...overrides}});
+          return document.querySelector('[data-key="display-primary-fps-limit"]')?.textContent ?? null;
+        };
+        window.wallpaperUI.receive({...base, page:'settings', displays, settings:base.settings});
+        document.querySelector('[data-section="displays"]').click();
+        return {
+          unlimited: look({frameRateCap:null, effectiveFrameRateCap:null}),
+          below: look({frameRateCap:null, effectiveFrameRateCap:24, qualityThrottle:['heat']}),
+          equal: look({frameRateCap:null, effectiveFrameRateCap:30}),
+          above: look({frameRateCap:null, effectiveFrameRateCap:45}),
+          battery: look({frameRateCap:null, effectiveFrameRateCap:20, batteryMode:'reducedQuality', onBatteryPower:true}),
+        };
+        """) as? [String: Any]
+
+      let notes = try XCTUnwrap(result)
+      XCTAssertTrue(notes["unlimited"] is NSNull, "No ceiling, no note")
+      XCTAssertTrue(notes["equal"] is NSNull, "A ceiling that does not lower the rate is not a limit")
+      XCTAssertTrue(notes["above"] is NSNull)
+      XCTAssertTrue((notes["below"] as? String)?.contains("24") == true, "\(String(describing: notes["below"]))")
+      XCTAssertTrue(
+        (notes["battery"] as? String)?.contains("20") == true,
+        "The battery profile reaches the page through the same ceiling")
     }
   }
 
@@ -1125,6 +1297,161 @@ final class ControlPanelShellTests: ControlPanelTestCase {
       XCTAssertEqual(result?["start"] as? Int, 3)
       XCTAssertEqual(result?["end"] as? Int, 11)
       XCTAssertEqual(result?["direction"] as? String, "backward")
+    }
+  }
+
+  /// Closing the panel releases its page, yet Installed's search, sort, boxes and scroll position
+  /// come back when it is reopened: the page reports them, native keeps the last valid report on
+  /// the navigation that outlives the window, and the next page restores them from the reply to
+  /// its first `ready`. A required tag that nothing in the library carries any more is dropped,
+  /// while a hidden type stays hidden.
+  func testInstalledFiltersAndScrollComeBackWhenThePanelIsReopened() async throws {
+    let fixture = makeStore()
+    let entries = (0..<80).map { index in
+      BridgeWallpaperEntry(
+        id: "wallpaper-\(index)", title: String(format: "Wallpaper %02d", index),
+        kind: index.isMultiple(of: 2) ? .projectScene : .video, supported: true, active: false,
+        selected: false, previewPath: nil)
+    }
+    fixture.store.librarySnapshot.wallpapers = entries
+    // A finished library load: the page keeps a restored tag while the library is loading.
+    fixture.bridge.snapshot = BridgeSnapshotBundle(
+      app: fixture.store.appSnapshot, library: fixture.store.librarySnapshot,
+      wallpaperOptions: nil, monitorInformation: fixture.store.monitorInformationSnapshot,
+      settings: fixture.store.settingsSnapshot)
+    try await fixture.store.refreshAllAsync()
+    let panel = try PanelFixture(
+      store: fixture.store, bridge: fixture.bridge, displayTitles: .renderer)
+    var reopened: WebPanelController?
+    do {
+      try await panel.start()
+      try await panel.finishWelcome()
+      // Every wallpaper is a favorite while the first page is open, so requiring Favorite
+      // keeps the whole library on show and leaves it tall enough to scroll.
+      panel.controller.favoriteIDs = Set(entries.map(\.id))
+      panel.show()
+      try await panel.waitJS("powerProbe.received.at(-1)?.favorites?.length === 80")
+      let before = try await panel.js("""
+        const change = (node, type) => node.dispatchEvent(new Event(type, { bubbles: true }));
+        const titles = () => [...document.querySelectorAll('.wallpaper-tile .tile-title')].map(node => node.textContent);
+        const initial = titles();
+        const sort = document.getElementById('browser-sort');
+        sort.value = 'type'; change(sort, 'change');
+        document.querySelector('[data-action="toggleSortDirection"]').click();
+        const sidebar = document.getElementById('filter-sidebar');
+        const favorite = sidebar.querySelector('input[value="Favorite"]'); favorite.checked = true; change(favorite, 'change');
+        const web = sidebar.querySelector('input[value="Web"]'); web.checked = false; change(web, 'change');
+        const search = document.getElementById('wallpaper-search'); search.value = 'wallpaper'; change(search, 'input');
+        const grid = document.getElementById('wallpaper-grid');
+        grid.scrollTop = 900;
+        grid.dispatchEvent(new Event('scroll'));
+        return { initial: initial.slice(0, 6), shown: titles().slice(0, 6), count: titles().length, scrollTop: grid.scrollTop };
+        """) as? [String: Any]
+      XCTAssertEqual(before?["count"] as? Int, 80, "Requiring Favorite keeps every favorite")
+      XCTAssertEqual(before?["scrollTop"] as? Double, 900, "The library is tall enough to scroll")
+      let initialOrder = try XCTUnwrap(before?["initial"] as? [String])
+      let order = try XCTUnwrap(before?["shown"] as? [String])
+      XCTAssertNotEqual(order, initialOrder, "Sorting by type, descending, changed the order")
+      let expected = PanelViewState(
+        installed: .init(
+          text: "wallpaper", sort: "type", descending: true, tags: ["Favorite"],
+          excludedTags: ["Web"]),
+        scroll: ["installed": 900])
+      try await panel.waitUntil(timeout: 5) { panel.navigation.viewState == expected }
+
+      // The window closes: its page and controller go, the navigation stays. The library has
+      // lost its favorites by the time the panel comes back.
+      panel.controller.stop()
+      let controller = WebPanelController(
+        store: panel.store, navigation: panel.navigation, workshop: panel.workshop,
+        pixiv: panel.pixiv, isPresentationVisible: { false }, theme: panel.theme,
+        defaults: panel.defaults, appLanguage: .english(),
+        playback: PlaybackPreferences(defaults: panel.defaults), playlists: panel.playlists,
+        hotKeys: HotKeyPreferences(defaults: panel.defaults), collections: panel.collections,
+        presets: panel.presets, backup: panel.backup, imagePlacement: panel.imagePlacement,
+        compatibility: panel.compatibility, automations: panel.automations, spaces: panel.spaces)
+      reopened = controller
+      XCTAssertTrue(controller.favoriteIDs.isEmpty)
+      panel.web = controller.makeWebView()
+      panel.web.setFrameSize(NSSize(width: 960, height: 640))
+      try await panel.waitUntil(timeout: 15) { controller.isReady }
+      // The sidebar is drawn by the render that follows the first snapshot, restore included.
+      try await panel.waitJS("document.querySelector('#filter-sidebar input[value=\"Favorite\"]')")
+      let after = try await panel.js("""
+        const sidebar = document.getElementById('filter-sidebar');
+        const grid = document.getElementById('wallpaper-grid');
+        return {
+          search: document.getElementById('wallpaper-search').value,
+          sort: document.getElementById('browser-sort').value,
+          favorite: sidebar.querySelector('input[value="Favorite"]').checked,
+          web: sidebar.querySelector('input[value="Web"]').checked,
+          mature: sidebar.querySelector('input[value="Mature"]').checked,
+          titles: [...document.querySelectorAll('.wallpaper-tile .tile-title')].map(node => node.textContent),
+          scrollTop: grid.scrollTop
+        };
+        """) as? [String: Any]
+      XCTAssertEqual(after?["search"] as? String, "wallpaper")
+      XCTAssertEqual(after?["sort"] as? String, "type")
+      XCTAssertEqual(after?["web"] as? Bool, false, "A hidden type stays hidden")
+      XCTAssertEqual(after?["mature"] as? Bool, true, "A box nobody touched stays ticked")
+      XCTAssertEqual(
+        after?["favorite"] as? Bool, false,
+        "No wallpaper is a favorite any more, so the stale required tag is dropped")
+      let titles = try XCTUnwrap(after?["titles"] as? [String])
+      XCTAssertEqual(titles.count, 80, "…and nothing is left hiding the library")
+      XCTAssertEqual(Array(titles.prefix(6)), order, "The descending type order returns")
+      XCTAssertEqual(try XCTUnwrap(after?["scrollTop"] as? Double), 900, accuracy: 1)
+
+      // A second `ready` (Reconnect) hands over the old report again; it must not undo what the
+      // person has done to the page since.
+      let later = try await panel.js("""
+        const search = document.getElementById('wallpaper-search');
+        search.value = 'newer search'; search.dispatchEvent(new Event('input', { bubbles: true }));
+        window.wallpaperUI.receive(await window.webkit.messageHandlers.native.postMessage({action:'ready'}));
+        return document.getElementById('wallpaper-search').value;
+        """) as? String
+      XCTAssertEqual(later, "newer search")
+      XCTAssertNil(controller.actionError)
+    } catch {
+      reopened?.stop()
+      await panel.shutdown()
+      throw error
+    }
+    reopened?.stop()
+    await panel.shutdown()
+  }
+
+  /// The page reports its view state while the person types and scrolls, so the reply carries
+  /// no snapshot and no push follows. A report outside the limits is dropped, and the one
+  /// before it stays.
+  func testViewStateReportsAreStoredSilentlyAndInvalidOnesAreIgnored() async throws {
+    try await withPanel { panel in
+      try await panel.finishWelcome()
+      panel.show()
+      try await panel.waitJS("powerProbe.received.length >= 1")
+      try await panel.quiet()
+      let pushes = try await panel.js("return powerProbe.received.length") as? Int
+      let replies = try await panel.js("""
+        const post = body => window.webkit.messageHandlers.native.postMessage({ action: 'viewState', ...body });
+        const filters = { text: 'night', sort: 'size', descending: true, tags: [], excludedTags: ['Mature'] };
+        const valid = await post({ installed: filters, scroll: { installed: 320 } });
+        const bogus = await post({ installed: { ...filters, sort: 'random' }, scroll: {} });
+        const negative = await post({ installed: filters, scroll: { installed: -5 } });
+        return { valid: valid ?? null, bogus: bogus ?? null, negative: negative ?? null };
+        """) as? [String: Any]
+      XCTAssertTrue(replies?["valid"] is NSNull, "The reply carries no snapshot")
+      XCTAssertTrue(replies?["bogus"] is NSNull)
+      XCTAssertTrue(replies?["negative"] is NSNull)
+      XCTAssertEqual(
+        panel.navigation.viewState,
+        PanelViewState(
+          installed: .init(
+            text: "night", sort: "size", descending: true, tags: [], excludedTags: ["Mature"]),
+          scroll: ["installed": 320]),
+        "Only the valid report was kept")
+      XCTAssertNil(panel.controller.actionError, "An invalid report is dropped without an error banner")
+      try await panel.quiet()
+      try await panel.expectJS("return powerProbe.received.length", equals: pushes ?? -1)
     }
   }
 

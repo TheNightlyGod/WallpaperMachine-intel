@@ -4,6 +4,7 @@ mod types;
 use std::{
     pin::Pin,
     sync::{Arc, Condvar, Mutex, MutexGuard},
+    time::Duration,
 };
 
 pub use error::{BridgeError, BridgeErrorKind};
@@ -11,15 +12,17 @@ use futures_util::Future;
 pub use types::{
     BridgeAppSnapshot, BridgeAudioSpectrum, BridgeComboOption, BridgeDirectoryMode,
     BridgeDisplayConfigRow, BridgeDisplayMode, BridgeDisplayMutationBundle,
-    BridgeDisplaySettingsRow, BridgeFileFilter, BridgeLibraryScanStatus, BridgeLibrarySnapshot,
+    BridgeDisplaySettingsRow, BridgeFileFilter, BridgeFraming, BridgeLibraryScanStatus,
+    BridgeLibrarySnapshot,
     BridgeLockScreenScene, BridgeLogLevel, BridgeLogStatus, BridgeMonitorInfoRow, BridgeWallpaperPreview,
     BridgeNativeVideoWallpaper, BridgeMediaSnapshot,
     BridgeMonitorInformationSnapshot, BridgePlaybackState, BridgeBatteryMode, BridgePropertyDescriptor,
-    BridgePropertyKind, BridgePropertyValue, BridgeRendererCountersReport,
+    BridgePropertyEdit, BridgePropertyKind, BridgePropertyValue, BridgeQualityThrottleCause,
+    BridgeRendererCountersReport,
     BridgeRendererSurfaceCounters, BridgeScalingMode, BridgeSceneBackendReport,
     BridgeSceneUpdateModeReport, BridgeSettingsSnapshot, BridgeUserShortcut,
-    BridgeSliderMetadata, BridgeSnapshotBundle, BridgeStorageStatus, BridgeVideoBackendReport,
-    BridgeWallpaperEntry,
+    BridgeSliderMetadata, BridgeSnapshotBundle, BridgeStorageStatus, BridgeSurfaceCheck,
+    BridgeVideoBackendReport, BridgeWallpaperEntry,
     BridgeWallpaperKind, BridgeWallpaperMutationBundle, BridgeWallpaperOptionsSnapshot,
     BridgeWebWallpaper,
 };
@@ -67,14 +70,18 @@ use crate::{
             GetLibrarySnapshot, GetLockScreenScenes, GetWallpaperPreview, GetMonitorInformationSnapshot,
             GetSettingsSnapshot, GetWallpaperOptionsSnapshot, GetWebWallpapers, InitialFrameReady,
             GetNativeVideoWallpapers, PollMousePosition, RejectNativeVideo, RendererCounters,
-            RefreshDisplays, RefreshLibrary, RestorePropertyDefault, SelectWallpaper,
+            RefreshDisplays, RefreshLibrary, ReleaseHeldWallpaper, RestoreAllPropertyDefaults,
+            RestorePropertyDefault,
+            SelectWallpaper,
             SetAudioResponseEnabled, SetDisplayConfigEnabled, SetDisplayEnabled, SetDisplayMode,
+            PreviewDisplayPosition, PreviewWallpaperProperties, SetDisplayPosition,
             SetDisplayPresentationSuspended,
             SetFilter, SetGlobalPlayback, SetLaunchAtLogin, SetMirrorMuted, SetMirrorScalingFactor,
             SetMirrorScalingMode, SetMirrorTarget, SetMirrorTargetFps, SetMirrorVolume, SetMuted,
             SetAudioSuppressed, SetBatteryMode, SetBatteryQualityProfile, SetContentPacingEnabled,
-            SetFrameRateCap, SetMediaIntegrationEnabled,
-            SetPresentationUnloaded, SetPresentationSuspended, SetPropertyPath, SetRenderScale,
+            SetFrameRateCap, SetLabelLanguages, SetMediaIntegrationEnabled,
+            SetPresentationUnloaded, SetPresentationSuspended, SetPropertyPath,
+            SetQualityThrottle, SetRenderScale,
             SetVerboseLogging,
             SetRendererCountersEnabled, SetScalingFactor, SetScalingMode,
             SetSceneOnDemandEnabled, SetSceneOptimizationEnabled, SetSceneRenderer,
@@ -85,7 +92,7 @@ use crate::{
         state::BridgeActorState,
     },
     config::{ConfigStore, SceneRendererModeCfg, VideoBackendModeCfg},
-    engine::{EngineFacade, RealEngineFacade},
+    engine::{EngineFacade, LoadJournal, RealEngineFacade},
     login::LaunchAtLoginController,
     media::SystemMediaStore,
     paths::BridgePaths,
@@ -128,6 +135,9 @@ pub struct BridgeBuilder<E: EngineFacade> {
     mouse_polling_enabled: bool,
     power_watching_enabled: bool,
     startup_power_source: Option<PowerSource>,
+    wake_check_grace: Duration,
+    /// Where the power watcher reads the power source from.
+    power_reader: Arc<dyn Fn() -> PowerSource + Send + Sync>,
 }
 
 impl<E: EngineFacade> BridgeBuilder<E> {
@@ -142,6 +152,8 @@ impl<E: EngineFacade> BridgeBuilder<E> {
             mouse_polling_enabled: true,
             power_watching_enabled: !cfg!(test),
             startup_power_source: None,
+            wake_check_grace: crate::engine::revalidate::GRACE,
+            power_reader: Arc::new(SystemPowerSource::current),
         }
     }
 
@@ -182,6 +194,22 @@ impl<E: EngineFacade> BridgeBuilder<E> {
     #[cfg(test)]
     pub fn with_startup_power_source(mut self, source: PowerSource) -> Self {
         self.startup_power_source = Some(source);
+        self
+    }
+
+    /// How long the check after a wake waits between its two readings.
+    #[cfg(test)]
+    pub fn with_wake_check_grace(mut self, grace: Duration) -> Self {
+        self.wake_check_grace = grace;
+        self
+    }
+
+    #[cfg(test)]
+    pub fn with_power_reader(
+        mut self,
+        reader: Arc<dyn Fn() -> PowerSource + Send + Sync>,
+    ) -> Self {
+        self.power_reader = reader;
         self
     }
 
@@ -253,6 +281,12 @@ impl<E: EngineFacade> BridgeBuilder<E> {
                 control.record_activity(activity);
             }
         })));
+        // Kept beside the configuration it protects, so an isolated support
+        // root has its own journal.
+        let load_journal = LoadJournal::open(
+            self.config_store.as_ref().map(ConfigStore::root),
+            &crate::engine::build_stamp(),
+        );
         let actor = BridgeActorHandle::spawn(
             state,
             engine.clone(),
@@ -260,6 +294,7 @@ impl<E: EngineFacade> BridgeBuilder<E> {
             self.launch_at_login,
             self.paths,
             Arc::clone(&mouse_polling),
+            load_journal.clone(),
         )?;
         let first_frame_notifier = FirstFrameNotifier {
             actor: actor.clone(),
@@ -274,7 +309,8 @@ impl<E: EngineFacade> BridgeBuilder<E> {
             None
         };
         let power_watcher = if self.power_watching_enabled {
-            Some(PowerWatcher::spawn(actor.clone()))
+            let power_reader = self.power_reader;
+            Some(PowerWatcher::spawn(actor.clone(), move || power_reader()))
         } else {
             None
         };
@@ -301,7 +337,10 @@ impl<E: EngineFacade> BridgeBuilder<E> {
             system_media_submission: tokio::sync::Mutex::new(()),
             engine,
             _config_store: self.config_store,
+            load_journal,
             user_shortcuts: tokio::sync::Mutex::new(shortcut_receiver),
+            wake_check_turn: Arc::default(),
+            wake_check_grace: self.wake_check_grace,
         })
     }
 }
@@ -570,8 +609,7 @@ pub struct WallpaperBridge {
     actor: BridgeActorHandle<ArcEngineFacade>,
     #[allow(dead_code)]
     mouse_poller: Option<MousePoller>,
-    #[allow(dead_code)]
-    power_watcher: Option<PowerWatcher<ArcEngineFacade>>,
+    power_watcher: Option<PowerWatcher>,
     /// Last known system media state, held for replay into pages that load
     /// after the fact. Process-wide, like the system player it describes, so
     /// it is deliberately not actor state.
@@ -582,10 +620,18 @@ pub struct WallpaperBridge {
     /// analysis can be read without an actor round trip on every poll.
     engine: ArcEngineFacade,
     _config_store: Option<ConfigStore>,
+    /// The actor's load journal, so a quit can close it without the actor: the
+    /// actor may be inside a startup load that lasts longer than the quit does.
+    load_journal: LoadJournal,
     /// Requests waiting for `next_user_shortcut`. Bounded, and outside the
     /// actor: awaiting one inside a message handler would stall the mailbox for
     /// every other request while nobody is pressing anything.
     user_shortcuts: tokio::sync::Mutex<tokio::sync::mpsc::Receiver<BridgeUserShortcut>>,
+    /// One check after a wake at a time. Two overlapping checks would each find
+    /// the same stalled scene and spend two rungs of its recovery ladder on one
+    /// fault.
+    wake_check_turn: Arc<tokio::sync::Mutex<()>>,
+    wake_check_grace: Duration,
 }
 
 #[derive(Clone)]
@@ -696,6 +742,19 @@ impl EngineFacade for ArcEngineFacade {
         self.0.scene_runtime_reports()
     }
 
+    fn recover_surface(
+        &self,
+        display_id: u32,
+        reason: wallpaper_core::RecoveryReason,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<wallpaper_core::RecoveryOutcome, wallpaper_core::EngineError>>
+                + Send,
+        >,
+    > {
+        self.0.recover_surface(display_id, reason)
+    }
+
     fn current_audio_spectrum(
         &self,
     ) -> Result<Option<wallpaper_core::AudioSpectrum128>, wallpaper_core::EngineError> {
@@ -804,6 +863,31 @@ impl EngineFacade for ArcEngineFacade {
         factor: f64,
     ) -> Pin<Box<dyn Future<Output = Result<(), wallpaper_core::EngineError>> + Send>> {
         self.0.set_scaling_factor(handle, factor)
+    }
+
+    fn set_framing(
+        &self,
+        handle: SceneHandle,
+        framing: wallpaper_core::project::SceneFraming,
+    ) -> Pin<Box<dyn Future<Output = Result<(), wallpaper_core::EngineError>> + Send>> {
+        self.0.set_framing(handle, framing)
+    }
+
+    fn preview_framing(
+        &self,
+        handle: SceneHandle,
+        framing: wallpaper_core::project::SceneFraming,
+    ) -> Pin<Box<dyn Future<Output = Result<(), wallpaper_core::EngineError>> + Send>> {
+        self.0.preview_framing(handle, framing)
+    }
+
+    fn preview_property_override(
+        &self,
+        handle: SceneHandle,
+        scene_path: String,
+        flat_json: String,
+    ) -> Pin<Box<dyn Future<Output = Result<wallpaper_core::PropertyPreview, wallpaper_core::EngineError>> + Send>> {
+        self.0.preview_property_override(handle, scene_path, flat_json)
     }
 
     fn set_fps(
@@ -962,12 +1046,19 @@ impl WallpaperBridge {
     /// Exports current draft inputs for an isolated preview, without selecting, applying,
     /// persisting or opening any wallpaper. Preview playback is owned by the host.
     ///
+    /// `pending` holds values the host is showing without having saved them, a
+    /// slider still being dragged: each is made to the draft's properties, in
+    /// order, for this export alone, so the draft, the dirty state and the
+    /// snapshots stay as they are. An entry is checked like
+    /// [`WallpaperBridge::edit_property`] checks its value.
+    ///
     /// # Errors
-    /// Returns an error for a missing or unsupported project or invalid input paths.
+    /// Returns an error for a missing or unsupported project, invalid input paths, or a
+    /// pending value the property does not accept. Nothing is exported then.
     pub async fn wallpaper_preview(
-        &self, wallpaper_id: String, display_id: String,
+        &self, wallpaper_id: String, display_id: String, pending: Vec<BridgePropertyEdit>,
     ) -> Result<BridgeWallpaperPreview, BridgeError> {
-        self.actor.ask(GetWallpaperPreview { wallpaper_id, display_id }).await
+        self.actor.ask(GetWallpaperPreview { wallpaper_id, display_id, pending }).await
     }
 
     /// Returns committed web wallpapers for the currently connected displays.
@@ -1147,6 +1238,21 @@ impl WallpaperBridge {
         self.actor.ask(RefreshDisplays).await
     }
 
+    /// Opens a wallpaper the load journal holds back after repeated crashes
+    /// while it loaded, and lifts the hold. A wallpaper that is not held is
+    /// left alone.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the configuration cannot be reconciled; the
+    /// wallpaper then stays held.
+    pub async fn release_held_wallpaper(
+        &self,
+        wallpaper_id: String,
+    ) -> Result<BridgeSnapshotBundle, BridgeError> {
+        self.actor.ask(ReleaseHeldWallpaper { wallpaper_id }).await
+    }
+
     /// # Errors
     ///
     /// Returns an error when host pointer state cannot be forwarded to active
@@ -1275,6 +1381,116 @@ impl WallpaperBridge {
                 wallpaper_id,
                 display_id,
                 factor,
+            })
+            .await
+    }
+
+    /// Moves a wallpaper on one display: `pan_x` and `pan_y` are fractions from
+    /// 0 (left, top) to 1 (right, bottom) of the room the display leaves around
+    /// the wallpaper, and an axis passed as `None` keeps its saved value. The
+    /// running scene follows without being rebuilt and the position is saved at
+    /// once, like the scaling mode and unlike the scale factor, so it is not
+    /// part of the draft that Apply and Cancel decide on. Repeating a position
+    /// changes nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the wallpaper or display id is unknown, an axis is
+    /// not a finite fraction between 0 and 1, persistence fails, or the live
+    /// engine update fails. A failed engine update leaves the position saved,
+    /// and the next time the scene is reconciled it is applied.
+    pub async fn set_display_position(
+        &self,
+        wallpaper_id: String,
+        display_id: String,
+        pan_x: Option<f64>,
+        pan_y: Option<f64>,
+    ) -> Result<BridgeWallpaperMutationBundle, BridgeError> {
+        self.actor
+            .ask(SetDisplayPosition {
+                wallpaper_id,
+                display_id,
+                pan_x,
+                pan_y,
+            })
+            .await
+    }
+
+    /// Shows a wallpaper at a position on one display while a drag toward it
+    /// is under way, and keeps nothing: the running scene follows, but the
+    /// position is not saved, no snapshot changes and the lock screen and
+    /// screen saver are not told, so a page can call it for every step of a
+    /// drag. `pan_x` and `pan_y` are read as for `set_display_position`.
+    /// The drag must end with `set_display_position` for the value it
+    /// settled on, which saves it (and puts the scene back at the saved
+    /// position when that is where the drag ended). A display that is gone or
+    /// that no scene draws, such as one the native video player plays, has
+    /// nothing to move and is not an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the wallpaper id is unknown, an axis is not a
+    /// finite fraction between 0 and 1, or the live engine update fails.
+    pub async fn preview_display_position(
+        &self,
+        wallpaper_id: String,
+        display_id: String,
+        pan_x: Option<f64>,
+        pan_y: Option<f64>,
+    ) -> Result<(), BridgeError> {
+        self.actor
+            .ask(PreviewDisplayPosition {
+                wallpaper_id,
+                display_id,
+                pan_x,
+                pan_y,
+            })
+            .await
+    }
+
+    /// Shows a wallpaper's pending property edits on every scene that draws it,
+    /// mirrors included, without applying them, or with `show` false puts the
+    /// saved look back. The scenes follow the whole pending edit: what the
+    /// panel's inspector holds, except a texture, a file or a folder, which
+    /// stay at what is saved because a texture is read only while a scene loads
+    /// and a file or folder is saved the moment it is picked. Nothing is saved,
+    /// the draft stays as it is, no snapshot changes and the lock screen and
+    /// screen saver are not told, so a page can call it after every edit.
+    ///
+    /// `pending` holds values the host is showing without having saved them, a
+    /// slider or colour still being dragged. Each is made to the draft for this
+    /// call alone, in order, as [`WallpaperBridge::edit_property`] would make
+    /// it, so the scenes follow the drag; none is kept, and the next call
+    /// shows the draft again unless it names them anew. Each is checked like
+    /// an edit's value, and one the property does not accept refuses the call
+    /// before any scene is told anything. A texture, a file or a folder in
+    /// `pending` stays at what is saved, like one in the draft. With `show`
+    /// false it has no effect on what the scenes are given.
+    ///
+    /// Asking for what the scenes already show, or for the saved look when they
+    /// are showing it, sends the engine nothing. Cancelling the options puts
+    /// the saved look back by itself, and applying them loads the scenes from
+    /// the saved configuration. Anything else that loads a scene again, a
+    /// display change or a wake for one, also shows the saved look, and the next
+    /// call shows the edit again. A wallpaper that is a video or a web page, or
+    /// that no display shows, has nothing to show and is not an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the wallpaper id is unknown, a scene wallpaper's
+    /// pending value is not one its property accepts, or the live engine
+    /// update fails. A refused update leaves the call to be repeated.
+    pub async fn preview_wallpaper_properties(
+        &self,
+        wallpaper_id: String,
+        show: bool,
+        pending: Vec<BridgePropertyEdit>,
+    ) -> Result<(), BridgeError> {
+        self.actor
+            .ask(PreviewWallpaperProperties {
+                wallpaper_id,
+                show,
+                pending,
             })
             .await
     }
@@ -1453,6 +1669,29 @@ impl WallpaperBridge {
         self.actor.ask(SetFrameRateCap { cap }).await
     }
 
+    /// Asks for the reduced-quality profile for as long as any of `causes`
+    /// holds, on top of the battery mode the user saved. The same frame-rate
+    /// ceiling and render scale the battery profile uses apply live to every
+    /// open scene, web page and native video, and the empty list hands the
+    /// user's own values back. Not persisted: a new bridge starts without any
+    /// cause, and the host asks again.
+    ///
+    /// It can only lower what runs. A scale or rate already below the profile
+    /// stays where the user put it, and playback is untouched, so a pause the
+    /// user asked for survives. Asking again with the same causes re-applies
+    /// them, which is how a caller whose last request failed retries.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a running scene rejects the resulting scale or
+    /// rate. The request is kept, so asking again retries it.
+    pub async fn set_quality_throttle(
+        &self,
+        causes: Vec<BridgeQualityThrottleCause>,
+    ) -> Result<BridgeSnapshotBundle, BridgeError> {
+        self.actor.ask(SetQualityThrottle { causes }).await
+    }
+
     /// Closes every scene runtime so the host can free wallpaper memory,
     /// without changing assignments. Clearing it opens the configured scenes
     /// again, paused if playback is paused.
@@ -1481,6 +1720,19 @@ impl WallpaperBridge {
         suppressed: bool,
     ) -> Result<BridgeSnapshotBundle, BridgeError> {
         self.actor.ask(SetAudioSuppressed { suppressed }).await
+    }
+
+    /// Names the languages a wallpaper's own translated labels are read in,
+    /// most preferred first, as Wallpaper Engine locale codes such as `zh-chs`
+    /// or `ja-jp`. English is added as the fallback. Not persisted: the host
+    /// supplies it at start and again whenever its language changes, and the
+    /// next options snapshot reflects it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the actor cannot take the request.
+    pub async fn set_label_languages(&self, locales: Vec<String>) -> Result<(), BridgeError> {
+        self.actor.ask(SetLabelLanguages { locales }).await
     }
 
     /// Suspends or resumes rendering and system-audio capture for every
@@ -1542,6 +1794,57 @@ impl WallpaperBridge {
     /// Returns an error when the renderer rejects the call.
     pub async fn renderer_counters(&self) -> Result<BridgeRendererCountersReport, BridgeError> {
         self.actor.ask(RendererCounters).await
+    }
+
+    /// Confirms that every scene that should be drawing still is, and has the
+    /// engine rebuild the surface of any that is not. The host calls it once
+    /// after the Mac or its displays wake, and again when presentation resumes
+    /// after a wake that landed on a locked session.
+    ///
+    /// Nothing is rebuilt on a healthy Mac. The check reads each scene's frame
+    /// counter, waits a few seconds and reads it again; only a continuous scene
+    /// on an unpaused display whose counter did not move, or one that has
+    /// stopped itself after a failure, is repaired, through the same budgeted
+    /// recovery the engine uses for a failed frame. Paused and suspended
+    /// displays, scenes that update on events, web pages and native video are
+    /// never touched. One row comes back for every display with a scene open.
+    ///
+    /// The wait happens outside the actor, so it stalls no other request, and
+    /// a second call waits for the first rather than overlapping it. `reason`
+    /// names what triggered the check in the log.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the bridge's runtime is gone or the check task
+    /// failed.
+    pub async fn revalidate_scene_presentation(
+        &self,
+        reason: String,
+    ) -> Result<Vec<BridgeSurfaceCheck>, BridgeError> {
+        let engine = self.engine.clone();
+        let turn = Arc::clone(&self.wake_check_turn);
+        let grace = self.wake_check_grace;
+        // The check waits on a timer, which needs the bridge's own runtime: the
+        // future the host polls is not running on one.
+        let checks = self
+            .actor
+            .run_on_runtime(async move {
+                let _turn = turn.lock().await;
+                log::info!(
+                    "[wallpaper-bridge power] wake check ({reason}): looking at scene surfaces"
+                );
+                crate::engine::revalidate::revalidate_presentation(&engine, grace).await
+            })
+            .await?;
+        Ok(checks
+            .into_iter()
+            .map(|check| BridgeSurfaceCheck {
+                display_id: check.display_id,
+                outcome: check.outcome().to_owned(),
+                frames_before: check.frames_before,
+                frames_after: check.frames_after,
+            })
+            .collect())
     }
 
     /// Chooses which renderer plays plain local videos.
@@ -2079,14 +2382,40 @@ impl WallpaperBridge {
             .await
     }
 
+    /// Stages the authored default for every property of the wallpaper except
+    /// the files and folders the user chose; cancelling the options undoes it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the wallpaper id is unknown.
+    pub async fn restore_all_property_defaults(
+        &self,
+        wallpaper_id: String,
+    ) -> Result<BridgeWallpaperMutationBundle, BridgeError> {
+        self.actor
+            .ask(RestoreAllPropertyDefaults { wallpaper_id })
+            .await
+    }
+
+    /// `user_initiated` says the user asked for this wallpaper themselves. Only
+    /// then does applying it lift the crash-loop guard's hold on it: a playlist,
+    /// a schedule or a rule that comes back to a wallpaper that crashed the app
+    /// must not reopen it, or the guard would stop nothing.
+    ///
     /// # Errors
     ///
     /// Returns an error when pending options cannot be applied or persisted.
     pub async fn apply_wallpaper_options(
         &self,
         wallpaper_id: String,
+        user_initiated: bool,
     ) -> Result<BridgeWallpaperMutationBundle, BridgeError> {
-        self.actor.ask(ApplyWallpaperOptions { wallpaper_id }).await
+        self.actor
+            .ask(ApplyWallpaperOptions {
+                wallpaper_id,
+                user_initiated,
+            })
+            .await
     }
 
     /// # Errors
@@ -2108,7 +2437,8 @@ impl WallpaperBridge {
         &self,
         wallpaper_id: String,
     ) -> Result<BridgeWallpaperMutationBundle, BridgeError> {
-        self.apply_wallpaper_options(wallpaper_id).await
+        // The OK button of the options dialog is the user's own choice.
+        self.apply_wallpaper_options(wallpaper_id, true).await
     }
 
     /// # Errors
@@ -2149,10 +2479,25 @@ impl WallpaperBridge {
             .await
     }
 
+    /// Asks the power watcher to read the power source again and apply the battery policy if
+    /// it differs from the one last applied. The host calls it when the Mac wakes, because a
+    /// plug or unplug during sleep may not have been reported. Safe at any time; it returns at
+    /// once, and does nothing when the bridge is not watching the power source.
+    pub fn resample_power_source(&self) {
+        if let Some(watcher) = &self.power_watcher {
+            watcher.resample();
+        }
+    }
+
     /// # Errors
     ///
     /// Returns an error when the engine cannot shut down active scenes.
     pub async fn shutdown(&self) -> Result<(), BridgeError> {
+        // Before the request, not inside it: the actor handles one message at
+        // a time, and startup holds it until the first scene shows a frame.
+        // Asking first would leave the record open for as long as the load
+        // takes, and a quit that gives up waiting would count it as a crash.
+        self.load_journal.clean_shutdown();
         self.actor.ask(Shutdown).await
     }
 }

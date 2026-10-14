@@ -20,8 +20,8 @@ mod scene;
 pub use r#override::{FlatScenePropertyOverride, ScenePropertyOverrideError, SerdeValudeExt};
 pub use resolver::{SceneSourcePaths, SceneSourceResolution};
 pub use scene::{
-    ScalingMode, SceneDesc, SceneDescBuilder, SceneDescSliceExt, SceneFile, SceneHandle, SceneIr,
-    SceneRenderTargetIr, SceneResult, SceneTemplate,
+    ScalingMode, SceneDesc, SceneDescBuilder, SceneDescSliceExt, SceneFile, SceneFraming,
+    SceneHandle, SceneIr, SceneRenderTargetIr, SceneResult, SceneTemplate,
 };
 
 /// High-level type of a Wallpaper Engine project.

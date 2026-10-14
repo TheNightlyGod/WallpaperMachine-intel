@@ -65,6 +65,12 @@ public:
     bool        EffectiveVisible() const {
         return m_visible && (m_parent == nullptr || m_parent->EffectiveVisible());
     }
+    /// Visibility only a reload changes: an authored value or one of the
+    /// wallpaper's own properties, which reparse the scene when they change.
+    /// False for a script-driven layer and from the moment a script writes
+    /// this one's visibility, since from then on the script decides.
+    bool        VisibilitySettled() const { return m_visibility_settled; }
+    void        SetVisibilitySettled(bool settled) { m_visibility_settled = settled; }
     void        SetRotation(Eigen::Vector3f v) {
         if (m_rotation.isApprox(v, 1.0e-6f)) return;
         m_rotation = v;
@@ -129,6 +135,7 @@ private:
     bool        m_skipRenderPass { false };
     bool        m_must_produce { false };
     bool        m_composite_only { false };
+    bool        m_visibility_settled { false };
     std::optional<double> m_textureFrame;
 
     bool            m_dirty;

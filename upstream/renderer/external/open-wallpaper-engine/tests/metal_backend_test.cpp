@@ -460,12 +460,6 @@ TEST(MetalCapability, EveryUnsupportedConstructHasItsOwnReason)
         reasons.emplace_back("other dynamic mesh", RejectionFor(fixture));
     }
     {
-        ImageScene fixture;
-        fixture.scene.lights.push_back(
-            std::make_unique<SceneLight>(Eigen::Vector3f { 1.0f, 1.0f, 1.0f }, 100.0f, 1.0f));
-        reasons.emplace_back("lights", RejectionFor(fixture));
-    }
-    {
         // A plain video wallpaper has its own host path; a scene that merely
         // binds a video texture is decided by the video module instead.
         ImageScene fixture;
@@ -702,6 +696,17 @@ TEST(MetalCapability, AZeroCapacityDynamicMeshIsRefusedRatherThanDrawnEmpty)
     EXPECT_NE(EvaluateMetalSupport(fixture.scene).backend, SceneBackend::NativeMetal);
 }
 
+TEST(MetalCapability, ASceneWithLightsIsAccepted)
+{
+    // Lighting is the author's shader reading uniforms the shared value updater
+    // writes for either backend; a light on its own asks nothing else of it.
+    ImageScene fixture;
+    fixture.scene.lights.push_back(
+        std::make_unique<SceneLight>(Eigen::Vector3f { 1.0f, 1.0f, 1.0f }, 100.0f, 1.0f));
+    const auto selection = EvaluateMetalSupport(fixture.scene);
+    EXPECT_EQ(selection.backend, SceneBackend::NativeMetal) << selection.fallback_reason;
+}
+
 TEST(MetalCapability, AnImageEffectChainIsNoLongerRejectedBeforeTheGraphExists)
 {
     // An effect chain is ordinary multi-pass work now. Whether its particular
@@ -747,19 +752,18 @@ TEST(MetalGraph, ALinkTextureProducedEarlierInTheSameFrameIsNotFeedback)
     EXPECT_EQ(MetalGraphRejection(fixture.scene, graph), "");
 }
 
-TEST(MetalGraph, ReadingATargetThatIsOnlyWrittenLaterIsRejectedAsHistoryFeedback)
+TEST(MetalGraph, ReadingATargetThatIsOnlyWrittenLaterIsAcceptedAsHistory)
 {
     // The mip-mapped frame buffer: sampled by a layer, then filled from the
-    // frame's own output afterwards. What the layer sampled is the previous
-    // frame's picture, which this backend keeps no history for.
+    // frame's own output afterwards. What the layer samples is the previous
+    // frame's picture, which this backend keeps in the target's own image.
     ImageScene      fixture;
     rg::RenderGraph graph;
     AddDraw(graph, std::string(SpecTex_Default),
             { "materials/card.tex", std::string(WE_MIP_MAPPED_FRAME_BUFFER) });
     AddCopy(graph, std::string(SpecTex_Default), std::string(WE_MIP_MAPPED_FRAME_BUFFER));
 
-    EXPECT_EQ(MetalGraphRejection(fixture.scene, graph),
-              "the scene uses a history feedback effect");
+    EXPECT_EQ(MetalGraphRejection(fixture.scene, graph), "");
 }
 
 TEST(MetalGraph, ATargetThisBackendCannotAllocateRejectsTheWholeScene)

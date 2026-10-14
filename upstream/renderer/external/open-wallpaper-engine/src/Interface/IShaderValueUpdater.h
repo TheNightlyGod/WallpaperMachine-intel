@@ -69,6 +69,9 @@ public:
         (void)camera_override;
         return frame_varying_uniform::kAll;
     }
+    /// Drops what was recorded for a node that is about to be freed, so a
+    /// later node allocated at the same address starts from nothing.
+    virtual void ForgetNode(SceneNode* node) { (void)node; }
     virtual void FrameEnd()                                                        = 0;
 
     virtual void MouseInput(double x, double y) = 0;

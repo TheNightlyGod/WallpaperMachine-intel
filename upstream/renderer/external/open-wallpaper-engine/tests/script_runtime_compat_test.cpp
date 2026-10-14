@@ -1273,6 +1273,108 @@ function update() {
     EXPECT_EQ(runtime->scriptErrorCount(), 0u);
 }
 
+namespace {
+// One authored layer, `owner`, whose model `models/line.json` scripts copy.
+struct LineTemplateScene {
+    Scene                                scene;
+    std::unique_ptr<SceneRuntimeContext> runtime = MakeRuntimeWithScene(scene);
+    std::shared_ptr<SceneNode>           owner   = std::make_shared<SceneNode>(
+        Eigen::Vector3f::Zero(), Eigen::Vector3f::Ones(), Eigen::Vector3f::Zero(), "owner");
+
+    LineTemplateScene() {
+        auto mesh = std::make_shared<SceneMesh>();
+        mesh->AddMaterial(SceneMaterial {});
+        owner->AddMesh(mesh);
+        scene.sceneGraph->AppendChild(owner);
+        runtime->RegisterNode("owner", owner.get());
+        runtime->RegisterLayerTemplate("models/line.json", owner, Eigen::Vector2f(1, 1));
+    }
+};
+} // namespace
+
+// A script that rebuilds the layers it made when its settings change destroys
+// the old ones first (IScene.destroyLayer, by reference or by name). They leave
+// the scene graph, and the layer object the script still holds does nothing.
+TEST(ScriptRuntimeCompat, DestroyLayerRemovesALayerTheScriptCreated) {
+    LineTemplateScene fixture;
+    auto&             runtime = *fixture.runtime;
+    ScriptHostContext host {};
+    auto program = runtime.scriptEngine().CreatePropertyScriptProgram(&runtime,
+                                                                      R"JS(
+export var scriptProperties = createScriptProperties().finish();
+var lines = [];
+var first;
+function build() {
+  for (var i = 0; i < lines.length; ++i) {
+    if (thisScene.destroyLayer(lines[i]) !== true) throw new Error('a created layer stayed');
+  }
+  lines = [];
+  for (var j = 0; j < 3; ++j) lines.push(thisScene.createLayer('models/line.json'));
+}
+export function init(value) {
+  build();
+  first = lines[0];
+  return value;
+}
+export function applyUserProperties() {
+  build();
+  if (thisScene.destroyLayer(first) !== false) throw new Error('a layer was destroyed twice');
+  first.visible = true;
+  first.origin = new Vec3(5, 6, 0);
+  if (first.visible) throw new Error('a destroyed layer can still be shown');
+  if (thisScene.destroyLayer(lines.pop().name) !== true) throw new Error('a name was not destroyed');
+}
+export function update(value) { return value; }
+)JS",
+                                                                      "owner",
+                                                                      {},
+                                                                      DynamicValue(0.0f),
+                                                                      host);
+    ASSERT_NE(program, nullptr);
+    program->Evaluate(host, DynamicValue(0.0f));
+
+    for (const auto& error : runtime.scriptErrors()) ADD_FAILURE() << error;
+    const auto& layers = fixture.scene.sceneGraph->GetChildren();
+    ASSERT_EQ(layers.size(), 3u);
+    EXPECT_EQ(layers.front(), fixture.owner);
+    for (const auto& layer : layers) {
+        EXPECT_TRUE(layer->Translate().isZero()) << layer->Name();
+    }
+    EXPECT_TRUE(runtime.ConsumeSceneGraphMutationFlag());
+}
+
+// The graph compiled before a layer was destroyed still points at it, so the
+// layer leaves the scene graph at once but is freed only after the graph has
+// been rebuilt without it, which consuming the mutation flag stands for.
+TEST(ScriptRuntimeCompat, ADestroyedLayerIsFreedOnlyOnceTheGraphNoLongerDrawsIt) {
+    LineTemplateScene fixture;
+    auto&             runtime = *fixture.runtime;
+    runtime.RegisterSceneScript(R"JS(
+var ticks = 0;
+var line;
+function update() {
+  ++ticks;
+  if (ticks === 1) line = thisScene.createLayer('models/line.json');
+  if (ticks === 2 && thisScene.destroyLayer(line) !== true) throw new Error('the line stayed');
+}
+)JS",
+                                "owner");
+
+    runtime.Tick(1.0 / 60.0);
+    ASSERT_EQ(fixture.scene.sceneGraph->GetChildren().size(), 2u);
+    EXPECT_TRUE(runtime.ConsumeSceneGraphMutationFlag());
+    const std::weak_ptr<SceneNode> line = fixture.scene.sceneGraph->GetChildren().back();
+
+    runtime.Tick(1.0 / 60.0);
+    EXPECT_EQ(fixture.scene.sceneGraph->GetChildren().size(), 1u);
+    runtime.Tick(1.0 / 60.0);
+    EXPECT_FALSE(line.expired());
+    EXPECT_TRUE(runtime.ConsumeSceneGraphMutationFlag());
+    runtime.Tick(1.0 / 60.0);
+    EXPECT_TRUE(line.expired());
+    for (const auto& error : runtime.scriptErrors()) ADD_FAILURE() << error;
+}
+
 TEST(ScriptRuntimeCompat, ScriptsLoadedByAnEventStartWithTheFollowingEvent) {
     for (const int event : {0, 1, 2}) {
         SCOPED_TRACE(event);
@@ -1467,6 +1569,68 @@ TEST(ScriptRuntimeCompat, CreateLayerFindsTheAssetsOfTheWorkshopItemItsScriptDec
                   (std::vector<std::string> { "models/bar.json",
                                               "models/workshop/2398102478/bar.json" }));
     }
+}
+
+// The scene layer that uses a model registers as its template, but one with an
+// effect chain (its own camera) or child layers cannot be copied. The model
+// still makes a layer, as it does when no scene layer uses it.
+TEST(ScriptRuntimeCompat, CreateLayerBuildsTheModelsOwnLayerWhenTheLayerUsingItCannotBeCopied) {
+    for (const bool has_effects : { true, false }) {
+        SCOPED_TRACE(has_effects ? "owner with effects" : "owner with a child layer");
+        WorkshopTemplateScene fixture({ "models/workshop/2398102478/bar.json" });
+        auto& runtime = *fixture.runtime;
+        if (has_effects) {
+            fixture.owner->SetCamera("owner-effects");
+        } else {
+            fixture.owner->AppendChild(std::make_shared<SceneNode>());
+        }
+        runtime.RegisterLayerTemplate(
+            "models/workshop/2398102478/bar.json", fixture.owner, Eigen::Vector2f(8, 8));
+        runtime.RegisterNodeVisibility(
+            "owner",
+            fixture.owner.get(),
+            ResolveBoolSetting(runtime,
+                               nlohmann::json {
+                                   { "script", BarScript("export let __workshopId = '2398102478';") },
+                                   { "value", true } },
+                               "owner"));
+
+        runtime.Tick(1.0 / 60.0);
+        runtime.Tick(1.0 / 60.0);
+
+        ASSERT_EQ(fixture.CreatedLayers(), 3u);
+        EXPECT_EQ(runtime.scriptErrorCount(), 0u);
+        for (const auto& created : fixture.scene.sceneGraph->GetChildren()) {
+            if (created == fixture.owner) continue;
+            EXPECT_TRUE(created->Camera().empty());
+            EXPECT_TRUE(created->GetChildren().empty());
+        }
+        EXPECT_TRUE(fixture.scene.sceneGraph->GetChildren().back()->Translate().isApprox(
+            Eigen::Vector3f(1, 2, 0)));
+        EXPECT_EQ(fixture.requested,
+                  (std::vector<std::string> { "models/workshop/2398102478/bar.json" }));
+    }
+}
+
+TEST(ScriptRuntimeCompat, CreateLayerDoesNotReloadAModelThatLoadsIntoALayerItCannotCopy) {
+    Scene scene;
+    auto runtime = MakeRuntimeWithScene(scene);
+    const auto uncopyable = [] {
+        auto node = std::make_shared<SceneNode>();
+        node->SetCamera("effects");
+        return node;
+    };
+    runtime->RegisterLayerTemplate("models/fx.json", uncopyable(), Eigen::Vector2f(8, 8));
+    int loads = 0;
+    runtime->SetLayerTemplateLoader([&](std::string_view path) {
+        ++loads;
+        runtime->RegisterLayerTemplate(std::string(path), uncopyable(), Eigen::Vector2f(8, 8));
+        return true;
+    });
+
+    EXPECT_TRUE(runtime->CreateLayerFromTemplate("models/fx.json", "").empty());
+    EXPECT_TRUE(runtime->CreateLayerFromTemplate("models/fx.json", "").empty());
+    EXPECT_EQ(loads, 1);
 }
 
 TEST(ScriptRuntimeCompat, CreateLayerPrefersThePathAsWrittenOverTheDeclaredWorkshopItem) {

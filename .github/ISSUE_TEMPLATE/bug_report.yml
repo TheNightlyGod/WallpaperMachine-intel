@@ -7,8 +7,9 @@ body:
       value: |
         Thanks for reporting. One diagnostics file answers most follow-up questions:
         **Settings → Storage → Troubleshooting → Diagnostics report → Export…** saves a `.zip`
-        with recent logs, lock screen and crash reports and a system summary. Home folder paths,
-        your Mac user name and Steam account names are replaced before it is written.
+        with recent logs, the lock screen log, macOS crash, resource, spin and hang reports, which
+        wallpapers were loading when the app quit unexpectedly, and a system summary. Home folder
+        paths, your Mac user name and Steam account names are replaced before it is written.
 
         If the problem is hard to reproduce, turn on **Detailed logging** in the same place,
         reproduce it, then export. Turn it off afterwards.

@@ -14,9 +14,7 @@
 #include "SpecTexs.hpp"
 #include "Particle/ParticleSystem.h"
 
-#include <algorithm>
 #include <functional>
-#include <unordered_set>
 #include <variant>
 #include <vector>
 
@@ -377,7 +375,9 @@ std::string SceneMetalStructuralRejection(const Scene& scene)
     // particle -- so what decides is whether the geometry that simulation
     // produces is a shape the draw path can consume, which `RejectDynamicMesh`
     // answers per mesh while the scene graph is walked below.
-    if (! scene.lights.empty()) return "the scene uses dynamic lighting";
+    // Lights are not refused. Wallpaper Engine lighting is the author's own
+    // shader reading `g_LightsPosition` and `g_LightsColorPremultiplied`, which
+    // the shared value updater writes for either backend through reflection.
     // A plain video wallpaper is not a scene this backend competes for: the
     // host has a dedicated path for it.
     if (scene.single_video_source) return "the wallpaper is a video";
@@ -458,10 +458,18 @@ std::string MetalGraphRejection(const Scene& scene, const rg::RenderGraph& graph
     constexpr std::string_view kUnrecognised =
         "the render graph contains a step the native renderer does not recognise";
 
-    // One step per pass that produces pixels, in execution order. Built first so
-    // the feedback question can look forward as well as back: whether an input
-    // is this frame's work or last frame's leftovers depends on what happens
-    // after the pass that reads it, not only before.
+    // One step per pass that produces pixels, in execution order.
+    //
+    // A target read before anything this frame writes it, and written later,
+    // is history: the reader sees the previous frame's result (a motion-blur
+    // trail, a ripple or fluid simulation). That is not a refusal.
+    // The graph flags such a target `carriesPreviousFrame`, and this backend
+    // already gives every target name an image of its own that lives as long as
+    // the compiled graph, so last frame's pixels are still there to read. The
+    // optimisations that could disturb that keep their hands off it: the copy
+    // planner never aliases a destination read before its copy, the reuse
+    // cache calls a read-write loop feedback and never reuses it, and the
+    // texture trade carries the copy's pixels with the texture.
     struct GraphStep
     {
         std::string              writes;
@@ -522,7 +530,6 @@ std::string MetalGraphRejection(const Scene& scene, const rg::RenderGraph& graph
         return target != nullptr && target->withDepth && target->width <= 0;
     };
 
-    std::unordered_set<std::string> written;
     for (std::size_t i = 0; i < steps.size(); ++i) {
         if (unrenderable(steps[i].writes)) {
             return "an effect uses a render-target format the native renderer cannot create";
@@ -539,16 +546,7 @@ std::string MetalGraphRejection(const Scene& scene, const rg::RenderGraph& graph
             if (! read.empty() && read == steps[i].writes) {
                 return "an effect reads the image it is drawing into";
             }
-            if (! IsSpecTex(read)) continue;          // an imported image, not a target
-            if (written.count(read) != 0) continue;   // produced earlier in this same frame
-            const bool written_later =
-                std::any_of(steps.begin() + static_cast<std::ptrdiff_t>(i) + 1, steps.end(),
-                            [&read](const GraphStep& later) { return later.writes == read; });
-            // Read before anything filled it, and filled afterwards: what this
-            // pass samples is the previous frame's result.
-            if (written_later) return "the scene uses a history feedback effect";
         }
-        if (! steps[i].writes.empty()) written.insert(steps[i].writes);
     }
     return {};
 }

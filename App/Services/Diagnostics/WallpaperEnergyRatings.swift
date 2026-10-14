@@ -86,9 +86,14 @@ final class WallpaperEnergyRatings {
   private let file: URL
   private var lastSave: Date?
   private var dirty = false
+  private let batteryWattHours: @MainActor () -> Double?
+  /// Read when the first rating is shown, then kept: the panel asks for every wallpaper
+  /// in each snapshot, and a battery's full charge moves over months, not minutes.
+  private lazy var batteryCapacity: Double? = batteryWattHours()
 
-  init(file: URL) {
+  init(file: URL, batteryWattHours: @escaping @MainActor () -> Double? = { nil }) {
     self.file = file
+    self.batteryWattHours = batteryWattHours
     do {
       entries =
         FileManager.default.fileExists(atPath: file.path)
@@ -133,18 +138,23 @@ final class WallpaperEnergyRatings {
     if dirty { save(now: Date()) }
   }
 
-  /// What the panel shows for one wallpaper, or nil when it has no rating yet.
+  /// What the panel shows for one wallpaper, or nil when it has no rating yet. On a Mac
+  /// with a battery it adds the share of a full charge the rated power uses per hour.
   func snapshot(for id: String, kind: BridgeWallpaperKind) -> [String: Any]? {
     guard let rating = rating(for: id),
       kind != .video || rating.version == WallpaperEnergyRating.currentVersion
     else { return nil }
-    return [
+    var result: [String: Any] = [
       "level": rating.level.rawValue,
       "milliwatts": rating.milliwatts,
       "displays": rating.conditions.displays,
       "frameRateCap": rating.conditions.frameRateCap.map { Int($0) } as Any? ?? NSNull(),
       "renderScale": rating.conditions.renderScale,
     ]
+    if let batteryCapacity, batteryCapacity > 0 {
+      result["batteryPercentPerHour"] = rating.milliwatts / 1000 / batteryCapacity * 100
+    }
+    return result
   }
 
   private func save(now: Date) {

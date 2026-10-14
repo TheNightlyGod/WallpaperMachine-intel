@@ -640,6 +640,79 @@ void main() {}
 }
 
 #[test]
+fn trailing_comment_after_less_than_comparison_is_stripped() {
+    // Only an angle-bracket include path opens `<...>`; a `<` comparison must
+    // not hide the comment that follows it from the expression parser.
+    let provider = InMemoryShaderSourceProvider::new().with_source(
+        include("http//shader/common.glsl"),
+        "float from_include = 1.0;\n",
+    );
+    let request = request_with_fragment(
+        r#"
+#include <http//shader/common.glsl> // angle include
+#if QUALITY < 2 && MODE == 0 //Is low quality
+float low_quality = from_include;
+#else
+float low_quality = 0.0;
+#endif
+void main() {}
+"#,
+        &[combo("QUALITY", "1")],
+    );
+
+    let program = PreprocessContext::new(&request, &provider)
+        .preprocess()
+        .expect("preprocesses");
+    let source = program
+        .stage(ShaderStageKind::Fragment)
+        .expect("fragment stage exists")
+        .source();
+
+    assert!(source.contains("float from_include = 1.0;"), "{source}");
+    assert!(
+        source.contains("float low_quality = from_include;"),
+        "{source}"
+    );
+    assert!(!source.contains("float low_quality = 0.0;"), "{source}");
+}
+
+#[test]
+fn directive_keyword_ends_at_first_non_identifier_character() {
+    // The keyword is an identifier, so `#if(EXPR)` and `#endif// note` are
+    // conditionals like their spaced spellings.
+    let provider = InMemoryShaderSourceProvider::new();
+    let request = request_with_fragment(
+        r#"
+#define GRID_SQUARE 1
+#define GRID_HEX 2
+#if(GRID == GRID_SQUARE)
+float grid = 1.0;
+#elif(GRID == GRID_HEX)
+float grid = 2.0;
+#else// no grid
+float grid = 0.0;
+#endif// grid
+void main() {}
+"#,
+        &[combo("GRID", "2")],
+    );
+
+    let program = PreprocessContext::new(&request, &provider)
+        .preprocess()
+        .expect("preprocesses");
+    let source = program
+        .stage(ShaderStageKind::Fragment)
+        .expect("fragment stage exists")
+        .source();
+
+    assert!(source.contains("float grid = 2.0;"), "{source}");
+    assert!(!source.contains("float grid = 1.0;"), "{source}");
+    assert!(!source.contains("float grid = 0.0;"), "{source}");
+    assert!(!source.contains("#if("), "{source}");
+    assert!(!source.contains("#endif"), "{source}");
+}
+
+#[test]
 fn tolerates_stray_trailing_endif_directive() {
     let provider = InMemoryShaderSourceProvider::new();
     let request = request_with_fragment(

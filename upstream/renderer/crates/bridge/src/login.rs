@@ -11,6 +11,10 @@ use crate::api::BridgeError;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LaunchAtLoginStatus {
     Available { enabled: bool },
+    /// The user switched the app off in System Settings > General > Login
+    /// Items. The login item does not run, and registering again cannot turn
+    /// it back on: only the user can, in System Settings.
+    RequiresApproval,
     Unavailable,
 }
 
@@ -37,7 +41,7 @@ trait LaunchAtLoginImpl: Send + Sync {
 
 impl Default for LaunchAtLoginController {
     fn default() -> Self {
-        Self::new(Arc::new(SystemLaunchAtLogin))
+        Self::new(Arc::new(SystemLaunchAtLogin::new(Arc::new(SystemLoginItem))))
     }
 }
 
@@ -91,30 +95,89 @@ impl LaunchAtLoginController {
     }
 }
 
-struct SystemLaunchAtLogin;
+/// What the service manager says about the app's login item, reduced to what
+/// the panel needs. `NotRegistered`, `NotFound` and any state a later macOS
+/// adds all read as "not on".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ServiceState {
+    Enabled,
+    RequiresApproval,
+    Off,
+}
 
-impl LaunchAtLoginImpl for SystemLaunchAtLogin {
-    fn status(&self) -> Result<LaunchAtLoginStatus, BridgeError> {
+/// The system's login item service for the main app, so the rules below can be
+/// tested without touching the real one.
+trait LoginItemService: Send + Sync {
+    /// Whether the app sits where macOS lets it register a login item.
+    fn can_register(&self) -> bool;
+    fn state(&self) -> ServiceState;
+    fn register(&self) -> Result<(), BridgeError>;
+    fn unregister(&self) -> Result<(), BridgeError>;
+}
+
+struct SystemLoginItem;
+
+impl LoginItemService for SystemLoginItem {
+    fn can_register(&self) -> bool {
         let bundle = NSBundle::mainBundle();
         let Some(bundle_path) = bundle
             .bundleURL()
             .path()
             .map(|path| std::path::PathBuf::from(path.to_string()))
         else {
-            return Ok(LaunchAtLoginStatus::Unavailable);
+            return false;
         };
 
         let installed_in_system_applications = bundle_path.starts_with("/Applications");
         let installed_in_user_applications =
             dirs::home_dir().is_some_and(|home| bundle_path.starts_with(home.join("Applications")));
-        if !installed_in_system_applications && !installed_in_user_applications {
-            return Ok(LaunchAtLoginStatus::Unavailable);
-        }
+        installed_in_system_applications || installed_in_user_applications
+    }
 
+    fn state(&self) -> ServiceState {
         let service = unsafe { SMAppService::mainAppService() };
         let status = unsafe { service.status() };
-        Ok(LaunchAtLoginStatus::Available {
-            enabled: status == SMAppServiceStatus::Enabled,
+        if status == SMAppServiceStatus::Enabled {
+            ServiceState::Enabled
+        } else if status == SMAppServiceStatus::RequiresApproval {
+            ServiceState::RequiresApproval
+        } else {
+            ServiceState::Off
+        }
+    }
+
+    fn register(&self) -> Result<(), BridgeError> {
+        let service = unsafe { SMAppService::mainAppService() };
+        unsafe { service.registerAndReturnError() }
+            .map_err(|error| BridgeError::engine(error.localizedDescription().to_string()))
+    }
+
+    fn unregister(&self) -> Result<(), BridgeError> {
+        let service = unsafe { SMAppService::mainAppService() };
+        unsafe { service.unregisterAndReturnError() }
+            .map_err(|error| BridgeError::engine(error.localizedDescription().to_string()))
+    }
+}
+
+struct SystemLaunchAtLogin {
+    service: Arc<dyn LoginItemService>,
+}
+
+impl SystemLaunchAtLogin {
+    fn new(service: Arc<dyn LoginItemService>) -> Self {
+        Self { service }
+    }
+}
+
+impl LaunchAtLoginImpl for SystemLaunchAtLogin {
+    fn status(&self) -> Result<LaunchAtLoginStatus, BridgeError> {
+        if !self.service.can_register() {
+            return Ok(LaunchAtLoginStatus::Unavailable);
+        }
+        Ok(match self.service.state() {
+            ServiceState::Enabled => LaunchAtLoginStatus::Available { enabled: true },
+            ServiceState::RequiresApproval => LaunchAtLoginStatus::RequiresApproval,
+            ServiceState::Off => LaunchAtLoginStatus::Available { enabled: false },
         })
     }
 
@@ -123,7 +186,13 @@ impl LaunchAtLoginImpl for SystemLaunchAtLogin {
             LaunchAtLoginStatus::Available { enabled: current } if current == enabled => {
                 return Ok(LaunchAtLoginStatus::Available { enabled });
             }
-            LaunchAtLoginStatus::Available { .. } => {}
+            // Registering leaves a switched-off item switched off, so there is
+            // nothing to ask the system for; the panel explains what the user
+            // has to do. Turning it off again does unregister it.
+            LaunchAtLoginStatus::RequiresApproval if enabled => {
+                return Ok(LaunchAtLoginStatus::RequiresApproval);
+            }
+            LaunchAtLoginStatus::Available { .. } | LaunchAtLoginStatus::RequiresApproval => {}
             LaunchAtLoginStatus::Unavailable => {
                 return Err(BridgeError::invalid_input(
                     "launch at login is available only when the app is installed in Applications",
@@ -131,13 +200,11 @@ impl LaunchAtLoginImpl for SystemLaunchAtLogin {
             }
         }
 
-        let service = unsafe { SMAppService::mainAppService() };
-        let result = if enabled {
-            unsafe { service.registerAndReturnError() }
+        if enabled {
+            self.service.register()?;
         } else {
-            unsafe { service.unregisterAndReturnError() }
-        };
-        result.map_err(|error| BridgeError::engine(error.localizedDescription().to_string()))?;
+            self.service.unregister()?;
+        }
         self.status()
     }
 }
@@ -156,7 +223,8 @@ impl LaunchAtLoginImpl for FakeLaunchAtLogin {
     fn set_enabled(&self, enabled: bool) -> Result<LaunchAtLoginStatus, BridgeError> {
         let mut status = self.status.lock().expect("fake status lock poisoned");
         match *status {
-            LaunchAtLoginStatus::Available { .. } => {
+            LaunchAtLoginStatus::RequiresApproval if enabled => Ok(*status),
+            LaunchAtLoginStatus::Available { .. } | LaunchAtLoginStatus::RequiresApproval => {
                 *status = LaunchAtLoginStatus::Available { enabled };
                 Ok(*status)
             }
@@ -227,6 +295,171 @@ mod tests {
 
         *system.status.lock().unwrap() = LaunchAtLoginStatus::Available { enabled: true };
 
+        assert_eq!(
+            controller.status_at(start + STATUS_FRESHNESS),
+            LaunchAtLoginStatus::Available { enabled: true }
+        );
+    }
+
+    /// The system's login item service: the state System Settings shows, the
+    /// state a registration leaves behind, and what the app asked of it.
+    struct FakeLoginItem {
+        can_register: bool,
+        state: Mutex<ServiceState>,
+        state_after_register: ServiceState,
+        registers: AtomicUsize,
+        unregisters: AtomicUsize,
+    }
+
+    impl FakeLoginItem {
+        fn new(state: ServiceState) -> Arc<Self> {
+            Arc::new(Self {
+                can_register: true,
+                state: Mutex::new(state),
+                state_after_register: ServiceState::Enabled,
+                registers: AtomicUsize::new(0),
+                unregisters: AtomicUsize::new(0),
+            })
+        }
+
+        fn registrations(&self) -> usize {
+            self.registers.load(Ordering::SeqCst)
+        }
+
+        fn unregistrations(&self) -> usize {
+            self.unregisters.load(Ordering::SeqCst)
+        }
+    }
+
+    impl LoginItemService for FakeLoginItem {
+        fn can_register(&self) -> bool {
+            self.can_register
+        }
+
+        fn state(&self) -> ServiceState {
+            *self.state.lock().unwrap()
+        }
+
+        fn register(&self) -> Result<(), BridgeError> {
+            self.registers.fetch_add(1, Ordering::SeqCst);
+            *self.state.lock().unwrap() = self.state_after_register;
+            Ok(())
+        }
+
+        fn unregister(&self) -> Result<(), BridgeError> {
+            self.unregisters.fetch_add(1, Ordering::SeqCst);
+            *self.state.lock().unwrap() = ServiceState::Off;
+            Ok(())
+        }
+    }
+
+    fn system(service: &Arc<FakeLoginItem>) -> SystemLaunchAtLogin {
+        SystemLaunchAtLogin::new(service.clone())
+    }
+
+    #[test]
+    fn what_the_service_manager_reports_decides_the_status() {
+        for (state, expected) in [
+            (ServiceState::Enabled, LaunchAtLoginStatus::Available { enabled: true }),
+            (ServiceState::Off, LaunchAtLoginStatus::Available { enabled: false }),
+            (ServiceState::RequiresApproval, LaunchAtLoginStatus::RequiresApproval),
+        ] {
+            let service = FakeLoginItem::new(state);
+            assert_eq!(system(&service).status().unwrap(), expected, "{state:?}");
+        }
+    }
+
+    #[test]
+    fn an_app_outside_applications_is_unavailable_whatever_the_service_says() {
+        let service = Arc::new(FakeLoginItem {
+            can_register: false,
+            state: Mutex::new(ServiceState::RequiresApproval),
+            state_after_register: ServiceState::Enabled,
+            registers: AtomicUsize::new(0),
+            unregisters: AtomicUsize::new(0),
+        });
+        let login = system(&service);
+
+        assert_eq!(login.status().unwrap(), LaunchAtLoginStatus::Unavailable);
+        assert!(login.set_enabled(true).is_err());
+        assert_eq!(service.registrations(), 0);
+    }
+
+    #[test]
+    fn turning_it_on_registers_once_and_reports_what_the_system_made_of_it() {
+        let service = FakeLoginItem::new(ServiceState::Off);
+
+        let status = system(&service).set_enabled(true).unwrap();
+
+        assert_eq!(status, LaunchAtLoginStatus::Available { enabled: true });
+        assert_eq!(service.registrations(), 1);
+    }
+
+    #[test]
+    fn a_registration_the_system_holds_back_reports_requires_approval() {
+        let service = Arc::new(FakeLoginItem {
+            can_register: true,
+            state: Mutex::new(ServiceState::Off),
+            state_after_register: ServiceState::RequiresApproval,
+            registers: AtomicUsize::new(0),
+            unregisters: AtomicUsize::new(0),
+        });
+
+        let status = system(&service).set_enabled(true).unwrap();
+
+        assert_eq!(status, LaunchAtLoginStatus::RequiresApproval);
+    }
+
+    #[test]
+    fn enabling_while_approval_is_pending_does_not_call_register_and_reports_requires_approval() {
+        let service = FakeLoginItem::new(ServiceState::RequiresApproval);
+
+        let status = system(&service).set_enabled(true).unwrap();
+
+        assert_eq!(status, LaunchAtLoginStatus::RequiresApproval);
+        assert_eq!(service.registrations(), 0, "registering cannot undo the user's choice");
+    }
+
+    #[test]
+    fn disabling_while_approval_is_pending_unregisters() {
+        let service = FakeLoginItem::new(ServiceState::RequiresApproval);
+
+        let status = system(&service).set_enabled(false).unwrap();
+
+        assert_eq!(status, LaunchAtLoginStatus::Available { enabled: false });
+        assert_eq!(service.unregistrations(), 1);
+    }
+
+    #[test]
+    fn asking_for_the_state_it_already_has_changes_nothing() {
+        let on = FakeLoginItem::new(ServiceState::Enabled);
+        assert_eq!(
+            system(&on).set_enabled(true).unwrap(),
+            LaunchAtLoginStatus::Available { enabled: true }
+        );
+        let off = FakeLoginItem::new(ServiceState::Off);
+        assert_eq!(
+            system(&off).set_enabled(false).unwrap(),
+            LaunchAtLoginStatus::Available { enabled: false }
+        );
+        assert_eq!(on.registrations() + on.unregistrations(), 0);
+        assert_eq!(off.registrations() + off.unregistrations(), 0);
+    }
+
+    #[test]
+    fn approval_given_in_system_settings_shows_once_the_last_read_has_aged() {
+        let (controller, system) = controller(false);
+        *system.status.lock().unwrap() = LaunchAtLoginStatus::RequiresApproval;
+        let start = Instant::now();
+        assert_eq!(controller.status_at(start), LaunchAtLoginStatus::RequiresApproval);
+
+        *system.status.lock().unwrap() = LaunchAtLoginStatus::Available { enabled: true };
+
+        assert_eq!(
+            controller.status_at(start + STATUS_FRESHNESS - Duration::from_millis(1)),
+            LaunchAtLoginStatus::RequiresApproval,
+            "a read this recent still stands"
+        );
         assert_eq!(
             controller.status_at(start + STATUS_FRESHNESS),
             LaunchAtLoginStatus::Available { enabled: true }

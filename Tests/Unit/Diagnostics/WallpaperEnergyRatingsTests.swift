@@ -113,6 +113,32 @@ final class WallpaperEnergyRatingsTests: XCTestCase {
     XCTAssertEqual(rating.level, .medium)
   }
 
+  func testShownRatingSharesItsPowerOfTheBattery() {
+    var batteryReads = 0
+    let ratings = WallpaperEnergyRatings(file: file) {
+      batteryReads += 1
+      return 50
+    }
+    ratings.record(context("a"), milliwatts: 1_000, seconds: 150)
+    ratings.record(context("b"), milliwatts: 250, seconds: 150)
+    XCTAssertNil(ratings.snapshot(for: "unrated", kind: .projectScene))
+    XCTAssertEqual(batteryReads, 0, "the battery is not read while nothing is rated")
+
+    XCTAssertEqual(
+      ratings.snapshot(for: "a", kind: .projectScene)?["batteryPercentPerHour"] as? Double ?? 0,
+      2, accuracy: 0.001, "1 W from a 50 Wh battery is 2 % an hour")
+    XCTAssertEqual(
+      ratings.snapshot(for: "b", kind: .projectScene)?["batteryPercentPerHour"] as? Double ?? 0,
+      0.5, accuracy: 0.001)
+    XCTAssertEqual(batteryReads, 1, "every wallpaper's snapshot shares one battery read")
+
+    let desktop = WallpaperEnergyRatings(file: folder.appendingPathComponent("desktop.json"))
+    desktop.record(context("a"), milliwatts: 1_000, seconds: 150)
+    let snapshot = desktop.snapshot(for: "a", kind: .projectScene)
+    XCTAssertNotNil(snapshot)
+    XCTAssertNil(snapshot?["batteryPercentPerHour"], "a Mac without a battery shows no share")
+  }
+
   func testStableSelectorsUseLiveDisplayMappingAndUnknownMappingDoesNotAttributeEnergy() {
     let identity = "identity:{\"uuid\":\"example\"}"
     let assignments = [(display: "primary", wallpaper: "a"), (display: identity, wallpaper: "b")]

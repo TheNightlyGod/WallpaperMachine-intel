@@ -30,10 +30,7 @@ extension WebPanelController {
         }
         if let info { snapshot["imageAspectRatio"] = info.imageAspectRatio }
         let displayTitle = store.settingsSnapshot.displays.first { $0.displayId == displayID }?.title ?? ""
-        let physicalID = ResolvedDisplayTitles.liveDisplayID(displayID, title: displayTitle)
-        if let screen = NSScreen.screens.first(where: {
-            ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == physicalID
-        }), screen.frame.height > 0 {
+        if let screen = DisplayGeometry.screen(displayID: displayID, title: displayTitle), screen.frame.height > 0 {
             snapshot["displayAspectRatio"] = screen.frame.width / screen.frame.height
             snapshot["displayViewportSize"] = ["width": screen.frame.width, "height": screen.frame.height]
             snapshot["displayPixelSize"] = ["width": screen.frame.width * screen.backingScaleFactor,

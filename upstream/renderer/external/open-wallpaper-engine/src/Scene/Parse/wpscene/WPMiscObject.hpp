@@ -126,6 +126,9 @@ struct WPTextObject : WPMiscObjectBase {
     float                brightness { 1.0f };
     int32_t              colorBlendMode { 0 };
     std::array<float, 2> size { 0.0f, 0.0f };
+    // How the layer's texture (`_rt_imageLayerComposite_<id>`) is addressed
+    // outside 0..1, as for an image layer.
+    bool                 clampuvs { true };
     bool                 perspective { false };
     bool                 copybackground { false };
     bool                 solid { false };
@@ -155,6 +158,7 @@ struct WPTextObject : WPMiscObjectBase {
         GET_JSON_NAME_VALUE_NOWARN(json, "brightness", brightness);
         GET_JSON_NAME_VALUE_NOWARN(json, "colorBlendMode", colorBlendMode);
         GET_JSON_NAME_VALUE_NOWARN(json, "size", size);
+        GET_JSON_NAME_VALUE_NOWARN(json, "clampuvs", clampuvs);
         GET_JSON_NAME_VALUE_NOWARN(json, "perspective", perspective);
         GET_JSON_NAME_VALUE_NOWARN(json, "copybackground", copybackground);
         GET_JSON_NAME_VALUE_NOWARN(json, "solid", solid);

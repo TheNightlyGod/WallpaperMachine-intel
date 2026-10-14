@@ -15,6 +15,9 @@ struct WallpaperPreviewRequest: Equatable, Sendable {
     let entryFile: String
     let assetsURL: URL
     var propertiesJSON: String
+    /// The properties a running preview cannot change in place: a picture or a file is read
+    /// when the wallpaper loads. A preview holds them at the values it started with.
+    var frozenPropertyIDs: Set<String> = []
     let fps: UInt32
     let scalingMode: Int32
     var scalingFactor: Double

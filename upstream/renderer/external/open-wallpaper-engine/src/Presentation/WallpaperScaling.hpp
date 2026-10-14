@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Presentation/WallpaperFraming.hpp"
+
 #include <cstdint>
 #include <vulkan/vulkan.h>
 
@@ -32,6 +34,8 @@ struct WallpaperScalingLayout {
     PixelRect scissor_px {};
 };
 
+// `pan_x` and `pan_y` are `WallpaperFraming` fractions and are clamped the same
+// way. The defaults centre the wallpaper exactly as the layout always has.
 WallpaperScalingLayout ComputeWallpaperScalingLayout(
     WallpaperScalingMode mode,
     uint32_t scene_width,
@@ -39,7 +43,9 @@ WallpaperScalingLayout ComputeWallpaperScalingLayout(
     uint32_t display_logical_width,
     uint32_t display_logical_height,
     double display_scale_factor,
-    double wallpaper_scale_factor);
+    double wallpaper_scale_factor,
+    double pan_x = 0.5,
+    double pan_y = 0.5);
 
 // World rectangle the window covers, expressed for a cursor given in
 // window-normalized coordinates: world = origin + (x, 1 - y) * size. The

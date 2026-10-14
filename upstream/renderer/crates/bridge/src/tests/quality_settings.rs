@@ -86,7 +86,7 @@ async fn commit(
         .await
         .unwrap();
     bridge
-        .apply_wallpaper_options(wallpaper.into())
+        .apply_wallpaper_options(wallpaper.into(), true)
         .await
         .unwrap();
 }
@@ -215,6 +215,26 @@ async fn render_scale_is_unsupported_when_only_a_video_wallpaper_runs() {
 
     commit(&bridge, "100", "scene", "7").await;
     assert!(settings(&bridge).await.render_scale_supported);
+}
+
+#[tokio::test]
+async fn render_scale_is_supported_when_a_web_wallpaper_runs() {
+    let temp = tempfile::tempdir().unwrap();
+    let engine = FakeEngineFacade::default();
+    engine.set_snapshot(vec![display_with_scene(7, 1)]);
+    let bridge = bridge_with(&engine, &temp);
+
+    commit(&bridge, "300", "video", "7").await;
+    assert!(
+        !settings(&bridge).await.render_scale_supported,
+        "a lone video still has nothing to rescale"
+    );
+
+    commit(&bridge, "400", "web", "7").await;
+    assert!(
+        settings(&bridge).await.render_scale_supported,
+        "a web page takes the scale through its devicePixelRatio"
+    );
 }
 
 #[tokio::test]

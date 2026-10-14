@@ -55,7 +55,7 @@ async fn apply_options_clears_dirty_state() {
     );
 
     bridge
-        .apply_wallpaper_options("100".to_string())
+        .apply_wallpaper_options("100".to_string(), true)
         .await
         .unwrap();
 
@@ -96,7 +96,7 @@ async fn apply_while_globally_paused_preserves_paused_snapshot_and_scene_seed() 
         .unwrap();
     let done = engine.wait_for_next_reconcile();
     bridge
-        .apply_wallpaper_options("100".to_string())
+        .apply_wallpaper_options("100".to_string(), true)
         .await
         .unwrap();
     assert!(done.wait(Duration::from_secs(2)));
@@ -134,7 +134,7 @@ async fn apply_options_keeps_draft_uncommitted_when_reconcile_fails() {
 
     let done = engine.wait_for_next_reconcile();
     bridge
-        .apply_wallpaper_options("100".to_string())
+        .apply_wallpaper_options("100".to_string(), true)
         .await
         .expect_err("reconcile should fail");
     assert!(done.wait(Duration::from_secs(2)));
@@ -321,7 +321,7 @@ async fn scaling_factor_edit_updates_draft_and_apply_persists_without_reconcile(
         .unwrap();
     let done = engine.wait_for_next_reconcile();
     bridge
-        .apply_wallpaper_options("100".to_string())
+        .apply_wallpaper_options("100".to_string(), true)
         .await
         .unwrap();
     assert!(done.wait(Duration::from_secs(2)));
@@ -346,7 +346,7 @@ async fn scaling_factor_edit_updates_draft_and_apply_persists_without_reconcile(
     assert_f64_close(edited.display_configurations[0].scaling_factor, 1.25);
 
     bridge
-        .apply_wallpaper_options("100".to_string())
+        .apply_wallpaper_options("100".to_string(), true)
         .await
         .unwrap();
 
@@ -430,7 +430,7 @@ async fn scaling_factor_edit_does_not_update_another_wallpapers_active_scene() {
         .unwrap();
     let done = engine.wait_for_next_reconcile();
     bridge
-        .apply_wallpaper_options("200".to_string())
+        .apply_wallpaper_options("200".to_string(), true)
         .await
         .unwrap();
     assert!(done.wait(Duration::from_secs(2)));
@@ -467,7 +467,7 @@ async fn audio_option_edits_apply_to_active_scene_without_reconcile() {
         .unwrap();
     let done = engine.wait_for_next_reconcile();
     bridge
-        .apply_wallpaper_options("100".to_string())
+        .apply_wallpaper_options("100".to_string(), true)
         .await
         .unwrap();
     assert!(done.wait(Duration::from_secs(2)));
@@ -506,7 +506,7 @@ async fn audio_option_edits_apply_to_active_scene_without_reconcile() {
     assert!(!options.dirty);
 
     bridge
-        .apply_wallpaper_options("100".to_string())
+        .apply_wallpaper_options("100".to_string(), true)
         .await
         .unwrap();
 
@@ -538,7 +538,7 @@ async fn scaling_and_fps_option_edits_apply_to_active_scene_without_reconcile() 
         .unwrap();
     let done = engine.wait_for_next_reconcile();
     bridge
-        .apply_wallpaper_options("100".to_string())
+        .apply_wallpaper_options("100".to_string(), true)
         .await
         .unwrap();
     assert!(done.wait(Duration::from_secs(2)));
@@ -572,7 +572,7 @@ async fn scaling_and_fps_option_edits_apply_to_active_scene_without_reconcile() 
     assert_eq!(options.display_configurations[0].target_fps, 30);
 
     bridge
-        .apply_wallpaper_options("100".to_string())
+        .apply_wallpaper_options("100".to_string(), true)
         .await
         .unwrap();
 
@@ -597,7 +597,7 @@ async fn pending_render_option_edits_apply_to_active_scene_without_reconcile() {
         .unwrap();
     let done = engine.wait_for_next_reconcile();
     bridge
-        .apply_wallpaper_options("100".to_string())
+        .apply_wallpaper_options("100".to_string(), true)
         .await
         .unwrap();
     assert!(done.wait(Duration::from_secs(2)));
@@ -617,7 +617,7 @@ async fn pending_render_option_edits_apply_to_active_scene_without_reconcile() {
     assert_f64_close(options.display_configurations[0].scaling_factor, 1.5);
 
     bridge
-        .apply_wallpaper_options("100".to_string())
+        .apply_wallpaper_options("100".to_string(), true)
         .await
         .unwrap();
 
@@ -659,7 +659,7 @@ async fn applying_default_scene_starts_audio_capture() {
         .unwrap();
     let done = engine.wait_for_next_reconcile();
     bridge
-        .apply_wallpaper_options("100".to_string())
+        .apply_wallpaper_options("100".to_string(), true)
         .await
         .unwrap();
     assert!(done.wait(Duration::from_secs(2)));
@@ -713,7 +713,7 @@ async fn live_audio_response_toggle_keeps_selection_responsive_while_capture_sta
         .unwrap();
     let done = engine.wait_for_next_reconcile();
     bridge
-        .apply_wallpaper_options("100".to_string())
+        .apply_wallpaper_options("100".to_string(), true)
         .await
         .unwrap();
     assert!(done.wait(Duration::from_secs(2)));
@@ -782,7 +782,7 @@ async fn failed_audio_activation_is_reported_and_rolls_back_without_losing_other
         .set_display_config_enabled("100".into(), "7".into(), true)
         .await
         .unwrap();
-    bridge.apply_wallpaper_options("100".into()).await.unwrap();
+    bridge.apply_wallpaper_options("100".into(), true).await.unwrap();
     engine.set_snapshot(vec![active_display_snapshot(7, 75, 1)]);
     bridge.set_volume("100".into(), 0.25).await.unwrap();
     engine.fail_audio_capture_with(Some("System audio recording denied".into()));
@@ -833,7 +833,7 @@ async fn apply_options_clamps_scene_fps_to_display_refresh_rate() {
         .unwrap();
     let done = engine.wait_for_next_reconcile();
     bridge
-        .apply_wallpaper_options("100".to_string())
+        .apply_wallpaper_options("100".to_string(), true)
         .await
         .unwrap();
     assert!(done.wait(Duration::from_secs(2)));
@@ -861,7 +861,7 @@ async fn apply_options_updates_active_wallpaper_snapshots() {
         .await
         .unwrap();
     bridge
-        .apply_wallpaper_options("100".to_string())
+        .apply_wallpaper_options("100".to_string(), true)
         .await
         .unwrap();
 
@@ -929,7 +929,7 @@ async fn applied_options_persist_across_bridge_instances() {
         .await
         .unwrap();
     bridge
-        .apply_wallpaper_options("100".to_string())
+        .apply_wallpaper_options("100".to_string(), true)
         .await
         .unwrap();
 
@@ -981,7 +981,7 @@ async fn failed_save_reports_live_assignment_and_preserves_pending_scaling() {
         .unwrap();
 
     bridge
-        .apply_wallpaper_options("100".to_string())
+        .apply_wallpaper_options("100".to_string(), true)
         .await
         .expect_err("wallpaper config write should fail");
 
@@ -1004,7 +1004,7 @@ async fn failed_save_reports_live_assignment_and_preserves_pending_scaling() {
     );
     fs::remove_file(root.path().join("wallpapers")).unwrap();
     let saved = bridge
-        .apply_wallpaper_options("100".to_string())
+        .apply_wallpaper_options("100".to_string(), true)
         .await
         .unwrap();
     assert!(!saved.wallpaper_options.dirty);
@@ -1039,7 +1039,7 @@ async fn control_plane_stays_responsive_when_apply_reconcile_is_in_flight() {
     let apply = thread::spawn(move || {
         let result = tokio::runtime::Runtime::new().unwrap().block_on(async {
             apply_bridge
-                .apply_wallpaper_options("100".to_string())
+                .apply_wallpaper_options("100".to_string(), true)
                 .await
         });
         apply_tx.send(result).unwrap();
@@ -1115,7 +1115,7 @@ async fn failed_reconcile_does_not_persist_config() {
 
     let done = engine.wait_for_next_reconcile();
     bridge
-        .apply_wallpaper_options("100".to_string())
+        .apply_wallpaper_options("100".to_string(), true)
         .await
         .expect_err("reconcile should fail");
     assert!(done.wait(Duration::from_secs(2)));
@@ -1215,7 +1215,7 @@ async fn lock_screen_export_ignores_drafts_and_tracks_pause_and_ejection() {
         .set_scaling_mode("100".into(), "7".into(), BridgeScalingMode::Fill)
         .await
         .unwrap();
-    bridge.apply_wallpaper_options("100".into()).await.unwrap();
+    bridge.apply_wallpaper_options("100".into(), true).await.unwrap();
     let applied = bridge.lock_screen_scenes().await.unwrap();
     assert_eq!(applied.len(), 1);
     assert_eq!(applied[0].scaling_mode, BridgeScalingMode::Fill);
@@ -1229,7 +1229,7 @@ async fn lock_screen_export_ignores_drafts_and_tracks_pause_and_ejection() {
         bridge.lock_screen_scenes().await.unwrap()[0].scaling_factor,
         1.0
     );
-    bridge.apply_wallpaper_options("100".into()).await.unwrap();
+    bridge.apply_wallpaper_options("100".into(), true).await.unwrap();
     assert_eq!(
         bridge.lock_screen_scenes().await.unwrap()[0].scaling_factor,
         1.25
@@ -1284,7 +1284,7 @@ async fn web_wallpaper_apply_bypasses_engine_and_exports_host_inputs() {
         )
         .await
         .unwrap();
-    bridge.apply_wallpaper_options("300".into()).await.unwrap();
+    bridge.apply_wallpaper_options("300".into(), true).await.unwrap();
 
     assert!(
         engine.rendered_scenes().is_empty(),
@@ -1350,6 +1350,69 @@ async fn web_wallpaper_apply_bypasses_engine_and_exports_host_inputs() {
     assert!(bridge.app_snapshot().await.unwrap().active_wallpaper_ids.is_empty());
 }
 
+/// A web page has no renderer target to shrink, so the host is handed the scale
+/// that is in force and applies it to `devicePixelRatio`. It has to follow the
+/// same rule a scene does: the saved scale, or the battery profile's while
+/// Reduced quality is selected and the Mac is on battery.
+#[tokio::test]
+async fn web_wallpaper_descriptor_carries_the_effective_render_scale() {
+    let engine = FakeEngineFacade::default();
+    engine.set_snapshot(vec![display_snapshot(7, 75)]);
+    let bridge = BridgeBuilder::new(engine)
+        .with_state(crate::actor::state::BridgeActorState::default())
+        .build()
+        .unwrap();
+    bridge
+        .inject_scene_project_for_test(
+            "300",
+            "Web",
+            r#"{"type":"web","title":"Web","file":"index.html"}"#,
+        )
+        .await;
+    bridge
+        .set_display_config_enabled("300".into(), "7".into(), true)
+        .await
+        .unwrap();
+    bridge.apply_wallpaper_options("300".into(), true).await.unwrap();
+
+    assert_eq!(bridge.web_wallpapers().await.unwrap()[0].render_scale, 1.0);
+    assert!(
+        bridge.settings_snapshot().await.unwrap().render_scale_supported,
+        "a running web page honours the scale, so the control must be enabled"
+    );
+
+    bridge.set_render_scale(0.5).await.unwrap();
+    assert_eq!(bridge.web_wallpapers().await.unwrap()[0].render_scale, 0.5);
+
+    bridge
+        .set_battery_mode(crate::BridgeBatteryMode::ReducedQuality)
+        .await
+        .unwrap();
+    assert_eq!(
+        bridge.web_wallpapers().await.unwrap()[0].render_scale,
+        0.5,
+        "Reduced quality is selected but the Mac is on external power"
+    );
+
+    bridge
+        .set_power_source_for_test(crate::power::PowerSource::Battery)
+        .await;
+    let on_battery = bridge.web_wallpapers().await.unwrap();
+    assert_eq!(
+        on_battery[0].render_scale, 0.75,
+        "the battery profile's default scale"
+    );
+
+    bridge
+        .set_power_source_for_test(crate::power::PowerSource::External)
+        .await;
+    assert_eq!(
+        bridge.web_wallpapers().await.unwrap()[0].render_scale,
+        0.5,
+        "leaving battery power hands back the scale the user saved"
+    );
+}
+
 #[tokio::test]
 async fn web_wallpaper_combo_values_keep_authored_types_after_editor_changes() {
     let engine = FakeEngineFacade::default();
@@ -1382,7 +1445,7 @@ async fn web_wallpaper_combo_values_keep_authored_types_after_editor_changes() {
         .set_display_config_enabled("300".into(), "7".into(), true)
         .await
         .unwrap();
-    bridge.apply_wallpaper_options("300".into()).await.unwrap();
+    bridge.apply_wallpaper_options("300".into(), true).await.unwrap();
 
     let web = bridge.web_wallpapers().await.unwrap();
     let initial: serde_json::Value = serde_json::from_str(&web[0].properties_json).unwrap();
@@ -1419,7 +1482,7 @@ async fn web_wallpaper_combo_values_keep_authored_types_after_editor_changes() {
                 value: selection.into()
             }
         );
-        bridge.apply_wallpaper_options("300".into()).await.unwrap();
+        bridge.apply_wallpaper_options("300".into(), true).await.unwrap();
         let web = bridge.web_wallpapers().await.unwrap();
         let properties: serde_json::Value = serde_json::from_str(&web[0].properties_json).unwrap();
         assert_eq!(
@@ -1444,7 +1507,7 @@ async fn lock_screen_export_ignores_presentation_suspension_but_preserves_playba
         .set_display_config_enabled("100".into(), "7".into(), true)
         .await
         .unwrap();
-    bridge.apply_wallpaper_options("100".into()).await.unwrap();
+    bridge.apply_wallpaper_options("100".into(), true).await.unwrap();
 
     bridge.set_presentation_suspended(true).await.unwrap();
     assert!(engine.rendered_scenes()[0].paused);
@@ -1486,7 +1549,7 @@ async fn lock_screen_export_ignores_the_desktop_display_being_covered() {
         .set_display_config_enabled("100".into(), "7".into(), true)
         .await
         .unwrap();
-    bridge.apply_wallpaper_options("100".into()).await.unwrap();
+    bridge.apply_wallpaper_options("100".into(), true).await.unwrap();
 
     bridge
         .set_display_presentation_suspended("7".into(), true)
@@ -1516,7 +1579,7 @@ async fn presentation_transitions_repair_in_flight_reconcile_pause_state() {
             .set_display_config_enabled("100".into(), "7".into(), true)
             .await
             .unwrap();
-        bridge.apply_wallpaper_options("100".into()).await.unwrap();
+        bridge.apply_wallpaper_options("100".into(), true).await.unwrap();
         bridge
             .set_presentation_suspended(initially_suspended)
             .await
@@ -1535,7 +1598,7 @@ async fn presentation_transitions_repair_in_flight_reconcile_pause_state() {
         let apply = thread::spawn(move || {
             tokio::runtime::Runtime::new()
                 .unwrap()
-                .block_on(apply_bridge.apply_wallpaper_options("200".into()))
+                .block_on(apply_bridge.apply_wallpaper_options("200".into(), true))
         });
         assert!(
             block.wait_until_blocked(Duration::from_secs(2)),
@@ -1581,7 +1644,7 @@ async fn failed_audio_resume_restores_renderer_and_allows_later_presentation_tra
         .set_display_config_enabled("100".into(), "7".into(), true)
         .await
         .unwrap();
-    bridge.apply_wallpaper_options("100".into()).await.unwrap();
+    bridge.apply_wallpaper_options("100".into(), true).await.unwrap();
     bridge.set_presentation_suspended(true).await.unwrap();
     engine.fail_audio_capture_with(Some("audio restart failed".into()));
 

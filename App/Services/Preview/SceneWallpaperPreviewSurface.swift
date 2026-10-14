@@ -171,6 +171,14 @@ final class SceneWallpaperPreviewSurface: WallpaperPreviewSurface {
         if let renderer { try check(owe_scene_wallpaper_set_audio_muted(renderer, muted)) }
     }
 
+    /// Hands the renderer the whole property state to show on the scene it is running. The
+    /// renderer never saves it and holds what only a load can apply, such as a picture, at the
+    /// value the scene loaded with.
+    func applyProperties(_ json: String) throws {
+        guard !stopped, let renderer else { return }
+        try check(owe_scene_wallpaper_set_property_string(renderer, owe_property_project_property_preview_json(), json))
+    }
+
     func stop() {
         guard !stopped else { return }
         stopped = true

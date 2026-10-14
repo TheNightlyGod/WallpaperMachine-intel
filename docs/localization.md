@@ -59,9 +59,30 @@ page in place without a reload. The `languageSetting` action validates the
 value against the registry and refreshes the user script so a later reload or
 WebContent recovery starts in the same language.
 
+The effective language also reaches the bridge, because a wallpaper can carry
+its own label translations (`general.localization`) and the bridge resolves them
+when it builds the property snapshot. `AppLanguage.wallpaperEngineLocale` names
+the table's language code (`en-us`, `zh-chs`, `zh-cht`, `ja-jp`) and
+`labelLocales` lists it followed by `en-us`. `BridgeStore.setLabelLanguageAsync`
+sends the list through `setLabelLanguages`, once before the library loads
+(`AppDelegate`) and again from the `languageSetting` action, which also re-reads
+the open wallpaper's options so the inspector relabels in place. The list is
+transient bridge state, never persisted, and these are the only two places that
+change the effective language in production; a new path that did would have to
+call `setLabelLanguageAsync` too. A failure to send it is logged and never fails
+the language change.
+
 What is never translated: action identifiers, option values, paths, tags sent
 to Steam, wallpaper titles, descriptions, creator names, custom property labels
-and upstream diagnostic text. Two labels are ours rather than the author's and
+and upstream diagnostic text. The exception to custom property labels is the
+text a wallpaper translates itself: a label or choice that is exactly a token in
+its own `general.localization` table follows the app language, falling back to
+that table's English and then to the author's string. A built-in `ui_` token that no
+table resolves is shown as English words derived from it (`ui_editor_effect_opacity_title`
+becomes Opacity), translated only when the same phrase is a catalog key; the rest stay
+English in the other languages. The curated phrases in `enginePropertyLabels`
+(`WebUI/panel.js`) reach `t()` through a table lookup, so each one needs an entry in
+every catalog, which `test_panel_localization.py` checks. Two labels are ours rather than the author's and
 are translated: the Wallpaper Engine editor's own token for the scheme colour it
 adds to every scene, and the **Unnamed option** stand-in for a control whose
 label was pure decoration. The property labels the app itself writes into the
@@ -119,9 +140,14 @@ registries agree and the catalogs are complete.
 3. **Panel registry.** In `WebUI/i18n.js`, add
    `import <binding> from './locales/<tag>.js';` and `'<tag>': <binding>,` to
    `catalogs`.
-4. **Native registry.** Append `AppLanguage(tag: "<tag>", name: "<own name>")`
-   to `AppLanguage.supported`. The served-file allowlist in `WebPanelAssets`
-   and the Settings picker derive from this list; nothing else needs a change.
+4. **Native registry.** Append
+   `AppLanguage(tag: "<tag>", name: "<own name>", wallpaperEngineLocale: "<code>")`
+   to `AppLanguage.supported`. The locale is the Wallpaper Engine code that
+   wallpapers use for the language in their own label tables (`zh-chs`, `ja-jp`,
+   `ko-kr`…); it is required so a language cannot ship without it, and
+   `AppLanguageTests` checks that the codes are distinct and well formed. The
+   served-file allowlist in `WebPanelAssets` and the Settings picker derive from
+   this list; nothing else needs a change.
 5. **Verify.** `python3 scripts/test.py`. The Python check confirms the
    registries, key parity and placeholders; the hosted tests load the panel in
    each language offscreen, switch it live through `languageSetting`, and

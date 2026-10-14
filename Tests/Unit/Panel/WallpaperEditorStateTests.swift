@@ -54,4 +54,47 @@ final class WallpaperEditorStateTests: XCTestCase {
         XCTAssertNil(state.propertyTextDrafts[changedType])
         XCTAssertEqual(state.propertyTextDrafts[other], "other editor")
     }
+
+    func testAValueBeingDraggedIsHeldBesideTheDraftsAndEndsWithItsEdit() {
+        let state = WallpaperEditorState()
+        let alpha = WallpaperEditorState.FieldKey(wallpaperID: "aurora", fieldID: "alpha")
+        let tint = WallpaperEditorState.FieldKey(wallpaperID: "aurora", fieldID: "tint")
+        let other = WallpaperEditorState.FieldKey(wallpaperID: "forest", fieldID: "alpha")
+        state.setPropertyPreview(.number(value: 0.4), key: alpha)
+        state.setPropertyPreview(.colorRgb(red: 1, green: 0, blue: 0), key: tint)
+        state.setPropertyPreview(.number(value: 0.9), key: other)
+        state.setPropertyPreview(.number(value: 0.5), key: alpha)
+
+        XCTAssertEqual(
+            state.propertyPreviews(wallpaperID: "aurora"),
+            [.init(propertyId: "alpha", value: .number(value: 0.5)), .init(propertyId: "tint", value: .colorRgb(red: 1, green: 0, blue: 0))],
+            "the newest step of each property, in a fixed order, for one wallpaper")
+        XCTAssertFalse(
+            state.hasPendingEdits(wallpaperID: "aurora"),
+            "a step is not a draft: it must not make the wallpaper look edited to a preset or an apply")
+
+        XCTAssertTrue(state.clearPropertyPreview(alpha))
+        XCTAssertFalse(state.clearPropertyPreview(alpha), "there is nothing left to end")
+        XCTAssertEqual(state.propertyPreviews(wallpaperID: "aurora").map(\.propertyId), ["tint"])
+        XCTAssertEqual(state.propertyPreviews(wallpaperID: "forest").count, 1)
+
+        state.discard(wallpaperID: "aurora")
+        XCTAssertTrue(state.propertyPreviews(wallpaperID: "aurora").isEmpty, "a revert or an apply ends it")
+        XCTAssertEqual(state.propertyPreviews(wallpaperID: "forest").count, 1, "for that wallpaper alone")
+    }
+
+    func testTheStepsOfEveryWallpaperButTheOpenOneAreDropped() {
+        let state = WallpaperEditorState()
+        for (wallpaper, property) in [("aurora", "alpha"), ("aurora", "tint"), ("forest", "alpha"), ("marsh", "alpha")] {
+            state.setPropertyPreview(.number(value: 1), key: .init(wallpaperID: wallpaper, fieldID: property))
+        }
+
+        XCTAssertEqual(state.clearPropertyPreviews(except: "aurora"), ["forest", "marsh"])
+        XCTAssertEqual(state.propertyPreviews(wallpaperID: "aurora").count, 2)
+        XCTAssertTrue(state.propertyPreviews(wallpaperID: "forest").isEmpty)
+        XCTAssertEqual(state.clearPropertyPreviews(except: "aurora"), [], "nothing else to drop")
+
+        XCTAssertTrue(state.clearPropertyPreviews(wallpaperID: "aurora"))
+        XCTAssertFalse(state.clearPropertyPreviews(wallpaperID: "aurora"))
+    }
 }

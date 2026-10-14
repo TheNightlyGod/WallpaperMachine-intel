@@ -95,6 +95,8 @@ final class DesktopWallpaperLedger {
     /// late poster on a desktop that no longer receives them.
     var awaitsConfirmation: Bool { !unconfirmed.isEmpty || !inFlight.isEmpty }
 
+    private static let journalName = "originals.json"
+
     private struct Entry: Codable {
         var original: DesktopPicture
         // nil for the previous alternating-file journal, which remains readable.
@@ -108,7 +110,7 @@ final class DesktopWallpaperLedger {
     init(folder: URL, workspace: any DesktopPictureWorkspace,
          confirmationWindow: Duration = DesktopWallpaperLedger.confirmationWindow) throws {
         self.folder = folder
-        self.journal = folder.appendingPathComponent("originals.json")
+        self.journal = folder.appendingPathComponent(Self.journalName)
         self.workspace = workspace
         self.confirmationWindow = confirmationWindow
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -117,6 +119,15 @@ final class DesktopWallpaperLedger {
         } else {
             entries = [:]
         }
+    }
+
+    /// Whether the journal in `folder` still names a poster whose original has not been put back,
+    /// so a crash, a relaunch or a switched-off preference may have left one on a desktop. False
+    /// for a missing, unreadable or empty journal. Reads the file only; nothing is created.
+    static func hasRecordedOriginals(in folder: URL) -> Bool {
+        guard let data = try? Data(contentsOf: folder.appendingPathComponent(journalName)),
+              let entries = try? JSONDecoder().decode([String: Entry].self, from: data) else { return false }
+        return !entries.isEmpty
     }
 
     /// Submit a fresh frame to EVERY desktop on its display, without a Space

@@ -409,6 +409,232 @@ final class WorkshopSourceTests: XCTestCase {
     XCTAssertEqual(store.totalCount, kept.count)
   }
 
+  // MARK: A pasted link or id
+
+  private static let pasted = "3632513108"
+
+  /// A pasted link or id is one tile, shown whatever the sidebar's rating, tags and type say:
+  /// it was asked for by name. Steam's browse page is never asked for it.
+  func testAPastedLinkOrIdShowsThatOneItemAndNeverAsksForABrowsePage() async throws {
+    let store = fixture.store
+    fixture.browse = browseHTML(rows: [wallpaperRow("12", tags: ["Scene", "Everyone"])])
+    fixture.details = [Self.pasted: detailsRow(Self.pasted, tags: ["Video", "Mature"])]
+    store.excludedTags = ["Mature", "Application"]
+    store.kind = .scene
+    store.tags = ["Approved"]
+    for text in [
+      "https://steamcommunity.com/sharedfiles/filedetails/?id=\(Self.pasted)&searchtext=forest",
+      "steam://url/CommunityFilePage/\(Self.pasted)", Self.pasted, "  \(Self.pasted)\n",
+    ] {
+      store.searchText = text
+      store.search()
+      try await finished(store)
+      XCTAssertEqual(store.items.map(\.id), [Self.pasted], text)
+      XCTAssertEqual(store.items.first?.kind, .video)
+      XCTAssertEqual(store.page, 1)
+      XCTAssertEqual(store.totalPages, 1)
+      XCTAssertEqual(store.totalCount, 1)
+      XCTAssertEqual(store.reachableCount, 1)
+      XCTAssertTrue(store.hasLoaded)
+      XCTAssertNil(store.errorMessage)
+      XCTAssertEqual(store.committedQuery?.itemID, Self.pasted)
+      XCTAssertEqual(store.browseURL, WorkshopItem.pageURL(id: Self.pasted), "Open on Steam opens the item")
+    }
+    XCTAssertEqual(fixture.browsePagesRequested, [], "the browse page is never read for a pasted item")
+    XCTAssertEqual(fixture.detailsRequests, 4)
+
+    // Words are searched as before, and the item no longer stands in for their results.
+    store.searchText = "forest"
+    store.kind = .all
+    store.tags = []
+    store.search()
+    try await finished(store)
+    XCTAssertEqual(store.items.map(\.id), ["12"])
+    XCTAssertNil(store.committedQuery?.itemID)
+    XCTAssertEqual(fixture.browsePagesRequested, [1])
+  }
+
+  /// Steam serves a collection as an item of its own, which opens like one from a list.
+  func testAPastedCollectionIsShownAsACollectionTile() async throws {
+    var row = detailsRow("77", tags: [])
+    row["creator_app_id"] = WorkshopService.collectionCreatorApp
+    fixture.details = ["77": row]
+    let store = fixture.store
+    store.searchText = "https://steamcommunity.com/sharedfiles/filedetails/?id=77"
+    store.search()
+    try await finished(store)
+    XCTAssertEqual(store.items.map(\.id), ["77"])
+    XCTAssertNotNil(store.items.first?.collectionSize)
+  }
+
+  /// An item that cannot be shown is an ordinary failed load: the banner and Retry, with the
+  /// list on show left as it was, and Retry asks for the same item again.
+  func testAPastedItemThatCannotBeShownFailsLikeAnyLoadAndRetryAsksAgain() async throws {
+    let store = fixture.store
+    fixture.browse = browseHTML(rows: [wallpaperRow("12", tags: ["Scene", "Everyone"])])
+    store.search()
+    try await finished(store)
+    XCTAssertEqual(store.items.map(\.id), ["12"])
+
+    var otherApp = detailsRow(Self.pasted, tags: ["Scene"])
+    otherApp["consumer_app_id"] = 440
+    var messages: [String] = []
+    let answers: [[String: [String: Any]]] = [
+      [:], [Self.pasted: otherApp], [Self.pasted: detailsRow(Self.pasted, tags: ["Application"])],
+    ]
+    for answer in answers {
+      fixture.details = answer
+      store.searchText = Self.pasted
+      store.search()
+      try await finished(store)
+      messages.append(try XCTUnwrap(store.errorMessage))
+      XCTAssertEqual(store.items.map(\.id), ["12"], "the list on show stays")
+      XCTAssertEqual(store.failedRequest?.query.itemID, Self.pasted)
+      XCTAssertEqual(store.failedRequest?.page, 1)
+    }
+    XCTAssertEqual(Set(messages).count, 3, "each reason is told apart")
+
+    fixture.details = [Self.pasted: detailsRow(Self.pasted, tags: ["Scene", "Everyone"])]
+    store.retrySearch()
+    try await finished(store)
+    XCTAssertEqual(store.items.map(\.id), [Self.pasted])
+    XCTAssertNil(store.errorMessage)
+    XCTAssertNil(store.failedRequest)
+    XCTAssertEqual(fixture.browsePagesRequested, [1], "only the first, ordinary search read the browse page")
+  }
+
+  /// The other sources read the text as words, so an id typed there is not looked up.
+  func testOtherSourcesIgnoreAPastedId() async throws {
+    let store = fixture.store
+    fixture.browse = browseHTML(rows: [collectionRow("901", children: [])])
+    fixture.details = [Self.pasted: detailsRow(Self.pasted, tags: ["Scene", "Everyone"])]
+    store.excludedTags = []
+    store.searchText = Self.pasted
+    store.open(.collections)
+    try await finished(store)
+    XCTAssertEqual(store.items.map(\.id), ["901"])
+    XCTAssertEqual(fixture.browseSections, ["collections"])
+    XCTAssertEqual(fixture.detailsRequests, 0, "no item was looked up")
+    XCTAssertNil(store.committedQuery?.itemID)
+    XCTAssertEqual(
+      URLComponents(url: store.browseURL, resolvingAgainstBaseURL: false)?.queryItems?
+        .first { $0.name == "searchtext" }?.value, Self.pasted)
+  }
+
+  // MARK: A browse page whose markup changed
+
+  private static let degradedIDs = ["1000000001", "1000000002", "1000000003"]
+
+  private func serve(_ ids: [String]) {
+    fixture.details = Dictionary(uniqueKeysWithValues: ids.map { ($0, detailsRow($0, tags: ["Scene", "Everyone"])) })
+  }
+
+  /// A page without the render context is not an error while its links still name the items:
+  /// they are listed in the page's order from their details, once each, and the list says it
+  /// is approximate. Its totals are the number of items seen.
+  func testAPageWithoutTheRenderContextIsListedFromItsLinks() async throws {
+    let store = fixture.store
+    let ids = Self.degradedIDs
+    fixture.browse = linksOnlyHTML(ids: [ids[2], ids[0], ids[1], ids[0]])
+    serve(ids)
+    store.search()
+    try await finished(store)
+    XCTAssertEqual(store.items.map(\.id), [ids[2], ids[0], ids[1]])
+    XCTAssertTrue(store.isDegraded)
+    XCTAssertNil(store.errorMessage)
+    XCTAssertTrue(store.hasLoaded)
+    XCTAssertEqual(store.page, 1)
+    XCTAssertEqual(store.totalPages, 1)
+    XCTAssertEqual(store.totalCount, 3)
+    XCTAssertEqual(fixture.detailsRequests, 1, "one batched request for the whole page")
+  }
+
+  /// Steam renaming the query key leaves the rows in its data: their ids are found there, and
+  /// an id Steam no longer serves, or that is not Wallpaper Engine's, is left out.
+  func testARenamedQueryIsListedFromTheIdsInItsData() async throws {
+    let store = fixture.store
+    let ids = Self.degradedIDs
+    fixture.browse = browseHTML(
+      rows: [ids[1], "1000000099", ids[2], ids[0]].map { wallpaperRow($0, tags: ["Scene"]) }, queryKey: "workshop_browse_v2")
+    serve(ids)
+    store.search()
+    try await finished(store)
+    XCTAssertEqual(store.items.map(\.id), [ids[1], ids[2], ids[0]])
+    XCTAssertTrue(store.isDegraded)
+    XCTAssertNil(store.errorMessage)
+
+    // The next search reads an ordinary page again, and the list is no longer approximate.
+    fixture.browse = browseHTML(rows: [wallpaperRow("12", tags: ["Scene"])])
+    store.searchText = "forest"
+    store.search()
+    try await finished(store)
+    XCTAssertEqual(store.items.map(\.id), ["12"])
+    XCTAssertFalse(store.isDegraded)
+  }
+
+  /// A full page of links suggests a page after it, and a page past the first counts the pages
+  /// before it; a short page is taken as the last.
+  func testAFullDegradedPageOffersAnotherPageAndAShortOneIsTheLast() async throws {
+    let store = fixture.store
+    let first = (0..<30).map { String(2_000_000_000 + $0) }
+    let second = (30..<35).map { String(2_000_000_000 + $0) }
+    fixture.browsePages = [1: linksOnlyHTML(ids: first), 2: linksOnlyHTML(ids: second)]
+    serve(first + second)
+    store.search()
+    try await finished(store)
+    XCTAssertEqual(store.items.map(\.id), first)
+    XCTAssertTrue(store.isDegraded)
+    XCTAssertEqual(store.totalPages, 2)
+
+    store.loadPage(2)
+    try await finished(store)
+    XCTAssertEqual(store.items.map(\.id), second)
+    XCTAssertTrue(store.isDegraded)
+    XCTAssertEqual(store.page, 2)
+    XCTAssertEqual(store.totalPages, 2)
+    XCTAssertEqual(store.totalCount, 35)
+  }
+
+  /// With nothing in the page to list, the original failure stands: an unreadable page never
+  /// passes for an empty list, and a list that cannot be listed is not invented.
+  func testAPageThatNamesNoItemFailsAsItDidBefore() async throws {
+    let store = fixture.store
+    func fails(_ page: Data, serving ids: [String]) async throws {
+      fixture.browse = page
+      serve(ids)
+      store.search()
+      try await finished(store)
+      XCTAssertEqual(store.errorMessage, WorkshopLayoutChanged.message)
+      XCTAssertTrue(store.items.isEmpty)
+      XCTAssertFalse(store.isDegraded)
+      XCTAssertFalse(store.hasLoaded)
+      XCTAssertNotNil(store.failedRequest)
+    }
+    try await fails(Data("<html><body>Steam is being rebuilt.</body></html>".utf8), serving: [])
+    // Links, but not to anything Steam serves for Wallpaper Engine.
+    try await fails(linksOnlyHTML(ids: Self.degradedIDs), serving: [])
+    // Steam answered its own query with a failure: its links are not a list to trust.
+    let before = fixture.detailsRequests
+    try await fails(
+      browseHTML(rows: [wallpaperRow(Self.degradedIDs[0], tags: ["Scene"])], eresult: 15), serving: Self.degradedIDs)
+    XCTAssertEqual(fixture.detailsRequests, before, "no item was looked up from a page Steam failed")
+  }
+
+  /// Collections are read by the same decoder but are not listed from links: their pages carry
+  /// every collection's children, which are not the page's items.
+  func testCollectionsAreNotListedFromLinks() async throws {
+    let store = fixture.store
+    fixture.browse = linksOnlyHTML(ids: Self.degradedIDs)
+    serve(Self.degradedIDs)
+    store.excludedTags = []
+    store.open(.collections)
+    try await finished(store)
+    XCTAssertEqual(store.errorMessage, WorkshopLayoutChanged.message)
+    XCTAssertTrue(store.items.isEmpty)
+    XCTAssertFalse(store.isDegraded)
+    XCTAssertEqual(fixture.detailsRequests, 0)
+  }
+
   // MARK: Fixtures
 
   private func finished(_ store: WorkshopStore) async throws {
@@ -499,15 +725,26 @@ final class WorkshopSourceTests: XCTestCase {
     ]
   }
 
+  /// A browse page of the kind Steam serves when it has changed its markup: item links and
+  /// no render context to read them from.
+  private func linksOnlyHTML(ids: [String]) -> Data {
+    let tiles = ids.map { id in
+      let link = "https://steamcommunity.com/sharedfiles/filedetails/?id=\(id)&searchtext="
+      return "<div class=\"workshopItem\"><a href=\"\(link)\"><img src=\"x\"></a><a href=\"\(link)\">Item \(id)</a></div>"
+    }.joined()
+    return Data("<html><body><div class=\"workshopBrowseItems\">\(tiles)</div></body></html>".utf8)
+  }
+
   private func browseHTML(
-    rows: [[String: Any]], page: Int = 1, pages: Int = 1, count: Int? = nil, legacy: Bool = false
+    rows: [[String: Any]], page: Int = 1, pages: Int = 1, count: Int? = nil, legacy: Bool = false,
+    queryKey: String = "workshop_browse", eresult: Int = 1
   ) -> Data {
     let queries: [[String: Any]] = [
       [
-        "queryKey": ["workshop_browse"],
+        "queryKey": [queryKey],
         "state": [
           "data": [
-            "eresult": 1, "current_page": page, "total_pages": pages, "total_count": count ?? rows.count,
+            "eresult": eresult, "current_page": page, "total_pages": pages, "total_count": count ?? rows.count,
             "results": rows,
           ]
         ],

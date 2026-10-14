@@ -9,7 +9,9 @@
 #include <cstddef>
 #include <memory>
 #include <optional>
+#include <string>
 #include <string_view>
+#include <vector>
 
 namespace wallpaper
 {
@@ -55,6 +57,11 @@ std::unique_ptr<DynamicValue> ResolveStringSetting(
     const nlohmann::json& value,
     std::string_view current_layer_name = {});
 std::vector<CameraPath> ParseCameraPaths(const nlohmann::json& json);
+
+// The wallpaper property a setting is bound to, in either authored form
+// (`{"user": "name"}` or `{"user": {"name": ..., "condition": ...}}`), or empty
+// when it is bound to none. The same reading the resolvers above bind with.
+std::string UserPropertyName(const nlohmann::json& setting);
 
 // `component` selects the `c0`-`c3` curve and the matching entry of a vector
 // initial value; scalar settings keep their single curve at component 0.

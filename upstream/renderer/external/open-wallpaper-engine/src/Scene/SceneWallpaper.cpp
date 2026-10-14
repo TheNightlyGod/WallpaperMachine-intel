@@ -351,6 +351,7 @@ public:
         CMD_POINTER_INPUT_CHANGED,
         CMD_USER_SHORTCUT,
         CMD_AUDIO_REQUIREMENT_CHANGED,
+        CMD_RENDER_FAILED,
         CMD_NO
     };
 
@@ -382,6 +383,7 @@ public:
                 CASE_CMD(POINTER_INPUT_CHANGED);
                 CASE_CMD(USER_SHORTCUT);
                 CASE_CMD(AUDIO_REQUIREMENT_CHANGED);
+                CASE_CMD(RENDER_FAILED);
             case CMD::CMD_NO: break;
                 // No `default`, for the same reason the render handler has
                 // none: a command that is posted and never dispatched is
@@ -398,6 +400,9 @@ public:
     /// Reports scene `generation`'s audio requirement. Generations increase
     /// with every scene commit on the render thread.
     void sendAudioRequirement(uint64_t generation, bool requires_audio);
+    /// Tells the host's render-failure callback that a scene which had drawn
+    /// stopped after a failed frame. Posts only: it runs on the render thread.
+    void sendRenderFailure();
     /// The listener a committed scene's runtime runs when it first marks
     /// itself as reading audio, on whatever thread that happens. It only posts.
     std::function<void()> audioRequirementReporter(uint64_t generation);
@@ -408,6 +413,10 @@ private:
     void setPaused(bool paused);
     bool setProjectPropertyOverrideJson(std::string json);
     bool resetProjectPropertyOverride();
+    /// Hands a property document to the render thread to show on the running
+    /// scene (`PROPERTY_PROJECT_PROPERTY_PREVIEW_JSON`). Touches no state that a
+    /// later load reads, so the saved look is what the next load shows.
+    void previewProjectProperties(const std::string& json);
     void loadScene();
     bool loadNonSceneProject(const ProjectManifest& manifest, std::unique_ptr<fs::VFS> vfs);
 
@@ -419,6 +428,7 @@ private:
     MHANDLER_CMD(POINTER_INPUT_CHANGED);
     MHANDLER_CMD(USER_SHORTCUT);
     MHANDLER_CMD(AUDIO_REQUIREMENT_CHANGED);
+    MHANDLER_CMD(RENDER_FAILED);
 
 private:
     bool m_inited { false };
@@ -439,6 +449,7 @@ private:
     UserShortcutCallback                 m_user_shortcut_callback;
     bool                                 m_accepts_pointer_input { true };
     AudioRequirementCallback             m_audio_requirement_callback;
+    RenderFailureCallback                m_render_failure_callback;
     /// Latest committed scene generation seen here, and whether that scene
     /// reads audio. Only the main looper touches these.
     uint64_t                             m_audio_requirement_generation { 0 };
@@ -463,18 +474,23 @@ public:
         CMD_SET_FILLMODE,
         CMD_SET_SCALINGMODE,
         CMD_SET_SCALINGFACTOR,
+        CMD_SET_FRAMING,
         CMD_SET_RENDER_SCALE,
         CMD_SET_HORIZONTAL_FLIP,
         CMD_SET_AUDIO_RESPONSE_ENABLED,
         CMD_SET_MEDIA_INTEGRATION_ENABLED,
         CMD_MEDIA_EVENT_JSON,
         CMD_SYSTEM_MEDIA_ARTWORK,
+        CMD_APPLY_PROJECT_PROPERTIES,
         CMD_SET_SPEED,
         CMD_STOP,
         CMD_DRAW,
         CMD_BEGIN_SURFACE_RECONFIGURE,
         CMD_FINISH_SURFACE_RECONFIGURE,
         CMD_POSTER_REQUEST,
+#ifdef WESCENE_BUILD_TESTS
+        CMD_INJECT_FRAME_FAILURE,
+#endif
         CMD_NO
     };
     MainHandler& main_handler;
@@ -517,11 +533,13 @@ public:
                 CASE_CMD(SET_FILLMODE);
                 CASE_CMD(SET_SCALINGMODE);
                 CASE_CMD(SET_SCALINGFACTOR);
+                CASE_CMD(SET_FRAMING);
                 CASE_CMD(SET_HORIZONTAL_FLIP);
                 CASE_CMD(SET_AUDIO_RESPONSE_ENABLED);
                 CASE_CMD(SET_MEDIA_INTEGRATION_ENABLED);
                 CASE_CMD(MEDIA_EVENT_JSON);
                 CASE_CMD(SYSTEM_MEDIA_ARTWORK);
+                CASE_CMD(APPLY_PROJECT_PROPERTIES);
                 CASE_CMD(SET_SCENE);
                 CASE_CMD(SET_SPEED);
                 CASE_CMD(INIT_VULKAN);
@@ -529,6 +547,9 @@ public:
                 CASE_CMD(FINISH_SURFACE_RECONFIGURE);
                 CASE_CMD(POSTER_REQUEST);
                 CASE_CMD(SET_RENDER_SCALE);
+#ifdef WESCENE_BUILD_TESTS
+                CASE_CMD(INJECT_FRAME_FAILURE);
+#endif
             case CMD::CMD_NO: break;
                 // No `default`. Every command is named, so the compiler
                 // reports the next one that is added and not dispatched —
@@ -724,7 +745,7 @@ public:
             if (error.empty()) error = "the native renderer could not be prepared";
             metal::RecordMetalPrepareFailure(*m_scene, error);
             if (! m_render->createVulkan(*m_render_init_info)) {
-                suspendRendering();
+                suspendAfterGraphFailure();
                 return;
             }
             setSceneBackendSelection(SceneBackendSelection { SceneBackend::LegacyVulkan, error });
@@ -740,7 +761,7 @@ public:
             return;
         }
         if (! m_render->createVulkan(*m_render_init_info)) {
-            suspendRendering();
+            suspendAfterGraphFailure();
             return;
         }
         setSceneBackendSelection(selection);
@@ -779,6 +800,7 @@ public:
         m_render->SetCounters(&counters);
         m_render->SetWallpaperScalingMode(m_scalingmode);
         m_render->SetWallpaperScalingFactor(m_scalingfactor);
+        m_render->SetWallpaperFraming(m_framing);
         m_render->SetWallpaperHorizontalFlip(m_horizontal_flip);
         m_render->SetVideoPlaybackRate(m_speed);
         m_render->SetVideoPlaybackPaused(! frame_timer.Running() || m_render_blocked);
@@ -890,6 +912,20 @@ public:
         wakeForPointer();
     }
 
+    /// Stages the newest property document to show on the running scene
+    /// (`PROPERTY_PROJECT_PROPERTY_PREVIEW_JSON`). Latest wins: a document
+    /// staged before the render thread has taken the previous one replaces it,
+    /// so a burst of edits costs one update on this thread instead of one each.
+    /// Returns whether the slot was empty; only then is no
+    /// `CMD_APPLY_PROJECT_PROPERTIES` already on its way to take the document,
+    /// and the caller posts one. Callable from any thread.
+    [[nodiscard]] bool stageProjectPropertyPreview(ProjectProperties document) {
+        std::scoped_lock lock(m_property_preview_mutex);
+        const bool       was_empty = ! m_property_preview.has_value();
+        m_property_preview         = std::move(document);
+        return was_empty;
+    }
+
 private:
 #ifdef WESCENE_BUILD_TESTS
     friend struct SceneWallpaperInputTestAccess;
@@ -906,6 +942,47 @@ private:
         m_render_blocked = true;
         frame_timer.Stop();
         publishPauseReasons();
+    }
+
+    /// Stops rendering because the graph or the backend under it failed, which
+    /// nobody asked for. The host sees the difference from a pause: a stop the
+    /// host started itself (a surface being reconfigured) goes through
+    /// `suspendRendering` alone and is never reported as a failure.
+    void suspendAfterGraphFailure() {
+        m_health.NoteGraphFailed();
+        suspendRendering();
+    }
+
+    /// The surface may draw again. The only place `m_render_blocked` is
+    /// lowered, so the failure latch the host reads can never outlive the
+    /// block it describes.
+    void clearRenderBlock() {
+        m_render_blocked = false;
+        m_health.ClearStop();
+    }
+
+    /// A frame failed and nobody asked for the stop. Counts it, latches the
+    /// reason the host reads, stops rendering and, for a scene that had drawn
+    /// before, tells the host so it can rebuild the surface.
+    ///
+    /// `reached_draw` is whether the failure came from the draw itself rather
+    /// than from building the graph, which has already reported its own.
+    /// A scene that never presented a frame does not call back: the host is
+    /// still waiting for that first frame and has its own timeout and rollback
+    /// for it, and a recovery of its own would race that wait. The call is a
+    /// post, so it never runs host code on this thread, and it is made after
+    /// rendering has stopped so the host cannot observe a still-running
+    /// surface.
+    void failFrame(bool reached_draw) {
+        counters.Add(OWE_RC_RENDER_FAILURES);
+        if (reached_draw) {
+            m_health.NoteFrameFailed();
+        } else {
+            m_health.NoteGraphFailed();
+        }
+        suspendRendering();
+        if (reached_draw && m_scene != nullptr && m_scene->first_frame_ok)
+            main_handler.sendRenderFailure();
     }
 
     /// Runs the frame clock exactly when there is something for it to drive:
@@ -948,7 +1025,7 @@ private:
         if (m_scene == nullptr) return true;
 
         if (m_rg && ! m_render->clearLastRenderGraph()) {
-            suspendRendering();
+            suspendAfterGraphFailure();
             return false;
         }
         // Seed the scale before the graph is compiled so render targets are
@@ -964,16 +1041,17 @@ private:
             // actually trips the Metal compiler. Suspending would leave that
             // wallpaper black; the compatibility backend draws it.
             if (! fallBackToCompatibility()) {
-                suspendRendering();
+                suspendAfterGraphFailure();
                 return false;
             }
             if (! m_render->compileRenderGraph(*m_scene, *m_rg)) {
-                suspendRendering();
+                suspendAfterGraphFailure();
                 return false;
             }
         }
         m_render->SetWallpaperScalingMode(m_scalingmode);
         m_render->SetWallpaperScalingFactor(m_scalingfactor);
+        m_render->SetWallpaperFraming(m_framing);
         m_render->SetWallpaperHorizontalFlip(m_horizontal_flip);
         if (m_fillmode_explicit) {
             m_render->UpdateCameraFillMode(*m_scene, m_fillmode);
@@ -981,7 +1059,7 @@ private:
         if (m_scene->runtime != nullptr) {
             m_scene->runtime->ConsumeSceneGraphMutationFlag();
         }
-        m_render_blocked = false;
+        clearRenderBlock();
         return true;
     }
 
@@ -1184,6 +1262,9 @@ private:
             }
 
             bool presented = false;
+            // A failure from here on belongs to the draw; one before it came
+            // from building the graph, which has already said so.
+            const bool reached_draw = frame_ok;
             if (frame_ok) {
                 frame_ok = m_render->drawFrame(*m_scene, &presented);
                 // A native frame can fail after the graph compiled -- a video
@@ -1202,9 +1283,13 @@ private:
                                    std::memory_order_relaxed);
                 m_scene->PassFrameTime(frame_time);
                 counters.Add(OWE_RC_SIMULATION_TICKS);
+                // Completed, not presented: a frame that would repeat the
+                // picture returns success without reaching the surface, and a
+                // healthy still scene must keep this number moving.
+                m_health.NoteFrameCompleted();
+                if (presented) m_health.NotePresented();
             } else {
-                counters.Add(OWE_RC_RENDER_FAILURES);
-                suspendRendering();
+                failFrame(reached_draw);
             }
 
             m_scene->shaderValueUpdater->FrameEnd();
@@ -1248,6 +1333,15 @@ private:
             m_scalingfactor = value;
             if (renderInited()) {
                 m_render->SetWallpaperScalingFactor(m_scalingfactor);
+            }
+        }
+    }
+    MHANDLER_CMD(SET_FRAMING) {
+        std::shared_ptr<WallpaperFraming> value;
+        if (msg->findObject("value", &value) && value != nullptr) {
+            m_framing = NormalizeWallpaperFraming(*value);
+            if (renderInited()) {
+                m_render->SetWallpaperFraming(m_framing);
             }
         }
     }
@@ -1342,10 +1436,12 @@ private:
             // refusing the next scene over it would leave the surface holding
             // a scene nobody can replace.
             if (m_rg && m_render->hasBackend() && ! m_render->clearLastRenderGraph()) {
-                suspendRendering();
+                suspendAfterGraphFailure();
                 return;
             }
             m_rg.reset();
+            // What the last scene could not preview says nothing about this one.
+            m_logged_deferred_properties.clear();
             // The outgoing scene's own late marks must not reach the host; the
             // generation check drops any already in flight.
             if (m_scene != nullptr && m_scene->runtime != nullptr) {
@@ -1364,7 +1460,7 @@ private:
             }
             commitAudioRequirement();
             main_handler.sendPointerInputCapability(accepts_pointer_input);
-            m_render_blocked = false;
+            clearRenderBlock();
             // Before the backend is chosen: creating one re-applies the video
             // pause from whether the clock runs.
             syncFrameClock();
@@ -1401,6 +1497,49 @@ private:
             refreshFrameDemand();
         }
     }
+    /// Shows the newest staged property document on the scene that is running,
+    /// without loading it again. Runs here because this thread is the only one
+    /// that ticks the runtime, so the runtime needs no lock for it.
+    ///
+    /// Nothing is remembered for a later scene: a scene committed afterwards
+    /// shows its own loaded values until the host sends the next document, so a
+    /// document for one wallpaper can never reach another by sharing a property
+    /// name. A document that finds no scene, or a scene without a runtime (a
+    /// plain video), is dropped.
+    ///
+    /// What a changed property shows needs nothing more from here. The command
+    /// asks for a frame like every command but the draw, so an idle scene
+    /// takes one and a paused one shows it when it resumes; that frame's tick
+    /// applies the bindings, and a layer the document reveals that the graph
+    /// left out asks for one new graph there (`RequestGraphForShownLayers`).
+    MHANDLER_CMD(APPLY_PROJECT_PROPERTIES) {
+#ifdef WESCENE_BUILD_TESTS
+        m_property_preview_commands.fetch_add(1, std::memory_order_relaxed);
+#endif
+        std::optional<ProjectProperties> document;
+        {
+            std::scoped_lock lock(m_property_preview_mutex);
+            document = std::move(m_property_preview);
+            m_property_preview.reset();
+        }
+        if (! document.has_value()) return;
+        if (m_scene == nullptr || m_scene->runtime == nullptr) return;
+        const auto preview = m_scene->runtime->PreviewProjectPropertyOverride(*document);
+        // Said when the set of properties the scene could not apply changes, not
+        // on every edit: a drag sends many documents that all defer the same few.
+        if (preview.deferred != m_logged_deferred_properties) {
+            m_logged_deferred_properties = preview.deferred;
+            if (! preview.deferred.empty()) {
+                std::string names;
+                for (const auto& name : preview.deferred) {
+                    names += (names.empty() ? "" : ", ") + name;
+                }
+                LOG_INFO("property preview: held at the loaded value until the scene loads "
+                         "again: %s",
+                         names.c_str());
+            }
+        }
+    }
     /// Takes over a surface description. No GPU backend is created here.
     ///
     /// Which backend this surface needs is decided from the parsed scene, so
@@ -1412,7 +1551,7 @@ private:
         if (! msg->findObject("info", &info) || info == nullptr) return;
 
         adoptRenderInitInfo(std::move(info));
-        m_render_blocked = false;
+        clearRenderBlock();
         // A surface this wallpaper is already running on can be replaced when
         // the display changes, so the resolution is republished here too.
         publishScreenResolution();
@@ -1422,7 +1561,7 @@ private:
         // keep behaving exactly as they did.
         if (m_render_init_info->offscreen || m_render_init_info->metal_layer == nullptr) {
             if (! m_render->createVulkan(*m_render_init_info)) {
-                suspendRendering();
+                suspendAfterGraphFailure();
                 return;
             }
             setSceneBackendSelection(SceneBackendSelection { SceneBackend::LegacyVulkan, {} });
@@ -1464,6 +1603,14 @@ private:
             break;
         }
     }
+#ifdef WESCENE_BUILD_TESTS
+    /// What a draw that fails after the scene has drawn does, without needing
+    /// the GPU to fail.
+    MHANDLER_CMD(INJECT_FRAME_FAILURE) {
+        failFrame(true);
+        refreshFrameDemand();
+    }
+#endif
     MHANDLER_CMD(BEGIN_SURFACE_RECONFIGURE) {
         std::shared_ptr<std::promise<bool>> promise;
         if (! msg->findObject("promise", &promise) || promise == nullptr) {
@@ -1502,7 +1649,7 @@ private:
                 // surface to reset and no graph to compile. Replacing the info
                 // is the whole job; the backend is created from it when the
                 // scene lands.
-                m_render_blocked = false;
+                clearRenderBlock();
                 syncFrameClock();
                 refreshFrameDemand();
                 publishPauseReasons();
@@ -1515,8 +1662,11 @@ private:
             bool surface_ok = m_render->resetSurface(*m_render_init_info);
             if (! surface_ok) surface_ok = fallBackToCompatibility();
             const bool ok = surface_ok && rebuildRenderGraph();
+            // The host asked for this stop; failing to end it is not the host's
+            // doing. A graph that failed to rebuild has already said so.
+            if (! ok) m_health.NoteGraphFailed();
             if (ok) {
-                m_render_blocked = false;
+                clearRenderBlock();
                 // A paused wallpaper stays paused across a display change.
                 syncFrameClock();
                 m_render->SetVideoPlaybackPaused(! frame_timer.Running());
@@ -1525,6 +1675,7 @@ private:
             }
             promise->set_value(ok);
         } catch (...) {
+            m_health.NoteGraphFailed();
             suspendRendering();
             promise->set_value(false);
         }
@@ -1560,6 +1711,12 @@ public:
     }
     [[nodiscard]] uint32_t sceneDemandReasons() const {
         return m_scene_demand_reasons.load(std::memory_order_relaxed);
+    }
+
+    /// Always-on frame-loop health; see `SurfaceHealth`. Written by the render
+    /// thread, read by the host without one.
+    [[nodiscard]] SurfaceHealthSnapshot surfaceHealth() const {
+        return m_health.Snapshot();
     }
 
     /// Published by the render thread after each drawn frame, read by the host
@@ -1628,11 +1785,19 @@ private:
     std::shared_ptr<RenderInitInfo>      m_render_init_info;
     std::unique_ptr<rg::RenderGraph>      m_rg { nullptr };
     bool                                m_render_blocked { false };
+    /// Whether the frame loop is alive and why it stopped. Unlike the
+    /// counters, never gated: a stop nobody can see cannot be told apart from
+    /// a pause.
+    SurfaceHealth                       m_health;
 
     FillMode                                 m_fillmode { FillMode::ASPECTFIT };
     bool                                     m_fillmode_explicit { false };
     WallpaperScalingMode                     m_scalingmode { WallpaperScalingMode::FIT };
     float                                    m_scalingfactor { 1.0f };
+    /// Where the presented image sits in the slack around it. Held here, not
+    /// in a backend, so it outlives a backend change, a surface rebuild and a
+    /// graph rebuild like the scaling mode and factor beside it.
+    WallpaperFraming                         m_framing {};
     /// Internal rasterization scale, independent of `m_scalingfactor`: that one
     /// scales the presented image on the output, this one only changes how many
     /// pixels the scene is drawn with.
@@ -1662,6 +1827,19 @@ private:
     /// pressed pause and play again. Latest-per-type, because a burst of
     /// timeline updates is one fact repeated, not a queue to drain.
     std::vector<std::pair<std::string, std::string>> m_pending_media_events {};
+    /// The newest property document waiting to be shown (see
+    /// `stageProjectPropertyPreview`). Not part of the scene: it is taken by the
+    /// command that was posted for it and never replayed.
+    std::mutex                       m_property_preview_mutex;
+    std::optional<ProjectProperties> m_property_preview {};
+    /// The deferred names the last preview reported, to log a change of them
+    /// once. Render thread only.
+    std::vector<std::string>         m_logged_deferred_properties {};
+#ifdef WESCENE_BUILD_TESTS
+    /// How many property-preview commands this thread has handled, so a test
+    /// can show that a burst of documents queues one command and not one each.
+    std::atomic<uint64_t>            m_property_preview_commands { 0 };
+#endif
 
     std::atomic<std::array<float, 2>> m_mouse_pos { std::array { 0.5f, 0.5f } };
     std::mutex                        m_mouse_buttons_mutex;
@@ -1719,6 +1897,17 @@ SceneWallpaperInputTestAccess::ConsumeMouseButtons(SceneWallpaper& wallpaper) {
     const auto snapshot =
         wallpaper.m_main_handler->renderHandler()->consumeMouseButtonSnapshot();
     return { snapshot.down, snapshot.pressed, snapshot.released };
+}
+
+uint64_t SceneWallpaperInputTestAccess::PropertyPreviewCommandsHandled(SceneWallpaper& wallpaper) {
+    return wallpaper.m_main_handler->renderHandler()->m_property_preview_commands.load(
+        std::memory_order_relaxed);
+}
+
+void SceneWallpaperInputTestAccess::InjectFrameFailure(SceneWallpaper& wallpaper) {
+    CreateMsgWithCmd(wallpaper.m_main_handler->renderHandler(),
+                     RenderHandler::CMD::CMD_INJECT_FRAME_FAILURE)
+        ->post();
 }
 
 std::shared_ptr<Scene>
@@ -1852,6 +2041,13 @@ SceneUpdateDemand::Kind SceneWallpaper::sceneUpdateKind() const {
     return handler->sceneUpdateKind();
 }
 
+SurfaceHealthSnapshot SceneWallpaper::surfaceHealth() const {
+    if (m_main_handler == nullptr) return SurfaceHealthSnapshot {};
+    auto handler = m_main_handler->renderHandler();
+    if (handler == nullptr) return SurfaceHealthSnapshot {};
+    return handler->surfaceHealth();
+}
+
 SceneBackendSelection SceneWallpaper::sceneBackendSelection() const {
     if (m_main_handler == nullptr) return SceneBackendSelection {};
     auto handler = m_main_handler->renderHandler();
@@ -1916,6 +2112,13 @@ void SceneWallpaper::setPropertyObject(std::string_view name, std::shared_ptr<vo
     if (msg->post() != looper::status_t::OK) {
         throw std::runtime_error("failed to enqueue object property message");
     }
+}
+
+void SceneWallpaper::setFraming(const WallpaperFraming& framing) {
+    // One object, so a reader of the render thread sees both axes change
+    // together; normalised here so what travels is already in range.
+    setPropertyObject(PROPERTY_FRAMING,
+                      std::make_shared<WallpaperFraming>(NormalizeWallpaperFraming(framing)));
 }
 
 int SceneWallpaper::takeLastFrameSyncFd() {
@@ -1994,6 +2197,14 @@ MHANDLER_CMD_IMPL(MainHandler, SET_PROPERTY) {
                 nmsg->setFloat("value", value);
                 nmsg->post();
             }
+        } else if (property == PROPERTY_FRAMING) {
+            std::shared_ptr<WallpaperFraming> value;
+            if (msg->findObject("value", &value) && value != nullptr) {
+                auto nmsg =
+                    CreateMsgWithCmd(m_render_handler, RenderHandler::CMD::CMD_SET_FRAMING);
+                nmsg->setObject("value", value);
+                nmsg->post();
+            }
         } else if (property == PROPERTY_RENDER_SCALE) {
             float value { 1.0f };
             if (msg->findFloat("value", &value)) {
@@ -2062,6 +2273,11 @@ MHANDLER_CMD_IMPL(MainHandler, SET_PROPERTY) {
             if (reset && resetProjectPropertyOverride()) {
                 if (m_render_handler != nullptr) CALL_MHANDLER_CMD(LOAD_SCENE, msg);
             }
+        } else if (property == PROPERTY_PROJECT_PROPERTY_PREVIEW_JSON) {
+            std::string json;
+            if (msg->findString("value", &json) && m_render_handler != nullptr) {
+                previewProjectProperties(json);
+            }
         } else if (property == PROPERTY_FORCE_SHADER_REFRESH) {
             msg->findBool("value", &m_force_shader_refresh);
         } else if (property == PROPERTY_FIRST_FRAME_CALLBACK) {
@@ -2084,6 +2300,11 @@ MHANDLER_CMD_IMPL(MainHandler, SET_PROPERTY) {
             if (msg->findObject("value", &cb) && cb != nullptr) {
                 m_audio_requirement_callback = std::move(*cb);
                 if (m_audio_requirement_callback) m_audio_requirement_callback(m_requires_audio);
+            }
+        } else if (property == PROPERTY_RENDER_FAILURE_CALLBACK) {
+            std::shared_ptr<RenderFailureCallback> cb;
+            if (msg->findObject("value", &cb) && cb != nullptr) {
+                m_render_failure_callback = std::move(*cb);
             }
         } else if (property == PROPERTY_SPEED) {
             float speed { 1.0f };
@@ -2152,6 +2373,10 @@ MHANDLER_CMD_IMPL(MainHandler, AUDIO_REQUIREMENT_CHANGED) {
     if (m_audio_requirement_callback) m_audio_requirement_callback(next);
 }
 
+MHANDLER_CMD_IMPL(MainHandler, RENDER_FAILED) {
+    if (m_render_failure_callback) m_render_failure_callback();
+}
+
 bool MainHandler::applyConfig(SceneWallpaperConfig config) {
     bool should_load = false;
 
@@ -2210,6 +2435,21 @@ bool MainHandler::resetProjectPropertyOverride() {
     if (m_project_property_override_json.empty()) return false;
     m_project_property_override_json.clear();
     return true;
+}
+
+void MainHandler::previewProjectProperties(const std::string& json) {
+    ProjectProperties document;
+    std::string       error;
+    if (! ParseFlatProjectPropertyOverrideJson(json, &document, &error)) {
+        LOG_ERROR("property preview ignored: %s", error.c_str());
+        return;
+    }
+    // The saved override above is deliberately left alone: a preview is not a
+    // choice, so a scene loaded again shows the saved look.
+    if (! m_render_handler->stageProjectPropertyPreview(std::move(document))) return;
+    // The slot was empty, so no command is on its way to take it; one is posted
+    // now, and the documents that follow before it runs only replace the slot.
+    CreateMsgWithCmd(m_render_handler, RenderHandler::CMD::CMD_APPLY_PROJECT_PROPERTIES)->post();
 }
 
 void MainHandler::loadScene() {
@@ -2283,6 +2523,9 @@ void MainHandler::loadScene() {
                       source_error.c_str());
             return;
         }
+        // What the project declares, before the saved choices go over it: a
+        // property the renderer is later told to drop returns to this value.
+        const ProjectProperties authored_properties = project_properties;
         if (! m_project_property_override_json.empty()) {
             ProjectProperties override_properties;
             if (! ParseFlatProjectPropertyOverrideJson(
@@ -2298,6 +2541,7 @@ void MainHandler::loadScene() {
             .scene_id           = source_paths.scene_id,
             .project_path       = m_source,
             .project_properties = &project_properties,
+            .authored_project_properties = &authored_properties,
             .pkg_version        = ReadPkgVersionFromFile(source_paths.pkg_path),
         };
         scene = m_scene_parser.Parse(request, scene_src, vfs, *m_sound_manager);
@@ -2409,6 +2653,12 @@ void MainHandler::sendAudioRequirement(uint64_t generation, bool requires_audio)
     msg->setObject("generation", std::make_shared<uint64_t>(generation));
     msg->setBool("requires_audio", requires_audio);
     msg->post();
+}
+
+void MainHandler::sendRenderFailure() {
+    auto self = weak_from_this().lock();
+    if (self == nullptr) return;
+    CreateMsgWithCmd(self, MainHandler::CMD::CMD_RENDER_FAILED)->post();
 }
 
 std::function<void()> MainHandler::audioRequirementReporter(uint64_t generation) {

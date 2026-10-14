@@ -92,12 +92,25 @@ final class ImageImportTests: XCTestCase {
     }
 
     func testKeepingBothCopiesOfAPictureKeepsItsPrefix() async throws {
-        let source = try picture("Twice.png", width: 20, height: 20)
-        _ = try await importOne(source)
-        let second = try await importOne(source, policy: .keepBoth)
+        _ = try await importOne(try picture("Twice.png", width: 20, height: 20))
+        // Another picture under the same name is another wallpaper: it is kept beside the first.
+        let second = try await importOne(try picture("Twice.png", width: 24, height: 20), policy: .keepBoth)
         let id = try XCTUnwrap(second.importedIDs.first)
         XCTAssertNotEqual(id, "image-Twice.png")
         XCTAssertTrue(id.hasPrefix(WallpaperImportService.imageIDPrefix))
+        XCTAssertTrue(second.identical.isEmpty)
+    }
+
+    func testKeepingBothNeverCopiesAPictureTheLibraryAlreadyHolds() async throws {
+        // A PNG is shown as it is, a TIFF from a JPEG copy; either way the original is what is compared.
+        for (name, type) in [("Same.png", UTType.png), ("Scan.tiff", UTType.tiff)] {
+            let source = try picture(name, width: 20, height: 20, type: type)
+            _ = try await importOne(source)
+            let again = try await importOne(source, policy: .keepBoth)
+            XCTAssertEqual(again.identical, [name])
+            XCTAssertTrue(again.importedIDs.isEmpty)
+        }
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: library.path).sorted(), ["image-Same.png", "image-Scan.tiff"])
     }
 
     @MainActor

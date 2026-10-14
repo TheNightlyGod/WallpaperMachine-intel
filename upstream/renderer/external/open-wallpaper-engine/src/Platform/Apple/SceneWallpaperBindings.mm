@@ -347,6 +347,23 @@ struct AudioRequirementCallbackRegistration {
     }
 };
 
+struct RenderFailureCallbackRegistration {
+    owe_render_failure_callback callback { nullptr };
+    void* user_data { nullptr };
+    owe_render_failure_callback_drop drop_user_data { nullptr };
+
+    RenderFailureCallbackRegistration(owe_render_failure_callback callback, void* user_data)
+        : callback(callback), user_data(user_data) {}
+
+    ~RenderFailureCallbackRegistration() {
+        if (drop_user_data != nullptr) drop_user_data(user_data);
+    }
+
+    void operator()() const {
+        if (callback != nullptr) callback(user_data);
+    }
+};
+
 int finish_with_error_noexcept(const char* message) noexcept {
     try {
         return finish_with_error(message);
@@ -363,6 +380,7 @@ struct owe_scene_wallpaper {
     std::shared_ptr<PointerInputCallbackRegistration> pointer_input_callback;
     std::shared_ptr<UserShortcutCallbackRegistration> user_shortcut_callback;
     std::shared_ptr<AudioRequirementCallbackRegistration> audio_requirement_callback;
+    std::shared_ptr<RenderFailureCallbackRegistration> render_failure_callback;
 };
 
 #ifdef WESCENE_BUILD_TESTS
@@ -555,6 +573,24 @@ extern "C" int owe_scene_wallpaper_set_render_scale(owe_scene_wallpaper* scene, 
     return 0;
 }
 
+extern "C" int owe_scene_wallpaper_set_framing(owe_scene_wallpaper* scene, double pan_x,
+                                               double pan_y)
+{
+    // No log line on this path: a drag sets it many times a second.
+    try {
+        clear_last_error();
+        if (!valid_scene(scene)) return finish_with_error("scene must not be null");
+        if (!std::isfinite(pan_x) || !std::isfinite(pan_y)) {
+            return finish_with_error("framing must be finite");
+        }
+
+        scene->scene.setFraming(wallpaper::WallpaperFraming { pan_x, pan_y });
+        return 0;
+    } catch (...) {
+        return finish_with_error_noexcept("failed to set framing");
+    }
+}
+
 extern "C" int owe_scene_wallpaper_set_first_frame_callback(
     owe_scene_wallpaper* scene,
     owe_first_frame_callback callback,
@@ -655,6 +691,32 @@ extern "C" int owe_scene_wallpaper_set_audio_requirement_callback(
         return 0;
     } catch (...) {
         return finish_with_error_noexcept("failed to register audio-requirement callback");
+    }
+}
+
+extern "C" int owe_scene_wallpaper_set_render_failure_callback(
+    owe_scene_wallpaper* scene,
+    owe_render_failure_callback callback,
+    void* user_data,
+    owe_render_failure_callback_drop drop_user_data)
+{
+    try {
+        clear_last_error();
+        if (!valid_scene(scene)) return finish_with_error("scene must not be null");
+        if (!scene->scene.inited()) return finish_with_error("scene must be initialized");
+
+        // Keep drop unarmed until the registration is installed, as the other
+        // callbacks do: a failure here must not consume user_data.
+        auto registration =
+            std::make_shared<RenderFailureCallbackRegistration>(callback, user_data);
+        auto forwarder = std::make_shared<wallpaper::RenderFailureCallback>(
+            [registration]() { (*registration)(); });
+        scene->scene.setPropertyObject(wallpaper::PROPERTY_RENDER_FAILURE_CALLBACK, forwarder);
+        registration->drop_user_data = drop_user_data;
+        scene->render_failure_callback = std::move(registration);
+        return 0;
+    } catch (...) {
+        return finish_with_error_noexcept("failed to register render-failure callback");
     }
 }
 
@@ -852,6 +914,11 @@ extern "C" const char* owe_property_project_property_reset(void)
     return property_name(wallpaper::PROPERTY_PROJECT_PROPERTY_RESET);
 }
 
+extern "C" const char* owe_property_project_property_preview_json(void)
+{
+    return property_name(wallpaper::PROPERTY_PROJECT_PROPERTY_PREVIEW_JSON);
+}
+
 extern "C" void owe_set_content_pacing_enabled(bool enabled)
 {
     wallpaper::video::SetContentPacingEnabled(enabled);
@@ -937,6 +1004,21 @@ extern "C" int owe_scene_wallpaper_update_mode(void* scene)
         return OWE_SCENE_UPDATE_CONTINUOUS;
     }
     return OWE_SCENE_UPDATE_UNKNOWN;
+}
+
+extern "C" int owe_scene_wallpaper_surface_health(void* scene, owe_surface_health* out)
+{
+    auto* wallpaper_scene = static_cast<wallpaper::SceneWallpaper*>(scene);
+    // Nothing observed is not a healthy surface: the caller is told it got no
+    // reading instead of being handed zeroes that read as "running, no frames".
+    if (wallpaper_scene == nullptr || out == nullptr) return 1;
+    const auto health = wallpaper_scene->surfaceHealth();
+    out->frames_completed = health.frames_completed;
+    out->frames_presented = health.frames_presented;
+    out->failed_frames = health.failed_frames;
+    out->last_present_age_ms = health.last_present_age_ms;
+    out->stop_reason = static_cast<uint32_t>(health.stop_reason);
+    return 0;
 }
 
 extern "C" void owe_set_scene_renderer_preference(int preference)

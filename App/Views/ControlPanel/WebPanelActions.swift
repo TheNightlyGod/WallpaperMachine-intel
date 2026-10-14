@@ -14,7 +14,11 @@ extension WebPanelController {
     if try performWallpaperAutomation(action, request: request) { return }
     if try await performBackup(action, request: request) { return }
     if try await performCompatibility(action, request: request) { return }
+    if try await performLetterbox(action, request: request) { return }
     if try await performImagePlacement(action, request: request) { return }
+    if try await performTelemetry(action, request: request) { return }
+    if try await performSharing(action, request: request) { return }
+    if try await performDisplayPosition(action, request: request) { return }
     switch action {
     case "ready":
       deliveredLibraryRevision = nil
@@ -30,6 +34,14 @@ extension WebPanelController {
             }) else { throw WebPanelRequest.invalid }
       store.retryHostWallpaper?(id, displayID)
       return
+    case "releaseHeld":
+      let id = try wallpaperID(request)
+      // Only a wallpaper the app is holding back can be released; anything else is a stale tile.
+      guard store.heldWallpaperIDs.contains(id) else { throw WebPanelRequest.invalid }
+      try await store.commands.run(subject: id) {
+        try await store.releaseHeldWallpaperAsync(id: id)
+      }
+      return
     case "themeSetting":
       try theme.set(try request.string("key"), value: try request.string("value"))
       return
@@ -41,6 +53,13 @@ extension WebPanelController {
       // The page switches from the snapshot it gets back; the user script is refreshed so a
       // later reload or WebContent recovery starts in the same language.
       installUserScript()
+      // A wallpaper's own label tables follow the language too. The change has already
+      // happened, so a failure here is logged and never fails it.
+      do {
+        try await store.setLabelLanguageAsync(appLanguage.effective)
+      } catch {
+        AppLog.warn("Property labels could not follow the new language: \(error.localizedDescription)")
+      }
       return
     case "dismissError":
       actionError = nil
@@ -140,22 +159,30 @@ extension WebPanelController {
       // offered once and afterwards only on request from Settings.
       welcomeSeen = true
       defaults.set(true, forKey: Self.welcomeSeenKey)
+      // The guide's Preferences page carries the performance data switch; someone who left
+      // before reaching it is asked once later instead.
+      if body["preferencesShown"] as? Bool == true { store.supportPrompt?.recordTelemetryAsked() }
       return
     case "dragSelectLearned":
       dragSelectLearned = true
       defaults.set(true, forKey: Self.dragSelectLearnedKey)
       return
     case "supportPromptShown":
-      store.supportPrompt?.markPresented()
+      store.supportPrompt?.markPresented(try promptKind(request))
       return
     case "supportPromptChoice":
+      let prompt = try promptKind(request)
       let url: URL
-      switch try request.string("choice") {
-      case "dismiss":
-        store.supportPrompt?.markPresented()
+      switch (prompt, try request.string("choice")) {
+      case (_, "dismiss"):
+        store.supportPrompt?.markPresented(prompt)
         return
-      case "star": url = AppUpdateConfiguration.repositoryURL
-      case "supporter":
+      case (.telemetry, "enableTelemetry"):
+        store.telemetry?.setEnabled(true)
+        store.supportPrompt?.markPresented(.telemetry)
+        return
+      case (.support, "star"), (.star, "star"): url = AppUpdateConfiguration.repositoryURL
+      case (.support, "supporter"):
         let path = language.hasPrefix("zh") ? "zh/pricing/" : "pricing/"
         url = URL(string: "https://www.wallpapermachine.app/\(path)")!
       default: throw WebPanelRequest.invalid
@@ -163,7 +190,8 @@ extension WebPanelController {
       guard openSupportURL(url) else {
         throw WallpaperActionError(message: String(localized: "The link could not be opened. Please try again."))
       }
-      store.supportPrompt?.markPresented()
+      if url == AppUpdateConfiguration.repositoryURL { store.supportPrompt?.recordStarChosen() }
+      store.supportPrompt?.markPresented(prompt)
       return
     case "workshopSelect":
       guard let id = body["id"] as? String, let item = workshop.workshopItem(id: id) else {
@@ -270,6 +298,19 @@ extension WebPanelController {
         preview(selection)
       }
       return
+    // A slider or colour being dragged. Not a command: it changes no state a later command depends
+    // on, and queued behind a running one it would reach the previews long after the thumb moved
+    // on. Only sliders and colours take part, and a value is held to the rules of an edit's.
+    case "propertyPreview":
+      let id = try wallpaperID(request)
+      let propertyID = try request.string("propertyID")
+      let options = try await store.wallpaperOptionsSnapshotAsync(wallpaperId: id)
+      guard let descriptor = options.properties.first(where: { $0.id == propertyID && $0.enabled }),
+        descriptor.kind == .slider || descriptor.kind == .color
+      else { throw WebPanelRequest.invalid }
+      let value = try propertyValue(body["value"], descriptor: descriptor)
+      await store.previewPropertyAsync(wallpaperId: id, propertyId: propertyID, value: value)
+      return
     case "playlistSkip":
       let display = try playlistDisplay(request)
       guard playlists.skipHandler?(display) == true else {
@@ -278,6 +319,9 @@ extension WebPanelController {
             ? String(localized: "This display’s playlist has no other wallpaper to change to.")
             : String(localized: "This display has no rotating playlist to move along."))
       }
+      return
+    case "playlistResume":
+      playlists.resumeHandler?(try playlistDisplay(request))
       return
     default: break
     }
@@ -301,23 +345,40 @@ extension WebPanelController {
       try await store.commands.run(slot: BridgeStore.selectionSlot, subject: id) {
         try await store.selectWallpaperAsync(id: id)
       }
-    case "activate":
+    // Applying the wallpaper a display already shows does nothing. Only the inspector's
+    // **Reapply wallpaper** restarts it, so a tile's double-click, Recently used and Previous
+    // keep leaving a running wallpaper alone.
+    case "activate", "reapplyWallpaper":
       let id = try wallpaperID(request)
+      let restarts = action == "reapplyWallpaper"
       // The display is the one targeted when the user asked, not when the command runs.
       let displayID = navigation.targetDisplayID
       let slot = BridgeStore.activationSlot(displayId: displayID)
       try await store.commands.run(slot: slot, subject: id) {
-        try await store.activateWallpaperAsync(id: id, displayId: displayID, userInitiated: true)
+        if restarts {
+          try await store.reapplyWallpaperAsync(id: id, displayId: displayID)
+        } else {
+          try await store.activateWallpaperAsync(id: id, displayId: displayID, origin: .user)
+        }
         // Get out of the way so the freshly applied wallpaper is visible, unless another
         // switch is already waiting to replace it.
-        if hidesAfterActivating, store.supportPrompt?.isPending != true,
+        if hidesAfterActivating, pendingPrompt() == nil,
           !store.commands.hasWaiting(slot: slot) { NSApp.hide(nil) }
       }
+    // One wallpaper on every enabled independent display. The transfer takes its own turn in
+    // the queue, so it must not run inside `commands.run` here.
+    case "activateAll":
+      try await store.activateWallpaperEverywhereAsync(id: try wallpaperID(request))
+      if hidesAfterActivating, pendingPrompt() == nil, !store.commands.isBusy { NSApp.hide(nil) }
     case "previousWallpaper":
       let displayID = try playlistDisplay(request)
       try await store.commands.run(slot: BridgeStore.activationSlot(displayId: displayID)) {
         try await store.activatePreviousWallpaperAsync(displayId: displayID)
       }
+    // Queues itself in the display's slot, like a switch, so it must not run inside the
+    // queued commands below: a command that waits for the queue it holds never returns.
+    case "sceneRetry":
+      try await store.retryStoppedSceneAsync(displayId: try sceneDisplay(request))
     // The confirmation is asked before queueing, so an open sheet holds up nothing else.
     case "delete":
       let id = try wallpaperID(request)
@@ -429,6 +490,8 @@ extension WebPanelController {
     case "restoreProperty":
       try await store.restorePropertyDefaultAsync(
         wallpaperId: try wallpaperID(request), propertyId: try request.string("propertyID"))
+    case "restoreAllProperties":
+      try await store.restoreAllPropertyDefaultsAsync(wallpaperId: try wallpaperID(request))
     case "choosePropertyFile":
       let id = try wallpaperID(request)
       let propertyID = try request.string("propertyID")
@@ -478,14 +541,58 @@ extension WebPanelController {
         } else {
           playback.thermalAction = action
         }
+      case "lowBatteryAction":
+        guard let action = SystemConditionAction(rawValue: try request.string("value")) else {
+          throw WebPanelRequest.invalid
+        }
+        playback.lowBatteryAction = action
+      case "lowBatteryThreshold":
+        let thresholds = PlaybackPreferences.lowBatteryThresholds
+        let value = try request.number(
+          "value", range: Double(thresholds.min() ?? 0)...Double(thresholds.max() ?? 0))
+        guard let level = Int(exactly: value), thresholds.contains(level) else {
+          throw WebPanelRequest.invalid
+        }
+        playback.lowBatteryThreshold = level
       case "verboseLogging":
         try await store.setVerboseLoggingAsync(enabled: try request.boolean("value"))
       case "keepWindowsOnWallpaperClick":
         try DesktopClickRevealPreference.setEnabled(!(try request.boolean("value")))
       case "refreshDesktopPicture":
         playback.refreshesDesktopPicturePeriodically = try request.boolean("value")
+      case "writeDesktopPicture":
+        let writes = try request.boolean("value")
+        if store.lockScreenWallpaper?.locksDesktopPictureChoice == true {
+          throw WallpaperActionError(
+            message: String(
+              localized: "Turn off Animate lock screen before changing this: it sets the desktop picture itself."))
+        }
+        playback.writesDesktopPicture = writes
+      case "playOnlyOnActiveDisplay":
+        playback.playsOnlyOnActiveDisplay = try request.boolean("value")
+      case "wallpapersMuted":
+        playback.wallpapersMuted = try request.boolean("value")
       case "hideAfterActivating":
         defaults.set(try request.boolean("value"), forKey: Self.hideAfterActivatingKey)
+      case "telemetry":
+        let enabled = try request.boolean("value")
+        // The switch is disabled without a service; a stale page must not stall the guide's
+        // Continue, which stops at the first refused draft.
+        guard let telemetry = store.telemetry else {
+          AppLog.warn("telemetry: the switch was changed but sending is unavailable in this run")
+          return
+        }
+        telemetry.setEnabled(enabled)
+        // Chosen here, so the one-time question is answered.
+        store.supportPrompt?.recordTelemetryAsked()
+      case "inspectWebWallpapers":
+        WebWallpaperInspection.setEnabled(try request.boolean("value"), defaults: defaults)
+      case "livePropertyEdits":
+        let enabled = try request.boolean("value")
+        LivePropertyEditing.setEnabled(enabled, defaults: defaults)
+        // Turning it off puts the saved look back on what the displays were shown; the edits
+        // stay pending in the inspector.
+        if !enabled { await store.stopShowingPropertyEditsOnDesktopAsync() }
       case "workshopUpdateChecks":
         workshop.updates.checksAutomatically = try request.boolean("value")
       case "concurrentDownloads":
@@ -553,14 +660,15 @@ extension WebPanelController {
     case "appRuleRemove":
       guard let id = UUID(uuidString: try request.string("id")) else { throw WebPanelRequest.invalid }
       playback.removeRule(id: id)
-    case "lockScreenRetry": store.lockScreenWallpaper?.refresh(retryingLockScreen: true)
-    case "screenSaverRetry": store.lockScreenWallpaper?.refresh()
+    case "lockScreenRetry": store.lockScreenWallpaper?.retry(lockScreen: true)
+    case "screenSaverRetry": store.lockScreenWallpaper?.retry(lockScreen: false)
+    case "openLoginItemsSettings": openLoginItemsSettings()
     case "openFocusSettings":
       // Focus filters are added to a Focus there; the app cannot add its own.
       NSWorkspace.shared.open(Self.focusSettingsURL)
     case "displaySetting": try await displaySetting(request)
     case "eject":
-      try await store.ejectWallpaperFromDisplayAsync(
+      try await store.removeWallpaperFromDisplayAsync(
         displayId: try request.string("displayID"), wallpaperId: try wallpaperID(request))
     case "refreshDisplays": try await store.refreshDisplaysAsync()
     case "locateAssets":
@@ -681,7 +789,16 @@ extension WebPanelController {
       } else {
         item = nil
       }
-      workshop.requestDownload(item: item, rememberSession: remembersSession, bridge: store)
+      // **Download and apply** names no display: it is the one the panel targets when the
+      // wallpaper is asked for, and it has to be one that can show a wallpaper of its own.
+      var displayID: String?
+      if try body["apply"] == nil ? false : request.boolean("apply") {
+        guard item != nil else { throw WebPanelRequest.invalid }
+        try store.validateActivationTarget(navigation.targetDisplayID)
+        displayID = navigation.targetDisplayID
+      }
+      workshop.requestDownload(
+        item: item, rememberSession: remembersSession, bridge: store, applyTo: displayID)
       try checkDownloadError()
     // An update downloads through the same queue and prerequisites as any Workshop item, and
     // replaces the installed copy once it has arrived whole.
@@ -691,6 +808,22 @@ extension WebPanelController {
       }
       workshop.requestDownload(item: item, rememberSession: remembersSession, bridge: store)
       try checkDownloadError()
+    // Reinstalling downloads an installed wallpaper again, whether or not its author changed it,
+    // and swaps it in once it has arrived whole: the same queue, prerequisites and replacement
+    // as an update, so a failed download leaves the installed copy where it is.
+    case "workshopReinstall":
+      let id = try wallpaperID(request)
+      if await confirm(
+        String(localized: "Reinstall this wallpaper?"),
+        detail: String(
+          localized:
+            "WallpaperMachine downloads it again from the Steam Workshop and swaps it in when the download is complete. Your settings for it are kept, and if the download fails the installed copy stays."
+        ),
+        button: String(localized: "Reinstall"))
+      {
+        try await workshop.requestReinstall(id: id, rememberSession: remembersSession, bridge: store)
+        try checkDownloadError()
+      }
     case "workshopUpdateAll":
       for item in workshop.updates.available.values.sorted(by: { $0.title < $1.title })
       where workshop.downloader.download(for: item.id)?.isPending != true {
@@ -824,6 +957,19 @@ extension WebPanelController {
     return id
   }
 
+  /// The panel's id for the display a scene report names. The page knows it by the physical
+  /// id the report carries, so the id is looked up among the displays that can run a
+  /// scene; one that is gone or disabled has nothing to retry. A display that mirrors another
+  /// presents a scene of its own, so it is accepted, and the store reloads the display it mirrors.
+  func sceneDisplay(_ request: WebPanelRequest) throws -> String {
+    guard let physical = UInt32(exactly: try request.number("displayId", range: 0...Double(UInt32.max))),
+      let display = store.settingsSnapshot.displays.first(where: {
+        $0.enabled && ResolvedDisplayTitles.liveDisplayID($0.displayId, title: $0.title) == physical
+      })
+    else { throw WebPanelRequest.invalid }
+    return display.displayId
+  }
+
   func playlistSetting(_ request: WebPanelRequest) throws {
     let display = try playlistDisplay(request)
     switch try request.string("key") {
@@ -852,7 +998,14 @@ extension WebPanelController {
       let range = DisplayPlaylist.intervalRange
       let minutes = try request.number("value", range: Double(range.lowerBound)...Double(range.upperBound))
       guard minutes == minutes.rounded() else { throw WebPanelRequest.invalid }
-      playlists.update(display) { $0.interval = Int(minutes) }
+      // Choosing a time is choosing to change on a timer again.
+      playlists.update(display) {
+        $0.interval = Int(minutes)
+        $0.trigger = .interval
+      }
+    case "trigger":
+      guard let trigger = PlaylistTrigger(rawValue: try request.string("value")) else { throw WebPanelRequest.invalid }
+      playlists.update(display) { $0.trigger = trigger }
     case "dayWallpaper", "nightWallpaper":
       // Empty clears the choice; anything else must be a wallpaper that can play.
       let value = try request.string("value")
@@ -1113,14 +1266,13 @@ extension WebPanelController {
     guard !imports.isBusy, !importPicker.isPresenting else {
       throw WallpaperActionError(message: String(localized: "An import is already running."))
     }
-    let policy =
-      (request.body["duplicates"] as? String) == "keepBoth"
-      ? WallpaperImportService.DuplicatePolicy.keepBoth : .skip
+    let policy = WallpaperImportService.DuplicatePolicy(panelValue: request.body["duplicates"])
     guard let window = webView?.window else { return }
+    // A project's own files stand for its folder (project.json, scene.json, scene.pkg).
     let types: [UTType] =
-      [.folder]
+      [.folder, .json]
       + WallpaperImportService.videoExtensions.union(WallpaperImportService.webExtensions)
-      .union(WallpaperImportService.imageExtensions).sorted()
+      .union(WallpaperImportService.imageExtensions).union(["pkg"]).sorted()
       .compactMap { UTType(filenameExtension: $0) }
     guard let urls = try await importPicker.choose(
       for: window, language: appLanguage.effective.tag, allowedContentTypes: types), !stopped
@@ -1139,20 +1291,24 @@ extension WebPanelController {
   /// up to 64 MB of logs must not stall the panel.
   func exportDiagnostics(to destination: URL) async throws {
     let settings = store.settingsSnapshot
+    let throttle = Self.qualityThrottle(settings.qualityThrottle).joined(separator: ", ")
     var environment = DiagnosticEnvironment.current()
     environment.append("""
       settings: scene renderer \(settings.sceneRenderer), video backend \(settings.videoBackend), \
       render scale \(settings.renderScale) (preferred \(settings.preferredRenderScale)), battery mode \
       \(settings.batteryMode), frame-rate cap \(settings.frameRateCap.map(String.init) ?? "none"), on battery \
-      \(settings.onBatteryPower), verbose logging \(settings.verboseLogging)
+      \(settings.onBatteryPower), reduced quality for \(throttle.isEmpty ? "nothing" : throttle), effective \
+      frame-rate cap \(settings.effectiveFrameRateCap.map(String.init) ?? "none"), verbose logging \
+      \(settings.verboseLogging)
       """)
     for scene in settings.sceneRenderers {
-      environment.append("""
-        running scene: display \(scene.displayId) "\(scene.displayName)", wallpaper \(scene.wallpaperId) \
-        "\(scene.wallpaperTitle)", backend \(scene.backend)\(scene.fallbackReason.map { " (fell back: \($0))" } ?? ""), \
-        video path \(scene.videoPath)
-        """)
+      let mode = settings.sceneUpdateModes.first { $0.displayId == scene.displayId }?.mode
+      environment.append(DiagnosticEnvironment.runningSceneLine(scene, mode: mode))
     }
+    // Read once, here: the report is the only consumer, so nothing polls the window server.
+    environment.append(contentsOf: DesktopWindowDiagnostics.current())
+    environment.append(ProcessFootprint.reportLine(
+      bytes: ProcessFootprint.current(), wallpaperWindows: WallpaperPresentationPolicy.wallpaperWindows().count))
     let bundle = DiagnosticsBundle(
       sources: DiagnosticsBundle.sources(logsRoot: try store.logFolderURL()),
       redactor: DiagnosticsRedactor(
@@ -1179,11 +1335,16 @@ extension WebPanelController {
   static let batteryTargetFpsRange: ClosedRange<Double> = 1...240
   /// Settings that change how much rendering work runs now, so the energy readout
   /// restarts its window and compares before with after. Battery quality counts only
-  /// while it is in force, but restarting on it anyway costs a few seconds of readout.
+  /// while it is in force, and so does what a Low Power Mode, a hot Mac or a low battery
+  /// asks for, but restarting on them anyway costs a few seconds of readout. A condition
+  /// choice reaches the renderer a moment after it is made, through the presentation
+  /// policy; the restart only takes a baseline sample, and the figure compared is the
+  /// window that follows, so that moment is a small part of it.
   static let renderingSettings: Set<String> = [
     "batteryMode", "batteryRenderScale", "batteryTargetFps", "frameRateCap", "qualityPreset",
     "renderScale", "videoBackend", "contentPacing", "sharedVideoDecode", "sceneOptimization",
-    "sceneOnDemand", "sceneVideoPlaneSampling", "sceneRenderer",
+    "sceneOnDemand", "sceneVideoPlaneSampling", "sceneRenderer", "lowPowerModeAction",
+    "thermalAction", "lowBatteryAction",
   ]
 
   /// The engine owns the battery scale and frame rate as one value, so a single
@@ -1293,6 +1454,15 @@ extension WebPanelController {
     }
   }
 
+  /// Which one-time prompt a page message is about; pages from before there were three name none.
+  func promptKind(_ request: WebPanelRequest) throws -> SupportPromptStore.Prompt {
+    guard request.body["prompt"] != nil else { return .support }
+    guard let prompt = SupportPromptStore.Prompt(rawValue: try request.string("prompt")) else {
+      throw WebPanelRequest.invalid
+    }
+    return prompt
+  }
+
   static func allowedExternalURL(_ url: URL) -> Bool {
     guard url.scheme == "https", url.user == nil, url.password == nil, url.port == nil else {
       return false
@@ -1301,6 +1471,28 @@ extension WebPanelController {
       "steamcommunity.com", "store.steampowered.com", "help.steampowered.com", "github.com", "www.gnu.org",
       "support.apple.com", "space.bilibili.com", "www.bilibili.com", "www.pixiv.net",
     ].contains(url.host ?? "")
+  }
+
+  /// Keeps the page's last valid report of Installed's filters and library scroll offsets.
+  /// A report that does not validate is dropped and the previous one stays.
+  func storeViewState(_ body: [String: Any]) {
+    guard let viewState = PanelViewState(validating: body) else {
+      AppLog.debug("Panel view state ignored: the page sent a value outside its limits")
+      return
+    }
+    navigation.viewState = viewState
+  }
+}
+
+extension WallpaperImportService.DuplicatePolicy {
+  /// The policy the import popover's choice names. Anything it does not recognize keeps what the
+  /// library holds: a stale page must never be able to replace an installed wallpaper.
+  init(panelValue: Any?) {
+    switch panelValue as? String {
+    case "keepBoth": self = .keepBoth
+    case "replaceChanged": self = .replaceChanged
+    default: self = .skip
+    }
   }
 }
 

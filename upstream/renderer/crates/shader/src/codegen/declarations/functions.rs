@@ -6,7 +6,18 @@ use super::{super::emission::SourceEmitter, layout::VideoPlaneResource,
             resources::TextureDeclaration};
 use crate::{ShaderResult, SourceSpan};
 
+/// Generated name a builtin matrix `inverse` call is rewritten to.
+pub(crate) const MATRIX_INVERSE_HELPER: &str = "_we_Inverse";
+
+/// Macro a compiler defines when its backend writer has no matrix `inverse`.
+///
+/// Without it the helper name expands back to the builtin, so a backend that
+/// implements `inverse` itself compiles exactly the call it always did.
+pub(crate) const MATRIX_INVERSE_POLYFILL_MACRO: &str = "_WE_POLYFILL_INVERSE";
+
 /// Compatibility helper functions requested during codegen.
+// One independent request per helper family, not a state machine.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct CompatibilityFunctionRequests {
     /// Whether generated `clip` overloads are needed.
@@ -15,12 +26,19 @@ pub(crate) struct CompatibilityFunctionRequests {
     perform_lighting: bool,
     /// Whether remainder expressions need a single-evaluation float helper.
     float_remainder: bool,
+    /// Whether builtin matrix `inverse` calls were renamed to the helper.
+    matrix_inverse: bool,
 }
 
 impl CompatibilityFunctionRequests {
     /// Requests truncating remainder overloads for generated float `%` calls.
     pub(crate) fn require_float_remainder(&mut self) {
         self.float_remainder = true;
+    }
+
+    /// Requests the matrix inverse helper for renamed builtin `inverse` calls.
+    pub(crate) fn require_matrix_inverse(&mut self) {
+        self.matrix_inverse = true;
     }
 
     /// Requests generated `clip` overloads.
@@ -75,7 +93,42 @@ impl CompatibilityFunctionRequests {
             }
         }
 
-        if self.perform_lighting || self.clip || self.float_remainder {
+        if self.matrix_inverse {
+            // Adjugate over determinant, one overload per square size. Cofactor
+            // columns are cross products of the other columns, so the 3x3
+            // inverse is the transposed cross products over the triple
+            // product, and the 4x4 one is assembled from the same products of
+            // its upper 3x3 block and bottom row (Lengyel's form). Singular
+            // input divides by zero, as the builtin's result is undefined.
+            writeln!(
+                output,
+                "#ifdef {MATRIX_INVERSE_POLYFILL_MACRO}\n\
+                 mat2 {MATRIX_INVERSE_HELPER}(mat2 m) {{\n    \
+                 return mat2(m[1][1], -m[0][1], -m[1][0], m[0][0]) * \
+                 (1.0 / (m[0][0] * m[1][1] - m[1][0] * m[0][1]));\n}}\n\
+                 mat3 {MATRIX_INVERSE_HELPER}(mat3 m) {{\n    \
+                 vec3 x = cross(m[1], m[2]);\n    vec3 y = cross(m[2], m[0]);\n    \
+                 vec3 z = cross(m[0], m[1]);\n    \
+                 return transpose(mat3(x, y, z)) * (1.0 / dot(m[0], x));\n}}\n\
+                 mat4 {MATRIX_INVERSE_HELPER}(mat4 m) {{\n    \
+                 vec3 a = m[0].xyz;\n    vec3 b = m[1].xyz;\n    \
+                 vec3 c = m[2].xyz;\n    vec3 d = m[3].xyz;\n    \
+                 float x = m[0].w;\n    float y = m[1].w;\n    \
+                 float z = m[2].w;\n    float w = m[3].w;\n    \
+                 vec3 s = cross(a, b);\n    vec3 t = cross(c, d);\n    \
+                 vec3 u = a * y - b * x;\n    vec3 v = c * w - d * z;\n    \
+                 float r = 1.0 / (dot(s, v) + dot(t, u));\n    \
+                 s *= r;\n    t *= r;\n    u *= r;\n    v *= r;\n    \
+                 return transpose(mat4(vec4(cross(b, v) + t * y, -dot(b, t)),\n        \
+                 vec4(cross(v, a) - t * x, dot(a, t)),\n        \
+                 vec4(cross(d, u) + s * w, -dot(d, s)),\n        \
+                 vec4(cross(u, c) - s * z, dot(c, s))));\n}}\n\
+                 #else\n#define {MATRIX_INVERSE_HELPER} inverse\n#endif"
+            )
+            .map_err(SourceEmitter::write_error)?;
+        }
+
+        if self.perform_lighting || self.clip || self.float_remainder || self.matrix_inverse {
             writeln!(output).map_err(SourceEmitter::write_error)?;
         }
         Ok(())

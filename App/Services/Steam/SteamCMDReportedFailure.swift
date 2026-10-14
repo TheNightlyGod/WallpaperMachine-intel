@@ -26,6 +26,10 @@ enum SteamCMDReportedFailure: String, Sendable {
         }
     }
 
+    /// Whether trying the same request again can succeed without the user doing anything: a dropped
+    /// or slow connection, as opposed to a sign-in Steam refused or a limit it set.
+    var isTransient: Bool { self == .connection }
+
     var message: String {
         switch self {
         case .cachedCredentials:

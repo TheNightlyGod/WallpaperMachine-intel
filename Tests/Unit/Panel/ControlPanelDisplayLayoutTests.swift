@@ -22,6 +22,54 @@ final class ControlPanelDisplayLayoutTests: ControlPanelTestCase {
     await panel.shutdown()
   }
 
+  /// The Installed page with the inspector open on wallpaper "a", which only the main display shows.
+  private func withInspectorPanel(_ body: (PanelFixture, DisplayTransferTestBridge) async throws -> Void) async throws {
+    let bridge = DisplayTransferTestBridge(noPointer: .init())
+    let store = BridgeStore(bridge: bridge)
+    let panel = try PanelFixture(store: store, bridge: bridge, displayTitles: .renderer)
+    do {
+      try bridge.installProjects(in: panel.library)
+      try await store.refreshAllAsync()
+      try await panel.start()
+      try await panel.finishWelcome()
+      panel.navigation.selection = .wallpaper
+      panel.show()
+      try await panel.waitJS("document.querySelector('#inspector [data-action=\"reapplyWallpaper\"][data-id=\"a\"]')")
+      try await body(panel, bridge)
+    } catch { await panel.shutdown(); throw error }
+    await panel.shutdown()
+  }
+
+  func testInspectorAppliesToEveryDisplayReportsAFailureAndHidesTheButtonWithOneDisplay() async throws {
+    try await withInspectorPanel { panel, bridge in
+      // Offered for the shown wallpaper too, since the other display can still take it.
+      try await panel.expectJS("const b = document.querySelector('#inspector [data-action=\"activateAll\"]'); return Boolean(b) && !b.disabled", equals: true)
+
+      _ = try await panel.js("document.querySelector('#wallpaper-grid [data-action=\"select\"][data-id=\"c\"]').click()")
+      try await panel.waitJS("document.querySelector('#inspector [data-action=\"activateAll\"][data-id=\"c\"]')")
+      bridge.failOnce = "secondary=c"; bridge.failAfterMutation = true
+      _ = try await panel.js("document.querySelector('#inspector [data-action=\"activateAll\"]').click()")
+      try await panel.waitJS("document.querySelector('#inspector .inspector-failure')?.textContent.trim().length > 0")
+      XCTAssertEqual(bridge.assignments, ["primary": "a", "secondary": "b"], "the main display was put back")
+      // Putting it back selected wallpaper a again; the panel returns to c, whose notice this is.
+      try await panel.expectJS("return document.querySelector('#inspector [data-action=\"activateAll\"]')?.dataset.id", equals: "c")
+
+      bridge.failAfterMutation = false
+      _ = try await panel.js("document.querySelector('#inspector [data-action=\"activateAll\"]').click()")
+      try await panel.waitUntil(timeout: 5) { bridge.assignments == ["primary": "c", "secondary": "c"] }
+      try await panel.waitJS("document.querySelector('#inspector .inspector-failure') === null && document.querySelector('#inspector [data-action=\"activateAll\"]')?.disabled === true")
+
+      // A mirror or a disabled display cannot take a wallpaper of its own: one display left, no button.
+      bridge.eligible.remove("secondary")
+      try await panel.store.refreshAllAsync()
+      try await panel.waitJS("document.querySelector('#inspector [data-action=\"activateAll\"]') === null")
+      bridge.eligible.insert("secondary")
+      bridge.mirrors = ["secondary": "primary"]
+      try await panel.store.refreshAllAsync()
+      try await panel.waitJS("document.querySelector('#inspector [data-action=\"activateAll\"]') === null")
+    }
+  }
+
   func testSaveRenameApplyAndDeleteLayoutThroughTheRealPanel() async throws {
     try await withTransferPanel { panel, bridge in
       _ = try await panel.js("""

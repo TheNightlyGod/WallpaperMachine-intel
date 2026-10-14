@@ -338,3 +338,123 @@ fn scalar_uniform_arrays_keep_one_layout_on_both_targets() {
     assert!(msl.contains("metal::float4 inner[64];"), "{msl}");
     assert!(!msl.contains("float inner[64];"), "{msl}");
 }
+
+/// Author-shaped vertex stage inverting one matrix of every square size, the
+/// way the stock perspective-warping effects undo `squareToQuad`.
+const AUTHOR_MATRIX_INVERSE: &str = r"
+uniform vec2 g_Point0;
+uniform vec2 g_Point1;
+uniform vec2 g_Point2;
+uniform vec4 g_Shear;
+attribute vec3 a_Position;
+attribute vec2 a_TexCoord;
+varying vec4 v_TexCoord;
+
+mat3 squareToQuad(vec2 p0, vec2 p1, vec2 p2) {
+    return mat3(vec3(p1 - p0, 0.0), vec3(p2 - p0, 0.0), vec3(p0, 1.0));
+}
+
+void main() {
+    mat3 xform = inverse(squareToQuad(g_Point0, g_Point1, g_Point2));
+    vec3 uvw = xform * vec3(a_TexCoord, 1.0);
+    mat2 shear = inverse(mat2(1.0, g_Shear.x, g_Shear.y, 1.0));
+    mat4 frame = inverse(mat4(vec4(g_Shear.z, 0.0, 0.0, 0.0), vec4(0.0, g_Shear.w, 0.0, 0.0),
+                              vec4(0.0, 0.0, 1.0, 0.0), vec4(g_Point0, 0.0, 1.0)));
+    v_TexCoord = vec4(shear * (uvw.xy / uvw.z), 0.0, 1.0);
+    gl_Position = frame * vec4(a_Position, 1.0);
+}
+";
+
+/// `GLSL.std.450` extended instruction number of `MatrixInverse`.
+const GLSL_STD_450_MATRIX_INVERSE: u32 = 34;
+
+#[test]
+fn matrix_inverse_of_every_square_size_compiles_to_metal_and_stays_native_in_spirv() {
+    // Naga's MSL writer has no `inverse`, so any stage that inverts a matrix
+    // failed to translate and the native Metal renderer dropped the whole
+    // effect (the stock perspective, lightshafts, reflection, clouds and
+    // waterwaves effects among them), while the same stage drew under Vulkan.
+    let module =
+        shader::syntax::ShaderModule::parse(ShaderStageKind::Vertex, AUTHOR_MATRIX_INVERSE)
+            .expect("author source parses");
+    let legalized = shader::legalize::Codegen
+        .legalize(&module)
+        .expect("author source legalizes");
+
+    let metal_artifact = NagaCompiler
+        .compile_stage(ShaderTarget::MetalMsl, ShaderStageKind::Vertex, &legalized)
+        .unwrap_or_else(|error| {
+            panic!(
+                "a stage that inverts matrices must translate to MSL: {}\n{}",
+                error.to_miette_report(),
+                legalized.source()
+            )
+        });
+    assert!(
+        !metal(&metal_artifact).source().contains("inverse("),
+        "no builtin inverse may reach the metal source:\n{}",
+        metal(&metal_artifact).source()
+    );
+
+    // SPIR-V keeps the driver's own MatrixInverse for each call and gains no
+    // generated function over the same program without the inversions:
+    // Vulkan output is what it was before the repair.
+    let words = vertex_spirv(AUTHOR_MATRIX_INVERSE);
+    let uninverted = vertex_spirv(&AUTHOR_MATRIX_INVERSE.replace("inverse(", "("));
+    assert_eq!(
+        spirv_instructions(&words, SPIRV_OP_FUNCTION).count(),
+        spirv_instructions(&uninverted, SPIRV_OP_FUNCTION).count(),
+        "no generated function may reach SPIR-V"
+    );
+    assert_eq!(
+        spirv_instructions(&words, SPIRV_OP_EXT_INST)
+            .filter(|operands| operands.get(3) == Some(&GLSL_STD_450_MATRIX_INVERSE))
+            .count(),
+        3
+    );
+}
+
+/// Legalizes an author vertex stage and compiles it to SPIR-V words.
+fn vertex_spirv(source: &str) -> Vec<u32> {
+    let module = shader::syntax::ShaderModule::parse(ShaderStageKind::Vertex, source)
+        .expect("author source parses");
+    let legalized = shader::legalize::Codegen
+        .legalize(&module)
+        .expect("author source legalizes");
+    NagaCompiler
+        .compile_stage(
+            ShaderTarget::VulkanSpirv,
+            ShaderStageKind::Vertex,
+            &legalized,
+        )
+        .expect("the stage compiles to SPIR-V")
+        .stage()
+        .spirv()
+        .expect("vulkan_spirv target should produce SPIR-V words")
+        .to_vec()
+}
+
+/// SPIR-V `OpFunction` opcode.
+const SPIRV_OP_FUNCTION: u16 = 54;
+/// SPIR-V `OpExtInst` opcode.
+const SPIRV_OP_EXT_INST: u16 = 12;
+
+/// Yields the operand words of every instruction with `opcode`.
+fn spirv_instructions(words: &[u32], opcode: u16) -> impl Iterator<Item = &[u32]> {
+    let mut index = 5;
+    std::iter::from_fn(move || {
+        while index < words.len() {
+            let word_count = (words[index] >> 16) as usize;
+            let instruction_opcode = (words[index] & 0xffff) as u16;
+            if word_count == 0 || index + word_count > words.len() {
+                return None;
+            }
+            let operands = &words[index + 1..index + word_count];
+            index += word_count;
+            if instruction_opcode == opcode {
+                return Some(operands);
+            }
+        }
+        None
+    })
+}

@@ -182,9 +182,10 @@ struct VulkanRender::Impl {
     /// Decides copy elimination and which targets may retain their pixels.
     /// Runs once per compiled graph, never per frame.
     bool applySceneOptimization(Scene&, rg::RenderGraph&);
-    /// Aggregates every pass's reflection-derived dynamic inputs. Runs whether
-    /// or not pixel reuse is enabled, because on-demand updating asks the same
-    /// question for a different purpose.
+    /// Aggregates every pass's reflection-derived dynamic inputs, plus
+    /// `Feedback` when the graph carries a target into the next frame. Runs
+    /// whether or not pixel reuse is enabled, because on-demand updating asks
+    /// the same question for a different purpose.
     void computeShaderDynamicReasons(Scene&);
     /// Gives every pinned target back to the reuse pool.
     void releaseStaticCache();
@@ -203,6 +204,7 @@ struct VulkanRender::Impl {
     void UpdateCameraFillMode(Scene&, wallpaper::FillMode);
     void SetWallpaperScalingMode(wallpaper::WallpaperScalingMode);
     void SetWallpaperScalingFactor(double);
+    void SetWallpaperFraming(const wallpaper::WallpaperFraming&);
     void SetWallpaperHorizontalFlip(bool);
 
     bool initRes();
@@ -256,6 +258,7 @@ struct VulkanRender::Impl {
     WallpaperScalingLayout                m_scaling_layout {};
     WallpaperScalingMode                  m_scaling_mode { WallpaperScalingMode::FIT };
     double                                m_scaling_factor { 1.0 };
+    wallpaper::WallpaperFraming           m_framing {};
     bool                                  m_horizontal_flip { false };
     double                                m_display_scale_factor { 1.0 };
     VkExtent2D                            m_requested_render_extent {};
@@ -272,8 +275,9 @@ struct VulkanRender::Impl {
     std::vector<StaticPassSample> m_static_samples;
     std::vector<uint8_t> m_static_skip;
     /// Union of every pass's reflection-derived dynamic inputs for the compiled
-    /// graph. `UnknownInput` until a graph has been analysed, so a renderer
-    /// that has not compiled anything never reports a scene as still.
+    /// graph, plus its history loops. `UnknownInput` until a graph has been
+    /// analysed, so a renderer that has not compiled anything never reports a
+    /// scene as still.
     uint32_t m_shader_dynamic_reasons { static_cast<uint32_t>(DynamicReason::UnknownInput) };
     /// The pass list this frame actually records, with skipped clears and
     /// copies removed. Rebuilt in place so no allocation happens per frame.
@@ -338,6 +342,9 @@ void VulkanRender::SetWallpaperScalingMode(wallpaper::WallpaperScalingMode mode)
 }
 void VulkanRender::SetWallpaperScalingFactor(double factor) {
     pImpl->SetWallpaperScalingFactor(factor);
+}
+void VulkanRender::SetWallpaperFraming(const wallpaper::WallpaperFraming& framing) {
+    pImpl->SetWallpaperFraming(framing);
 }
 void VulkanRender::SetWallpaperHorizontalFlip(bool enabled) {
     pImpl->SetWallpaperHorizontalFlip(enabled);
@@ -1183,7 +1190,9 @@ VulkanRender::Impl::computeScalingLayout(const Scene& scene, uint32_t output_wid
                                          logical_width,
                                          logical_height,
                                          scale_factor,
-                                         m_scaling_factor);
+                                         m_scaling_factor,
+                                         m_framing.pan_x,
+                                         m_framing.pan_y);
 }
 
 void VulkanRender::Impl::updateScalingLayout(const Scene& scene, uint32_t output_width,
@@ -1226,6 +1235,13 @@ void VulkanRender::Impl::SetWallpaperScalingFactor(double factor) {
     m_scaling_factor = NormalizeScaleFactor(factor);
     m_present_gate.Invalidate();
     LOG_INFO("wallpaper scaling factor: %.3f", m_scaling_factor);
+}
+
+void VulkanRender::Impl::SetWallpaperFraming(const wallpaper::WallpaperFraming& framing) {
+    // No log line: a drag on a position control sets this many times a second,
+    // which would flood the log.
+    m_framing = NormalizeWallpaperFraming(framing);
+    m_present_gate.Invalidate();
 }
 
 void VulkanRender::Impl::SetWallpaperHorizontalFlip(bool enabled) {
@@ -1516,21 +1532,44 @@ void VulkanRender::Impl::computeShaderDynamicReasons(Scene& scene) {
     // Starts at "unknown" and is replaced wholesale, so a pass shape this
     // function does not recognise leaves the scene looking dynamic rather than
     // still. Only `CustomShaderPass` carries shader reflection; clears and
-    // copies contribute nothing of their own.
+    // copies contribute nothing of their own beyond the targets they touch.
+    //
+    // A target the frame reads before it writes it hands each frame's result
+    // to the next: a trail keeps fading and an accumulation keeps converging
+    // with nothing else changing, so the clock has to keep running for it.
+    // The flag stays on the scene's target once a graph has set it, so only a
+    // target a pass of this graph reads or writes counts, not one an earlier
+    // graph of the same scene carried.
+    const auto carries_previous_frame = [&scene](const std::string& key) {
+        if (key.empty()) return false;
+        const auto* target = scene.FindRenderTarget(key);
+        return target != nullptr && target->carriesPreviousFrame;
+    };
     uint32_t reasons = 0;
     bool     understood_every_pass = true;
+    bool     reads_previous_frame  = false;
     for (auto* pass : m_passes) {
         if (pass == nullptr) continue;
         if (auto* custom = dynamic_cast<CustomShaderPass*>(pass)) {
-            reasons |= custom->staticPassDesc(scene).dynamic_reasons;
+            const auto desc = custom->staticPassDesc(scene);
+            reasons |= desc.dynamic_reasons;
+            reads_previous_frame = reads_previous_frame || carries_previous_frame(desc.target) ||
+                                   std::any_of(desc.inputs.begin(), desc.inputs.end(),
+                                               carries_previous_frame);
             continue;
         }
-        if (dynamic_cast<CopyPass*>(pass) != nullptr || dynamic_cast<PrePass*>(pass) != nullptr ||
-            dynamic_cast<FinPass*>(pass) != nullptr) {
+        if (auto* copy = dynamic_cast<CopyPass*>(pass)) {
+            reads_previous_frame = reads_previous_frame ||
+                                   carries_previous_frame(copy->desc().src) ||
+                                   carries_previous_frame(copy->desc().dst);
+            continue;
+        }
+        if (dynamic_cast<PrePass*>(pass) != nullptr || dynamic_cast<FinPass*>(pass) != nullptr) {
             continue;
         }
         understood_every_pass = false;
     }
+    if (reads_previous_frame) reasons |= DynamicReason::Feedback;
     if (! understood_every_pass) reasons |= DynamicReason::UnknownInput;
     m_shader_dynamic_reasons = reasons;
 }

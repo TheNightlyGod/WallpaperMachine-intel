@@ -10,7 +10,7 @@ final class ControlPanelPreviewTests: ControlPanelTestCase {
         .init(id: "preview", title: "Preview", kind: .webpage, supported: true, active: false, selected: true, previewPath: nil),
         .init(id: "active", title: "Active", kind: .video, supported: true, active: true, selected: false, previewPath: nil),
       ]
-      panel.store.appSnapshot = .init(playbackState: .playing, selectedWallpaperId: "preview", activeWallpaperIds: ["active"], errors: [])
+      panel.store.appSnapshot = .init(playbackState: .playing, selectedWallpaperId: "preview", activeWallpaperIds: ["active"], errors: [], heldWallpaperIds: [])
       panel.store.monitorInformationSnapshot.rows = [.init(displayId: "primary", title: "Primary",
         wallpaperId: "active", wallpaperTitle: "Active", mirrorTargetDisplayId: nil, mirrorTargetTitle: nil,
         scalingMode: "fill", targetFps: "30", audioResponse: false)]

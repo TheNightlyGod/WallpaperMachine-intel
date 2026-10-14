@@ -166,6 +166,21 @@ impl DisplayStateModel {
         primary: DisplayDesc,
         displays: Vec<DisplayDesc>,
     ) -> Result<Vec<DisplayAction>, EngineError> {
+        self.refresh_connected_keeping(primary, displays, &[])
+    }
+
+    /// Like [`Self::refresh_connected`], for a report in which some displays
+    /// have no pixel size yet (`transitional`, absent from `displays`).
+    ///
+    /// A transitional display that already has a descriptor keeps it, so its
+    /// runtime is neither closed nor rebuilt while the display settles. One
+    /// that has none gets no live descriptor, so nothing opens on it.
+    pub fn refresh_connected_keeping(
+        &mut self,
+        primary: DisplayDesc,
+        displays: Vec<DisplayDesc>,
+        transitional: &[DisplayDesc],
+    ) -> Result<Vec<DisplayAction>, EngineError> {
         let mut candidate = self.clone();
         let primary_id = primary.display_id;
         let primary_assignment_before = candidate
@@ -189,6 +204,7 @@ impl DisplayStateModel {
             }
         }
 
+        candidate.keep_descriptors_of_transitional_displays(self, transitional);
         candidate.reject_mirror_cycles()?;
         candidate.transfer_runtime_open_flags_from(self);
         let actions = candidate.plan_actions()?;
@@ -314,6 +330,33 @@ impl DisplayStateModel {
         }
 
         Ok(connected)
+    }
+
+    fn keep_descriptors_of_transitional_displays(
+        &mut self,
+        before: &DisplayStateModel,
+        transitional: &[DisplayDesc],
+    ) {
+        if transitional.is_empty() {
+            return;
+        }
+        for record in &mut self.records {
+            if record.live_display.is_some() {
+                continue;
+            }
+            let Some(previous) = before
+                .record(&record.key)
+                .and_then(|source| source.live_display.as_ref())
+            else {
+                continue;
+            };
+            if transitional
+                .iter()
+                .any(|display| previous.is_same_physical_display_as(display))
+            {
+                record.live_display = Some(previous.clone());
+            }
+        }
     }
 
     fn transfer_runtime_open_flags_from(&mut self, before: &DisplayStateModel) {
@@ -1840,5 +1883,159 @@ mod tests {
             Some(display(1, identity("primary")));
 
         assert!(model.plan_actions().unwrap().is_empty());
+    }
+
+    fn no_pixels(id: u32, identity: DisplayIdentity) -> DisplayDesc {
+        DisplayDesc::with_identity(id, identity, 1920, 0, 0, 0, 1.0)
+    }
+
+    /// A primary display and an external one, both assigned, active and with
+    /// their runtimes open, the way the engine leaves them after an Apply.
+    fn model_running_on_two_displays(external: &DisplayIdentity) -> DisplayStateModel {
+        let mut model = DisplayStateModel::from_config(WallpaperEngineConfig {
+            displays: vec![
+                DisplayConfig {
+                    selector: DisplaySelector::Primary,
+                    window_active: true,
+                    wallpaper: Some(WallpaperAssignment::Direct(template("/tmp/primary.json"))),
+                },
+                DisplayConfig {
+                    selector: DisplaySelector::Identity(external.clone()),
+                    window_active: true,
+                    wallpaper: Some(WallpaperAssignment::Direct(template("/tmp/external.json"))),
+                },
+            ],
+        })
+        .unwrap();
+        let primary = display(1, identity("primary"));
+        model
+            .refresh_connected(primary.clone(), vec![primary, display(7, external.clone())])
+            .unwrap();
+        for record in &mut model.records {
+            record.runtime_open = true;
+        }
+        model
+    }
+
+    #[test]
+    fn a_running_display_that_reports_no_pixels_keeps_its_descriptor_and_runtime() {
+        let external = identity("external");
+        let key = DisplayKey::Identity(external.clone());
+        let mut model = model_running_on_two_displays(&external);
+        let primary = display(1, identity("primary"));
+        let running = model.record(&key).unwrap().live_display.clone();
+        assert_eq!(running, Some(display(7, external.clone())));
+
+        // Dropping the display from the report instead leaves it without a
+        // live descriptor, and the engine closes the runtime of such a record
+        // and reloads the scene when the display returns.
+        let mut dropped = model.clone();
+        dropped
+            .refresh_connected(primary.clone(), vec![primary.clone()])
+            .unwrap();
+        assert!(!dropped.record(&key).unwrap().should_have_runtime());
+
+        model
+            .refresh_connected_keeping(
+                primary.clone(),
+                vec![primary],
+                &[no_pixels(7, external.clone())],
+            )
+            .unwrap();
+
+        let record = model.record(&key).unwrap();
+        assert!(record.should_have_runtime());
+        assert_eq!(record.live_display, running);
+        assert!(record.runtime_open);
+        assert!(model.record(&DisplayKey::Primary).unwrap().runtime_open);
+    }
+
+    #[test]
+    fn a_new_display_that_reports_no_pixels_gets_no_record_until_it_has_a_size() {
+        let external = identity("external");
+        let key = DisplayKey::Identity(external.clone());
+        let primary = display(1, identity("primary"));
+
+        // Not part of the configuration: no record appears for it at all.
+        let mut unknown = DisplayStateModel::from_config(WallpaperEngineConfig::default()).unwrap();
+        unknown
+            .refresh_connected_keeping(
+                primary.clone(),
+                vec![primary.clone()],
+                &[no_pixels(7, external.clone())],
+            )
+            .unwrap();
+        assert_eq!(unknown.records.len(), 1);
+
+        // Configured but not yet connected: the record stays without a
+        // descriptor, so nothing opens on it.
+        let mut configured = DisplayStateModel::from_config(WallpaperEngineConfig {
+            displays: vec![DisplayConfig {
+                selector: DisplaySelector::Identity(external.clone()),
+                window_active: true,
+                wallpaper: Some(WallpaperAssignment::Direct(template("/tmp/external.json"))),
+            }],
+        })
+        .unwrap();
+        let actions = configured
+            .refresh_connected_keeping(
+                primary.clone(),
+                vec![primary.clone()],
+                &[no_pixels(7, external.clone())],
+            )
+            .unwrap();
+        assert!(configured.record(&key).unwrap().live_display.is_none());
+        assert!(!actions.contains(&DisplayAction::Open(key.clone())));
+
+        let actions = configured
+            .refresh_connected_keeping(
+                primary.clone(),
+                vec![primary, display(7, external.clone())],
+                &[],
+            )
+            .unwrap();
+        assert!(actions.contains(&DisplayAction::Open(key)));
+    }
+
+    #[test]
+    fn transitional_matching_uses_identity_when_the_display_id_changed() {
+        let external = identity("external");
+        let key = DisplayKey::Identity(external.clone());
+        let mut model = model_running_on_two_displays(&external);
+        let primary = display(1, identity("primary"));
+        let running = model.record(&key).unwrap().live_display.clone();
+
+        // The same monitor came back under a new id and has no size yet.
+        model
+            .refresh_connected_keeping(
+                primary.clone(),
+                vec![primary],
+                &[no_pixels(9, external.clone())],
+            )
+            .unwrap();
+
+        let record = model.record(&key).unwrap();
+        assert_eq!(record.live_display, running);
+        assert!(record.runtime_open);
+    }
+
+    #[test]
+    fn a_transitional_display_does_not_keep_a_different_display_that_went_away() {
+        let external = identity("external");
+        let key = DisplayKey::Identity(external.clone());
+        let mut model = model_running_on_two_displays(&external);
+        let primary = display(1, identity("primary"));
+
+        model
+            .refresh_connected_keeping(
+                primary.clone(),
+                vec![primary],
+                &[no_pixels(9, identity("somebody-else"))],
+            )
+            .unwrap();
+
+        let record = model.record(&key).unwrap();
+        assert!(record.live_display.is_none());
+        assert!(!record.runtime_open);
     }
 }

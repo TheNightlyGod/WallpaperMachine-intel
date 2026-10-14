@@ -43,6 +43,9 @@ pub(crate) struct DeclarationPlan<'src> {
     pub compatibility_functions: CompatibilityFunctionRequests,
     /// Video plane sampling helpers requested by rewritten sampling calls.
     pub video_sampling_functions: VideoSamplingFunctionRequests,
+    /// Globals whose initializers run at the beginning of `main`, in
+    /// declaration order.
+    pub global_initializers: Vec<SmolStr>,
     /// Program-level stage interface edits supplied by pipeline assembly.
     pub interface_layout: StageInterfaceLayout,
     /// Program-level resource layout edits supplied by pipeline assembly.
@@ -366,6 +369,11 @@ impl<'src> DeclarationPlan<'src> {
     /// Requests generated `PerformLighting_V1` overloads.
     pub(crate) fn require_perform_lighting_functions(&mut self) {
         self.compatibility_functions.require_perform_lighting();
+    }
+
+    /// Requests the matrix inverse helper that renamed `inverse` calls use.
+    pub(crate) fn require_matrix_inverse_functions(&mut self) {
+        self.compatibility_functions.require_matrix_inverse();
     }
 
     /// Emits requested compatibility helper functions.

@@ -99,6 +99,12 @@
     },
     "Invalid lock-screen asset path." : {
       "localizations" : {"en" : {"stringUnit" : {"state" : "translated", "value" : "Invalid lock-screen asset path."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "ロック画面のアセットのパスが無効です。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "锁定屏幕文件路径无效。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "鎖定畫面資源路徑無效。"}}}
+    },
+    "WallpaperMachine does not accept added wallpapers." : {
+      "localizations" : {"en" : {"stringUnit" : {"state" : "translated", "value" : "WallpaperMachine does not accept added wallpapers."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "WallpaperMachineでは壁紙を追加できません。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "WallpaperMachine 不支持添加墙纸。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "WallpaperMachine 不支援加入桌布。"}}}
+    },
+    "WallpaperMachine does not handle debug requests." : {
+      "localizations" : {"en" : {"stringUnit" : {"state" : "translated", "value" : "WallpaperMachine does not handle debug requests."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "WallpaperMachineはデバッグリクエストを処理しません。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "WallpaperMachine 不处理调试请求。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "WallpaperMachine 不處理除錯請求。"}}}
     }
   },
   "version" : "1.0"

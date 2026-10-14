@@ -142,6 +142,207 @@ final class ControlPanelDiscoverTests: ControlPanelTestCase {
     await workshop.steamCMDSetup.shutdown()
   }
 
+  /// A link pasted whole is looked up at once, but a bare id waits for Return: searching as it is
+  /// typed would look up every prefix of it. Words keep their short pause. The summary stops
+  /// counting results while the grid shows an item looked up from a link, and only the
+  /// wallpapers list invites a link.
+  func testPastedLinksSearchAtOnceAndIdsWaitForReturnWithoutWindow() async throws {
+    let fixture = makeStore()
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "web-paste-link-\(UUID().uuidString)")
+    let defaults = try TemporaryDefaults.make(for: self).defaults
+    defer { try? FileManager.default.removeItem(at: root) }
+    let workshop = WorkshopStore(
+      downloader: WorkshopDownloadManager(sessionDirectory: root), supportDirectory: root,
+      defaults: defaults)
+    let controller = WebPanelController(
+      store: fixture.store, navigation: ControlPanelNavigation(), workshop: workshop,
+      defaults: defaults, appLanguage: .english())
+    let web = controller.makeWebView()
+    defer { controller.stop() }
+    web.setFrameSize(NSSize(width: 960, height: 640))
+    let deadline = Date().addingTimeInterval(15)
+    while !controller.isReady && Date() < deadline {
+      try await Task.sleep(for: .milliseconds(100))
+    }
+    XCTAssertTrue(controller.isReady)
+    guard controller.isReady else { return }
+    _ = try await web.callAsyncJavaScript("""
+      document.querySelector('#welcome [data-action="go"][data-step="5"]').click();
+      document.querySelector('#welcome [data-action="finish"]').click();
+      """, arguments: [:], in: nil, contentWorld: .page)
+    // Messages are recorded and answered with nothing, so no search reaches Steam, and the
+    // short pause before a search is recorded instead of waited for.
+    let result =
+      try await web.callAsyncJavaScript(
+        """
+        const snapshot = await window.webkit.messageHandlers.native.postMessage({action:'ready'});
+        const sent = [];
+        // The page drops the wrapper, and the override on it, once it collects garbage unless
+        // something holds the wrapper.
+        window.heldBridge = window.webkit.messageHandlers.native;
+        window.webkit.messageHandlers.native.postMessage = message => { sent.push(message); return Promise.resolve(null); };
+        const pauses = [];
+        const realSetTimeout = window.setTimeout.bind(window);
+        window.setTimeout = (callback, delay, ...rest) => {
+          if (delay === 450) { pauses.push(delay); return 0; }
+          return realSetTimeout(callback, delay, ...rest);
+        };
+        const show = workshop => window.wallpaperUI.receive(Object.assign({}, snapshot, {
+          page: 'discover',
+          workshop: Object.assign({}, snapshot.workshop, {
+            page: 1, totalPages: 1000, totalCount: 2891159, pageSize: 30,
+            loaded: true, loading: false, items: [], error: null, lookup: false,
+            source: { key: 'browse', id: null, name: null, searchable: true, canGoBack: false }
+          }, workshop)
+        }));
+        // Native pushes can replace the snapshot between turns, so each step shows Discover again
+        // first and reads what it caused straight away: handlers post their message at once.
+        const turn = () => new Promise(resolve => realSetTimeout(resolve, 0));
+        const field = () => document.getElementById('wallpaper-search');
+        const searches = () => sent.filter(message => message.action === 'workshopSearch').map(message => message.text);
+        const begin = async text => {
+          await turn(); show({});
+          sent.length = 0; pauses.length = 0;
+          if (text !== undefined) field().value = text;
+        };
+        const enter = async (text, inputType) => {
+          await begin(text);
+          field().dispatchEvent(new InputEvent('input', { bubbles: true, inputType }));
+          return { searches: searches(), pauses: pauses.length };
+        };
+        const summary = () => document.getElementById('browser-summary').textContent.trim();
+        show({});
+        const result = { placeholder: field().placeholder, plainSummary: summary() };
+        const link = 'https://steamcommunity.com/sharedfiles/filedetails/?id=3632513108';
+        result.pastedLink = await enter(link, 'insertFromPaste');
+        result.typedLink = await enter(link, 'insertText');
+        result.typedId = await enter('3632513108', 'insertText');
+        result.pastedId = await enter('3632513108', 'insertFromPaste');
+        result.shortNumber = await enter('12345', 'insertText');
+        result.words = await enter('forest', 'insertText');
+        result.wordsPasted = await enter('forest', 'insertFromPaste');
+        await enter('3632513108', 'insertFromPaste');
+        await begin();
+        field().form.requestSubmit();
+        result.submitted = searches();
+        await turn(); show({ lookup: true, totalPages: 1, totalCount: 1 });
+        result.lookupSummary = summary();
+        show({ source: { key: 'collections', id: null, name: null, searchable: true, canGoBack: false } });
+        result.collectionsPlaceholder = field().placeholder;
+        return result;
+        """, arguments: [:], in: nil, contentWorld: .page) as? [String: Any]
+    let link = "https://steamcommunity.com/sharedfiles/filedetails/?id=3632513108"
+    func entry(_ name: String) -> (searches: [String], pauses: Int) {
+      let value = result?[name] as? [String: Any]
+      return (value?["searches"] as? [String] ?? ["missing"], value?["pauses"] as? Int ?? -1)
+    }
+    XCTAssertEqual(entry("pastedLink").searches, [link], "a link pasted whole is looked up at once")
+    XCTAssertEqual(entry("pastedLink").pauses, 0)
+    XCTAssertEqual(entry("typedLink").searches, [], "a link typed by hand waits for a pause like words")
+    XCTAssertEqual(entry("typedLink").pauses, 1)
+    for name in ["typedId", "pastedId"] {
+      XCTAssertEqual(entry(name).searches, [], "an id is not looked up as it is entered")
+      XCTAssertEqual(entry(name).pauses, 0, "and no pause is left running to look it up")
+    }
+    XCTAssertEqual(entry("shortNumber").pauses, 1, "a short number is searched for like words")
+    XCTAssertEqual(entry("words").pauses, 1)
+    XCTAssertEqual(entry("wordsPasted").searches, [])
+    XCTAssertEqual(entry("wordsPasted").pauses, 1)
+    XCTAssertEqual(result?["submitted"] as? [String], ["3632513108"], "Return looks the id up")
+    let plain = result?["plainSummary"] as? String ?? ""
+    let looked = result?["lookupSummary"] as? String ?? ""
+    XCTAssertNotNil(plain.rangeOfCharacter(from: .decimalDigits), "a list counts its results")
+    XCTAssertFalse(looked.isEmpty)
+    XCTAssertNil(looked.rangeOfCharacter(from: .decimalDigits), "an item looked up from a link is not counted among results")
+    XCTAssertNotEqual(result?["placeholder"] as? String, result?["collectionsPlaceholder"] as? String,
+      "only the wallpapers list invites a pasted link")
+    XCTAssertFalse((result?["collectionsPlaceholder"] as? String ?? "").isEmpty)
+    XCTAssertNil(controller.actionError)
+    await workshop.steamCMDSetup.shutdown()
+  }
+
+  /// The sort menu is the web page's own table of keys, and the native side refuses a key it
+  /// does not know, so each option must be one `WorkshopSort` reads and none may be left out.
+  /// Choosing one asks for a search sorted by that key.
+  func testDiscoverSortMenuOffersEveryWorkshopSortAndSearchesByTheChosenOne() async throws {
+    let fixture = makeStore()
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "web-sort-menu-\(UUID().uuidString)")
+    let defaults = try TemporaryDefaults.make(for: self).defaults
+    defer { try? FileManager.default.removeItem(at: root) }
+    let workshop = WorkshopStore(
+      downloader: WorkshopDownloadManager(sessionDirectory: root), supportDirectory: root,
+      defaults: defaults)
+    let controller = WebPanelController(
+      store: fixture.store, navigation: ControlPanelNavigation(), workshop: workshop,
+      defaults: defaults, appLanguage: .english())
+    let web = controller.makeWebView()
+    defer { controller.stop() }
+    web.setFrameSize(NSSize(width: 960, height: 640))
+    let deadline = Date().addingTimeInterval(15)
+    while !controller.isReady && Date() < deadline {
+      try await Task.sleep(for: .milliseconds(100))
+    }
+    XCTAssertTrue(controller.isReady)
+    guard controller.isReady else { return }
+    _ = try await web.callAsyncJavaScript("""
+      document.querySelector('#welcome [data-action="go"][data-step="5"]').click();
+      document.querySelector('#welcome [data-action="finish"]').click();
+      """, arguments: [:], in: nil, contentWorld: .page)
+    // Messages are recorded and answered with nothing, so no search reaches Steam.
+    let result =
+      try await web.callAsyncJavaScript(
+        """
+        const snapshot = await window.webkit.messageHandlers.native.postMessage({action:'ready'});
+        const sent = [];
+        // WebKit hands the page a wrapper that is dropped, with the override on it, once nothing
+        // in the page refers to it and the page collects garbage; the next message would then
+        // reach the real handler. Holding the wrapper keeps the override for the whole run.
+        window.heldBridge = window.webkit.messageHandlers.native;
+        window.webkit.messageHandlers.native.postMessage = message => { sent.push(message); return Promise.resolve(null); };
+        const show = () => window.wallpaperUI.receive(Object.assign({}, snapshot, {
+          page: 'discover',
+          workshop: Object.assign({}, snapshot.workshop, {
+            page: 1, totalPages: 1000, totalCount: 2891159, pageSize: 30,
+            loaded: true, loading: false, items: [], error: null, lookup: false,
+            source: { key: 'browse', id: null, name: null, searchable: true, canGoBack: false }
+          })
+        }));
+        // Native pushes can replace the snapshot between turns, and one that arrives while the
+        // page is not on Discover turns a sort choice into an Installed sort that searches
+        // nothing. So each choice shows Discover again just before it and reads what it caused
+        // in the same turn: the handler posts its message at once. The page redraws after a
+        // choice, so the menu is looked up again for each one.
+        const turn = () => new Promise(resolve => setTimeout(resolve, 0));
+        const menu = () => document.getElementById('browser-sort');
+        show();
+        const keys = [...menu().options].map(option => option.value);
+        const labels = [...menu().options].map(option => option.textContent.trim());
+        const choices = {};
+        for (const key of keys) {
+          await turn(); show();
+          sent.length = 0;
+          menu().value = key;
+          menu().dispatchEvent(new Event('change', { bubbles: true }));
+          choices[key] = sent.filter(message => message.action === 'workshopSearch').map(message => message.sort);
+        }
+        return { keys, labels, choices };
+        """, arguments: [:], in: nil, contentWorld: .page) as? [String: Any]
+    let keys = result?["keys"] as? [String] ?? []
+    XCTAssertEqual(Set(keys), Set(WorkshopSort.allCases.map(\.rawValue)), "every sort has a menu entry and no entry is unknown to Swift")
+    XCTAssertEqual(keys.count, Set(keys).count, "no sort is offered twice")
+    let labels = result?["labels"] as? [String] ?? []
+    XCTAssertEqual(labels.count, Set(labels).count, "entries are told apart by their labels")
+    XCTAssertFalse(labels.contains(where: \.isEmpty))
+    let choices = result?["choices"] as? [String: [String]] ?? [:]
+    for key in keys {
+      XCTAssertEqual(choices[key], [key], "choosing \(key) searches sorted by it")
+    }
+    XCTAssertNil(controller.actionError)
+    await workshop.steamCMDSetup.shutdown()
+  }
+
   /// Discover's lists are tabs, so subscriptions can be found without opening a menu, even at
   /// the 760px window minimum; signed in, downloading what the library lacks leads the list.
   func testDiscoverListsAreTabsAndSubscriptionsLeadWithTheirDownload() async throws {
@@ -616,6 +817,88 @@ final class ControlPanelDiscoverTests: ControlPanelTestCase {
     await workshop.steamCMDSetup.shutdown()
   }
 
+  func testDownloadTimeLeftShowsWhenEveryRunningJobHasAnEstimate() async throws {
+    let fixture = makeStore()
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "web-time-left-\(UUID().uuidString)")
+    let defaults = try TemporaryDefaults.make(for: self).defaults
+    defer { try? FileManager.default.removeItem(at: root) }
+    let workshop = WorkshopStore(
+      downloader: WorkshopDownloadManager(sessionDirectory: root), supportDirectory: root,
+      defaults: defaults)
+    let controller = WebPanelController(
+      store: fixture.store, navigation: ControlPanelNavigation(), workshop: workshop,
+      defaults: defaults,
+      appLanguage: .english())
+    let web = controller.makeWebView()
+    defer { controller.stop() }
+    web.setFrameSize(NSSize(width: 960, height: 640))
+    let deadline = Date().addingTimeInterval(15)
+    while !controller.isReady && Date() < deadline {
+      try await Task.sleep(for: .milliseconds(50))
+    }
+    XCTAssertTrue(controller.isReady)
+    guard controller.isReady else { return }
+    let base =
+      try await web.callAsyncJavaScript(
+        "return await window.webkit.messageHandlers.native.postMessage({action:'ready'})",
+        arguments: [:], in: nil, contentWorld: .page) as? [String: Any]
+    XCTAssertNotNil(base)
+    guard let base else { return }
+    controller.stop()
+
+    let result =
+      try await web.callAsyncJavaScript(
+        """
+        const waitFor = async predicate => {
+          const deadline = Date.now() + 5000;
+          while (!predicate()) {
+            if (Date.now() > deadline) throw new Error('Time left did not settle');
+            await new Promise(resolve => setTimeout(resolve, 20));
+          }
+        };
+        const job = (id, extra = {}) => Object.assign({
+          id, wallpaperID: id, title: id, status: 'Downloading Workshop files…', preview: null, account: 'fixture',
+          progress: 0.4, pending: true, queued: false, bytesReceived: 400, bytesExpected: 1000, bytesPerSecond: 600000,
+          secondsRemaining: null, authenticating: false, cancelled: false, error: null, prompt: null,
+          securePrompt: false, challenge: null, warning: null }, extra);
+        const push = downloads => window.wallpaperUI.receive(Object.assign({}, base, { downloads, downloadRequests: [] }));
+        const activity = document.getElementById('activity-bar');
+        const queue = document.getElementById('queue-popover');
+        push([job('one')]);
+        document.querySelector('#top-actions [data-action="openDownloads"]').click();
+        await waitFor(() => !queue.hidden);
+        const both = text => activity.textContent.includes(text) && queue.textContent.includes(text);
+        const neither = text => !activity.textContent.includes(text) && !queue.textContent.includes(text);
+        const none = neither(' left');
+        push([job('one', { secondsRemaining: 45 })]);
+        const seconds = both('45 sec left');
+        push([job('one', { secondsRemaining: 600 })]);
+        const minutes = both('10 min left');
+        push([job('one', { secondsRemaining: 9000 })]);
+        const hours = both('2.5 hr left');
+        push([job('one', { secondsRemaining: null })]);
+        const cleared = neither(' left');
+        push([job('one', { secondsRemaining: 600 }), job('two', { secondsRemaining: 120 })]);
+        const slowest = activity.textContent.includes('2 downloading') && activity.textContent.includes('10 min left')
+          && !activity.textContent.includes('2 min left');
+        push([job('one', { secondsRemaining: 600 }), job('two', { secondsRemaining: null })]);
+        const unknownJob = activity.textContent.includes('2 downloading') && !activity.textContent.includes(' left');
+        return {none, seconds, minutes, hours, cleared, slowest, unknownJob};
+        """, arguments: ["base": base], in: nil, contentWorld: .page) as? [String: Any]
+    XCTAssertEqual(result?["none"] as? Bool, true, "No estimate means no time left on screen")
+    XCTAssertEqual(result?["seconds"] as? Bool, true, "Under a minute and a half reads in seconds, on both surfaces")
+    XCTAssertEqual(result?["minutes"] as? Bool, true, "Minutes follow")
+    XCTAssertEqual(result?["hours"] as? Bool, true, "Past an hour and a half it reads in hours")
+    XCTAssertEqual(result?["cleared"] as? Bool, true, "An estimate that goes away is removed, not left stale")
+    XCTAssertEqual(result?["slowest"] as? Bool, true, "Several jobs finish when the slowest does")
+    XCTAssertEqual(
+      result?["unknownJob"] as? Bool, true,
+      "A running job without an estimate keeps the batch from promising one")
+    XCTAssertNil(web.window, "This regression must not open a desktop window")
+    await workshop.steamCMDSetup.shutdown()
+  }
+
   func testDiscoverPreviewsPlayWithoutCanvasReadbackAndReleaseOffscreenImages() async throws {
     let fixture = makeStore()
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(
@@ -799,6 +1082,82 @@ final class ControlPanelDiscoverTests: ControlPanelTestCase {
     XCTAssertEqual(fetcher.requests.count, 3)
     XCTAssertNil(web.window, "This regression must not open a desktop window")
     await workshop.steamCMDSetup.shutdown()
+  }
+
+  /// **Download and apply** sits under Download for a wallpaper that can run and a target display
+  /// that can show it, says what is pending while the choice stands, and explains a wallpaper that
+  /// arrived and was left alone. One click asks Swift to apply it on arrival.
+  func testDownloadAndApplyIsOfferedOnlyWhereItCanApplyAndTheInspectorSaysWhatIsPending() async throws {
+    try await withPanel { panel in
+      try await panel.finishWelcome()
+      panel.workshop.selectedItem = WorkshopItem(
+        id: "111", title: "W111", creator: "Test", summary: "", previewURL: nil, tags: ["Video"],
+        size: 2048, subscriptions: 0)
+      panel.show()
+      try await panel.waitJS("powerProbe.received.length >= 1")
+      let result = try await panel.js("""
+        const base = window.powerProbe.received.at(-1);
+        const item = (id, kind = 'Video', extra = {}) => Object.assign({ id, title: 'W' + id, creator: 'Test', summary: '', preview: null, thumbnail: null, animated: null, tags: [kind], approved: false, size: 2048, subscriptions: 0, kind, creatorID: null, collection: false, collectionSize: 0 }, extra);
+        const items = [item('111'), item('222', 'Application'), item('333', 'Video', { collection: true, collectionSize: 4 }), item('444'), item('555'), item('666')];
+        const installed = [{ id: '444', title: 'W444', kind: 'Video', size: 100, preview: null, active: false, supported: true, tags: [] }];
+        const job = (id, extra = {}) => Object.assign({ id, wallpaperID: id, title: 'W' + id, status: '', preview: null, thumbnail: null, account: '', phase: null, progress: null, pending: true, queued: true, paused: false, cancelled: false, error: null, applyOnArrival: false }, extra);
+        const request = (id, extra = {}) => Object.assign({ id, wallpaperID: id, title: 'W' + id, preview: null, thumbnail: null, account: '', rememberSession: true, stage: 'setup', paused: false, applyOnArrival: false }, extra);
+        const show = (id, extra = {}) => {
+          window.wallpaperUI.receive(Object.assign({}, base, { page: 'discover', targetDisplayID: 'primary',
+            workshop: Object.assign({}, base.workshop, { items, loaded: true, selectedID: id }),
+            wallpapers: [], downloads: [], downloadRequests: [], applyNotes: {} }, extra));
+          const inspector = document.getElementById('inspector');
+          return { apply: !!inspector.querySelector('[data-action="requestDownloadAndApply"][data-id="' + id + '"]'),
+                   plain: !!inspector.querySelector('[data-action="requestDownload"][data-id="' + id + '"]'),
+                   pending: inspector.querySelector('.inspector-apply-intent')?.textContent.trim() || '',
+                   note: inspector.querySelector('.inspector-apply-note')?.textContent.trim() || '' };
+        };
+        const mirrored = base.displays.map(display => Object.assign({}, display, { mode: 'mirror', mirrorTarget: 'other' }));
+        const showing = base.displays.map(display => Object.assign({}, display, { wallpaperID: '111' }));
+        const note = 'Downloaded, but not applied because you chose another wallpaper.';
+        const facts = {
+          video: show('111'), application: show('222'), collection: show('333'),
+          installed: show('444', { wallpapers: installed }),
+          downloading: show('555', { downloads: [job('555')] }),
+          downloadingToApply: show('555', { downloads: [job('555', { applyOnArrival: true })] }),
+          waitingToApply: show('666', { downloadRequests: [request('666', { applyOnArrival: true })] }),
+          mirrorTarget: show('111', { displays: mirrored }),
+          withNote: show('111', { applyNotes: { '111': note } }),
+          noteOnceShown: show('111', { applyNotes: { '111': note }, displays: showing }),
+        };
+        // Choosing it asks native to apply it on arrival; the plain button asks for nothing more.
+        window.sent = [];
+        const native = window.webkit.messageHandlers.native;
+        const original = native.postMessage.bind(native);
+        native.postMessage = message => { window.sent.push(message); return original(message); };
+        show('111');
+        document.querySelector('#inspector [data-action="requestDownloadAndApply"]').click();
+        return { facts, note };
+        """) as? [String: Any]
+      let facts = try XCTUnwrap(result?["facts"] as? [String: [String: Any]])
+      func offered(_ key: String) -> Bool? { facts[key]?["apply"] as? Bool }
+      XCTAssertEqual(offered("video"), true)
+      XCTAssertEqual(facts["video"]?["plain"] as? Bool, true, "Download stays as it was beside it")
+      XCTAssertEqual(offered("application"), false, "An Application cannot run on macOS")
+      XCTAssertEqual(offered("collection"), false, "A collection is opened, not downloaded")
+      XCTAssertEqual(offered("installed"), false, "An installed wallpaper is applied, not downloaded")
+      XCTAssertEqual(offered("downloading"), false, "A download under way is where the person looks")
+      XCTAssertEqual(offered("waitingToApply"), false)
+      XCTAssertEqual(offered("mirrorTarget"), false, "A display mirroring another shows no wallpaper of its own")
+
+      XCTAssertEqual(facts["downloading"]?["pending"] as? String, "", "A plain download promises no apply")
+      XCTAssertNotEqual(facts["downloadingToApply"]?["pending"] as? String, "", "A running download says it will apply")
+      XCTAssertNotEqual(facts["waitingToApply"]?["pending"] as? String, "", "So does one waiting for setup")
+      XCTAssertEqual(facts["withNote"]?["note"] as? String, result?["note"] as? String, "A wallpaper left alone says why")
+      XCTAssertEqual(facts["noteOnceShown"]?["note"] as? String, "", "The reason is moot once the display shows it")
+
+      try await panel.waitUntil { panel.workshop.appliesOnArrival("111") }
+      let sent = try await panel.js("return window.sent.map(message => ({ action: message.action, id: message.id, apply: message.apply }))")
+        as? [[String: Any]]
+      let request = sent?.first { $0["action"] as? String == "requestDownload" }
+      XCTAssertEqual(request?["id"] as? String, "111")
+      XCTAssertEqual(request?["apply"] as? Bool, true)
+    }
   }
 
   /// `closing`, when given, is the brightness of a last frame shown for a fiftieth of a second

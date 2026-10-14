@@ -68,6 +68,33 @@ pub enum BridgeScalingMode {
     Fill,
 }
 
+/// Where a wallpaper sits on one display when that display leaves room around
+/// it, as a fraction of that room on each axis: `0.0` is left or top, `1.0` is
+/// right or bottom, and `0.5` on both is the centred layout every wallpaper
+/// has until it is moved. Always a finite fraction between 0 and 1.
+#[derive(Clone, Copy, Debug, PartialEq, uniffi::Record)]
+pub struct BridgeFraming {
+    pub pan_x: f64,
+    pub pan_y: f64,
+}
+
+impl From<wallpaper_core::project::SceneFraming> for BridgeFraming {
+    fn from(framing: wallpaper_core::project::SceneFraming) -> Self {
+        Self {
+            pan_x: framing.pan_x,
+            pan_y: framing.pan_y,
+        }
+    }
+}
+
+impl From<crate::config::FramingCfg> for BridgeFraming {
+    /// What the app is told is what the engine is handed, so a saved position
+    /// that is not a valid fraction reads the way it plays.
+    fn from(framing: crate::config::FramingCfg) -> Self {
+        framing.to_scene().into()
+    }
+}
+
 /// Committed wallpaper inputs for a native lock-screen or screen-saver display.
 #[derive(Clone, Debug, PartialEq, uniffi::Record)]
 pub struct BridgeLockScreenScene {
@@ -82,6 +109,9 @@ pub struct BridgeLockScreenScene {
     pub fps: u32,
     pub scaling_mode: BridgeScalingMode,
     pub scaling_factor: f64,
+    /// Where the wallpaper sits on that display. Web wallpapers fill their
+    /// page and are always centred.
+    pub framing: BridgeFraming,
     /// Flat renderer overrides, or decorated `{id: {value, type, ...}}` web options.
     pub properties_json: Option<String>,
     pub paused: bool,
@@ -104,6 +134,11 @@ pub struct BridgeWebWallpaper {
     /// Entry page relative to `project_path`.
     pub entry_file: String,
     pub fps: u32,
+    /// The internal render scale in force: the saved scale, or the battery
+    /// profile's while Reduced quality is selected and the Mac is on battery,
+    /// already clamped to `0.25..=1.0`. A web page applies it to
+    /// `window.devicePixelRatio`.
+    pub render_scale: f32,
     pub paused: bool,
     pub volume: f32,
     pub muted: bool,
@@ -133,6 +168,15 @@ pub enum BridgePropertyValue {
     String { value: String },
     ColorRgb { red: f64, green: f64, blue: f64 },
     Empty,
+}
+
+/// One value a host is showing for a property without having saved it, such
+/// as a slider the person is still dragging. It is checked like an edit and
+/// never becomes one.
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct BridgePropertyEdit {
+    pub property_id: String,
+    pub value: BridgePropertyValue,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
@@ -202,12 +246,29 @@ pub enum BridgeBatteryMode {
     Pause,
 }
 
+/// Why the host asks for the reduced-quality profile right now, apart from
+/// the battery mode the user saved. Held only while the host reports it; never
+/// persisted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, uniffi::Enum)]
+pub enum BridgeQualityThrottleCause {
+    /// Low Power Mode is on.
+    LowPowerMode,
+    /// The Mac reports a thermal state that calls for less work.
+    Heat,
+    /// The battery is at or below the user's low-battery threshold.
+    LowBattery,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct BridgeAppSnapshot {
     pub playback_state: BridgePlaybackState,
     pub selected_wallpaper_id: Option<String>,
     pub active_wallpaper_ids: Vec<String>,
     pub errors: Vec<String>,
+    /// Wallpapers assigned to a display that were left out of this session
+    /// because the app died while opening them in two sessions in a row,
+    /// sorted. `BridgeStore` offers each one a retry; Apply clears them too.
+    pub held_wallpaper_ids: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
@@ -263,6 +324,9 @@ pub struct BridgeDisplayConfigRow {
     pub enabled: bool,
     pub scaling_mode: BridgeScalingMode,
     pub scaling_factor: f64,
+    /// Where the wallpaper sits on this display. Unlike the scale factor it is
+    /// never a draft: this is what is saved and what the display shows.
+    pub framing: BridgeFraming,
     pub target_fps: u32,
     pub max_fps: u32,
     pub muted: bool,
@@ -301,6 +365,10 @@ pub struct BridgePropertyDescriptor {
     pub directory_mode: Option<BridgeDirectoryMode>,
     pub dirty: bool,
     pub can_restore_defaults: bool,
+    /// False while an authored visibility rule hides the property. The row is
+    /// still listed, with the value the renderer is using, so a host can show only
+    /// the enabled rows and still reach the rest. A rule the bridge cannot read
+    /// never disables a property.
     pub enabled: bool,
     /// File and directory properties only: the app holds its own copy of this
     /// property's assets in managed storage, so deleting or re-downloading the
@@ -410,8 +478,9 @@ pub struct BridgeVideoBackendReport {
 /// `mode` composes the renderer's own answer with the host's pause state, in
 /// that precedence: a wallpaper the user paused reads `user_paused` whatever
 /// the renderer says, a display whose presentation is suspended reads
-/// `policy_suspended`, and only then does the renderer's classification show
-/// through. A scene that is running but cannot be read reads `unknown` — never
+/// `policy_suspended`, a surface that stopped drawing after a failure reads
+/// `stopped_after_failure`, and only then does the renderer's classification
+/// show through. A scene that is running but cannot be read reads `unknown` — never
 /// `continuous`, because "we could not tell" and "it is definitely ticking"
 /// are different facts and only one of them is evidence.
 ///
@@ -458,6 +527,10 @@ pub struct BridgeSettingsSnapshot {
     pub displays: Vec<BridgeDisplaySettingsRow>,
     pub launch_at_login_available: bool,
     pub launch_at_login_enabled: bool,
+    /// The user switched the login item off in System Settings > General >
+    /// Login Items. Launch at login is then available but not enabled, and
+    /// turning it on from the app cannot help: the user has to allow it there.
+    pub launch_at_login_needs_approval: bool,
     pub battery_mode: BridgeBatteryMode,
     /// Debug-level lines are recorded too; see `set_verbose_logging`.
     pub verbose_logging: bool,
@@ -515,6 +588,13 @@ pub struct BridgeSettingsSnapshot {
     pub battery_render_scale: f32,
     pub battery_target_fps: u32,
     pub on_battery_power: bool,
+    /// The causes the host has asked the reduced-quality profile for, sorted.
+    /// Empty when none holds. Runtime only: a fresh bridge starts without any.
+    pub quality_throttle: Vec<BridgeQualityThrottleCause>,
+    /// The frame-rate ceiling in force: the stricter of the saved global cap
+    /// and the profile's rate while the battery mode or a throttle holds the
+    /// profile. `frame_rate_cap` stays the saved global cap.
+    pub effective_frame_rate_cap: Option<u32>,
     /// False when nothing running can honour an internal render scale, so the
     /// control describes a preference that changes nothing on screen today.
     pub render_scale_supported: bool,
@@ -634,6 +714,23 @@ pub struct BridgeRendererCountersReport {
     /// This backend cannot, so present requests are never reported as
     /// presented frames.
     pub presentation_feedback_available: bool,
+}
+
+/// What the check after the Mac wakes concluded about one display's scene.
+///
+/// `outcome` is one of a fixed set of names: `ok` (the scene's frame loop
+/// moved), `repaired` (it had stopped and the engine rebuilt its surface),
+/// `recovery_pending` (a repair was already under way), `gave_up` (this
+/// minute's repair attempts were spent, so the scene stays stopped),
+/// `recovery_failed`, and `skipped_paused`, `skipped_not_continuous`,
+/// `skipped_unreadable` or `skipped_changed` for a scene that was not probed.
+/// The frame counts are the renderer's `frames_completed` at the two readings.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct BridgeSurfaceCheck {
+    pub display_id: u32,
+    pub outcome: String,
+    pub frames_before: u64,
+    pub frames_after: u64,
 }
 
 /// A plain local video routed to the native platform player instead of the

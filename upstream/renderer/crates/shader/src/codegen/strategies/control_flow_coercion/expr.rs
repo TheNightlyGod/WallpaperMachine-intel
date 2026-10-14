@@ -1,7 +1,11 @@
 use super::symbols::{NumericScalarType, SymbolFacts};
 use crate::{
     SourceSpan,
-    tokenizer::{LogicalOperator, OperatorType::Logical, TokenCursor, TypedToken, TypedTokenFacts},
+    tokenizer::{
+        ConditionalOperator, LogicalOperator,
+        OperatorType::{Conditional, Logical},
+        TokenCursor, TypedToken, TypedTokenFacts,
+    },
 };
 
 /// Boolean-valued expression marker.
@@ -31,6 +35,11 @@ impl BoolExpression {
         }
         if input.start == input.end && input.facts.bool_identifier(tokens, input.start) {
             return Ok(Self);
+        }
+        // A conditional selects a value rather than producing one: `a < b ?
+        // 1.0 : 2.0` is a number, whatever its condition compares.
+        if let Some(branch) = Self::top_level_conditional_branch(input, tokens) {
+            return Self::classify(branch, tokens);
         }
         if matches!(
             tokens[input.start].kind(),
@@ -81,6 +90,51 @@ impl BoolExpression {
         }
 
         Err(())
+    }
+
+    /// Returns the true branch of a top-level conditional expression.
+    #[expect(
+        clippy::single_call_fn,
+        reason = "keeps the conditional scan out of the classification order"
+    )]
+    fn top_level_conditional_branch<'statement, 'src>(
+        input: BoolExpressionInput<'statement, 'src>,
+        tokens: TokenCursor<'_>,
+    ) -> Option<BoolExpressionInput<'statement, 'src>> {
+        let mut depth = 0usize;
+        let mut question = None;
+        let mut nested = 0usize;
+        for index in input.start..=input.end {
+            match tokens[index].kind() {
+                kind if kind.is_left_paren() || kind.is_left_square() => depth += 1,
+                kind if kind.is_right_paren() || kind.is_right_square() => {
+                    depth = depth.saturating_sub(1);
+                }
+                TypedToken::Operator(Conditional(ConditionalOperator::Question)) if depth == 0 => {
+                    if question.is_none() {
+                        question = Some(index);
+                    } else {
+                        nested += 1;
+                    }
+                }
+                TypedToken::Operator(Conditional(ConditionalOperator::Colon))
+                    if depth == 0 && question.is_some() =>
+                {
+                    if nested == 0 {
+                        let start = question? + 1;
+                        let end = index.checked_sub(1)?;
+                        return (start <= end).then_some(BoolExpressionInput {
+                            start,
+                            end,
+                            ..input
+                        });
+                    }
+                    nested -= 1;
+                }
+                _ => {}
+            }
+        }
+        None
     }
 }
 

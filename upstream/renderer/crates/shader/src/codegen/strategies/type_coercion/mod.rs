@@ -10,6 +10,8 @@ mod boolean;
 mod calls;
 /// Declaration initializer vector coercions.
 mod initializer;
+/// Returned value conversions to the declared return type.
+mod returns;
 /// Texture sample initializer coercions.
 mod texture;
 /// Shared vector type facts for type coercion strategies.
@@ -26,6 +28,7 @@ use self::{
         NarrowVectorInitializers, ScalarVectorInitializers, ScalarVectorReturnInitializers,
         VectorScalarInitializers,
     },
+    returns::ReturnConversions,
     texture::{TextureCoordinateArguments, TextureVectorInitializers},
     types::VectorTypeBindings,
 };
@@ -155,6 +158,12 @@ impl Emitable for TypeCoercionStrategy {
         scalar_assignments.collect(tokens, &token_facts, &vector_facts);
         for assignment in scalar_assignments.items {
             assignment.emit(context);
+        }
+
+        let mut returns = ReturnConversions::default();
+        returns.collect(context.context().module, tokens, &token_facts, &vector_facts);
+        for conversion in returns.items {
+            conversion.emit(context);
         }
 
         let mut binary_vectors = Vec3Vec2BinaryExpressions::default();

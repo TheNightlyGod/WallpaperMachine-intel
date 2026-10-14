@@ -1,5 +1,6 @@
 #include "Runtime/SceneRuntimeContext.hpp"
 
+#include "Interface/IShaderValueUpdater.h"
 #include "Runtime/DynamicValue.hpp"
 #include "Runtime/RuntimeImageSource.hpp"
 #include "Runtime/ScriptedDynamicValue.hpp"
@@ -345,6 +346,18 @@ double WrapSeconds(double seconds, double duration_seconds) {
     return wrapped;
 }
 
+// A value of another kind is a change even when both print alike.
+bool ProjectPropertyValueChanged(const RuntimeScalarValue& previous,
+                                 const RuntimeScalarValue& next) {
+    if (previous.kind != next.kind) return true;
+    switch (next.kind) {
+    case RuntimeScalarValue::Kind::Bool: return previous.bool_value != next.bool_value;
+    case RuntimeScalarValue::Kind::Float: return previous.float_value != next.float_value;
+    case RuntimeScalarValue::Kind::String: return previous.string_value != next.string_value;
+    }
+    return false;
+}
+
 std::unique_ptr<DynamicValue> MakePropertyValue(const RuntimeScalarValue& value) {
     switch (value.kind) {
     case RuntimeScalarValue::Kind::Bool: return std::make_unique<DynamicValue>(value.asBool());
@@ -478,7 +491,8 @@ bool NodeHitMask::covers(float u, float v) const noexcept {
 SceneRuntimeContext::SceneRuntimeContext(SceneRuntimeBootstrap bootstrap)
     : m_script_engine(std::make_unique<ScriptEngine>()),
       m_host_context(std::make_unique<ScriptHostContext>()),
-      m_default_project_properties(bootstrap.project_properties),
+      m_default_project_properties(
+          bootstrap.authored_project_properties.value_or(bootstrap.project_properties)),
       m_project_properties(bootstrap.project_properties) {
     m_host_context->canvas_size = Eigen::Vector2f(static_cast<float>(bootstrap.canvas_width),
                                                   static_cast<float>(bootstrap.canvas_height));
@@ -504,6 +518,7 @@ SceneRuntimeContext::SceneRuntimeContext(SceneRuntimeBootstrap bootstrap)
 SceneRuntimeContext::~SceneRuntimeContext() { StopTextWorker(); }
 
 void SceneRuntimeContext::Tick(double frame_time) {
+    ReleaseRetiredLayers();
     m_host_context->frame_time = frame_time;
     m_host_context->runtime_seconds += frame_time;
     // Loading a script-created template can register more scripts. Newly added
@@ -525,12 +540,16 @@ void SceneRuntimeContext::Tick(double frame_time) {
         if (value != nullptr) value->reevaluate();
     }
     DispatchPendingAnimationEvents();
+    bool shown = false;
     for (auto& [name, binding] : m_node_visibility) {
         (void)name;
         if (binding.node != nullptr && binding.value != nullptr) {
-            binding.node->SetVisible(binding.value->getBool());
+            const bool visible = binding.value->getBool();
+            shown = shown || (visible && ! binding.node->Visible());
+            binding.node->SetVisible(visible);
         }
     }
+    if (shown) RequestGraphForShownLayers();
     for (auto& [name, binding] : m_node_translate) {
         (void)name;
         if (binding.node == nullptr || binding.value == nullptr ||
@@ -613,27 +632,63 @@ const ProjectProperties& SceneRuntimeContext::projectProperties() const {
     return m_project_properties;
 }
 
-void SceneRuntimeContext::ApplyProjectPropertyOverride(
+std::vector<std::string> SceneRuntimeContext::ApplyProjectPropertyOverride(
+    const ProjectProperties& override_properties) {
+    m_project_property_overrides = override_properties;
+    return ApplyProjectProperties(
+        MergeProjectProperties(m_default_project_properties, m_project_property_overrides));
+}
+
+void SceneRuntimeContext::NoteLoadOnlyProperty(std::string_view name) {
+    if (name.empty()) return;
+    std::string key(name);
+    if (m_load_only_properties.contains(key)) return;
+    const auto found = m_project_properties.find(key);
+    std::optional<RuntimeScalarValue> read_with;
+    if (found != m_project_properties.end()) read_with = found->second;
+    m_load_only_properties.emplace(std::move(key), std::move(read_with));
+}
+
+std::vector<std::string> SceneRuntimeContext::LoadOnlyProperties() const {
+    std::vector<std::string> names;
+    names.reserve(m_load_only_properties.size());
+    for (const auto& entry : m_load_only_properties) names.push_back(entry.first);
+    return names;
+}
+
+ProjectPropertyPreview SceneRuntimeContext::PreviewProjectPropertyOverride(
     const ProjectProperties& override_properties) {
     m_project_property_overrides = override_properties;
     auto next_properties =
         MergeProjectProperties(m_default_project_properties, m_project_property_overrides);
+    ProjectPropertyPreview preview;
+    // The map is ordered, so the names come out sorted.
+    for (const auto& [name, read_with] : m_load_only_properties) {
+        const auto asked = next_properties.find(name);
+        const bool asked_for_something_else =
+            asked == next_properties.end()
+                ? read_with.has_value()
+                : ! read_with.has_value() || ProjectPropertyValueChanged(*read_with, asked->second);
+        if (asked_for_something_else) preview.deferred.push_back(name);
+        if (read_with.has_value()) {
+            next_properties.insert_or_assign(name, *read_with);
+        } else if (asked != next_properties.end()) {
+            next_properties.erase(name);
+        }
+    }
+    preview.changed = ApplyProjectProperties(std::move(next_properties));
+    return preview;
+}
+
+std::vector<std::string> SceneRuntimeContext::ApplyProjectProperties(
+    ProjectProperties next_properties) {
     ProjectProperties changed_properties;
     for (const auto& [name, value] : next_properties) {
         const auto previous = m_project_properties.find(name);
-        bool changed = previous == m_project_properties.end();
-        if (! changed) {
-            const auto& old = previous->second;
-            changed = old.kind != value.kind;
-            if (! changed) {
-                switch (value.kind) {
-                case RuntimeScalarValue::Kind::Bool: changed = old.bool_value != value.bool_value; break;
-                case RuntimeScalarValue::Kind::Float: changed = old.float_value != value.float_value; break;
-                case RuntimeScalarValue::Kind::String: changed = old.string_value != value.string_value; break;
-                }
-            }
+        if (previous == m_project_properties.end() ||
+            ProjectPropertyValueChanged(previous->second, value)) {
+            changed_properties.emplace(name, value);
         }
-        if (changed) changed_properties.emplace(name, value);
     }
     m_project_properties = std::move(next_properties);
     m_project_properties_changing = true;
@@ -662,9 +717,17 @@ void SceneRuntimeContext::ApplyProjectPropertyOverride(
         auto* script = m_scene_scripts[index].script.get();
         if (script != nullptr) script->ApplyProjectProperties(m_project_properties, changed_properties);
     }
+
+    std::vector<std::string> changed_names;
+    changed_names.reserve(changed_properties.size());
+    for (const auto& entry : changed_properties) changed_names.push_back(entry.first);
+    std::sort(changed_names.begin(), changed_names.end());
+    return changed_names;
 }
 
-void SceneRuntimeContext::ResetProjectPropertyOverride() { ApplyProjectPropertyOverride({}); }
+std::vector<std::string> SceneRuntimeContext::ResetProjectPropertyOverride() {
+    return ApplyProjectPropertyOverride({});
+}
 
 void SceneRuntimeContext::AttachScene(Scene* scene) { m_scene = scene; }
 
@@ -817,7 +880,7 @@ bool SceneRuntimeContext::TextLayoutInFlight() const {
 bool SceneRuntimeContext::TextLayerIsBeingPrepared(const std::string& name) const {
     const auto node = m_nodes.find(name);
     if (node == m_nodes.end() || node->second == nullptr) return true;
-    return node->second->EffectiveVisible();
+    return node->second->EffectiveVisible() || node->second->MustProduce();
 }
 
 void SceneRuntimeContext::SetContentWakeHandler(std::function<void()> handler) {
@@ -909,6 +972,8 @@ bool SceneRuntimeContext::ApplyPreparedTextLayer(const RuntimePreparedTextLayerI
     }
 
     if (raster_size_changed || layout_size_changed) {
+        // The card the layer shows: the text's own, or the chain's final card.
+        TextLayerRenderFrame card = prepared.render_frame;
         if (const auto effect_iterator = m_node_effect_final.find(prepared.name);
             effect_iterator != m_node_effect_final.end() &&
             effect_iterator->second.node != nullptr &&
@@ -961,6 +1026,11 @@ bool SceneRuntimeContext::ApplyPreparedTextLayer(const RuntimePreparedTextLayerI
                 resolved != nullptr && resolved->Mesh() != nullptr) {
                 ResizeCardMesh(*resolved->Mesh(), final_frame.bounds, texture_bounds);
             }
+            card = final_frame;
+        }
+        if (const auto node_iterator = m_nodes.find(prepared.name);
+            node_iterator != m_nodes.end() && node_iterator->second != nullptr) {
+            FitTextLayerComposite(*node_iterator->second, card);
         }
     }
 
@@ -973,6 +1043,35 @@ bool SceneRuntimeContext::ApplyPreparedTextLayer(const RuntimePreparedTextLayerI
     }
     if (! layer.layoutPending()) layer.ClearDirty();
     return true;
+}
+
+void SceneRuntimeContext::FitTextLayerComposite(SceneNode& node,
+                                                const TextLayerRenderFrame& card) {
+    if (m_scene == nullptr || card.size.x() <= 0.0f || card.size.y() <= 0.0f) return;
+    const auto camera = m_scene->cameras.find(LayerCompositeCameraKey(node.ID()));
+    if (camera == m_scene->cameras.end() || camera->second == nullptr ||
+        camera->second->GetAttachedNode() == nullptr)
+        return;
+    camera->second->SetWidth(card.size.x());
+    camera->second->SetHeight(card.size.y());
+    camera->second->GetAttachedNode()->SetTranslate(
+        Eigen::Vector3f(card.center.x(), card.center.y(), 0.0f));
+    camera->second->Update();
+    // One texel per unit of the card, as at parse time: a consumer may place
+    // the image by its size (`g_Texture1Resolution`), so stretching a new card
+    // over the old target would show the text at another scale. Only a card
+    // whose size in texels changed costs a new graph.
+    const auto found = m_scene->renderTargets.find(LayerCompositeTargetKey(node.ID()));
+    if (found == m_scene->renderTargets.end()) return;
+    auto&      target = found->second;
+    const auto width  = std::max(4, static_cast<int32_t>(std::lround(card.size.x())));
+    const auto height = std::max(4, static_cast<int32_t>(std::lround(card.size.y())));
+    const auto current_width  = target.authored_width > 0 ? target.authored_width : target.width;
+    const auto current_height = target.authored_height > 0 ? target.authored_height : target.height;
+    if (current_width == width && current_height == height) return;
+    target.width = target.authored_width = width;
+    target.height = target.authored_height = height;
+    m_scene_graph_mutated = true;
 }
 
 DynamicValue* SceneRuntimeContext::FindPropertyValue(std::string_view name) const {
@@ -1916,15 +2015,29 @@ std::string SceneRuntimeContext::CreateLayerFromTemplate(std::string_view reques
         return {};
     }
 
-    const auto& binding = template_iterator->second;
-    if (binding.node == nullptr) return {};
-    if (! binding.node->Camera().empty() || ! binding.node->GetChildren().empty()) {
-        LOG_INFO(
-            "scene runtime createLayer unsupported template shape: current=\"%s\" template=\"%s\"",
-            std::string(current_layer_name).c_str(),
-            binding.canonical_path.c_str());
-        return {};
+    // The scene layer registered under a model is copied, but one with an
+    // effect chain (its own camera) or child layers cannot be. The model itself
+    // still makes a layer, as when no scene layer uses it; loading it replaces
+    // that registration, so later calls copy the loaded layer directly.
+    const auto copyable = [](const LayerTemplateBinding& candidate) {
+        return candidate.node != nullptr && candidate.node->Camera().empty() &&
+               candidate.node->GetChildren().empty();
+    };
+    if (! copyable(template_iterator->second)) {
+        const std::string model_path = template_iterator->second.canonical_path;
+        template_iterator            = load_template(model_path);
+        if (template_iterator == m_layer_templates.end() || ! copyable(template_iterator->second)) {
+            // A model that loads into a shape that cannot be copied always will.
+            m_failed_layer_templates.insert(model_path);
+            LOG_INFO(
+                "scene runtime createLayer unsupported template shape: current=\"%s\" template=\"%s\"",
+                std::string(current_layer_name).c_str(),
+                model_path.c_str());
+            return {};
+        }
     }
+
+    const auto& binding = template_iterator->second;
 
     const std::string generated_name =
         "__generated_layer_" + std::to_string(m_next_generated_layer_id++) + ":" + requested_path;
@@ -1945,6 +2058,7 @@ std::string SceneRuntimeContext::CreateLayerFromTemplate(std::string_view reques
     }
 
     RegisterNode(generated_name, generated.get());
+    m_script_created_layers.insert(generated_name);
     RegisterNodeSize(generated_name, binding.size);
     m_node_template_paths[generated_name] = binding.canonical_path;
     if (generated->Mesh() != nullptr && generated->Mesh()->MaterialSlotPtr() != nullptr) {
@@ -1980,6 +2094,48 @@ std::string SceneRuntimeContext::CreateLayerFromTemplate(std::string_view reques
     }
     m_scene_graph_mutated = true;
     return generated_name;
+}
+
+bool SceneRuntimeContext::DestroyLayer(std::string_view name) {
+    const auto created = m_script_created_layers.find(std::string(name));
+    if (created == m_script_created_layers.end()) return false;
+    const std::string key = *created;
+    m_script_created_layers.erase(created);
+
+    const auto registered = m_nodes.find(key);
+    SceneNode* node       = registered != m_nodes.end() ? registered->second : nullptr;
+    UnregisterNode(key);
+    if (node == nullptr || node->Parent() == nullptr) return true;
+
+    auto&      siblings = node->Parent()->GetChildren();
+    const auto entry    = std::find_if(siblings.begin(), siblings.end(), [node](const auto& child) {
+        return child.get() == node;
+    });
+    if (entry == siblings.end()) return true;
+    m_retired_layers.push_back(*entry);
+    siblings.erase(entry);
+    m_scene_graph_mutated = true;
+    return true;
+}
+
+void SceneRuntimeContext::ReleaseRetiredLayers() {
+    if (m_retired_layers.empty() || m_scene_graph_mutated) return;
+    // Their copies of the template's material bindings write to materials
+    // nothing draws any more.
+    std::unordered_set<const SceneMaterial*> materials;
+    for (const auto& node : m_retired_layers) {
+        if (node->Mesh() != nullptr && node->Mesh()->MaterialSlotPtr() != nullptr) {
+            materials.insert(node->Mesh()->MaterialSlotPtr().get());
+        }
+        if (m_scene != nullptr && m_scene->shaderValueUpdater != nullptr) {
+            m_scene->shaderValueUpdater->ForgetNode(node.get());
+        }
+    }
+    std::erase_if(m_material_constants, [&materials](const MaterialConstantBinding& binding) {
+        const auto material = binding.material.lock();
+        return material != nullptr && materials.contains(material.get());
+    });
+    m_retired_layers.clear();
 }
 
 Eigen::Vector3f SceneRuntimeContext::NodeColor(std::string_view name) const {
@@ -2061,8 +2217,25 @@ bool SceneRuntimeContext::SetNodeVisible(std::string_view name, bool visible) {
     }
     const auto iterator = m_nodes.find(std::string(name));
     if (iterator == m_nodes.end() || iterator->second == nullptr) return false;
-    iterator->second->SetVisible(visible);
+    auto* node = iterator->second;
+    const bool shown = visible && ! node->Visible();
+    node->SetVisible(visible);
+    // The script decides this layer's visibility from now on, so no later
+    // graph may leave it out for being hidden.
+    node->SetVisibilitySettled(false);
+    if (shown) RequestGraphForShownLayers();
     return true;
+}
+
+void SceneRuntimeContext::RequestGraphForShownLayers() {
+    if (m_scene == nullptr) return;
+    for (const auto& excluded : m_scene->render_excluded_nodes) {
+        const auto node = excluded.lock();
+        if (node != nullptr && node->EffectiveVisible()) {
+            m_scene_graph_mutated = true;
+            return;
+        }
+    }
 }
 
 bool SceneRuntimeContext::SetNodeTranslate(std::string_view name, const Eigen::Vector3f& value) {

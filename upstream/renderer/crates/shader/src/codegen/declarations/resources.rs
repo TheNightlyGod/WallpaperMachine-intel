@@ -125,6 +125,32 @@ impl WidenedArrayMember {
         let end = tokens[close].span().end();
         SourceSpan::new(end, end).ok()
     }
+
+    /// Span of a second subscript following the element read beginning at
+    /// `index`, which selects a component of that element.
+    #[expect(
+        clippy::single_call_fn,
+        reason = "pairs with subscript_swizzle_span, which reads the same subscript"
+    )]
+    pub(crate) fn component_subscript_span(
+        tokens: TokenCursor<'_>,
+        index: usize,
+    ) -> Option<SourceSpan> {
+        let open = tokens.next_non_comment(index + 1)?;
+        if !tokens[open].kind().is_left_square() {
+            return None;
+        }
+        let component_open = tokens.next_non_comment(tokens.matching_right_square(open)? + 1)?;
+        if !tokens[component_open].kind().is_left_square() {
+            return None;
+        }
+        let component_close = tokens.matching_right_square(component_open)?;
+        SourceSpan::new(
+            tokens[component_open].span().start(),
+            tokens[component_close].span().end(),
+        )
+        .ok()
+    }
 }
 
 /// Generated std140 block containing scalar/vector uniforms.

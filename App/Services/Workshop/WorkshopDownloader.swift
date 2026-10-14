@@ -30,6 +30,12 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
     private(set) var bytesReceived: Int64?
     private(set) var bytesExpected: Int64?
     private(set) var bytesPerSecond: Double?
+    /// Seconds until the transfer in progress finishes at its recent pace, or nil while there is
+    /// no trustworthy pace (the first seconds, a crawl, the last bytes, nothing measurable).
+    var secondsRemaining: Int? {
+        guard isRunning, receivesNetwork, let received = bytesReceived, let expected = bytesExpected else { return nil }
+        return estimator.secondsRemaining(remaining: expected - received)
+    }
     private(set) var prompt: Prompt?
     private(set) var steamGuardChallenge: SteamGuardChallenge?
     var canRetryAuthentication: Bool { authenticationFailed && !isRunning }
@@ -76,27 +82,73 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
     @ObservationIgnored private let passTimeout: TimeInterval
     /// The clock both limits are measured on.
     @ObservationIgnored private let now: () -> Date
+    /// Free bytes on the volume that holds a folder, as the system would hand them to this app.
+    @ObservationIgnored private let freeSpace: @Sendable (URL) -> Int64?
     @ObservationIgnored private var failure: String?
     @ObservationIgnored private var receivesNetwork = false
     @ObservationIgnored private var networkStarted = false
     @ObservationIgnored private var expectedBytes: Int64?
     @ObservationIgnored private var diskSampleTask: Task<Void, Never>?
     @ObservationIgnored private var lastDiskSample = Date.distantPast
+    @ObservationIgnored private var estimator = TransferEstimator()
+    /// The most bytes this run has shown. Each SteamCMD launch starts its own network meter and the
+    /// tree can shrink as Steam moves chunks about, so what is shown never drops below it.
+    @ObservationIgnored private var receivedFloor: Int64 = 0
+    /// What the run had shown when the current network meter started. A relaunched SteamCMD
+    /// resumes from Steam's partial manifests and its meter counts only the bytes still to come,
+    /// so the figure shown is this baseline plus the meter, never the meter alone.
+    @ObservationIgnored private var receivedBaseline: Int64 = 0
+    /// How long to wait before each automatic retry of a dropped connection; one entry per retry
+    /// the pass may use.
+    @ObservationIgnored private let retryDelays: [TimeInterval]
+    /// Set together with `failure` when the inactivity limit, not a message from Steam or the
+    /// watch after a wake, ended the pass.
+    @ObservationIgnored private var endedBySilence = false
+    /// Passes already repeated after such a silence. Each one costs the whole inactivity limit,
+    /// so only `maximumSilentRetries` of them are repeated.
+    @ObservationIgnored private var silentRetries = 0
+    nonisolated static let maximumSilentRetries = 1
+    /// Set together with `failure` when the attempt ended in a way another launch can fix: the
+    /// connection dropped after Steam accepted the sign-in. Never set for anything the user decides.
+    @ObservationIgnored private var transientFailure = false
+    /// Retries the pass in progress has used; a preset's base wallpaper starts its own count.
+    private(set) var retryAttempt = 0
+    /// When the Mac last woke while a transfer was running, until bytes arrive again or SteamCMD is
+    /// relaunched. Sleep usually kills the connection without a word from SteamCMD, so the wait
+    /// for the inactivity limit is replaced by a short watch for bytes.
+    @ObservationIgnored private(set) var resumedAt: Date?
+    /// How long after a wake a transfer may stay silent before it is restarted.
+    @ObservationIgnored private let resumeGrace: TimeInterval
+    /// What the log calls this run, for lines written outside the run itself.
+    @ObservationIgnored private var runLabel = ""
     private(set) var isAuthenticating = true
     private static let failurePattern = try! NSRegularExpression(pattern: #"(?:failed|error!?)\s*\(([^)\r\n]+)\)"#)
+
+    /// The parenthesised reason SteamCMD gives a failure, such as `Timeout` in `failed (Timeout)`.
+    private static func failureReason(in output: String) -> String? {
+        guard let match = failurePattern.firstMatch(in: output, range: NSRange(output.startIndex..., in: output)),
+              let range = Range(match.range(at: 1), in: output) else { return nil }
+        return String(output[range])
+    }
+
     private static let appProgressPattern = try! NSRegularExpression(pattern: #"progress:\s*(\d+(?:\.\d+)?)\s*\((\d+)\s*/\s*(\d+)\)"#)
     nonisolated private static let sessionLock = NSLock()
 
-    init(sessionDirectory: URL = ClientPaths.supportURL.appendingPathComponent("SteamSession", isDirectory: true),
+    init(sessionDirectory: URL = ClientPaths.steamSessionURL(),
          runtimeProvider: any SteamCMDRuntimeProviding = SteamCMDRuntimeService(),
          networkMonitor: (any ProcessNetworkMonitoring)? = nil, checkpointDirectory: URL? = nil,
          inactivityTimeout: TimeInterval = 300, passTimeout: TimeInterval = 1800,
-         now: @escaping () -> Date = Date.init) {
+         now: @escaping () -> Date = Date.init,
+         freeSpace: @escaping @Sendable (URL) -> Int64? = WorkshopDownloader.systemFreeSpace,
+         retryDelays: [TimeInterval] = [2, 8, 30], resumeGrace: TimeInterval = 45) {
         self.sessionDirectory = sessionDirectory
         self.checkpointDirectory = checkpointDirectory
         self.inactivityTimeout = inactivityTimeout
         self.passTimeout = passTimeout
         self.now = now
+        self.freeSpace = freeSpace
+        self.retryDelays = retryDelays
+        self.resumeGrace = resumeGrace
         self.runtimeProvider = runtimeProvider
         self.networkMonitor = networkMonitor ?? ProcessNetworkMonitor()
         savedAccount = Self.readSavedAccount(at: sessionDirectory)
@@ -195,6 +247,14 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
         networkStarted = false
         self.expectedBytes = expectedBytes
         lastDiskSample = .distantPast
+        receivedFloor = 0
+        receivedBaseline = 0
+        estimator.reset()
+        retryAttempt = 0
+        silentRetries = 0
+        endedBySilence = false
+        transientFailure = false
+        resumedAt = nil
         endedBySessionConflict = false
         signInHandedOff = false
         prompt = nil
@@ -205,6 +265,7 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
         phase = .preparing
         status = signInOnly ? String(localized: "Preparing a private SteamCMD sign-in…") : String(localized: "Preparing a private SteamCMD download…")
         let label = itemID ?? (signInOnly ? "sign-in" : "shared assets")
+        runLabel = label
         loggedStatus = ""
         task = Task {
             let staging = root.appendingPathComponent(Self.stagingPrefix + UUID().uuidString, isDirectory: true)
@@ -230,6 +291,8 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
             var restoredSessionRevision: UInt64?
             do {
                 let prepared = try await runtimeProvider.prepare(executable: executable, staging: staging)
+                // Partial downloads and the restored sign-in live here: keep a running backup away.
+                ClientPaths.excludeFromBackup(staging)
                 claim = Self.claimStaging(staging)
                 if let checkpointDirectory, !signInOnly {
                     try await Task.detached(priority: .utility) {
@@ -244,12 +307,17 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
                 }
                 AppLog.info("SteamCMD \(label): runtime prepared; saved sign-in restored: \(restoredSessionRevision != nil)")
                 try Task.checkCancellation()
+                try await ensureFreeSpace(under: root, staging: staging, label: label)
+                try Task.checkCancellation()
                 var passItemID = itemID
                 while true {
                     let started = now()
                     var restarts = 0
                     repeat {
                         try Task.checkCancellation()
+                        // The first launch of the run was checked above, and a retry is checked before
+                        // it comes back here; this is SteamCMD asking to be started again.
+                        if restarts > 0 { try await ensureFreeSpace(under: root, staging: staging, label: label) }
                         try await runtimeProvider.validate(at: staging)
                         try Task.checkCancellation()
                         try launch(executable: prepared, staging: staging, account: account, itemID: passItemID, claim: claim)
@@ -271,6 +339,7 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
                                 if !networkStarted {
                                     networkMonitor.start(processID: process.processIdentifier)
                                     networkStarted = true
+                                    receivedBaseline = receivedFloor
                                 }
                                 bytesPerSecond = networkMonitor.rate(at: ProcessInfo.processInfo.systemUptime)
                                 noteTransfer(networkMonitor.bytesReceived(), on: .network)
@@ -279,14 +348,36 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
                                 bytesPerSecond = nil
                             }
                             let checked = now()
+                            if let woke = resumedAt {
+                                if let moved = lastTransferProgress, moved > woke {
+                                    // Bytes are arriving again: the connection survived the sleep.
+                                    resumedAt = nil
+                                } else if receivesNetwork, phase == .transferring, failure == nil,
+                                          checked.timeIntervalSince(woke) > resumeGrace {
+                                    // Nothing arrived since the Mac woke, so the connection died with
+                                    // the sleep. Relaunching resumes from Steam's partial manifests.
+                                    resumedAt = nil
+                                    transientFailure = true
+                                    failure = String(localized: "The connection to Steam stopped responding after the Mac woke from sleep. Check your connection and try again; what was already downloaded is kept.")
+                                    AppLog.warn("SteamCMD \(label): no bytes \(Int(resumeGrace.rounded())) s after the Mac woke; restarting the transfer")
+                                }
+                            }
                             let stalled = checked.timeIntervalSince(lastActivity) > inactivityTimeout
                             // A long pass is cut short only once its bytes have stopped arriving too.
                             let overlong = checked.timeIntervalSince(started) > passTimeout
                                 && checked.timeIntervalSince(lastTransferProgress ?? started) > inactivityTimeout
                             if failure != nil || stalled || overlong {
                                 if failure == nil {
-                                    authenticationFailed = isAuthenticating
-                                    failure = isAuthenticating
+                                    // Steam Guard can be what a silent sign-in waits for, but only until Steam
+                                    // has taken this run's sign-in once. A relaunch signs in again and flags
+                                    // `isAuthenticating` afresh; a stall there is the connection, unless it is
+                                    // sitting at a prompt that is waiting for the user.
+                                    let waitingOnSteamGuard = isAuthenticating
+                                        && (!signInHandedOff || prompt != nil || steamGuardChallenge != nil)
+                                    authenticationFailed = waitingOnSteamGuard
+                                    transientFailure = !waitingOnSteamGuard
+                                    endedBySilence = true
+                                    failure = waitingOnSteamGuard
                                         ? String(localized: "SteamCMD timed out. If Steam Guard was not completed, retry signing in and approve the new request or enter a fresh code. Otherwise check your connection and available disk space.")
                                         : String(localized: "SteamCMD stopped receiving the download. Check your connection and available disk space, then try again.")
                                 }
@@ -300,19 +391,32 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
                         // Drain the last output before closing, even when SteamCMD has already exited.
                         try readTerminalOutput()
                         consumeOwnershipLine(recentOutput)
+                        consumeUnterminatedOutput()
                         try? terminal?.close()
                         terminal = nil
                         restarts += 1
                     } while process?.terminationStatus == 42 && restarts < 4 && failure == nil
                     AppLog.info("SteamCMD \(label): exited with status \(process.map { String($0.terminationStatus) } ?? "unknown")\(failure.map { "; failure: \($0)" } ?? "")")
                     try Task.checkCancellation()
-                    if let failure { throw WorkshopFailure(message: failure) }
+                    // A connection lost after sign-in resumes in the same staging: Steam keeps its
+                    // partial manifests and the saved sign-in is still there, so nothing is asked.
+                    if failure != nil, let delay = nextRetryDelay() {
+                        prepareRetry(label: label, delay: delay)
+                        try await Task.sleep(for: .seconds(delay))
+                        // The disk can fill while a pass runs, and what the pass staged is counted, so
+                        // only the space still missing is asked for. Failing here beats waiting out
+                        // another silent pass that a full disk caused.
+                        try await ensureFreeSpace(under: root, staging: staging, label: label)
+                        try Task.checkCancellation()
+                        continue
+                    }
+                    if let failure { throw passFailure(failure, itemID: passItemID) }
                     guard process?.terminationStatus == 0 else {
                         authenticationFailed = isAuthenticating
                         if isSigningInOnly {
                             throw WorkshopFailure(message: String(localized: "SteamCMD exited before confirming the sign-in. Check the account name and password, approve Steam Guard, and retry."))
                         }
-                        throw WorkshopFailure(message: String(localized: "SteamCMD exited before completing the download. Confirm this account owns Wallpaper Engine, approve Steam Guard, and retry."))
+                        throw passFailure(String(localized: "SteamCMD exited before completing the download. Confirm this account owns Wallpaper Engine, approve Steam Guard, and retry."), itemID: passItemID)
                     }
                     progress = nil
                     receivesNetwork = false
@@ -325,7 +429,7 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
                         throw WorkshopFailure(message: String(localized: "Steam exited without confirming a complete Wallpaper Engine installation. Retry installing scene assets; existing assets have not been changed."))
                     }
                     if !isInstallingAssets && !isSigningInOnly && !workshopDownloadCompleted {
-                        throw WorkshopFailure(message: String(localized: "Steam exited without confirming a complete Workshop download. Retry; no partial wallpaper has been added to your library."))
+                        throw passFailure(String(localized: "Steam exited without confirming a complete Workshop download. Retry; no partial wallpaper has been added to your library."), itemID: passItemID)
                     }
                     // At most one follow-up: a preset's base is never itself fetched for another.
                     guard !fetchingPresetBase, let followUp, let next = try await followUp(staging) else { break }
@@ -334,6 +438,11 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
                     fetchingPresetBase = true
                     workshopDownloadCompleted = false
                     self.expectedBytes = nil
+                    receivedFloor = 0
+                    receivedBaseline = 0
+                    estimator.reset()
+                    retryAttempt = 0
+                    silentRetries = 0
                     phase = .requesting
                     status = String(localized: "Downloading the wallpaper this preset is based on…")
                 }
@@ -394,6 +503,112 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
                 }.value
             }
         }
+    }
+
+    /// What a failed pass is reported as. The second pass of a preset fetches its base wallpaper: the
+    /// preset has already arrived, but without its base nothing is added, and the user should hear
+    /// that rather than a bare "could not download this wallpaper" about an item they never chose.
+    private func passFailure(_ reason: String, itemID: String?) -> WorkshopFailure {
+        guard fetchingPresetBase, let itemID else { return WorkshopFailure(message: reason) }
+        return WorkshopFailure(message: String(localized: "The preset downloaded, but the wallpaper it is based on (Workshop item \(itemID)) did not, so nothing was added to your library. \(reason)"))
+    }
+
+    /// Stops a download that cannot fit before SteamCMD starts, instead of letting it stall for
+    /// the inactivity limit and blame the connection. It runs on every start (first, resume,
+    /// Try again) after any checkpoint is restored, and again before each automatic relaunch
+    /// of SteamCMD (a retry after a dropped connection or a wake, or Steam asking to be
+    /// started again), so a retry only needs the space still missing. A preset's base is
+    /// fetched in a second pass of unknown size, which is not checked; concurrent jobs are
+    /// checked one by one, not summed.
+    private func ensureFreeSpace(under root: URL, staging: URL, label: String) async throws {
+        let installingAssets = isInstallingAssets
+        let expected = expectedBytes
+        guard !isSigningInOnly,
+              Self.requiredFreeBytes(expected: expected, alreadyStaged: 0, installingAssets: installingAssets) != nil
+        else { return }
+        // Where this kind of run keeps what it has fetched: an item under the Workshop tree, the
+        // shared assets in the app's own install directory.
+        let content = staging.appendingPathComponent(installingAssets ? "wallpaper-engine" : "steamapps/workshop", isDirectory: true)
+        let measure = freeSpace
+        let (staged, available) = await Task.detached(priority: .utility) { () -> (Int64, Int64?) in
+            (Self.bytesOnDisk(under: content), measure(root))
+        }.value
+        guard let needed = Self.requiredFreeBytes(expected: expected, alreadyStaged: staged, installingAssets: installingAssets),
+              let available, available < needed else { return }
+        AppLog.warn("SteamCMD \(label): not enough free space (need \(needed), have \(available))")
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        let neededText = formatter.string(fromByteCount: needed)
+        let availableText = formatter.string(fromByteCount: available)
+        throw WorkshopFailure(message: String(localized: "Not enough free disk space: this download needs about \(neededText) and only \(availableText) is available on the disk that holds your library. Free up space, then try again."))
+    }
+
+    /// Free bytes the system would give this app on the volume holding `url`, counting space it
+    /// can reclaim on demand (purgeable caches, local snapshots); nil when it cannot be read.
+    nonisolated static func availableCapacity(at url: URL) -> Int64? {
+        try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+            .volumeAvailableCapacityForImportantUsage
+    }
+
+    /// What a download reads by default; tests pass their own disk instead.
+    nonisolated static let systemFreeSpace: @Sendable (URL) -> Int64? = { availableCapacity(at: $0) }
+
+    /// Room kept beyond the content itself for Steam's manifests and the private runtime.
+    nonisolated static let freeSpaceMargin: Int64 = 64 * 1024 * 1024
+    /// What a Workshop item needs on top of its listed size while Steam stages and assembles it.
+    nonisolated static let freeSpaceHeadroom = 1.15
+    /// Wallpaper Engine's shared assets have no size to read, so a fixed floor stands in. It is
+    /// a lower bound, meant to block only when the disk is clearly short; tune it after one
+    /// measured real installation. What an earlier attempt already staged counts against it.
+    nonisolated static let sceneAssetsFreeBytes: Int64 = 3 * 1024 * 1024 * 1024
+
+    /// The free space a download needs before it starts, or nil when nothing can be said and the
+    /// download is never blocked: a sign-in-only run, or an item whose listing gives no size.
+    /// Bytes an earlier attempt already staged are on the disk and are not needed again, for the
+    /// shared assets as much as for an item.
+    nonisolated static func requiredFreeBytes(expected: Int64?, alreadyStaged: Int64, installingAssets: Bool) -> Int64? {
+        if installingAssets { return max(freeSpaceMargin, sceneAssetsFreeBytes - max(0, alreadyStaged)) }
+        guard let expected, expected > 0 else { return nil }
+        // A listed size beyond a pebibyte is a bad listing, not a disk that needs it.
+        let remaining = max(0, min(expected, 1 << 50) - max(0, alreadyStaged))
+        return Int64((Double(remaining) * freeSpaceHeadroom).rounded(.up)) + freeSpaceMargin
+    }
+
+    /// How long to wait before trying the pass again, or nil when this failure is the user's to
+    /// handle: only a connection lost after Steam accepted the sign-in is retried, and never once
+    /// the budget is spent, Steam asked for a password or Guard, rejected the saved sign-in, or
+    /// ended the session for a sign-in elsewhere. A pass that went silent for the whole inactivity
+    /// limit is repeated once at most, since each repeat can cost that long again. Waits vary a
+    /// little so parallel jobs that lost the same connection do not all come back in the same second.
+    private func nextRetryDelay() -> TimeInterval? {
+        guard transientFailure, retryAttempt < retryDelays.count, !cachedCredentialsRejected,
+              !endedBySessionConflict, !isSigningInOnly, prompt == nil, steamGuardChallenge == nil,
+              !endedBySilence || silentRetries < Self.maximumSilentRetries
+        else { return nil }
+        let delay = retryDelays[retryAttempt]
+        return delay > 0 ? delay * Double.random(in: 0.8...1.2) : 0
+    }
+
+    private func prepareRetry(label: String, delay: TimeInterval) {
+        retryAttempt += 1
+        if endedBySilence { silentRetries += 1 }
+        endedBySilence = false
+        failure = nil
+        transientFailure = false
+        authenticationFailed = false
+        phase = .connecting
+        status = String(localized: "Connection lost; retrying (\(retryAttempt) of \(retryDelays.count))…")
+        AppLog.warn("SteamCMD \(label): connection lost after sign-in; retry \(retryAttempt) of \(retryDelays.count) in \(Int(delay.rounded())) s")
+    }
+
+    /// The Mac woke from sleep. A transfer that was running is watched rather than trusted: if no
+    /// byte arrives within `resumeGrace`, SteamCMD is relaunched through the retry path, and one
+    /// that keeps receiving is left alone. A run that was signing in or requesting has nothing to
+    /// restart (Steam Guard may be waiting for the user), so only a transfer in progress counts.
+    func noteSystemResume() {
+        guard isRunning, !isSigningInOnly, receivesNetwork, phase == .transferring, failure == nil else { return }
+        resumedAt = now()
+        AppLog.info("SteamCMD \(runLabel): Mac woke; watching for bytes")
     }
 
     func submitSecret(_ value: String) {
@@ -492,6 +707,8 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
         networkStarted = false
         lastActivity = now()
         lastTransferProgress = nil
+        // A new process has not slept; whatever the last one was waiting for no longer applies.
+        resumedAt = nil
         transferMarks = [:]
         do {
             process = try SteamCMDTerminalProcess(executable: executable, arguments: arguments,
@@ -538,6 +755,13 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
         }
         recentOutput = String(recentOutput.suffix(4096))
         // Interactive prompts have no newline and can span multiple reads.
+        consumeLine(recentOutput, complete: false)
+    }
+
+    /// Output the process left without a final newline is a whole line once nothing more can
+    /// arrive, so a failure reported that way is judged like any other.
+    private func consumeUnterminatedOutput() {
+        guard !recentOutput.isEmpty else { return }
         consumeLine(recentOutput)
     }
 
@@ -561,7 +785,10 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
         }
     }
 
-    private func consumeLine(_ line: String) {
+    /// `complete` is false for the unfinished end of the output so far. Prompts have to be
+    /// recognised before their newline arrives, but a failure line is judged only once it is
+    /// whole: what follows `failed` decides whether the connection or the purchase is to blame.
+    private func consumeLine(_ line: String, complete: Bool = true) {
         let output = line.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !output.isEmpty, failure == nil else { return }
         if output.contains("cached credential") && (output.contains("invalid") || output.contains("expired") || output.contains("revoked")) {
@@ -581,15 +808,26 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
         } else if output.contains("no subscription") || (output.contains("access denied") && !isAuthenticating) || output.contains("does not own") {
             failure = String(localized: "Steam denied this download. Sign in with an account that owns Wallpaper Engine and has access to this Workshop item.")
         } else if output.contains("error! download item") || output.contains("failed to download") || output.contains("error! failed to start downloading item") {
-            failure = String(localized: "Steam could not download this wallpaper. Downloads require a Steam account that has purchased Wallpaper Engine. Buy it on Steam or sign in with an account that already owns it, then retry. If this account already owns it, the wallpaper may be private or removed; check its Workshop page.")
+            // The reason arrives in parentheses at the end of the line; judge it once all of it is here.
+            if !complete || (!isInstallingAssets && output.contains("(") && !output.contains(")")) { return }
+            if !isInstallingAssets, let reason = Self.failureReason(in: output),
+               SteamCMDReportedFailure(reason: reason).isTransient {
+                // A slow or dropped connection says nothing about ownership, whatever the item.
+                transientFailure = !isAuthenticating || signInHandedOff
+                AppLog.warn("SteamCMD reported download failure: \(SteamCMDReportedFailure.connection.rawValue); authenticating: \(isAuthenticating)")
+                failure = String(localized: "The connection to Steam dropped while downloading. Check your connection and try again; what was already downloaded is kept.")
+            } else {
+                failure = String(localized: "Steam could not download this wallpaper. Downloads require a Steam account that has purchased Wallpaper Engine. Buy it on Steam or sign in with an account that already owns it, then retry. If this account already owns it, the wallpaper may be private or removed; check its Workshop page.")
+            }
         } else if isInstallingAssets && (output.contains("error! app") || output.contains("failed to install app")) {
             failure = String(localized: "Steam could not install Wallpaper Engine’s shared assets. Confirm ownership and check available disk space, then retry.")
-        } else if let match = Self.failurePattern.firstMatch(in: output, range: NSRange(output.startIndex..., in: output)),
-                  let range = Range(match.range(at: 1), in: output) {
+        } else if let reason = Self.failureReason(in: output) {
             let reported = SteamCMDReportedFailure(
-                reason: String(output[range]), cachedCredentialsRejected: cachedCredentialsRejected,
+                reason: reason, cachedCredentialsRejected: cachedCredentialsRejected,
                 awaitingSteamGuard: steamGuardChallenge != nil)
             authenticationFailed = isAuthenticating
+            // A sign-in that times out on a relaunch is the connection, once this run was accepted.
+            transientFailure = reported.isTransient && signInHandedOff
             AppLog.warn("SteamCMD reported failure: \(reported.rawValue); authenticating: \(isAuthenticating)")
             failure = reported.message
         } else if output.contains("invalid password") || output.contains("invalid login") || output.contains("account logon denied") {
@@ -647,9 +885,18 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
             steamGuardChallenge = nil
             isAuthenticating = false
             receivesNetwork = true
-            bytesReceived = nil
-            bytesExpected = nil
-            progress = nil
+            // A relaunch counts from a new network anchor. What was already shown stays on screen
+            // until the new meter passes it, and no pace is claimed in the meantime.
+            estimator.reset()
+            if receivedFloor > 0, let expected = expectedBytes, expected > 0 {
+                bytesReceived = receivedFloor
+                bytesExpected = expected
+                progress = min(0.99, Double(receivedFloor) / Double(expected))
+            } else {
+                bytesReceived = nil
+                bytesExpected = nil
+                progress = nil
+            }
             phase = .transferring
             status = fetchingPresetBase ? String(localized: "Downloading the wallpaper this preset is based on…")
                 : String(localized: "Downloading Workshop files…")
@@ -711,6 +958,7 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
                 if receivesNetwork {
                     bytesReceived = received
                     bytesExpected = total
+                    estimator.add(bytes: received, at: now().timeIntervalSinceReferenceDate)
                 }
             }
         }
@@ -723,6 +971,8 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
     /// arrive, which the network figure cannot overstate; compressed chunks make the network figure
     /// run a little behind, which the tree cannot overstate. The tree is walked off the UI actor at
     /// most twice a second; a sample is applied only while the transfer it measured is still on.
+    /// What is shown never falls below the most this run has shown, however either measure moves,
+    /// and a relaunch carries on from there instead of waiting for the new meter to catch up.
     private func sampleWorkshopDisk(in staging: URL) {
         guard !isInstallingAssets, let expected = expectedBytes, expected > 0, diskSampleTask == nil,
               Date().timeIntervalSince(lastDiskSample) >= 0.5 else { return }
@@ -733,9 +983,12 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
             diskSampleTask = nil
             guard isRunning, receivesNetwork, failure == nil else { return }
             noteTransfer(onDisk, on: .disk)
-            // Without a working network meter the tree alone is still better than nothing.
-            let arrived = networkMonitor.bytesReceived().map { min($0, onDisk) } ?? onDisk
-            let received = min(arrived, expected)
+            // Without a working network meter the tree alone is still better than nothing. The
+            // meter counts from its own start, so a relaunch adds what was shown before it.
+            let arrived = networkMonitor.bytesReceived().map { min($0 + receivedBaseline, onDisk) } ?? onDisk
+            let received = max(receivedFloor, min(arrived, expected))
+            receivedFloor = received
+            estimator.add(bytes: received, at: now().timeIntervalSinceReferenceDate)
             bytesReceived = received
             bytesExpected = expected
             // Only Steam's own success line claims completion; bytes alone stop at 99%.
@@ -962,6 +1215,10 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
         let files = FileManager.default
         let pending = directory.deletingLastPathComponent().appendingPathComponent(".steam-session-\(UUID().uuidString)", isDirectory: true)
         defer { try? files.removeItem(at: pending) }
+        // Flag the copy before it holds a token, and the published folder again below: replacing
+        // a directory can hand back the new one's attributes instead of the old one's.
+        try privateDirectory(pending)
+        ClientPaths.excludeFromBackup(pending)
         guard try copySessionFiles(from: staging, to: pending) else { return false }
         let identity = pending.appendingPathComponent("account")
         try Data(account.utf8).write(to: identity, options: .atomic)
@@ -972,6 +1229,7 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
         } else {
             try files.moveItem(at: pending, to: directory)
         }
+        ClientPaths.excludeFromBackup(directory)
         return true
     }
 

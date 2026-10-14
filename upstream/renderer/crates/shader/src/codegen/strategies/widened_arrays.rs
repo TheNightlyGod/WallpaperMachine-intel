@@ -9,8 +9,8 @@ use super::{
 use smol_str::SmolStr;
 
 use crate::{
-    ShaderResult, SourceSpan,
-    codegen::{Fixup, declarations::WidenedArrayMember},
+    ShaderResult,
+    codegen::{ExpressionReplacement, Fixup, declarations::WidenedArrayMember},
     syntax::SyntaxItem,
     tokenizer::{TokenCursor, TypedToken},
 };
@@ -142,37 +142,46 @@ impl Emitable for WidenedArrayStrategy {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        let mut insertions = Vec::new();
+        let mut fixups = Vec::new();
         for body in bodies {
             for index in body.start()..body.end() {
-                insertions.extend(Self::swizzle_at(tokens, index, &widened));
+                fixups.extend(Self::narrowing_at(tokens, index, &widened));
             }
         }
 
-        for (span, swizzle) in insertions {
-            context
-                .context()
-                .fixups
-                .push(Fixup::insert(span, swizzle.to_owned()));
+        for fixup in fixups {
+            context.context().fixups.push(fixup);
         }
         Ok(())
     }
 }
 
 impl WidenedArrayStrategy {
-    /// Returns the swizzle insertion for a widened member read at `index`.
-    fn swizzle_at(
+    /// Returns the narrowing edit for a widened member read at `index`.
+    fn narrowing_at(
         tokens: TokenCursor<'_>,
         index: usize,
         widened: &[(SmolStr, WidenedArrayMember)],
-    ) -> Option<(SourceSpan, &'static str)> {
+    ) -> Option<Fixup> {
         let TypedToken::Identifier(name) = tokens[index].kind() else {
             return None;
         };
         let (_name, member) = widened
             .iter()
             .find(|(member_name, _widened)| member_name.as_str() == name.as_str())?;
+        // A `float` element is a one-component value, as the permissive path
+        // treats every scalar, so the only component a further subscript can
+        // select is the element itself: `[barID % 4]` reads `.x`. The edit
+        // owns the subscript, so fixups inside it go with it.
+        if *member == WidenedArrayMember::Scalar
+            && let Some(component) = WidenedArrayMember::component_subscript_span(tokens, index)
+        {
+            return Some(Fixup::replace(
+                component,
+                ExpressionReplacement::new().with_text(member.swizzle()),
+            ));
+        }
         let span = WidenedArrayMember::subscript_swizzle_span(tokens, index)?;
-        Some((span, member.swizzle()))
+        Some(Fixup::insert(span, member.swizzle().to_owned()))
     }
 }

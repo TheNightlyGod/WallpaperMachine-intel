@@ -13,24 +13,26 @@ enum DesktopPosterEncoder {
     static let fileExtension = "jpg"
     static let quality = 0.9
 
-    static func jpeg(pixels: Data, width: Int, height: Int, bgra: Bool) throws -> Data {
+    /// The picture behind renderer pixels, tagged sRGB like the renderer's own layer. Nil for
+    /// pixels that do not fill `width` by `height` exactly or a size beyond what is read back.
+    static func image(pixels: Data, width: Int, height: Int, bgra: Bool) -> CGImage? {
         guard width > 0, height > 0, width <= 16_384, height <= 16_384,
               width * height <= 32 * 1024 * 1024,
               pixels.count == width * height * 4,
-              let provider = CGDataProvider(data: pixels as CFData) else {
-            throw CocoaError(.fileReadCorruptFile)
-        }
-        guard let space = CGColorSpace(name: CGColorSpace.sRGB) else {
-            throw CocoaError(.fileWriteUnknown)
-        }
+              let provider = CGDataProvider(data: pixels as CFData),
+              let space = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
         let info = bgra
             ? CGBitmapInfo.byteOrder32Little.rawValue | CGImageAlphaInfo.noneSkipFirst.rawValue
             : CGBitmapInfo.byteOrder32Big.rawValue | CGImageAlphaInfo.noneSkipLast.rawValue
-        guard let image = CGImage(width: width, height: height, bitsPerComponent: 8,
-                                  bitsPerPixel: 32, bytesPerRow: width * 4,
-                                  space: space,
-                                  bitmapInfo: CGBitmapInfo(rawValue: info), provider: provider,
-                                  decode: nil, shouldInterpolate: false, intent: .defaultIntent) else {
+        return CGImage(width: width, height: height, bitsPerComponent: 8,
+                       bitsPerPixel: 32, bytesPerRow: width * 4,
+                       space: space,
+                       bitmapInfo: CGBitmapInfo(rawValue: info), provider: provider,
+                       decode: nil, shouldInterpolate: false, intent: .defaultIntent)
+    }
+
+    static func jpeg(pixels: Data, width: Int, height: Int, bgra: Bool) throws -> Data {
+        guard let image = image(pixels: pixels, width: width, height: height, bgra: bgra) else {
             throw CocoaError(.fileReadCorruptFile)
         }
         let output = NSMutableData()
@@ -83,6 +85,24 @@ struct DesktopPosterFrame: Sendable {
     }
 }
 
+extension DesktopPosterFrame {
+    /// The frame a `DesktopPosterNotification.ready` carries, or nil when any of its four
+    /// values is missing or of another type. An extension, so the memberwise initializer stays.
+    init?(userInfo: [AnyHashable: Any]?) {
+        guard let values = userInfo,
+              let pixels = values["pixels"] as? Data,
+              let width = values["width"] as? Int, let height = values["height"] as? Int,
+              let bgra = values["bgra"] as? Bool else { return nil }
+        self.init(pixels: pixels, width: width, height: height, bgra: bgra)
+    }
+
+    /// The frame as a picture; nil when its size and pixel count disagree or are beyond what the
+    /// encoder accepts.
+    func cgImage() -> CGImage? {
+        DesktopPosterEncoder.image(pixels: pixels, width: width, height: height, bgra: bgra)
+    }
+}
+
 enum DesktopPosterNotification {
     static let request = Notification.Name("WallpaperMachine.requestDesktopPoster")
     static let ready = Notification.Name("WallpaperMachine.desktopPosterReady")
@@ -112,11 +132,27 @@ enum DesktopPosterScope: Equatable {
 /// (intros, fades and settings that take a moment to show), on a Space change
 /// or wake, and optionally every few minutes. A frame identical to the current
 /// poster costs a readback and a hash; nothing is encoded or written.
+///
+/// A Space change, wake or resume takes it again only for a surface whose poster is
+/// older than `recaptureFloor` or was taken before the wallpaper settled: Mission
+/// Control shows sampled stills, and every new frame is one more file, readback and
+/// encode, so a poster a minute old is as good as a new one.
 @MainActor
 final class DesktopWallpaperSync {
     /// Delays after a start, change or resume at which the poster is taken again.
     static let settleCaptureDelays: [Duration] = [.seconds(3), .seconds(15)]
     static let periodicRefreshInterval: Duration = .seconds(300)
+    /// How old a settled poster may be before a Space change, wake or resume takes it again.
+    nonisolated static let recaptureFloor: Duration = .seconds(120)
+
+    /// What the refresh that fires next asks the surfaces for. Coalesced calls
+    /// keep the largest request.
+    private enum CaptureRequest: Comparable {
+        case none
+        /// Only surfaces whose poster is older than the floor or was taken before settling.
+        case stale
+        case all
+    }
 
     private let ledger: DesktopWallpaperLedger
     private var frameObserver: NSObjectProtocol?
@@ -148,20 +184,31 @@ final class DesktopWallpaperSync {
     private static let refreshInterval: Duration = .milliseconds(500)
     private let settleDelays: [Duration]
     private let periodicInterval: Duration
+    private let recaptureFloor: Duration
+    private let clock: @MainActor () -> ContinuousClock.Instant
+    /// When each layer's latest accepted frame arrived while its wallpaper was presenting.
+    /// Counted for identical frames too, and not for a frame a paused surface kept.
+    private var capturedAt: [ObjectIdentifier: ContinuousClock.Instant] = [:]
+    /// When every surface was last asked for a frame because a wallpaper started or changed.
+    /// Frames that arrived before its settle captures are not final.
+    private var lastFullRequest: ContinuousClock.Instant?
     private var settling: Task<Void, Never>?
     private var periodic: Task<Void, Never>?
     /// Whether a surface's wallpaper is presenting, so a later capture can show
     /// something new. Settling and periodic captures skip the others; a new
     /// wallpaper, a Space change and a wake still capture every surface.
     var canCapture: @MainActor (DesktopPosterSurface) -> Bool = { _ in true }
+    /// Whether a surface draws a look nobody saved, such as property edits shown before Apply
+    /// changes. Its frames are neither asked for nor taken as the poster, so Mission Control and
+    /// the moment before a wallpaper loads keep the saved look; the owner asks for a refresh when
+    /// the surface draws the saved look again. A frame already on its way is dropped on arrival.
+    var showsUnsavedLook: @MainActor (DesktopPosterSurface) -> Bool = { _ in false }
     /// Takes the poster again every `periodicRefreshInterval` while on.
     var refreshesPeriodically = false {
         didSet { if refreshesPeriodically != oldValue { schedulePeriodicCaptures() } }
     }
     private var stopped = false
-    /// Whether the refresh that fires next reads fresh frames; coalesced calls
-    /// capture when any of them asked to.
-    private var pendingCapture = false
+    private var pendingRequest = CaptureRequest.none
     var isSuspended: Bool { stopped }
 
     convenience init(folder: URL, scope: @escaping @MainActor (String) -> DesktopPosterScope = { _ in .all },
@@ -190,7 +237,9 @@ final class DesktopWallpaperSync {
          },
          settleDelays: [Duration] = DesktopWallpaperSync.settleCaptureDelays,
          periodicInterval: Duration = DesktopWallpaperSync.periodicRefreshInterval,
-         confirmationDelay: Duration = DesktopWallpaperLedger.confirmationWindow) throws {
+         confirmationDelay: Duration = DesktopWallpaperLedger.confirmationWindow,
+         recaptureFloor: Duration = DesktopWallpaperSync.recaptureFloor,
+         clock: @escaping @MainActor () -> ContinuousClock.Instant = { ContinuousClock.now }) throws {
         ledger = try DesktopWallpaperLedger(folder: folder, workspace: workspace,
                                             confirmationWindow: confirmationDelay)
         self.confirmationDelay = confirmationDelay
@@ -202,6 +251,8 @@ final class DesktopWallpaperSync {
         self.encode = encode
         self.settleDelays = settleDelays.sorted()
         self.periodicInterval = periodicInterval
+        self.recaptureFloor = recaptureFloor
+        self.clock = clock
     }
 
     func start() {
@@ -226,20 +277,22 @@ final class DesktopWallpaperSync {
     /// asks each surface for a fresh frame first, which is what a new or
     /// changed wallpaper needs, and takes it again as the wallpaper settles.
     func refresh(capture: Bool = true) {
-        refresh(capture: capture, settle: capture)
+        refresh(capture ? .all : .none, settle: capture)
     }
 
     /// A display's wallpaper plays again after a pause, a cover or display
     /// sleep: an intro may only now be running, so the poster is taken again
-    /// as it settles.
+    /// as it settles. A display whose poster is recent and settled keeps it.
     func presentationResumed() {
-        scheduleSettleCaptures()
+        scheduleSettleCaptures(staleOnly: true)
     }
 
-    private func refresh(capture: Bool, settle: Bool) {
+    private func refresh(_ request: CaptureRequest, settle: Bool) {
         guard !stopped else { return }
-        if settle { scheduleSettleCaptures() }
-        pendingCapture = pendingCapture || capture
+        // Before the settle captures are scheduled, so the last of them lands after it.
+        if request == .all { lastFullRequest = clock() }
+        if settle { scheduleSettleCaptures(staleOnly: false) }
+        pendingRequest = max(pendingRequest, request)
         let now = ContinuousClock.now
         if let last = lastRefresh, now - last < Self.refreshInterval {
             guard coalesced == nil else { return }
@@ -258,16 +311,36 @@ final class DesktopWallpaperSync {
     }
 
     /// A Space change or wake shows a desktop the poster may not be on yet: the
-    /// current poster is applied at once and a fresh frame is asked for, since
-    /// an animated wallpaper has moved on since its poster was taken. Desktops
-    /// that kept refusing posters are tried again.
+    /// current poster is applied at once. A fresh frame is asked for only where
+    /// the poster has aged, since an animated wallpaper moves on. Desktops that
+    /// kept refusing posters are tried again.
     private func refreshAfterDesktopChange() {
         beforeDesktopChange()
         ledger.retryRefusedDesktops()
-        refresh(capture: true, settle: false)
+        refresh(.stale, settle: false)
     }
 
-    private func scheduleSettleCaptures() {
+    /// Whether a Space change, wake or resume leaves the surface's poster as it is
+    /// because it is recent and was taken once the wallpaper had settled. A poster
+    /// scoped to a Space must confirm its context, so it is never kept.
+    private func keepsPoster(of surface: DesktopPosterSurface) -> Bool {
+        guard recaptureFloor > .zero, scope(surface.display) == .all,
+              let taken = capturedAt[ObjectIdentifier(surface.layer)] else { return false }
+        if let requested = lastFullRequest, taken < requested.advanced(by: settleDelays.last ?? .zero) {
+            return false
+        }
+        let age = clock() - taken
+        guard age >= .zero, age < recaptureFloor else { return false }
+        AppLog.debug("desktop poster: kept the poster taken \(age.components.seconds)s ago on display \(surface.display)")
+        return true
+    }
+
+    /// `staleOnly` leaves out the surfaces whose poster is fresh, and does nothing,
+    /// not even restarting a sequence already running, when there are none.
+    private func scheduleSettleCaptures(staleOnly: Bool) {
+        let only = staleOnly
+            ? Set(surfaces().filter { !keepsPoster(of: $0) }.map { ObjectIdentifier($0.layer) }) : nil
+        if let only, only.isEmpty { return }
         settling?.cancel()
         settling = nil
         guard !stopped, frameObserver != nil, !settleDelays.isEmpty else { return }
@@ -278,7 +351,7 @@ final class DesktopWallpaperSync {
                 do { try await Task.sleep(for: delay - elapsed) } catch { return }
                 elapsed = delay
                 guard let self, !self.stopped else { return }
-                self.requestPresentingFrames()
+                self.requestPresentingFrames(only: only)
             }
         }
     }
@@ -290,7 +363,8 @@ final class DesktopWallpaperSync {
         let interval = periodicInterval
         periodic = Task { [weak self] in
             while true {
-                do { try await Task.sleep(for: interval) } catch { return }
+                // The poster only has to be roughly this old, so let the system coalesce it.
+                do { try await Task.sleep(for: interval, tolerance: interval / 10) } catch { return }
                 guard let self, !self.stopped else { return }
                 self.requestPresentingFrames()
             }
@@ -299,29 +373,29 @@ final class DesktopWallpaperSync {
 
     /// Asks only presenting surfaces: a suspended one would draw the frame its
     /// poster already shows.
-    private func requestPresentingFrames() {
-        for surface in surfaces() where canCapture(surface) {
+    private func requestPresentingFrames(only layers: Set<ObjectIdentifier>? = nil) {
+        for surface in surfaces() where canCapture(surface) && layers?.contains(ObjectIdentifier(surface.layer)) != false {
             requestFrame(for: surface)
         }
     }
 
     private func requestFrame(for surface: DesktopPosterSurface) {
         let scope = scope(surface.display)
-        guard scope != .hold else { return }
+        guard scope != .hold, !showsUnsavedLook(surface) else { return }
         frameCenter.post(name: DesktopPosterNotification.request, object: surface.layer,
                          userInfo: ["context": scope.context ?? ""])
     }
 
     private func performRefresh() {
         guard !stopped else { return }
-        let capture = pendingCapture
-        pendingCapture = false
+        let request = pendingRequest
+        pendingRequest = .none
         // Request GPU pixels before potentially slow native Space enumeration
         // and journal I/O, so readback can overlap synchronization.
         // No debounce: an Apply must not wait for a 400 ms timer, another
         // snapshot, or an activeSpaceDidChange notification to request pixels.
-        if capture {
-            for surface in surfaces() {
+        if request != .none {
+            for surface in surfaces() where request == .all || !keepsPoster(of: surface) {
                 requestFrame(for: surface)
             }
         }
@@ -347,6 +421,8 @@ final class DesktopWallpaperSync {
         periodic?.cancel()
         periodic = nil
         lastRefresh = nil
+        capturedAt.removeAll()
+        lastFullRequest = nil
         if let frameObserver { frameCenter.removeObserver(frameObserver) }
         frameObserver = nil
         for observer in workspaceObservers { workspaceCenter?.removeObserver(observer) }
@@ -397,19 +473,22 @@ final class DesktopWallpaperSync {
         guard !stopped, let layer = notification.object as? CALayer,
               let surface = surfaces().first(where: { $0.layer === layer }),
               let values = notification.userInfo,
-              let pixels = values["pixels"] as? Data,
-              let width = values["width"] as? Int, let height = values["height"] as? Int,
-              let bgra = values["bgra"] as? Bool else { return }
+              let frame = DesktopPosterFrame(userInfo: values),
+              !showsUnsavedLook(surface) else { return }
         let receivedScope = scope(surface.display)
         guard receivedScope != .hold,
               (values["context"] as? String ?? "") == (receivedScope.context ?? "") else { return }
         let key = ObjectIdentifier(layer)
+        // A surface that is not presenting answers with the frame it kept, however long ago
+        // it drew it. That frame is still the poster, but it says nothing about the wallpaper
+        // as it plays now, so it must not make the poster fresh: the resume that follows
+        // would otherwise skip the capture that shows the wallpaper running again.
+        if canCapture(surface) { capturedAt[key] = clock() }
         let revision = (revisions[key] ?? 0) &+ 1
         revisions[key] = revision
         arrivalCount &+= 1
         let arrival = arrivalCount
         let encode = self.encode
-        let frame = DesktopPosterFrame(pixels: pixels, width: width, height: height, bgra: bgra)
         Task(priority: .userInitiated) { [weak self, weak layer] in
             let digest = await Task.detached(priority: .userInitiated) { frame.digest }.value
             guard let self, let layer, self.isNewest(revision, of: layer),
@@ -431,7 +510,11 @@ final class DesktopWallpaperSync {
                 self.frameDigests[key] = digest
                 self.arrivals[key] = arrival
                 self.synchronizeAllSpaces()
-            } catch { self.report(error) }
+            } catch {
+                // No poster came of this frame, so the next trigger takes another.
+                if self.isNewest(revision, of: layer) { self.capturedAt[key] = nil }
+                self.report(error)
+            }
         }
     }
 
@@ -449,6 +532,7 @@ final class DesktopWallpaperSync {
         frameDigests = frameDigests.filter { keys.contains($0.key) }
         revisions = revisions.filter { keys.contains($0.key) }
         arrivals = arrivals.filter { keys.contains($0.key) }
+        capturedAt = capturedAt.filter { keys.contains($0.key) }
         var byDisplay: [String: Data] = [:]
         var newest: [String: UInt64] = [:]
         var targetSpaces: [String: Set<String>] = [:]

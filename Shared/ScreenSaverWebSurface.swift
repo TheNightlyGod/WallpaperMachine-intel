@@ -91,8 +91,7 @@ final class ScreenSaverWebSurface: NSObject, WKNavigationDelegate, WKUIDelegate 
     configuration.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
     // File resources and ES modules are confined by loadFileURL's sandbox grant.
     // Unlike desktop pages, native saver content gets no universal file access.
-    configuration.userContentController.addUserScript(WKUserScript(
-      source: WebWallpaperProtocol.hostScript, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+    for script in WebWallpaperProtocol.userScripts() { configuration.userContentController.addUserScript(script) }
     configuration.userContentController.addUserScript(WKUserScript(
       source: Self.denyCaptureScript, injectionTime: .atDocumentStart, forMainFrameOnly: false))
     webView = WKWebView(frame: CGRect(origin: .zero, size: size), configuration: configuration)

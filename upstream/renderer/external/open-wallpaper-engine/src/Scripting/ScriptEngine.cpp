@@ -1466,6 +1466,18 @@ void AppendCommonHostBootstrap(std::ostringstream& wrapper) {
         << "  __sceneBase.createLayer = function(sourcePath) {\n"
         << "    return this.__createLayerFor('', sourcePath);\n"
         << "  };\n"
+        // Only a layer a script created is removed. The scene file's own
+        // layers stay, as does a layer named by index (getLayer resolves no
+        // index either), and the call answers false for them.
+        << "  __sceneBase.destroyLayer = function(layerOrName) {\n"
+        << "    var name = typeof layerOrName === 'string' ? __layerResolveName(layerOrName) : "
+           "__resolveLayerName(layerOrName);\n"
+        << "    if (!name || !__layerDestroy(name)) return false;\n"
+        << "    delete globalThis.__layerCache[name];\n"
+        << "    var order = globalThis.__layerOrder.indexOf(name);\n"
+        << "    if (order >= 0) globalThis.__layerOrder.splice(order, 1);\n"
+        << "    return true;\n"
+        << "  };\n"
         << "  __sceneBase.sortLayer = function(layerOrName, index) {\n"
         << "    var name = __resolveLayerName(layerOrName);\n"
         << "    if (!name) return;\n"
@@ -2173,6 +2185,17 @@ JSValue JsLayerCreate(JSContext* context, JSValueConst, int argc, JSValueConst* 
     return JS_NewString(context, generated_name.c_str());
 }
 
+JSValue JsLayerDestroy(JSContext* context, JSValueConst, int argc, JSValueConst* argv) {
+    if (argc < 1) return JS_NewBool(context, false);
+    auto* bridge = GetBridgeState(context);
+    if (bridge == nullptr || bridge->runtime == nullptr) return JS_NewBool(context, false);
+
+    const char* layer_name = JS_ToCString(context, argv[0]);
+    const bool  destroyed  = layer_name != nullptr && bridge->runtime->DestroyLayer(layer_name);
+    if (layer_name != nullptr) JS_FreeCString(context, layer_name);
+    return JS_NewBool(context, destroyed);
+}
+
 JSValue JsLayerGetIndex(JSContext* context, JSValueConst, int argc, JSValueConst* argv) {
     if (argc < 1) return JS_NewInt32(context, -1);
     auto* bridge = GetBridgeState(context);
@@ -2816,6 +2839,10 @@ bool EnsureSharedHostBindings(JSContext* context, SceneRuntimeContext* runtime,
                           global_object,
                           "__layerCreate",
                           JS_NewCFunction(context, JsLayerCreate, "__layerCreate", 2));
+        JS_SetPropertyStr(context,
+                          global_object,
+                          "__layerDestroy",
+                          JS_NewCFunction(context, JsLayerDestroy, "__layerDestroy", 1));
         JS_SetPropertyStr(context,
                           global_object,
                           "__layerGetIndex",

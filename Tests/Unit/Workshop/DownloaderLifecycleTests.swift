@@ -433,6 +433,145 @@ final class DownloaderLifecycleTests: DownloaderTestCase {
     try assertNoStaging(in: root)
   }
 
+  /// A Workshop preset (123456) built on a base wallpaper (654321). The preset always arrives;
+  /// `base` is the shell that runs when SteamCMD is asked for the base. Every request is appended
+  /// to `../invocations`, and a preset found already in the staging leaves `../preset-resumed`.
+  private func makePresetRuntime(base: String) throws -> URL {
+    try makeRuntime(
+      """
+      item=''
+      while [ "$#" -gt 0 ]; do
+          case "$1" in +workshop_download_item) shift; shift; item="$1" ;; esac
+          shift
+      done
+      printf '%s\\n' "$item" >> ../invocations
+      printf 'Waiting for user info...OK\\nDownloading item %s ...\\n' "$item"
+      content="steamapps/workshop/content/431960/$item"
+      if [ "$item" = 123456 ]; then
+          [ -f "$content/project.json" ] && touch ../preset-resumed
+          mkdir -p "$content"
+          printf '{"title":"Purple preset","dependency":"654321","preset":{"speed":7}}' > "$content/project.json"
+          printf 'Success. Downloaded item %s\\n' "$item"
+      else
+          \(base)
+      fi
+      """)
+  }
+
+  private let deliverBase = """
+    mkdir -p "$content"
+    printf '{"title":"Base","type":"video","file":"movie.mp4","general":{"properties":{"speed":{"type":"slider","value":1}}}}' > "$content/project.json"
+    printf 'base-content' > "$content/movie.mp4"
+    printf 'Success. Downloaded item %s\\n' "$item"
+    """
+
+  private let denyBase = "printf 'ERROR! Download item %s failed (Access Denied).\\n' \"$item\"; exit 1"
+
+  private let steamDenied = String(localized: "Steam denied this download. Sign in with an account that owns Wallpaper Engine and has access to this Workshop item.")
+
+  private func invocations(in root: URL) throws -> [String] {
+    try String(contentsOf: root.appendingPathComponent("invocations"), encoding: .utf8)
+      .split(separator: "\n").map(String.init)
+  }
+
+  private func assertNothingInstalled(in root: URL, file: StaticString = #filePath, line: UInt = #line) {
+    for id in ["123456", "654321"] {
+      XCTAssertFalse(
+        FileManager.default.fileExists(atPath: root.appendingPathComponent("Library/\(id)").path),
+        "Neither half of a preset reaches the library when its base is missing", file: file, line: line)
+    }
+  }
+
+  func testFailedBasePassNamesTheBaseAndKeepsTheReason() async throws {
+    let root = try makePresetRuntime(base: denyBase)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let downloader = startDownload(in: root)
+    try await waitForStop(downloader)
+    let message = try XCTUnwrap(downloader.errorMessage)
+    XCTAssertTrue(message.contains("654321"), "The user is told which item did not arrive")
+    XCTAssertTrue(message.contains(steamDenied), "Steam's own reason is not swallowed")
+    XCTAssertNotEqual(message, steamDenied, "It is not the bare reason for an item they never chose")
+    XCTAssertNil(downloader.downloadedID)
+    XCTAssertEqual(try invocations(in: root), ["123456", "654321"])
+    assertNothingInstalled(in: root)
+    try assertNoStaging(in: root)
+  }
+
+  func testFailedPresetPassIsReportedAsItsOwnFailure() async throws {
+    // The first item is the one the user asked for: nothing about a base applies yet.
+    let root = try makeRuntime(
+      """
+      printf 'Waiting for user info...OK\\nDownloading item 123456 ...\\nERROR! Download item 123456 failed (Access Denied).\\n'
+      exit 1
+      """)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let downloader = startDownload(in: root)
+    try await waitForStop(downloader)
+    XCTAssertEqual(downloader.errorMessage, steamDenied)
+  }
+
+  func testBaseThatExitsWithoutConfirmingIsAlsoNamed() async throws {
+    let root = try makePresetRuntime(base: "exit 0")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let downloader = startDownload(in: root)
+    try await waitForStop(downloader)
+    let message = try XCTUnwrap(downloader.errorMessage)
+    XCTAssertTrue(message.contains("654321"))
+    XCTAssertNotEqual(message, steamDenied)
+    assertNothingInstalled(in: root)
+
+    let crashRoot = try makePresetRuntime(base: "exit 3")
+    defer { try? FileManager.default.removeItem(at: crashRoot) }
+    let crashed = startDownload(in: crashRoot)
+    try await waitForStop(crashed)
+    XCTAssertTrue(try XCTUnwrap(crashed.errorMessage).contains("654321"))
+    assertNothingInstalled(in: crashRoot)
+  }
+
+  func testBaseConnectionDropIsRetriedBeforeItIsReported() async throws {
+    let root = try makePresetRuntime(
+      base: "printf 'ERROR! Download item %s failed (Timeout).\\n' \"$item\"; exit 1")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let downloader = startDownload(in: root)
+    try await waitForStop(downloader)
+    XCTAssertEqual(
+      try invocations(in: root), ["123456", "654321", "654321", "654321", "654321"],
+      "The base is retried in place; the preset that already arrived is not fetched again")
+    let message = try XCTUnwrap(downloader.errorMessage)
+    XCTAssertTrue(message.contains("654321"))
+    XCTAssertNotEqual(message, steamDenied)
+    assertNothingInstalled(in: root)
+  }
+
+  func testTryAgainAfterABaseFailureResumesFromTheKeptPreset() async throws {
+    let root = try makePresetRuntime(
+      base: """
+        if [ -f ../base-available ]; then
+            \(deliverBase)
+        else
+            \(denyBase)
+        fi
+        """)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let checkpoint = root.appendingPathComponent("Checkpoint")
+    let first = startDownload(in: root, checkpointDirectory: checkpoint)
+    try await waitForStop(first)
+    XCTAssertNotNil(first.errorMessage)
+    XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("preset-resumed").path))
+    assertNothingInstalled(in: root)
+
+    FileManager.default.createFile(atPath: root.appendingPathComponent("base-available").path, contents: nil)
+    let again = startDownload(in: root, checkpointDirectory: checkpoint)
+    try await assertImported(again, in: root, itemID: "123456")
+    XCTAssertTrue(
+      FileManager.default.fileExists(atPath: root.appendingPathComponent("preset-resumed").path),
+      "The preset came back from the kept download, not from a fresh start")
+    XCTAssertEqual(
+      try Data(contentsOf: root.appendingPathComponent("Library/123456/movie.mp4")), Data("base-content".utf8))
+    XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("Library/654321").path))
+    try assertNoStaging(in: root)
+  }
+
   func testMobileApprovalCanAdvanceToIndeterminateDownload() async throws {
     let root = try makeRuntime(
       """
@@ -548,7 +687,207 @@ final class DownloaderLifecycleTests: DownloaderTestCase {
       XCTAssertNil(downloader.progress)
       XCTAssertNil(downloader.bytesReceived)
       XCTAssertNil(downloader.bytesExpected)
+      XCTAssertNil(downloader.secondsRemaining, "Nothing to compare with means no time left to claim")
       await downloader.shutdown()
+    } catch { await downloader.shutdown(); throw error }
+  }
+
+  /// Watches `bytesReceived` while the downloader reads its network meter `readings` more times,
+  /// which it does every 200 ms and after each of its half-second disk samples, and returns the
+  /// lowest figure shown meanwhile.
+  private func lowestBytesShown(
+    by downloader: WorkshopDownloader, over readings: Int, monitor: FixtureNetworkMonitor
+  ) async throws -> Int64? {
+    let target = monitor.receivedReadings + readings
+    var lowest: Int64?
+    try await waitUntil {
+      if let shown = downloader.bytesReceived { lowest = min(lowest ?? shown, shown) }
+      return monitor.receivedReadings >= target || !downloader.isRunning
+    }
+    return lowest
+  }
+
+  func testProgressNeverMovesBackwardsWhenTheTreeShrinks() async throws {
+    // Steam can move chunks about, so the staged tree may weigh less later than it did earlier.
+    let root = try makeRuntime("""
+      printf 'Waiting for user info...OK\\nDownloading item 123456 ...\\n'
+      mkdir -p steamapps/workshop/downloads/431960/123456
+      head -c 1024 /dev/zero > steamapps/workshop/downloads/431960/123456/part1
+      touch ../first-written
+      while [ ! -f ../release-shrink ]; do sleep 0.02; done
+      rm steamapps/workshop/downloads/431960/123456/part1
+      head -c 256 /dev/zero > steamapps/workshop/downloads/431960/123456/part2
+      touch ../shrunk
+      while [ ! -f ../release-grow ]; do sleep 0.02; done
+      head -c 1536 /dev/zero > steamapps/workshop/downloads/431960/123456/part3
+      touch ../grown
+      IFS= read -r finish
+      """)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let sizedItem = WorkshopItem(id: "123456", title: "Disk fixture", creator: "Test", summary: "", previewURL: nil, tags: ["Video"], size: 2048, subscriptions: 0)
+    let monitor = FixtureNetworkMonitor()
+    let downloader = startDownload(in: root, item: sizedItem, networkMonitor: monitor)
+    do {
+      try await waitUntil { downloader.bytesReceived == 1024 }
+      XCTAssertEqual(downloader.progress, 0.5)
+      try Data().write(to: root.appendingPathComponent("release-shrink"))
+      try await waitUntil { FileManager.default.fileExists(atPath: root.appendingPathComponent("shrunk").path) }
+      let lowest = try await lowestBytesShown(by: downloader, over: 6, monitor: monitor)
+      XCTAssertEqual(lowest, 1024, "A tree that weighs less than before must not pull the bytes back")
+      XCTAssertEqual(downloader.progress, 0.5)
+      // Only more than was already shown moves it again.
+      try Data().write(to: root.appendingPathComponent("release-grow"))
+      try await waitUntil { downloader.bytesReceived == 1792 }
+      XCTAssertEqual(downloader.progress, 0.875)
+      await downloader.shutdown()
+    } catch { await downloader.shutdown(); throw error }
+  }
+
+  func testProgressNeverMovesBackwardsWhenTheNetworkMeterStartsOver() async throws {
+    let root = try makeRuntime("""
+      printf 'Waiting for user info...OK\\nDownloading item 123456 ...\\n'
+      mkdir -p steamapps/workshop/downloads/431960/123456
+      head -c 2048 /dev/zero > steamapps/workshop/downloads/431960/123456/movie.mp4
+      IFS= read -r finish
+      """)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let sizedItem = WorkshopItem(id: "123456", title: "Disk fixture", creator: "Test", summary: "", previewURL: nil, tags: ["Video"], size: 2048, subscriptions: 0)
+    let monitor = FixtureNetworkMonitor()
+    monitor.received = 1536
+    let downloader = startDownload(in: root, item: sizedItem, networkMonitor: monitor)
+    do {
+      try await waitUntil { downloader.bytesReceived == 1536 }
+      // A new process counts its own traffic from zero.
+      monitor.received = 100
+      let lowest = try await lowestBytesShown(by: downloader, over: 6, monitor: monitor)
+      XCTAssertEqual(lowest, 1536, "A meter that restarts must not pull the bytes back")
+      XCTAssertEqual(downloader.progress, 0.75)
+      monitor.received = 1792
+      try await waitUntil { downloader.bytesReceived == 1792 }
+      XCTAssertEqual(downloader.progress, 0.875)
+      await downloader.shutdown()
+    } catch { await downloader.shutdown(); throw error }
+  }
+
+  func testProgressSurvivesSteamCMDRelaunchingWithinTheRun() async throws {
+    // Exit status 42 makes the downloader launch SteamCMD again in the same staging, which
+    // announces the item once more and starts a fresh network meter.
+    let root = try makeRuntime("""
+      printf 'Waiting for user info...OK\\nDownloading item 123456 ...\\n'
+      mkdir -p steamapps/workshop/downloads/431960/123456
+      if [ -f ../second-pass ]; then
+          touch ../second-launch
+          IFS= read -r finish
+      else
+          head -c 1536 /dev/zero > steamapps/workshop/downloads/431960/123456/part1
+          touch ../first-launch
+          while [ ! -f ../release-first ]; do sleep 0.02; done
+          exit 42
+      fi
+      """)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let sizedItem = WorkshopItem(id: "123456", title: "Disk fixture", creator: "Test", summary: "", previewURL: nil, tags: ["Video"], size: 2048, subscriptions: 0)
+    let monitor = FixtureNetworkMonitor()
+    monitor.received = 1536
+    let downloader = startDownload(in: root, item: sizedItem, networkMonitor: monitor)
+    do {
+      try await waitUntil { downloader.bytesReceived == 1536 }
+      monitor.received = 0
+      try Data().write(to: root.appendingPathComponent("second-pass"))
+      try Data().write(to: root.appendingPathComponent("release-first"))
+      try await waitUntil { monitor.startedPIDs.count == 2 }
+      XCTAssertEqual(downloader.bytesReceived, 1536, "The bar keeps its place through the relaunch")
+      XCTAssertEqual(downloader.progress, 0.75)
+      let lowest = try await lowestBytesShown(by: downloader, over: 6, monitor: monitor)
+      XCTAssertEqual(lowest, 1536, "The second process starts counting from zero; the figure shown must not")
+      XCTAssertEqual(downloader.progress, 0.75)
+      XCTAssertNil(downloader.secondsRemaining, "A relaunch has no pace of its own until bytes move again")
+      await downloader.shutdown()
+    } catch { await downloader.shutdown(); throw error }
+  }
+
+  func testProgressAdvancesAgainAfterARelaunchEvenBelowWhatWasAlreadyShown() async throws {
+    // The first process dropped at three quarters. Steam resumes and fetches only the last
+    // quarter, so the second process's meter never reaches what was shown before it: the bar
+    // has to carry on from where it was, not wait at that figure until Steam reports success.
+    let root = try makeRuntime("""
+      printf 'Waiting for user info...OK\\nDownloading item 123456 ...\\n'
+      mkdir -p steamapps/workshop/downloads/431960/123456
+      if [ -f ../second-pass ]; then
+          head -c 1024 /dev/zero > steamapps/workshop/downloads/431960/123456/part2
+          touch ../second-launch
+          IFS= read -r finish
+      else
+          head -c 3072 /dev/zero > steamapps/workshop/downloads/431960/123456/part1
+          touch ../first-launch
+          while [ ! -f ../release-first ]; do sleep 0.02; done
+          exit 42
+      fi
+      """)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let sizedItem = WorkshopItem(id: "123456", title: "Disk fixture", creator: "Test", summary: "", previewURL: nil, tags: ["Video"], size: 4096, subscriptions: 0)
+    let monitor = FixtureNetworkMonitor()
+    monitor.received = 3072
+    let downloader = startDownload(in: root, item: sizedItem, networkMonitor: monitor)
+    do {
+      try await waitUntil { downloader.bytesReceived == 3072 }
+      monitor.received = 0
+      try Data().write(to: root.appendingPathComponent("second-pass"))
+      try Data().write(to: root.appendingPathComponent("release-first"))
+      try await waitUntil { monitor.startedPIDs.count == 2 }
+      try await waitUntil { FileManager.default.fileExists(atPath: root.appendingPathComponent("second-launch").path) }
+      // The new meter has seen 512 bytes, far below the 3072 already shown.
+      monitor.received = 512
+      try await waitUntil { downloader.bytesReceived == 3584 }
+      XCTAssertEqual(downloader.progress, 0.875, "Bytes fetched after the relaunch move the bar past its old place")
+      monitor.received = 1024
+      try await waitUntil { downloader.bytesReceived == 4096 }
+      XCTAssertEqual(downloader.progress, 0.99, "Bytes alone stop short of completion")
+      await downloader.shutdown()
+    } catch { await downloader.shutdown(); throw error }
+  }
+
+  func testSecondsRemainingFollowsTheMeasuredPaceAndSaysNothingAtTheCap() async throws {
+    let root = try makeRuntime("""
+      printf 'Waiting for user info...OK\\nDownloading item 123456 ...\\n'
+      mkdir -p steamapps/workshop/downloads/431960/123456
+      head -c 6000000 /dev/zero > steamapps/workshop/downloads/431960/123456/movie.mp4
+      touch ../allocated
+      IFS= read -r finish
+      """)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let sizedItem = WorkshopItem(id: "123456", title: "Disk fixture", creator: "Test", summary: "", previewURL: nil, tags: ["Video"], size: 6_000_000, subscriptions: 0)
+    let monitor = FixtureNetworkMonitor()
+    monitor.received = 0
+    // The estimate is measured on the downloader's clock, so the test decides how long a second is.
+    var clock = Date(timeIntervalSinceReferenceDate: 0)
+    let downloader = WorkshopDownloader(
+      sessionDirectory: root.appendingPathComponent("SteamSession"),
+      runtimeProvider: ShellRuntimeProvider(), networkMonitor: monitor, now: { clock },
+      freeSpace: { _ in nil })
+    downloader.start(
+      item: sizedItem, username: "localtest", executable: root.appendingPathComponent("runtime/steamcmd"),
+      library: root.appendingPathComponent("Library"), rememberSession: false, onImported: {})
+    do {
+      try await waitUntil { FileManager.default.fileExists(atPath: root.appendingPathComponent("allocated").path) }
+      try await waitUntil { downloader.bytesReceived == 0 }
+      XCTAssertNil(downloader.secondsRemaining, "A single reading has no pace")
+      clock = Date(timeIntervalSinceReferenceDate: 2)
+      monitor.received = 2_000_000
+      try await waitUntil { downloader.bytesReceived == 2_000_000 }
+      XCTAssertNil(downloader.secondsRemaining, "Two seconds of history is too little to promise anything")
+      clock = Date(timeIntervalSinceReferenceDate: 4)
+      monitor.received = 4_000_000
+      try await waitUntil { downloader.bytesReceived == 4_000_000 }
+      XCTAssertEqual(downloader.secondsRemaining, 2, "2 MB left at 1 MB/s")
+      // The last byte is claimed by Steam alone: at the cap there is nothing left to estimate.
+      clock = Date(timeIntervalSinceReferenceDate: 5)
+      monitor.received = 6_000_000
+      try await waitUntil { downloader.bytesReceived == 6_000_000 }
+      XCTAssertEqual(downloader.progress, 0.99)
+      XCTAssertNil(downloader.secondsRemaining)
+      await downloader.shutdown()
+      XCTAssertNil(downloader.secondsRemaining)
     } catch { await downloader.shutdown(); throw error }
   }
 
@@ -564,7 +903,7 @@ final class DownloaderLifecycleTests: DownloaderTestCase {
     let destination = root.appendingPathComponent("SceneAssets")
     let downloader = WorkshopDownloader(
       sessionDirectory: root.appendingPathComponent("SteamSession"),
-      runtimeProvider: ShellRuntimeProvider())
+      runtimeProvider: ShellRuntimeProvider(), freeSpace: { _ in nil })
     downloader.installAssets(
       username: "localtest", executable: root.appendingPathComponent("runtime/steamcmd"),
       destination: destination
@@ -763,7 +1102,7 @@ final class DownloaderLifecycleTests: DownloaderTestCase {
       to: destination.appendingPathComponent("old"))
     let downloader = WorkshopDownloader(
       sessionDirectory: root.appendingPathComponent("SteamSession"),
-      runtimeProvider: ShellRuntimeProvider())
+      runtimeProvider: ShellRuntimeProvider(), freeSpace: { _ in nil })
     downloader.installAssets(
       username: "localtest", executable: root.appendingPathComponent("runtime/steamcmd"),
       destination: destination, onInstalled: {})
@@ -804,7 +1143,7 @@ final class DownloaderLifecycleTests: DownloaderTestCase {
     try Data("preserved".utf8).write(to: destination.appendingPathComponent("existing"))
     let downloader = WorkshopDownloader(
       sessionDirectory: root.appendingPathComponent("SteamSession"),
-      runtimeProvider: ShellRuntimeProvider())
+      runtimeProvider: ShellRuntimeProvider(), freeSpace: { _ in nil })
     downloader.installAssets(
       username: "localtest", executable: root.appendingPathComponent("runtime/steamcmd"),
       destination: destination
@@ -840,7 +1179,7 @@ final class DownloaderLifecycleTests: DownloaderTestCase {
     let destination = root.appendingPathComponent("SceneAssets")
     let downloader = WorkshopDownloader(
       sessionDirectory: root.appendingPathComponent("SteamSession"),
-      runtimeProvider: ShellRuntimeProvider())
+      runtimeProvider: ShellRuntimeProvider(), freeSpace: { _ in nil })
     downloader.installAssets(
       username: "localtest", executable: root.appendingPathComponent("runtime/steamcmd"),
       destination: destination
@@ -876,5 +1215,265 @@ final class DownloaderLifecycleTests: DownloaderTestCase {
     XCTAssertFalse(
       FileManager.default.fileExists(atPath: root.appendingPathComponent("Library/123456").path))
     try assertNoStaging(in: root)
+  }
+
+  // MARK: Free disk space
+
+  private let mebibyte: Int64 = 1_048_576
+
+  private func sizedItem(_ size: Int64) -> WorkshopItem {
+    WorkshopItem(
+      id: "123456", title: "Sized fixture", creator: "Test", summary: "", previewURL: nil,
+      tags: ["Video"], size: size, subscriptions: 0)
+  }
+
+  private func fileSize(_ bytes: Int64) -> String {
+    let formatter = ByteCountFormatter()
+    formatter.countStyle = .file
+    return formatter.string(fromByteCount: bytes)
+  }
+
+  /// A SteamCMD stand-in that leaves a marker next to staging when it starts and then delivers
+  /// the item, so a test sees both whether it was launched and whether the download completed.
+  private func makeMarkingRuntime() throws -> URL {
+    try makeRuntime(
+      """
+      touch ../launched
+      printf 'Waiting for user info...OK\\nDownloading item 123456 ...\\n'
+      content="steamapps/workshop/content/431960/123456"
+      mkdir -p "$content"
+      printf '{"type":"video","file":"movie.mp4"}' > "$content/project.json"
+      printf 'movie' > "$content/movie.mp4"
+      printf 'Success. Downloaded item 123456\\n'
+      """)
+  }
+
+  private func launched(in root: URL) -> Bool {
+    FileManager.default.fileExists(atPath: root.appendingPathComponent("launched").path)
+  }
+
+  private func restart(_ downloader: WorkshopDownloader, in root: URL, item: WorkshopItem) {
+    downloader.start(
+      item: item, username: "localtest", executable: root.appendingPathComponent("runtime/steamcmd"),
+      library: root.appendingPathComponent("Library"), onImported: {})
+  }
+
+  func testShortFreeSpaceFailsBeforeSteamCMDLaunches() async throws {
+    let root = try makeMarkingRuntime()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let listed = sizedItem(50 * mebibyte)
+    let disk = FreeSpaceProbe(3 * mebibyte)
+    let downloader = startDownload(in: root, item: listed, freeSpace: disk.measure)
+    try await waitForStop(downloader)
+    let needed = try XCTUnwrap(
+      WorkshopDownloader.requiredFreeBytes(expected: listed.size, alreadyStaged: 0, installingAssets: false))
+    let message = try XCTUnwrap(downloader.errorMessage)
+    XCTAssertTrue(message.contains(fileSize(needed)), "The message names what the download needs: \(message)")
+    XCTAssertTrue(message.contains(fileSize(3 * mebibyte)), "The message names what is free: \(message)")
+    XCTAssertFalse(launched(in: root), "SteamCMD must not start on a disk that cannot hold the item")
+    XCTAssertNil(downloader.downloadedID)
+    XCTAssertFalse(downloader.wasCancelled)
+    XCTAssertFalse(downloader.canRetryAuthentication, "A full disk is not a sign-in failure")
+    XCTAssertEqual(
+      disk.questions.map(\.path), [root.path],
+      "Free space is read on the disk that holds the library")
+    XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("Library/123456").path))
+    try assertNoStaging(in: root)
+  }
+
+  func testTryAgainChecksFreeSpaceAgainAndStartsOnceThereIsRoom() async throws {
+    let root = try makeMarkingRuntime()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let listed = sizedItem(50 * mebibyte)
+    let disk = FreeSpaceProbe(3 * mebibyte)
+    let downloader = startDownload(in: root, item: listed, freeSpace: disk.measure)
+    try await waitForStop(downloader)
+    XCTAssertNotNil(downloader.errorMessage)
+    XCTAssertFalse(launched(in: root))
+    disk.available = 4_000 * mebibyte
+    restart(downloader, in: root, item: listed)
+    try await assertImported(downloader, in: root, itemID: "123456")
+    XCTAssertTrue(launched(in: root))
+    XCTAssertEqual(disk.questions.count, 2, "Each start reads the disk again")
+    try assertNoStaging(in: root)
+  }
+
+  func testEnoughFreeSpaceDownloadsNormally() async throws {
+    let root = try makeMarkingRuntime()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let listed = sizedItem(50 * mebibyte)
+    let needed = try XCTUnwrap(
+      WorkshopDownloader.requiredFreeBytes(expected: listed.size, alreadyStaged: 0, installingAssets: false))
+    let disk = FreeSpaceProbe(needed)
+    let downloader = startDownload(in: root, item: listed, freeSpace: disk.measure)
+    try await assertImported(downloader, in: root, itemID: "123456")
+    XCTAssertTrue(launched(in: root), "Exactly the space it needs is enough")
+  }
+
+  func testUnknownFreeSpaceNeverBlocks() async throws {
+    let root = try makeMarkingRuntime()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let disk = FreeSpaceProbe(nil)
+    let downloader = startDownload(in: root, item: sizedItem(50 * mebibyte), freeSpace: disk.measure)
+    try await assertImported(downloader, in: root, itemID: "123456")
+    XCTAssertTrue(launched(in: root))
+  }
+
+  func testItemWithoutAListedSizeIsNeverBlocked() async throws {
+    let root = try makeMarkingRuntime()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let disk = FreeSpaceProbe(0)
+    let downloader = startDownload(in: root, item: sizedItem(0), freeSpace: disk.measure)
+    try await assertImported(downloader, in: root, itemID: "123456")
+    XCTAssertTrue(launched(in: root), "Without a size there is nothing to compare the disk with")
+  }
+
+  func testPartialDownloadsAlreadyOnDiskReduceWhatIsRequired() async throws {
+    let root = try makeMarkingRuntime()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let listed = sizedItem(8 * mebibyte)
+    let fresh = try XCTUnwrap(
+      WorkshopDownloader.requiredFreeBytes(expected: listed.size, alreadyStaged: 0, installingAssets: false))
+    let resumed = try XCTUnwrap(
+      WorkshopDownloader.requiredFreeBytes(expected: listed.size, alreadyStaged: listed.size, installingAssets: false))
+    XCTAssertLessThan(resumed, fresh)
+    // Room for the rest of a half-finished download, but not for the whole item over again.
+    let disk = FreeSpaceProbe((fresh + resumed) / 2)
+    let checkpoint = root.appendingPathComponent("Checkpoint")
+    let downloader = startDownload(in: root, item: listed, checkpointDirectory: checkpoint, freeSpace: disk.measure)
+    try await waitForStop(downloader)
+    XCTAssertNotNil(downloader.errorMessage, "Nothing is staged yet, so the whole item must fit")
+    XCTAssertFalse(launched(in: root))
+
+    let partial = checkpoint.appendingPathComponent("steamapps/workshop/downloads/431960/123456")
+    try FileManager.default.createDirectory(at: partial, withIntermediateDirectories: true)
+    try Data(repeating: 1, count: Int(listed.size)).write(to: partial.appendingPathComponent("part"))
+    restart(downloader, in: root, item: listed)
+    try await assertImported(downloader, in: root, itemID: "123456")
+    XCTAssertTrue(launched(in: root), "What the earlier attempt kept is already on the disk")
+  }
+
+  func testRequiredFreeBytesTracksTheListedSizeAndWhatIsAlreadyStaged() {
+    let size = 100 * mebibyte
+    let fresh = WorkshopDownloader.requiredFreeBytes(expected: size, alreadyStaged: 0, installingAssets: false)
+    XCTAssertNotNil(fresh)
+    XCTAssertGreaterThan(fresh ?? 0, size + WorkshopDownloader.freeSpaceMargin, "The item plus Steam's staging overhead")
+    let half = WorkshopDownloader.requiredFreeBytes(expected: size, alreadyStaged: size / 2, installingAssets: false)
+    XCTAssertLessThan(half ?? .max, fresh ?? 0)
+    XCTAssertGreaterThan(half ?? 0, WorkshopDownloader.freeSpaceMargin)
+    for staged in [size, 3 * size] {
+      XCTAssertEqual(
+        WorkshopDownloader.requiredFreeBytes(expected: size, alreadyStaged: staged, installingAssets: false),
+        WorkshopDownloader.freeSpaceMargin, "A fully staged item needs only the margin")
+    }
+    XCTAssertEqual(
+      WorkshopDownloader.requiredFreeBytes(expected: size, alreadyStaged: -5, installingAssets: false), fresh)
+    XCTAssertNil(WorkshopDownloader.requiredFreeBytes(expected: nil, alreadyStaged: 0, installingAssets: false))
+    XCTAssertNil(WorkshopDownloader.requiredFreeBytes(expected: 0, alreadyStaged: 0, installingAssets: false))
+    XCTAssertNotNil(
+      WorkshopDownloader.requiredFreeBytes(expected: .max, alreadyStaged: 0, installingAssets: false),
+      "An absurd listed size is bounded rather than overflowing")
+  }
+
+  func testSceneAssetsUseTheFixedFloor() async throws {
+    let floor = WorkshopDownloader.sceneAssetsFreeBytes
+    for (expected, staged) in [(nil, 0), (Int64(10), 0), (nil, -5)] as [(Int64?, Int64)] {
+      XCTAssertEqual(
+        WorkshopDownloader.requiredFreeBytes(expected: expected, alreadyStaged: staged, installingAssets: true),
+        floor, "Nothing staged yet: the whole floor, whatever the listing says")
+    }
+    XCTAssertEqual(
+      WorkshopDownloader.requiredFreeBytes(expected: nil, alreadyStaged: floor / 2, installingAssets: true),
+      floor - floor / 2, "What an earlier attempt kept is already on the disk")
+    XCTAssertEqual(
+      WorkshopDownloader.requiredFreeBytes(expected: nil, alreadyStaged: 10 * floor, installingAssets: true),
+      WorkshopDownloader.freeSpaceMargin, "A fully staged install needs only the margin")
+    let root = try makeRuntime("touch ../launched")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let destination = root.appendingPathComponent("SceneAssets")
+    let disk = FreeSpaceProbe(floor - 1)
+    let downloader = WorkshopDownloader(
+      sessionDirectory: root.appendingPathComponent("SteamSession"),
+      runtimeProvider: ShellRuntimeProvider(), networkMonitor: FixtureNetworkMonitor(),
+      freeSpace: disk.measure)
+    downloader.installAssets(
+      username: "localtest", executable: root.appendingPathComponent("runtime/steamcmd"),
+      destination: destination
+    ) {
+      XCTFail("A disk that cannot hold the assets must not install them")
+    }
+    try await waitForStop(downloader)
+    let message = try XCTUnwrap(downloader.errorMessage)
+    XCTAssertTrue(message.contains(fileSize(floor)) && message.contains(fileSize(floor - 1)), message)
+    XCTAssertFalse(launched(in: root))
+    XCTAssertFalse(downloader.canRetryAuthentication)
+    XCTAssertEqual(disk.questions.map(\.path), [root.path], "Free space is read where the assets are installed")
+    try assertNoStaging(in: root)
+
+    disk.available = floor
+    downloader.installAssets(
+      username: "localtest", executable: root.appendingPathComponent("runtime/steamcmd"),
+      destination: destination, onInstalled: {})
+    try await waitUntil { self.launched(in: root) }
+    await downloader.shutdown()
+  }
+
+  func testResumedSceneAssetsOnlyNeedTheSpaceStillMissing() async throws {
+    let root = try makeRuntime("touch ../launched")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let floor = WorkshopDownloader.sceneAssetsFreeBytes
+    let kept = 4 * mebibyte
+    // Short of the whole floor, but by less than the earlier attempt kept on the disk.
+    let disk = FreeSpaceProbe(floor - kept / 2)
+    let checkpoint = root.appendingPathComponent("Checkpoint")
+    let destination = root.appendingPathComponent("SceneAssets")
+    let downloader = WorkshopDownloader(
+      sessionDirectory: root.appendingPathComponent("SteamSession"),
+      runtimeProvider: ShellRuntimeProvider(), networkMonitor: FixtureNetworkMonitor(),
+      checkpointDirectory: checkpoint, freeSpace: disk.measure)
+    let install = {
+      downloader.installAssets(
+        username: "localtest", executable: root.appendingPathComponent("runtime/steamcmd"),
+        destination: destination, onInstalled: {})
+    }
+    install()
+    try await waitForStop(downloader)
+    XCTAssertNotNil(downloader.errorMessage, "Nothing is staged yet, so the whole floor must fit")
+    XCTAssertFalse(launched(in: root))
+
+    // The connection dropped after most of the install had arrived: Resume must not ask for it again.
+    let partial = checkpoint.appendingPathComponent("wallpaper-engine/steamapps/downloading/431960")
+    try FileManager.default.createDirectory(at: partial, withIntermediateDirectories: true)
+    try Data(repeating: 1, count: Int(kept)).write(to: partial.appendingPathComponent("part"))
+    install()
+    try await waitUntil { self.launched(in: root) }
+    await downloader.shutdown()
+  }
+
+  func testSignInOnlyNeverChecksFreeSpace() async throws {
+    let root = try makeRuntime("printf 'Waiting for user info...OK\\n'")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let disk = FreeSpaceProbe(0)
+    let downloader = WorkshopDownloader(
+      sessionDirectory: root.appendingPathComponent("SteamSession"),
+      runtimeProvider: ShellRuntimeProvider(), networkMonitor: FixtureNetworkMonitor(),
+      freeSpace: disk.measure)
+    downloader.signIn(
+      username: "localtest", executable: root.appendingPathComponent("runtime/steamcmd"),
+      root: root, rememberSession: false)
+    try await waitForStop(downloader)
+    XCTAssertNil(downloader.errorMessage, "Signing in writes nothing worth a disk check")
+    XCTAssertTrue(disk.questions.isEmpty)
+    try assertNoStaging(in: root)
+  }
+
+  func testAvailableCapacityReadsTheVolumeOfAFolder() throws {
+    let folder = FileManager.default.temporaryDirectory
+    let free = try XCTUnwrap(WorkshopDownloader.availableCapacity(at: folder))
+    XCTAssertGreaterThan(free, 0)
+    XCTAssertNil(
+      WorkshopDownloader.availableCapacity(
+        at: folder.appendingPathComponent("mwe-missing-\(UUID().uuidString)")),
+      "A folder that cannot be read is unknown, which never blocks a download")
   }
 }

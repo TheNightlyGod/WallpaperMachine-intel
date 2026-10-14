@@ -2,8 +2,9 @@
 
 use crate::{
     DisplayDesc, DisplaySelector, WallpaperAssignment,
+    engine::surface_recovery::{RecoveryReason, RecoveryStep},
     media::audio::AudioVolume,
-    project::{ScalingMode, SceneDesc, SceneHandle, SceneResult},
+    project::{ScalingMode, SceneDesc, SceneFraming, SceneHandle, SceneResult},
 };
 
 pub(super) struct NativePointerInputChanged {
@@ -17,6 +18,40 @@ pub(super) struct NativeAudioRequirementChanged {
     pub handle: SceneHandle,
     pub renderer_instance: std::sync::Arc<()>,
     pub requires_audio: bool,
+}
+
+/// A renderer's report that its scene, which had drawn, failed a frame and
+/// stopped.
+pub(super) struct NativeRenderFailed {
+    pub handle: SceneHandle,
+    pub renderer_instance: std::sync::Arc<()>,
+}
+
+/// A recovery attempt the failure ladder scheduled for itself, delivered after
+/// its delay. Carries the renderer it was scheduled for, so an attempt that
+/// outlives its renderer (the wallpaper was replaced meanwhile) does nothing.
+pub(super) struct RecoverSurfaceAttempt {
+    pub handle: SceneHandle,
+    pub renderer_instance: std::sync::Arc<()>,
+    pub step: RecoveryStep,
+    pub number: usize,
+}
+
+/// A look at a renderer that recovery rebuilt, which the engine schedules for
+/// itself because that renderer reports no failure until it has drawn. Carries
+/// the renderer it was scheduled for, like [`RecoverSurfaceAttempt`], and when
+/// the rebuild finished.
+pub(super) struct SettleRecoveredSurface {
+    pub handle: SceneHandle,
+    pub renderer_instance: std::sync::Arc<()>,
+    pub number: usize,
+    pub rebuilt_at: std::time::Instant,
+}
+
+/// A recovery asked for from outside the renderer's own report.
+pub struct RecoverSurface {
+    pub display_id: u32,
+    pub reason: RecoveryReason,
 }
 
 /// One `engine.openUserShortcut` request from a wallpaper.
@@ -36,6 +71,9 @@ pub(super) struct PollMouseState {
 
 #[cfg(test)]
 pub(super) struct TakePointerNotificationsForTest;
+
+#[cfg(test)]
+pub(super) struct TakeRenderFailuresForTest;
 
 pub struct Ping;
 
@@ -88,6 +126,18 @@ pub struct SetScalingMode {
 pub struct SetScalingFactor {
     pub handle: SceneHandle,
     pub factor: f64,
+}
+
+pub struct SetFraming {
+    pub handle: SceneHandle,
+    pub framing: SceneFraming,
+}
+
+/// Shows a position without making it the scene's: the renderer follows, the
+/// stored runtime state does not.
+pub struct PreviewFraming {
+    pub handle: SceneHandle,
+    pub framing: SceneFraming,
 }
 
 pub struct SetFps {
@@ -176,6 +226,21 @@ pub struct SetPropertyOverride {
 
 pub struct ResetPropertyOverride {
     pub handle: SceneHandle,
+}
+
+/// Shows a property document on the running scene without keeping it: the
+/// renderer follows, the stored runtime state does not, and the scene is not
+/// loaded again.
+///
+/// `expected_scene_path` names the wallpaper the document was made for. The
+/// handle names a display's scene, not a wallpaper: a reconcile queued ahead of
+/// this message can have put another wallpaper on the same handle, and the
+/// engine is the only place that can tell, because it handles this message
+/// after that reconcile, not before.
+pub struct PreviewPropertyOverride {
+    pub handle: SceneHandle,
+    pub expected_scene_path: String,
+    pub flat_json: String,
 }
 
 pub struct CloseAllScenes;

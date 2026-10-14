@@ -22,7 +22,8 @@ final class ControlPanelSyncTests: ControlPanelTestCase {
           active: false, selected: false, previewPath: nil)
       ]
       panel.store.appSnapshot = BridgeAppSnapshot(
-        playbackState: .playing, selectedWallpaperId: nil, activeWallpaperIds: ["second"], errors: [])
+        playbackState: .playing, selectedWallpaperId: nil, activeWallpaperIds: ["second"], errors: [],
+        heldWallpaperIds: [])
       panel.store.snapshotRevision &+= 1
       panel.show()
       try await panel.waitJS("powerProbe.received.at(-1)?.displays[1]?.wallpaperID === 'second'")

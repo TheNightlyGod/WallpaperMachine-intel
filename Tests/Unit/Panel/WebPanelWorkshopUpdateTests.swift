@@ -52,4 +52,41 @@ final class WebPanelWorkshopUpdateTests: XCTestCase {
     try await controller.perform("setting", body: ["key": "workshopUpdateChecks", "value": false])
     XCTAssertFalse(updates.checksAutomatically)
   }
+
+  /// Reinstalling downloads an installed wallpaper again, so it needs a wallpaper that is
+  /// installed and the user's yes. Until both are there, Steam is not asked and nothing is queued.
+  func testReinstallNeedsAnInstalledWallpaperAndAConfirmation() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("panel-reinstall-\(UUID().uuidString)")
+    let defaults = try TemporaryDefaults.make(for: self).defaults
+    let stub = WorkshopDetailsStub()
+    stub.rows["123"] = WorkshopDetailsStub.row("123", title: "Current", tags: ["Video"])
+    defer {
+      stub.invalidate()
+      try? FileManager.default.removeItem(at: root)
+    }
+    let workshop = WorkshopStore(
+      service: stub.service, downloader: WorkshopDownloadManager(sessionDirectory: root),
+      supportDirectory: root, defaults: defaults)
+    let store = BridgeStore(bridge: WallpaperBridge(noPointer: .init()))
+    store.librarySnapshot = BridgeLibrarySnapshot(
+      wallpapers: [BridgeWallpaperEntry(
+        id: "123", title: "Installed", kind: .video, supported: true, active: false, selected: false,
+        previewPath: nil)],
+      scanStatus: BridgeLibraryScanStatus(scanning: false, done: 0, total: 0), sceneCount: 0,
+      videoCount: 1, webpageCount: 0, unknownCount: 0)
+    let controller = WebPanelController(
+      store: store, navigation: ControlPanelNavigation(), workshop: workshop, defaults: defaults,
+      appLanguage: .english())
+    defer { controller.stop() }
+
+    do {
+      try await controller.perform("workshopReinstall", body: ["id": "456"])
+      XCTFail("a wallpaper that is not installed has nothing to reinstall")
+    } catch {}
+    // No panel window means no sheet to answer it, which is a no.
+    try await controller.perform("workshopReinstall", body: ["id": "123"])
+    XCTAssertEqual(stub.requests, [])
+    XCTAssertTrue(workshop.downloadRequests.isEmpty)
+    XCTAssertTrue(workshop.downloader.downloads.isEmpty)
+  }
 }

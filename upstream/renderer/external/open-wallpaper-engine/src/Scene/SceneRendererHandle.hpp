@@ -207,6 +207,9 @@ public:
     void SetWallpaperScalingFactor(double value) {
         OWE_FORWARD_VOID(SetWallpaperScalingFactor(value));
     }
+    void SetWallpaperFraming(const WallpaperFraming& value) {
+        OWE_FORWARD_VOID(SetWallpaperFraming(value));
+    }
     void SetWallpaperHorizontalFlip(bool value) {
         OWE_FORWARD_VOID(SetWallpaperHorizontalFlip(value));
     }

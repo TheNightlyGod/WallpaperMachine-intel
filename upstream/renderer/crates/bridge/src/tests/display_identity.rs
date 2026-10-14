@@ -121,6 +121,7 @@ fn wallpaper_by_display(
         library: None,
         displays,
         suspended_displays: &BTreeSet::new(),
+        held: &BTreeSet::new(),
         paused: false,
         paths: &paths,
         force_shader_refresh: false,
@@ -307,7 +308,7 @@ async fn identical_monitors_keep_their_own_wallpapers_across_renumbering() {
         .await
         .unwrap();
     bridge
-        .apply_wallpaper_options("500".to_string())
+        .apply_wallpaper_options("500".to_string(), true)
         .await
         .unwrap();
     assert_eq!(

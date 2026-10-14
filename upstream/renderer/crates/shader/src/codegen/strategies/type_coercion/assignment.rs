@@ -168,13 +168,17 @@ impl NarrowVectorAssignment {
 }
 
 /// Assignments whose scalar RHS must be broadcast to a vector target.
+///
+/// The permissive path these shaders target broadcasts a scalar stored into a
+/// vector, `albedo.rgb = greyscale(albedo.rgb);` included. A strict frontend
+/// accepts that only for compound assignments.
 pub(super) struct ScalarVectorAssignments {
     /// Assignment RHS constructor insertions in source order.
     pub items: Vec<ScalarVectorAssignment>,
 }
 
 impl ScalarVectorAssignments {
-    /// Scans compound assignments that broadcast scalar RHS expressions.
+    /// Scans assignments that broadcast scalar RHS expressions.
     pub(super) fn collect(
         &mut self,
         tokens: TokenCursor<'_>,
@@ -182,13 +186,23 @@ impl ScalarVectorAssignments {
         facts: &VectorTypeBindings<'_>,
     ) {
         for (index, token) in tokens.iter().enumerate() {
-            if !token.kind().is_compound_assignment_operator() {
+            let simple = token.kind().is_simple_assignment_operator();
+            if !simple && !token.kind().is_compound_assignment_operator() {
                 continue;
             }
             let search = tokens;
             let Some(lhs) = AssignmentLhs::before_assignment(tokens, index) else {
                 continue;
             };
+            // A declaration initializer is broadcast by the initializer scan.
+            if simple
+                && token_facts
+                    .declarations()
+                    .iter()
+                    .any(|declaration| declaration.name_index() == lhs.end())
+            {
+                continue;
+            }
             let Some(width) = lhs.vector_width_with_facts(tokens, token_facts, facts) else {
                 continue;
             };
@@ -210,8 +224,9 @@ impl ScalarVectorAssignments {
             let range = TokenIndexRange::from_inclusive(rhs_start, rhs_end);
             if !CallArgument::trim_from_bounds(tokens, range.start(), range.end()).is_some_and(
                 |argument| {
-                    VectorExpressionAnalyzer { facts, token_facts }
-                        .argument_is_scalar_like(tokens, argument)
+                    let analyzer = VectorExpressionAnalyzer { facts, token_facts };
+                    analyzer.argument_vector_width(tokens, argument).is_none()
+                        && analyzer.argument_is_scalar_like(tokens, argument)
                 },
             ) {
                 continue;

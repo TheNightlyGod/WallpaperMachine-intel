@@ -50,6 +50,8 @@ enum WallpaperPresentationAuthority {
     var role: SurfaceRole
     /// The user's Play/Pause choice for this wallpaper.
     var userPaused: Bool
+    /// Whether the surface's display is asleep. Read from `DisplayPowerProbe` when the
+    /// request is built, never remembered from a sleep or wake notification.
     var displaysAsleep: Bool
     /// Whether the login session is showing the lock screen.
     var sessionLocked: Bool

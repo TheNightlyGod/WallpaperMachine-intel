@@ -5,6 +5,7 @@ mod array_parameters;
 mod compat_functions;
 mod control_flow_coercion;
 mod fragment_output;
+mod global_initializers;
 mod hlsl_mul;
 mod legacy_builtins;
 mod legacy_types;
@@ -74,6 +75,9 @@ pub(super) const MUTABLE_INPUTS: CodegenStrategyName = CodegenStrategyName::new(
 pub(super) const FRAGMENT_OUTPUT: CodegenStrategyName = CodegenStrategyName::new("fragment_output");
 /// Strategy name for widened uniform array element reads.
 pub(super) const WIDENED_ARRAYS: CodegenStrategyName = CodegenStrategyName::new("widened_arrays");
+/// Strategy name for global initializers that read runtime values.
+pub(super) const GLOBAL_INITIALIZERS: CodegenStrategyName =
+    CodegenStrategyName::new("global_initializers");
 
 /// Coarse legalizer execution stage.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]

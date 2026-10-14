@@ -52,6 +52,39 @@ struct LockScreenScene: Codable, Equatable {
   var paused: Bool
   /// A project-relative HTML entry; nil selects the scene/video renderer.
   var webEntryFile: String? = nil
+  /// Where the picture sits in the room its display leaves around it. Absent from a
+  /// configuration an older app wrote and for a web page, which fills its window; both
+  /// read as centred, and a copy of the extension that predates the key ignores it.
+  var framing: LockScreenFraming? = nil
+
+  var effectiveFraming: LockScreenFraming { framing ?? .centered }
+
+  /// Whether a surface already showing `other` can take this scene without a new
+  /// renderer. Frame rate, title and pause apply to the running renderer, and the
+  /// preview path is not read by it. The scaling and the position are, like the
+  /// project, only read when the renderer is built, so a change of either replaces it.
+  func sharesRenderer(with other: LockScreenScene) -> Bool {
+    projectPath == other.projectPath && assetsPath == other.assetsPath
+      && webEntryFile == other.webEntryFile && propertiesJSON == other.propertiesJSON
+      && scalingMode == other.scalingMode && scalingFactor == other.scalingFactor
+      && effectiveFraming == other.effectiveFraming
+  }
+}
+
+/// A position as fractions of the room around the picture on each axis: 0 is the left
+/// or top edge, 1 the right or bottom edge and 0.5 on both the centred layout every
+/// wallpaper has until it is moved. The renderer clamps what it is given, so
+/// `isValid` is what keeps a hand-edited or corrupt file from being drawn silently
+/// somewhere else.
+struct LockScreenFraming: Codable, Equatable {
+  static let centered = LockScreenFraming(panX: 0.5, panY: 0.5)
+
+  var panX: Double = 0.5
+  var panY: Double = 0.5
+
+  var isValid: Bool {
+    (0.0...1.0).contains(panX) && (0.0...1.0).contains(panY)
+  }
 }
 
 /// Written once a non-preview surface has GPU-ready pixels, or with `error` when

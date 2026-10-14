@@ -24,7 +24,9 @@ an unlocked lock-screen surface keeps animating for 15 seconds after its first
 frame (`WallpaperPresentationAuthority.desktopSettleBudget`) rather than holding an
 intro's opening (often black) or a setting before it has faded in. A new wallpaper
 or changed setting replaces the renderer and settles again; the periodic Mission
-Control update in Settings does not apply in this mode.
+Control update in Settings does not apply in this mode. Nor does the Settings switch
+for using the wallpaper as the macOS desktop picture, which stays locked while the
+lock screen is requested ([desktop picture](desktop-picture.md#leaving-macoss-own-wallpaper-alone)).
 
 Once settled, the surface pauses its renderer while retaining scene state, textures
 and device allocations, and reads the held frame back. That frame is committed
@@ -40,6 +42,36 @@ renders continuously while paused, and resolution, frame rate and effects are
 unchanged. A newly acquired surface or a changed wallpaper still needs an initial
 load, macOS can show its own cached snapshot before it presents the extension, and
 real lock/wake timing is OS-controlled.
+
+Whether the display is asleep and whether the session is locked are read from the
+system each time a surface decides, not remembered from a notification. A surface asks
+about its own display, so one monitor sleeping does not pause the surface on another,
+and a surface acquired while the displays sleep pauses as soon as its first frame
+exists. Display sleep and wake, system sleep and wake, lock, unlock and the wallpaper
+service's wake notice only start a re-check: at once, and again 0.25, 0.75 and 2
+seconds later, because displays, the session and the video decoder do not all come
+back at the same moment. A notification that arrives early, late or not at all
+therefore cannot leave a surface paused or rendering for good. A newer event replaces
+the checks still pending, and a surface whose state did not change does nothing.
+
+### Where the picture sits
+
+A scene or video sits on the lock screen and as the screen saver where it sits on the
+desktop: the display's position decides how the room a Fit, Original size or small
+Scale factor leaves, or the overflow of Fill or a large one, is divided (see [scene
+rendering](scene-rendering.md)). The app publishes it with each scene in
+`configuration.json` as an optional `framing` (`panX` and `panY`, fractions from 0 to
+1). A file without it, such as one an older app wrote, reads as centred, and a copy of
+the extension that predates the key ignores it and draws the picture centred; the
+configuration version is unchanged. The extension reads the position, like the scaling
+mode, when it builds a renderer, so moving the picture publishes a new revision and
+replaces the renderer instead of updating the running one: the held frame stays
+beneath it until the new one arrives, and it takes a moment longer than on the desktop.
+The steps shown on the desktop while a Position slider is being dragged are not
+published; the lock screen follows the release.
+A position outside 0 to 1 is refused with the usual invalid-playback-configuration
+error rather than drawn somewhere else. Web wallpapers fill their page and carry no
+position, and a display that mirrors another is published centred, as on the desktop.
 
 ### Display changes
 
@@ -83,7 +115,10 @@ WallpaperAgent abandons an extension that has not answered after about 31 second
 
 Enable **Settings → General → Screen saver → Use wallpaper as screen saver**. Each
 display follows its applied wallpaper and committed properties, including scene,
-video, web and still-image/pixiv projects. Choosing the native desktop video backend
+video, web and still-image/pixiv projects. Committed means saved: a property edit
+that the desktop only shows while it is made ([edits on the
+desktop](wallpaper-properties.md#showing-edits-on-the-desktop)) reaches the lock screen and
+the screen saver with **Apply changes**. Choosing the native desktop video backend
 does not exclude a video from native presentation.
 
 This control owns only the system's **Idle** selection. **Animate lock screen** owns
@@ -167,8 +202,19 @@ tree; it does not resume playback the user paused. Web projects remain unsupport
 - Lock-screen animation replaces Desktop; screen-saver playback replaces Idle.
   Selection changes reload the wallpaper service, and unsupported per-display
   configurations are rejected rather than converted destructively.
-- Playback respects the pause and battery settings. The lock screen covering the
-  desktop does not pause it.
+- Playback respects the pause and battery settings, and the reduced-quality frame
+  rate that Low Power Mode, heat or a low battery can ask for. Only the frame rate
+  reaches the lock screen and the screen saver: the lock-screen export carries no
+  render scale, so they draw at the surface's own resolution whatever the render
+  scale is. The lock screen covering the desktop does not pause it. A change made
+  while the Mac is locked has not been exercised.
+- The extension answers the whole private wallpaper-service protocol, 21 requests on
+  macOS 27.0. macOS drops the connection of an extension that cannot answer a request,
+  or answers it with another reply type, and the service also sends requests
+  WallpaperMachine has no use for: downloads, skipping shuffled content, context-menu
+  items, added wallpapers, migration and debugging. Those get an immediate "nothing to
+  do" reply; the service's own wake notice makes every surface re-check whether it
+  should be presenting, and its time-change notice is ignored.
 
 ## When activation fails
 
@@ -182,7 +228,9 @@ error. Reports for an earlier revision are ignored, and a successful configurati
 report is not frame readiness. For older extensions that cannot send this report, a
 timed-out activation checks the current user's running extension paths and identifies
 a different app copy when one is found; otherwise the generic "macOS did not load the
-lock-screen renderer" message means no matching frame acknowledgement arrived.
+lock-screen renderer" message means no matching frame acknowledgement arrived. A
+renderer the user switched off in macOS is told apart earlier still, while registering,
+and stops activation at once ([App copies and registration](#app-copies-and-registration)).
 
 The extension keeps a bounded log at
 `~/Library/Application Support/WallpaperMachine/LockScreenExchange/extension.log`
@@ -212,21 +260,76 @@ registration's path is never unregistered, and failed discovery never authorizes
 cleanup.
 
 Registration commands run off the UI thread with cancellation and a ten-second
-deadline each. They do not change extension enable/disable elections, reset the
-system registry, install apps or restart app copies. Snapshot refreshes share an
+deadline each. Registration never changes extension elections, resets the system
+registry, installs apps or restarts app copies. Snapshot refreshes share an
 in-progress attempt (neither restarting it nor resetting the automatic recovery
 limit), and changing a native-mode switch or shutting down cancels pending
 preparation before it can publish. Registration alone does not establish playback:
 activation still waits for the matching first-frame acknowledgement.
 
+The same registry listing carries the user's election for the renderer as the first
+character of each line (`pluginkit(8)`): blank when the user never chose, which is the
+normal state, `+` to use it, `-` to ignore it, `=` superseded, `!` for debugging.
+Only `-` on this app's copy is acted on. If it reads `-`, activation stops before
+anything is published, without the 35-second wait, and the row says macOS has the
+renderer switched off and Retry turns it back on. Retry, from either the lock-screen
+or the screen-saver row, then runs `pluginkit -e use -i
+app.wallpapermachine.wallpaper-extension` once and reads the registry again; if macOS
+still reports the renderer ignored the row says so and points to System Settings, and
+every further Retry tries once more. That command is the only place the app changes an
+election and it runs only for that click: the monitor, snapshot refreshes, a relaunch,
+switching a mode off or on (the offer is also dropped once both are off), a different
+earlier failure and a click that finds nothing to activate never run it.
+The other marks are logged and do not stop activation. The repair is skipped when this
+copy's election is not `-` (for example after the user switched it on in System
+Settings). It leaves the election at `+`; `pluginkit -e default -i
+app.wallpapermachine.wallpaper-extension` clears it again.
+
+Once the registry confirms this app's extension (never after a failure or a
+cancellation), activation ends leftover renderer processes. macOS can hand requests to
+an extension process that is already running instead of launching the registered
+binary, so a helper left behind by another copy or by an earlier build stalls
+activation until it is gone. The app lists this user's processes of the extension
+executable, identified by the kernel-reported path, the bundle identifier and the
+process start time, and ends those that cannot serve the registered copy: a process
+running from a different bundle, or one whose executable was replaced in place after the
+process started. A replacement shows either as an executable created or modified after
+the process started (a rebuild) or, for a copy that keeps its source's file dates
+(`ditto`, `cp -p`, Finder over an existing file), as a running build UUID that is not
+among the registered executable's (compared as described below). An unreadable build on
+either side keeps the process.
+
+A process whose files are gone is the state an in-app update leaves behind: the
+updater renames the old app aside and deletes it before the new one opens, so macOS no
+longer reports a path for the old helper, which keeps running until its idle grace
+ends. Such a process is recognised by its name, its owner and the build UUID the kernel
+recorded when it started (`proc_pid_rusage`), which stays readable after the file is
+deleted. It is ended when that UUID is not among the UUIDs (`LC_UUID`, one per
+architecture slice) of the registered extension executable, which the app reads from
+disk. File dates are not used for this: `ditto`, which the updater copies with, carries
+the release's own file dates into the installed copy, and those are normally older than
+the moment the old helper started. A process that runs the same build as the registered
+executable, or whose build or the registered executable's cannot be read, is left alone
+and logged at debug level. A process that has already exited and is only waiting to be
+collected is not listed.
+
+Each ended process gets SIGTERM and up to two seconds to exit; only survivors get
+SIGKILL. Before every signal the app reads the pid again and sends it only if the
+executable path (or, without one, the name) and start time still match, so a reused
+pid is never hit. Only the extension helper that ExtensionKit starts again on demand is
+ended: the app, other app copies and WallpaperAgent are never signalled. Ending a
+process is best effort: a refused signal is logged and activation continues to the
+timeout diagnostics below.
+
 macOS can rediscover a copy after a build or launch, so unregistering it is not a
 permanent exclusion. If a current diagnostic (or a legacy timeout's process-path check)
 identifies another copy, the app restores its owned selections and makes one fresh
-activation attempt with a new revision, repeating registration repair. If that also
-fails, it restores the selections and shows **Retry**; close other running copies
-before retrying. Ordinary two-second refreshes do not rewrite registration. Startup
-logs include the extension bundle path and configuration version, because checking
-only the identifier does not prove which copy macOS loaded.
+activation attempt with a new revision, repeating registration repair and ending
+leftover renderer processes again. If that also fails, it restores the selections and
+shows **Retry**; close other running copies before retrying. Ordinary two-second
+refreshes do not rewrite registration. Startup logs include the extension bundle path
+and configuration version, because checking only the identifier does not prove which
+copy macOS loaded.
 
 ### Idle exit
 
@@ -237,9 +340,48 @@ an already-running extension process to WallpaperAgent even after macOS has
 registered another copy (an update or another build). That process never receives the
 new connection, and WallpaperAgent processes requests one at a time, so each System
 Settings query stalls for about 30 seconds while wallpaper choices, the lock screen
-and the screen saver wait behind it. A process from an older build that lingers can be
-cleared by quitting it (`pkill -x WallpaperMachineExtension`) or logging out; macOS
-starts the registered copy on the next request.
+and the screen saver wait behind it. Activation ends a process from an older build that
+lingers (see [App copies and registration](#app-copies-and-registration)), and macOS
+starts the registered copy on the next request. That includes the helper left by the
+in-app updater. A process that cannot be told apart from the registered build (the same
+build, or one whose build cannot be read) is left alone; quit it with
+`pkill -x WallpaperMachineExtension` or log out.
+
+### What the logs record
+
+Beyond failures, the extension and the app log a few measurements, so that decisions
+about the private wallpaper-service requests rest on what real activations do. They
+change no behavior, and none has yet been read from a real activation, so this page
+states no latency or request finding.
+
+In `extension.log`:
+
+- `Acquired id=... firstFrameAfter=3.4s`: the time from the request arriving to the reply
+  that carries the surface, which is when WallpaperAgent receives its first frame. From
+  10 seconds the line adds `(slow)`, and from 20 seconds `(near limit)` together with
+  `First frame took 21.0 s; WallpaperAgent gives up at about 31.0 s`. WallpaperAgent was
+  observed to stop waiting after about 31 seconds on macOS 27, and the extension's own
+  deadline is 30. A failed acquire logs `Acquire failed display=... after X s: <reason>`.
+- `Connection closed pid=... served=K open=M surfaces=S`: one line per wallpaper-service
+  connection, with the requests it carried, the connections still open and the surfaces
+  still alive. `served=0` is a connection that opened and closed without asking for
+  anything. Nothing acts on it.
+- `Request shape acquire: <type> destination destination.size ...` (and `update`): the field
+  names an acquire or update request carries, once per distinct shape per launch. Only
+  names are recorded, never what they hold: no paths, titles, identifiers or sizes; dictionary
+  keys and set members, which are data, are left out, and a name that is not a plain
+  identifier shows as `?`. The line is capped in length.
+
+In the app log (the [diagnostics report](diagnostics.md#diagnostics-report) includes it):
+`Native lock screen: first frame acknowledged after 4.2 s (waited from selection reload)`
+is how long the app waited, from applying the selection (which reloads the wallpaper
+service when the selection changed) to the first acknowledged frame, so it includes that
+reload; a timeout logs `no first frame acknowledged after 35.0 s` (or adds `waited` to the
+running-copy line) instead.
+
+```sh
+grep 'firstFrameAfter\|First frame took\|Connection closed\|Request shape' ~/Library/Application\ Support/WallpaperMachine/LockScreenExchange/extension.log
+```
 
 ## Turning it off
 
@@ -250,14 +392,18 @@ If the native provider replaced a desktop poster, quit restores the native selec
 first, then waits for WallpaperAgent's asynchronous reload and restores the poster's
 saved original (poster ownership and the quit wait are described in
 [desktop picture](desktop-picture.md#quitting)).
-If restoration still fails after the wait, quit is cancelled and the error is exposed
-in the menu bar (and native-feature status) so the user can retry. A failed activation
+If restoration still fails after the wait, or takes longer than 20 seconds, quit is cancelled
+and an alert gives the error; it also stays in the menu bar (and native-feature status) so the
+user can retry. A failed activation
 also restores native selections, but resumes live desktop playback afterward.
 
 ## Background checks and recovery
 
 The service keeps one two-second monitor while a mode can still refresh safely,
-recovery is complete, and shutdown has not begun. Busy refreshes keep the timer but
+recovery is complete, and shutdown has not begun. The timer may fire up to a second
+late so the system can share the wakeup with other timers: its tick only reconciles
+state that has no notification of its own (a battery pause, a new Space, a choice in
+System Settings), and it never fires early. Busy refreshes keep the timer but
 skip its work; an active request with no wallpapers still checks for a later
 wallpaper; disabling both modes or shutting down cancels the timer immediately. A
 shared error stops automatic monitoring until an explicit retry or another existing
@@ -306,9 +452,48 @@ that project's referenced managed files.
 ## Verification
 
 The offscreen suites (service, selection journal, extension registration, frame
-backing, presentation authority, and the screen saver's native-context/WebKit
-surface) are inventoried under *Lock screen* in [coverage](../testing/coverage.md).
-They never mutate LaunchServices or PlugInKit and select no real wallpaper. Real idle
-transitions, password UI, multi-monitor compositor delivery, sleep/wake visuals, live
-registration repair and macOS choosing the intended extension still require an
-authorized desktop check.
+backing, presentation authority, the protocol comparison, and the screen saver's
+native-context/WebKit surface) are inventoried under *Lock screen* in
+[coverage](../testing/coverage.md). They never mutate LaunchServices or PlugInKit and
+select no real wallpaper. Real idle transitions, password UI, multi-monitor compositor
+delivery, sleep/wake visuals, live registration repair, ending a genuinely stale
+extension process, macOS choosing the intended extension, switching a really ignored
+renderer back on from Retry, the wallpaper service's wake and time-change notices
+completing without an error in WallpaperAgent's log, what the timing, connection and
+request-shape lines report after a real activation (see [What the logs
+record](#what-the-logs-record)) and a moved picture appearing at its position on the lock
+screen and as the screen saver (the extension logs `Framing display=… panX=… panY=…` each
+time it builds a renderer) still require an authorized desktop check.
+
+### After sleep, wake, lock and unlock
+
+Each of those events logs one line when the surfaces re-check, and a surface logs a
+`Playback` line only when its paused state actually changes:
+
+```sh
+grep 'Re-checking presentation\|Playback display' ~/Library/Application\ Support/WallpaperMachine/LockScreenExchange/extension.log
+```
+
+`Re-checking presentation (display wake) surfaces=1` names the cause (`display sleep`,
+`display wake`, `system sleep`, `system wake`, `screen locked`, `screen unlocked` or
+`wallpaper service wake`). The `Playback ... paused=` line after it should match the real
+display state, including after a wake for which no `display wake` line appears.
+
+### After a macOS update
+
+The first connection each launch compares the extension's declared requests and reply
+types with the system's own `WallpaperExtensionXPCProtocol` (read on macOS 27.0; macOS 26
+has not been compared) and writes one line to `extension.log`:
+
+```sh
+grep 'XPC protocol' ~/Library/Application\ Support/WallpaperMachine/LockScreenExchange/extension.log
+```
+
+`XPC protocol matches the system (21 selectors)` means nothing changed. `XPC protocol
+drift: missing=[...] extra=[...] differing=[...]` names the requests macOS added
+(`missing`), no longer has (`extra`) or now declares with another argument or reply
+type (`differing`); a missing or differing request makes macOS drop the connection, so
+update `Extension/WallpaperExtensionBridge.h` and `WallpaperExtension.swift` before
+the lock screen is trusted on that release. A skipped check is logged as such and
+changes nothing. `Unsupported request <selector> answered inertly` appears once per
+request kind the extension has nothing to do for.

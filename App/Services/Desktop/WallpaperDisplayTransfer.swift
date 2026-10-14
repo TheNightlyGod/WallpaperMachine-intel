@@ -13,11 +13,36 @@ enum WallpaperDisplayTransfer {
         var displays: [Display]
         var wallpapers: Set<String>
         var reliable = true
+        /// Wallpapers the load journal holds back after repeated crashes. A held wallpaper keeps
+        /// its display assignment, so its display reads as showing it while it has no scene.
+        var held: Set<String> = []
     }
     enum Request {
         case layout([WallpaperDisplayAssignment])
         case copy(from: String, to: String)
         case swap(String, String)
+        /// One wallpaper on every eligible display. The displays are read from the snapshot the
+        /// request is planned in, not fixed when it is made, so `execute` plans again after
+        /// preparing and refuses a display set that moved.
+        case everywhere(wallpaperID: String)
+
+        /// Whether the request is the user naming one wallpaper to open, which counts as choosing
+        /// it again after a crash hold. Copy, swap and a layout move assignments that already
+        /// exist, so they leave a hold alone.
+        var releasesHold: Bool {
+            if case .everywhere = self { true } else { false }
+        }
+
+        /// The displays the request gives a wallpaper to, which is what it is a choice for: a
+        /// copy leaves its source as it was.
+        func displayIDs(in snapshot: Snapshot) -> [String] {
+            switch self {
+            case .layout(let values): values.map(\.displayID)
+            case .copy(_, let target): [target]
+            case .swap(let first, let second): [first, second]
+            case .everywhere: WallpaperDisplayTransfer.eligibleDisplays(in: snapshot).map(\.id)
+            }
+        }
     }
     typealias Apply = @MainActor (String, String) async throws -> Void
     typealias Clear = @MainActor (String, String) async throws -> Void
@@ -33,10 +58,22 @@ enum WallpaperDisplayTransfer {
         return values
     }
 
+    /// The displays a wallpaper can be given to, the main display first and the others in the
+    /// order the snapshot lists them, so the screen being looked at changes first.
+    nonisolated static func eligibleDisplays(in snapshot: Snapshot) -> [Display] {
+        let eligible = snapshot.displays.filter(\.eligible)
+        return eligible.filter { $0.id == "primary" } + eligible.filter { $0.id != "primary" }
+    }
+
     static func plan(_ request: Request, in snapshot: Snapshot) throws -> [WallpaperDisplayAssignment] {
         let result: [WallpaperDisplayAssignment]
         switch request {
         case .layout(let values): result = values
+        case .everywhere(let wallpaperID):
+            guard snapshot.reliable else { throw WallpaperDisplayLayoutError.changed }
+            let targets = eligibleDisplays(in: snapshot)
+            guard !targets.isEmpty else { throw WallpaperDisplayLayoutError.noEligibleDisplays }
+            result = targets.map { .init(displayID: $0.id, displayTitle: $0.title, wallpaperID: wallpaperID) }
         case .copy(let source, let target), .swap(let source, let target):
             guard source != target else { throw WallpaperDisplayLayoutError.sameDisplay }
             let first = try display(source, in: snapshot)
@@ -90,7 +127,11 @@ enum WallpaperDisplayTransfer {
                 let original = before.displays.first { $0.id == value.displayID }?.wallpaperID
                 guard existing == original else { throw WallpaperDisplayLayoutError.changed }
                 attempted.append(value)
-                if existing != value.wallpaperID { try await apply(value.wallpaperID, value.displayID) }
+                // A held wallpaper's display reads as showing it, so it is applied again until the
+                // hold is lifted: the first apply lifts it for every display, and the displays after
+                // it find the wallpaper opened and are skipped like any other.
+                let held = request.releasesHold && current.held.contains(value.wallpaperID)
+                if existing != value.wallpaperID || held { try await apply(value.wallpaperID, value.displayID) }
             }
             let after = snapshot()
             try validate(assignments, in: after)

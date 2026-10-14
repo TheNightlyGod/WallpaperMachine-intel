@@ -17,6 +17,10 @@ final class WallpaperEditorState {
 
     private(set) var scalingDrafts: [FieldKey: ScalingDraft] = [:]
     private(set) var propertyTextDrafts: [FieldKey: String] = [:]
+    /// The value a slider or colour is being dragged to. Shown on the previews, never kept as an
+    /// edit, so it is not a draft: it does not make the wallpaper dirty or block a preset, and the
+    /// edit that ends the drag, a revert, an apply or a switch to another wallpaper drops it.
+    @ObservationIgnored private(set) var propertyPreviewValues: [FieldKey: BridgePropertyValue] = [:]
     var expandedSections: [FieldKey: Bool] = [:]
 
     static func scalingFormat(locale: Locale = .current) -> FloatingPointFormatStyle<Double> {
@@ -56,6 +60,34 @@ final class WallpaperEditorState {
     func clearScaling(_ key: FieldKey) { scalingDrafts.removeValue(forKey: key) }
     func clearPropertyText(_ key: FieldKey) { propertyTextDrafts.removeValue(forKey: key) }
 
+    func setPropertyPreview(_ value: BridgePropertyValue, key: FieldKey) { propertyPreviewValues[key] = value }
+
+    /// Drops the value being dragged for one property. Returns whether there was one.
+    @discardableResult
+    func clearPropertyPreview(_ key: FieldKey) -> Bool { propertyPreviewValues.removeValue(forKey: key) != nil }
+
+    /// Drops every value being dragged for a wallpaper. Returns whether there was one.
+    @discardableResult
+    func clearPropertyPreviews(wallpaperID: String) -> Bool {
+        let before = propertyPreviewValues.count
+        propertyPreviewValues = propertyPreviewValues.filter { $0.key.wallpaperID != wallpaperID }
+        return propertyPreviewValues.count != before
+    }
+
+    /// Drops the values being dragged for every wallpaper but one. Returns the wallpapers that had some.
+    func clearPropertyPreviews(except wallpaperID: String) -> Set<String> {
+        let others = Set(propertyPreviewValues.keys.map(\.wallpaperID)).subtracting([wallpaperID])
+        propertyPreviewValues = propertyPreviewValues.filter { $0.key.wallpaperID == wallpaperID }
+        return others
+    }
+
+    /// What the bridge is told to show on top of the wallpaper's draft, in a fixed order.
+    func propertyPreviews(wallpaperID: String) -> [BridgePropertyEdit] {
+        propertyPreviewValues.filter { $0.key.wallpaperID == wallpaperID }
+            .sorted { $0.key.fieldID < $1.key.fieldID }
+            .map { BridgePropertyEdit(propertyId: $0.key.fieldID, value: $0.value) }
+    }
+
     func hasPendingEdits(wallpaperID: String) -> Bool {
         scalingDrafts.keys.contains { $0.wallpaperID == wallpaperID }
             || propertyTextDrafts.keys.contains { $0.wallpaperID == wallpaperID }
@@ -68,6 +100,7 @@ final class WallpaperEditorState {
     func discard(wallpaperID: String) {
         scalingDrafts = scalingDrafts.filter { $0.key.wallpaperID != wallpaperID }
         propertyTextDrafts = propertyTextDrafts.filter { $0.key.wallpaperID != wallpaperID }
+        clearPropertyPreviews(wallpaperID: wallpaperID)
     }
     func reconcile(wallpaperID: String, displayIDs: Set<String>? = nil, textPropertyIDs: Set<String>) {
         if let displayIDs {

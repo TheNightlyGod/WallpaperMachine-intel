@@ -23,12 +23,56 @@ device.
   refused; a puppet under an effect chain is judged by the chain's final mesh,
   and only on the chain's last node. An unused perspective camera does not
   reject; a supported layer that names a perspective camera, or an active
-  perspective camera with supported layers, is accepted.
+  perspective camera with supported layers, is accepted. Scene lights are
+  accepted (`MetalCapability.ASceneWithLightsIsAccepted`), and so is a graph
+  that reads a target before it writes it
+  (`MetalGraph.ReadingATargetThatIsOnlyWrittenLaterIsAcceptedAsHistory`).
+- **Lighting** — `MetalSceneDraw.ASceneLightReachesTheAuthorsLightingUniforms`:
+  a point light's premultiplied colour (colour x intensity x radius squared)
+  and position reach the author's `g_LightsColorPremultiplied` and
+  `g_LightsPosition` through the shared value updater, read back as pixels.
+- **Previous-frame reads** — `MetalSceneDraw.ALayerReadingThePreviousFrameSeesExactlyThePreviousFrame`:
+  a card sampling `_rt_MipMappedFrameBuffer` sees the cleared buffer on the
+  first frame and the frame before on every later one, byte-identical with
+  scene optimisation off and on, and the loop is reported as `Feedback` demand
+  so updating only on change cannot stop a trail mid-fade.
+- **An input nothing produces** — `MetalSceneDraw.AStepSamplingAnImageNothingProducesIsSkippedLikeOnCompatibility`:
+  a step whose sampled slot the graph left without a name (a layer texture
+  whose layer draws no composite) neither draws nor clears, as on
+  Compatibility, instead of refusing the scene. An image that has a name and
+  does not load still sends the whole scene to Compatibility.
+- **Face culling** — `MetalSceneDraw.ADepthTestedDrawCullsTheSameFacesAsCompatibility`:
+  a card under a perspective camera, turned towards and away, with back, front
+  and no culling and with and without a depth attachment, drawn by both
+  renderers through `SceneRendererHandle`; the pictures must be byte-identical,
+  and the cases must differ (one side culled, the other kept). A pass into a
+  depth-attached target takes its material's cull mode with counter-clockwise
+  front faces, as Compatibility does; every other pass culls nothing. Native
+  Metal culled nothing, so a planet's ring drew its unlit back over its front.
+- **The host's frame step** — `MetalSceneDraw.ThePointerSmoothingStepsOnceForEachFrameTheHostDraws`:
+  `WPShaderValueUpdater::FrameBegin` (the parallax cursor's smoothing, puppet
+  attachments) is the host's, once per frame before it draws, on either
+  backend. `MetalRender::drawFrame` used to call it again, which stepped the
+  smoothing twice per frame: the parallax on Native Metal chased the cursor
+  twice as fast and a frame earlier than on Compatibility. Test loops that
+  drive `drawFrame` directly take the step themselves, as `SceneWallpaper`'s
+  draw does.
 - **Perspective cameras** — `MetalProjection.PerspectiveUsesFovAspectNearFarAndAHomogeneousDivide`,
   `.UnprojectingNdcHitsTheLayerPlane` and `.CameraAxesFollowTheAttachedNode` in
   `metal_backend_test`; `MetalSceneDraw.APerspectiveCameraDrawsThroughTheAuthoredShader`.
   Projection is the scene camera's own FOV/aspect/near/far, not an orthographic
   scale; a rotated card must foreshorten.
+- **Depth writes** — `MetalSceneDraw.ADepthWritingDrawHidesLaterDrawsAsOnCompatibility`:
+  a half-transparent card, then an opaque card behind it, authored with
+  translucent, additive and normal blending, with and without `depthtest` and
+  `depthwrite`, and with and without a depth attachment, each drawn by both
+  renderers through `SceneRendererHandle` (`DrawWithRenderer`); the pictures must
+  be byte-identical, and the nearer card must hide the overlap exactly when it
+  depth-tests and writes into a depth-attached target. Both renderers take their
+  depth state from `ResolveSceneDepthState` (`SceneMaterial.h`). Native Metal used
+  to drop depth writes for translucent and additive materials, and depth-tested
+  into targets with no depth attachment, where Compatibility draws in painter's
+  order.
 - **Render passes** — `MetalSceneDraw.LayersSharingATargetShareOneRenderPassAndHiddenLayersCostNone`:
   consecutive passes into one image share one render pass, a hidden layer starts
   none, a hidden card draws exactly what a dropped one does, and showing it
@@ -39,6 +83,16 @@ device.
   included. On a real scene, `WE_TEST_METAL_PROJECTS` prints render passes and
   blits per frame and CPU per `drawFrame`, and its PPM must stay byte-identical to
   a build without the change.
+- **Shared target images** — `MetalSceneDraw.TargetsThatAreNeverAliveTogetherShareImagesAndDrawTheSamePicture`:
+  traded copies of the scene (two lenses, scene optimisation on) and the effect
+  buffers of two layers drawn one after the other (optimisation off, so nothing is
+  pinned) are drawn with sharing off and on (`MetalRender::SetTargetSharingForTests`);
+  with it on the targets must take fewer bytes, every frame must be
+  byte-identical, and the copies must still be traded rather than blitted. Only a
+  target whose first touch in a frame is a clear that runs, that no copy writes or
+  reads, and that is not carried over, pinned, mip-mapped, depth-attached or the
+  output shares; a pooled copy gives its image back only after its last reader is
+  encoded, and an abandoned frame puts every pooled name back.
 - **Feedback copies** — `MetalSceneDraw.AFeedbackCopyTradesTexturesAndDrawsTheSamePicture`:
   two lenses that each sample `_rt_FullFrameBuffer` over a card, drawn with scene
   optimisation off (the graph's copies are made) and on (the image and its copy
@@ -94,6 +148,14 @@ device.
   pipelines are offered to the archive, published, reopened from disk and
   satisfied strictly, and a scene with no archive path still draws. A written
   archive that is never attached to a production descriptor proves nothing.
+- **A store folder deleted mid-write** — `MetalSceneDraw.AStoreFolderDeletedWhileItsArchiveIsWrittenCostsOnlyThatWrite`:
+  eight scenes, each with its own store, write while every store folder is deleted
+  and made again in a loop; the process survives and no scratch file is left in
+  the temporary folder. Metal's `serializeToURL:` writes a scratch file beside its
+  destination and corrupts the heap when that folder vanishes (a double free in its
+  error path): serialised beside the store, this test crashed every run, and
+  **Clear shader cache** could do the same to the app. The archive is serialised
+  in `NSTemporaryDirectory()`, moved beside the store, then over it.
 - **Who owns the first frame** — `MetalSceneDraw.ADrawnFrameIsReportedAsPresentedAndLeavesTheFirstFrameFlagAlone`:
   a backend reports presentation through `drawFrame`'s `presented` out-parameter
   and leaves `Scene::first_frame_ok` to the frame handler. A backend that sets the
@@ -102,6 +164,13 @@ device.
   wallpaper that is drawing correctly.
 - **Posters** — `metal_poster_capture_test` covers on-request poster readback,
   busy coalescing and invalidation.
+  `MetalSceneDraw.APannedWallpaperIsComposedAtTheChosenPositionInTheDrawableAndThePoster`
+  fits a 3:2 scene into a square layer and reads the poster for a position at the top,
+  the middle and the bottom: the first and last rows that are not the bars' black must
+  be the layout function's, in the frame that presents the change and in a poster served
+  from the retained output without drawing (`ServicePosterRequest`), and the two posters
+  must be byte-identical. It skips visibly without a Metal device. The poster is the
+  only place the composition can be read, the drawable being released at present.
 
 ## Video decode, color and import
 
@@ -229,7 +298,12 @@ device.
   over fit, fill, stretch, none, user scale, 2x displays, exact halving and
   uneven reduction, RGBA and BGRA sources sampled linearly or nearest, and
   requires the copy path's bytes; mirrored, smaller frames and other passes fall
-  back.
+  back. The rows with a position (fill pinned to the leading and to the trailing
+  edges, fit against the bottom, a 2x display pinned to the top, an unscaled picture
+  at 0.25/0.75) hold the same bar, and also require the picture's footprint, the first
+  and last rows and columns that are not the clear colour, to equal the layout's
+  viewport, and the pixels to differ from the centred rendering, so a position that is
+  ignored leaves the picture in the middle and fails.
 - **Posters** — the Compatibility swapchain is `COLOR_ATTACHMENT` only, so
   MoltenVK makes the layer framebuffer-only. A requested poster is composed a
   second time by the pass that composed the drawable (`FinPass::recordComposition`
@@ -287,9 +361,9 @@ device.
   (`TheSkipPresentsTheSameVideoFramesInTheSameOrder`, observed through
   `RenderInitInfo::video_frame_presented`), and with the skip on no generation is
   presented twice after the start. A held frame submits nothing until a flip, a
-  poster request, a resume, a scaling-factor (crop), render-scale, surface-resize
-  or fill-mode change, each of which presents the held generation exactly once and
-  then repeats again; a static scene submits nothing once every pass is reused,
+  position change (`SceneWallpaper::setFraming`), a poster request, a resume, a
+  scaling-factor (crop), render-scale, surface-resize or fill-mode change, each of
+  which presents the held generation exactly once and then repeats again; a static scene submits nothing once every pass is reused,
   and the poster it then exports is byte-identical to the baseline's. Counters
   are compared within one draw at the window edges, never exactly. A change the
   comparison cannot see must invalidate the gate; do not widen the skip by
@@ -383,10 +457,57 @@ device.
   a caption computed every tick keeps the clock on every frame, whatever the
   script returns. No script source is read, no repeated result is counted and no
   schedule is inferred.
+- **A history loop is never called still** — `UnchangedPresent.AHistoryLoopKeepsTheClockRunningWithoutATimeUniform`
+  (it counts draws in a half-second wait, so it is named in `REALTIME_TESTS`):
+  a layer sampling a target the graph fills only after it has drawn (the fixture
+  uses `_rt_MipMappedFrameBuffer`; a motion-blur trail or an accumulation is the
+  same shape) keeps changing the picture with no time uniform. Both backends
+  report `Feedback` for a `carriesPreviousFrame` target their compiled graph
+  reads or writes, so the clock keeps running (Compatibility with pixel reuse off
+  and on, Native Metal with it on), while the same card without the loop goes
+  idle on either.
 - **Geometry rewritten on an event** — `SceneDemandMapping.GeometryRewrittenOnAnEventIsNotAReasonToKeepDrawing`
   in `static_subgraph_cache_test`: `EventMesh` and `DynamicMesh` must both cost a
   target its cacheability and must differ at the scene level. Collapsing them
   into one bit either stops static text idling or idles a particle system.
+- **A stop after a failure is visible, and a still scene is not a stalled one** —
+  `surface_health_test` and `UnchangedPresent.AStaticSceneStopsPresentingOnceEveryPassIsReused`:
+  the always-on surface health keeps completed and presented frames apart, so a
+  scene whose every pass is reused keeps completing frames while presenting none and
+  is never called stopped; a draw failure and a graph failure latch different
+  reasons, a graph failure is not downgraded by the draw failure that follows it, and
+  clearing the stop keeps the failure count. A liveness check built on presents or on
+  the present age would misread every static scene. On the Rust side
+  `tests::scene_settings` pins the precedence (the user's pause and a suspended
+  display outrank a stop, an unread surface is `unknown` and never `stopped`).
+  A genuine presentation failure cannot be produced without a desktop, so the latch
+  is covered through its setter, not through MoltenVK.
+- **A scene that fails after drawing is healed within a budget, once and visibly** —
+  `wallpaper-core` `engine::surface_recovery::tests` pin the ladder with injected
+  instants (an in-place surface rebuild after 0.5 s, then two renderer rebuilds after 2 s
+  and 8 s), the rolling minute (a failure after a quiet minute starts again, one inside it
+  does not), giving up without scheduling anything, a failure while an attempt is
+  pending being ignored without spending the budget, a stall check not buying back a spent
+  one, a lost attempt not blocking recovery for good, and the look at a rebuilt renderer
+  (`settle`: drawing, stopped before drawing, still waiting, and left alone after the limit,
+  with a stop outranking a presented frame) feeding a rebuild that stopped before it drew to
+  the next rung and then to giving up.
+  `runtime::tests` cover the relay: a burst raised before the actor runs is one report, a
+  report names the renderer that made it so a rebuilt renderer ignores its predecessor's,
+  a closed renderer reports nothing, and a request for a display with no scene, or a look at
+  a rebuilt renderer whose scene is gone, heals nothing and leaves the engine serving.
+  They also pin the render scale a rebuild carries over (`RenderScale`): a renderer opened
+  by recovery, a wallpaper switch or a resolution change is handed the reduced scale in force
+  (a new renderer starts at full size), a scale turned back up to full size is not sent again,
+  a scale the renderer refused does not replace the one in force, and a new renderer that
+  cannot take it fails the rebuild so it is rolled back. Whether a live rebuilt scene really
+  rasterizes at the reduced size needs a real window and is not covered. `owe::backend::render_failure_callback_tests` pin
+  that a rejected registration hands the callback back to be dropped exactly once and that
+  a panicking callback does not unwind into C++. In the renderer,
+  `UnchangedPresent.ADrawFailureAfterTheFirstFrameIsReportedOnceAndASurfaceRebuildHealsIt`
+  and `...BeforeTheFirstFrameIsCountedButNotReported`. The engine's reaction to a report
+  on a live scene needs a real window and is not covered by an automated test, and no
+  genuine presentation failure is produced anywhere.
 
 ## Audio
 
@@ -419,6 +540,26 @@ device.
   against emitted sample counts, including different callback sizes,
   pause/resume, stop/restart and seeded bounds, on the null backend, which never
   opens an audio device. All sound fixtures use the null backend.
+- **Output device rebuild** — `wallpaper-core` `media::audio::device_watch::tests`
+  (a burst of changes is one report after the quiet period, a change wakes an idle
+  watcher, `cancel` drops a pending report without waiting it out, every subscriber
+  hears a change until it is dropped) and `capture_controller_tests`
+  (`restart_*`, `a_failed_restart_*` and
+  `a_pending_restart_is_dropped_once_nobody_wants_capture`: a running tap is
+  stopped and started once and still serves every scene; stopped, suspended and
+  permission-pending controllers do nothing; a failed start leaves capture
+  stopped, is retried without another device change, is healed by the next
+  sync, and is forgotten once nobody wants capture). The
+  bridge's `web_audio_media::output_device_change::*` replays the worker's
+  handlers on a scripted backend: a web-only session is rebuilt, each retry waits
+  its own delay and then gives up after a bounded number of attempts, a newer
+  change supersedes an older pending retry, and a retry never tears down a tap
+  that a demand change has started; `output_device_change::the_output_watcher_exists_only_while_capture_is_wanted`
+  and `::a_watcher_that_could_not_start_is_tried_again_only_when_capture_is_wanted_anew`
+  pin that no watcher exists until capture is wanted, that one is released when it
+  stops being wanted, and that a failed start is not retried on every command. The
+  CoreAudio listener registration is not
+  covered; see [audio response](../features/audio-response.md#output-device-changes).
 - **Audio capture follows what the scene reads** — `SceneSchema.AudioRequirementComesOnlyFromContentThatReadsAudio`
   and `.AudioRequirementIsReportedOncePerSceneAndResetByReplacement` in
   `scene_schema_tests`, `VideoSourceInput.PlainVideoProjectNeverReportsAnAudioRequirement`
@@ -446,6 +587,7 @@ engine to redo, and when.
   suspended.
 - **A display refresh keeps an unchanged scene** — `settings_intents::a_display_refresh_does_not_reload_a_scene_whose_audio_response_has_nothing_to_read`,
   `::a_display_refresh_does_not_reload_a_scene_held_to_the_battery_frame_rate`,
+  `::a_display_refresh_does_not_reload_a_scene_held_to_the_quality_throttle`,
   `::a_display_refresh_does_not_reload_a_scene_muted_for_other_audio`,
   `::a_display_refresh_does_not_reload_a_scene_paused_by_a_lock_or_a_covered_display`,
   and `DisplayRefreshCoalescerTests` in `Tests/Unit/Desktop/`. A value applied
@@ -455,18 +597,51 @@ engine to redo, and when.
 - **A screen change that moves nothing does no work** — `DisplayRefreshCoalescerTests`
   (`testScreenChangesThatLeaveTheDisplaysAsTheyWereDoNotRefresh`,
   `testAnUnchangedBurstDuringARefreshEndsWithIt`,
-  `testTwoReadingsOfTheSameDisplaysAreEqual`), `WallpaperSpaceMonitorTests.testOnlyAScreenChangeThatMovesADisplayRereadsTheSpaces`
-  and `WallpaperPresentationPolicyTests.testOnlyAScreenChangeThatMovesAWorkingAreaIsEvaluated`.
+  `testTwoReadingsOfTheSameDisplaysAreEqual`), `WallpaperSpaceMonitorTests.testOnlyAScreenChangeThatMovesADisplayRereadsTheSpaces`,
+  `WallpaperPresentationPolicyTests.testOnlyAScreenChangeThatMovesAWorkingAreaIsEvaluated`
+  and `WallpaperWindowAuditorTests.testScreenChangesThatLeaveTheDisplaysAsTheyWereDoNotCheck`.
   An XDR display posts a screen change for every frame of an EDR headroom ramp;
   each one would run a bridge refresh, republish every snapshot, re-sync the lock
   screen, push the whole control panel and ask the window server for the
   session's lock state twice. A failed refresh is still retried on the next
   change.
+- **A display that vanishes for a moment is not closed and reopened** —
+  `DisplayRefreshCoalescerTests` (`testADisplayThatComesBackBeforeTheSettleCausesNoRefresh`,
+  `testADisplayThatStaysAwayRefreshesOnceWhenTheSettleEnds`,
+  `testAFlappingDisplayHoldsOneWaitAndTheSettleIsNeverExtended`,
+  `testAChangeToADisplayThatRemainsRefreshesAtOnce`,
+  `testAnArrivalDuringTheSettleRefreshesAtOnce`,
+  `testADisplayThatComesBackAsTheSettleEndsIsAnnouncedToo`).
+  The bridge closes the wallpaper of a display absent from the screen list, so
+  refreshing at once turned a link renegotiating or a monitor waking into a full
+  scene load or decoder rebuild. Not refreshing for a display that returns also
+  means no snapshot follows, so a window the web or native video host closed
+  during the gap would stay closed; the coalescer announces the return and both
+  hosts reconcile. Only a reading that is the last refresh with displays removed
+  and nothing else moved waits (0.8 s, fixed, never extended); everything else
+  still refreshes at once, so a real unplug refreshes exactly once and a
+  changed remaining display is never left stale.
+- **A wanted display the native video host cannot see is said so, not dropped** —
+  `NativeVideoWallpaperHostTests` (`testAWantedDisplayTheHostCannotSeeIsReportedNotSilentlyDropped`,
+  `testTheUnseenDisplayIsOpenedOnceItAppears`, `testTheWarningIsNotRepeatedEveryPass`,
+  `testADisagreementThatComesBackOrChangesIsReportedAgain`,
+  `testADisplayThatReturnsInsideTheSettleHasItsWindowBackWithoutARefresh`) and the mirror,
+  clamshell and unnumbered-screen fixtures in `DisplayRefreshCoalescerTests`. The bridge
+  reads CoreGraphics' displays and the host reads AppKit's screens, so an offer for a display the host's list
+  lacks was skipped with no log line, which looked like a wallpaper that never appears. The
+  host still draws nothing there and adds no timer, but it logs the disagreement once and
+  opens the display as soon as the lists agree. That includes a display that was missing
+  only inside the refresh filter's settle, which causes no refresh and so no snapshot: the
+  filter announces the return and the host reconciles, which the host test drives through a
+  real `DisplayRefreshCoalescer`.
 - **The lock state is not asked per evaluation** — `WallpaperPresentationPolicyTests.testTheLockStateIsAskedOnlyWhenItCanHaveChanged`,
   `.testASessionLockedBeforeStartIsSuspendedFromTheStart`,
   `.testWakingDisplaysAskForTheLockStateAgain`,
   `.testSwitchingUsersAsksForTheLockStateAgain` and
-  `.testAMissedUnlockClearsAtTheNextEvaluation`. Every snapshot the engine applies
+  `.testAMissedUnlockClearsAtTheNextEvaluation`, plus
+  `.testUnlockIsReportedOnceWhenTheLockClears` and
+  `.testAMissedUnlockIsStillReportedAtTheNextEvaluation` for the edge the playlists
+  answer. Every snapshot the engine applies
   runs the presentation policy, and `CGSessionCopyCurrentDictionary` is a
   synchronous window-server round trip. It is asked again only at start, on a lock
   or unlock, on display wake, on a user switch and while the session counts as
@@ -489,7 +664,39 @@ engine to redo, and when.
   UUIDs or serials differ, display sync must keep one `[[monitors]]` block per
   display under its current selector, and a panel display id from before a
   renumbering must still edit that display.
+- **A display that reports no pixels is left out of the refresh** — `display::state::tests::a_running_display_that_reports_no_pixels_keeps_its_descriptor_and_runtime`,
+  `::a_new_display_that_reports_no_pixels_gets_no_record_until_it_has_a_size` and
+  `::transitional_matching_uses_identity_when_the_display_id_changed`, with
+  `display::tests::plan_refresh_*` and `engine::tests::a_secondary_display_without_pixels_is_left_out_until_it_reports_a_size`.
+  A display that is still connecting can be listed as active with a 0x0 mode, and
+  opening a window for it fails the whole reconcile. It must stay out of the
+  refresh, yet a display that already runs a scene must keep its descriptor:
+  reading it as absent would close the scene and reload it after the glitch. All
+  descriptors are synthetic; a real display that reports 0x0 while connecting was
+  not reproduced.
+- **A wake repairs only a scene that stopped drawing** — `wake_revalidation::*` in the bridge
+  (`a_scene_whose_frames_advanced_is_left_alone`,
+  `::a_continuous_scene_with_flat_frames_is_recovered_once`,
+  `::a_paused_or_suspended_display_is_never_probed`,
+  `::a_waiting_for_event_scene_is_never_recovered_even_with_flat_frames`,
+  `::a_stopped_latch_is_recovered_without_waiting_for_the_grace`,
+  `::a_replaced_renderer_whose_counter_restarted_is_not_stale`,
+  `::the_call_reaches_the_engine_through_both_facade_halves` and
+  `::two_checks_at_once_run_one_after_the_other`), and `SystemWakeRevalidatorTests` and the
+  resume tests in `WallpaperPresentationPolicyTests` (`testAGlobalResumeIsAnnouncedAndASuspendIsNot`,
+  `testResumingOneDisplayIsAnnouncedAndHidingOrNeverHidingIsNot`,
+  `testAResumeTheBridgeRefusesIsAnnouncedWhenItLands`). The check reads each continuous,
+  unpaused scene's `frames_completed` twice and hands the engine's budgeted recovery only
+  the one that stood still, so a Mac that woke well rebuilds nothing. The signal must stay
+  completed frames: a still scene completes frames without presenting, so a check built on
+  presents would rebuild every static wallpaper. Paused, event-driven and unreadable scenes
+  must never be repaired, a counter that went backwards is a replaced renderer, not a stalled
+  one, the forward through `ArcEngineFacade` must reach the engine (a missing one answers
+  "no scene" to every repair), and two checks must not overlap or one stall spends two rungs
+  of the ladder. The readings are scripted: whether a real surface stops across a sleep, and
+  whether the reconfigure restores it, needs an authorized sleep and wake.
 - **A reconcile keeps an unchanged scene** — `settings_intents::a_reconcile_does_not_reload_a_scene_held_to_the_frame_rate_cap`,
+  `::a_reconcile_does_not_reload_a_scene_held_to_the_quality_throttle`,
   `::a_reconcile_does_not_reload_a_scene_muted_for_other_audio` and
   `performance_settings::wallpapers_applied_under_a_frame_rate_cap_start_at_the_capped_rate`.
   A reconcile hands the engine every configured scene and the engine reopens any
@@ -502,6 +709,30 @@ engine to redo, and when.
   launch-at-login status; reading it from `SMAppService` for each one would hold a
   burst of queued bridge requests (Apply and Quit among them) behind service-manager
   round trips.
+- **A failed scene replacement keeps the previous layer in the view** —
+  `tests::general::platform::case_wallpaper_window_layer_swap_revert` and `::case_wallpaper_window_layer_swap_finish`
+  (`wallpaper-core`, window tests: `WE_RUN_MACOS_WINDOW_TESTS`, an authorized desktop run
+  only, listed in `CORE_EXCLUSIONS` of `scripts/check_rust.py`). The window installs the new
+  `CAMetalLayer` before the replacement renderer exists. When the replacement then fails, the
+  renderer that kept running draws on the layer that was taken out of the view, and the
+  bridge's restore sees an unchanged descriptor and rebuilds nothing, so the display stayed on
+  the empty replacement layer. A reverted swap must show the original layer pointer and the
+  original window, view and layer geometry (changed on purpose by the swap); a finished swap
+  keeps the new layer. Nothing routine opens a window, so the revert on a forced `open_scene`
+  failure is verified by reading only, and the gated cases have not been run.
+- **Every window layer is announced with its display and reason** —
+  `window::tests::announcement_carries_display_and_reason` and
+  `::install_reason_strings_are_the_swift_contract` (`wallpaper-core`, device-free: a private
+  `NSNotificationCenter` and plain `NSObject`s stand in for the window and its layers). The Swift
+  host puts content on a window's new layer from `WallpaperMachine.wallpaperLayerInstalled`, and
+  matches the name, the `displayID` and `reason` keys and the `open`, `replace` and `reconfigure`
+  strings literally, so a rename on one side silently disables the other (the Swift side,
+  `WallpaperSwitchHold`, is pinned by `WallpaperSwitchHoldTests`, which post the same spelling).
+  One announcement per
+  install, in order, the layer as the object, delivered on the posting thread and not on the
+  default center. `tests::general::platform::case_wallpaper_window_announces_layers` runs the
+  real window paths (open, swap, update, reverted swap) under the same gate as the layer-swap
+  cases above and has not been run.
 - **The lock screen ignores the covered desktop** — `apply_options::lock_screen_export_ignores_the_desktop_display_being_covered`:
   locking covers the desktop and suspends its display, and the exported
   lock-screen scene must stay unpaused unless the user or power policy paused
@@ -530,6 +761,29 @@ engine to redo, and when.
   descriptors the facade last handed over would make the next Apply wait out the
   90 seconds and roll back a playing wallpaper
   (`engine::facade::first_frame_tests`).
+- **A wallpaper that kills the app while it loads is held back.** The saved
+  configuration is replayed at every launch, so a scene that crashes the
+  process on load would crash every launch. The bridge's load journal records
+  the scenes about to open (`engine/load_journal.rs`) and keeps them through a
+  20 s settle window after the first frame and over the render-scale, audio and
+  mute calls that follow the scene (the changelog records a launch crash after
+  applying a render scale). Two launches in a row that
+  die mid-load hold the wallpaper out of every plan; Apply, the panel's
+  Try again, an app update, or its removal from the library releases it, and
+  nothing is deleted.
+  `engine::load_journal::tests` and `tests::crash_loop_guard` (fake engine, a
+  record that never ends playing the crash) must keep covering: a quit while startup holds the actor, one strike per
+  dead session and wallpaper, the hold persisting across launches, a failed
+  load and a quit during a load leaving no strike, only scenes that really open
+  being recorded, Apply reaching the engine for an unchanged draft, a rotation leaving a hold alone, and a Try
+  again or an Apply that fails leaving the wallpaper held, with a crash during an Apply counting a
+  third strike (`ControlPanelHeldWallpaperTests`
+  covers the banner and the action). Choosing a held wallpaper again must reach
+  the bridge even though its display still reads as showing it, while a
+  rotation's or rule's activation of it stays a no-op
+  (`WallpaperActivationRecoveryTests`). A real
+  engine crash is not reproducible headlessly; see
+  [crash recovery](../features/crash-recovery.md#verification).
 - **Texture decode at preparation** — `texture_prefetch_test` (CPU, in the gate):
   images handed over once under their own name, decoding plus untaken images held
   within the byte budget (an image larger than the budget alone), preparation

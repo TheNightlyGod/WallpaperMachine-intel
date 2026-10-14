@@ -1,7 +1,8 @@
 import Foundation
 
 /// A zip a user can attach to a bug report: recent logs, the lock-screen
-/// extension log, crash reports and the environment lines they were asked for.
+/// extension log, the load journal, crash reports, macOS resource, spin and
+/// hang reports, and the environment lines they were asked for.
 ///
 /// Synchronous and off the main actor. The caller decides where it runs.
 /// Missing sources are notes in the report, not failures — a bug report with
@@ -11,6 +12,16 @@ struct DiagnosticsBundle {
         var logsRoot: URL
         var extensionLog: URL
         var crashReports: URL
+        /// The bridge's `load-journal.json` (see docs/features/crash-recovery.md).
+        /// `nil` means the caller has no journal to offer, which is not noted.
+        var loadJournal: URL? = nil
+        /// Where macOS keeps resource (`.diag`) reports for every account, and on
+        /// recent releases spin and hang reports too. Only members of the
+        /// `_analyticsusers` group can list it, so being unable to is noted, not
+        /// an error. `nil` means the caller offers no such folder, which is not
+        /// noted. `crashReports` is searched for the same kinds of report as
+        /// well, since older releases wrote them there.
+        var systemReports: URL? = nil
     }
 
     struct Limits {
@@ -18,6 +29,11 @@ struct DiagnosticsBundle {
         var logBytes = 64 * 1024 * 1024
         var crashReports = 5
         var crashReportAge: TimeInterval = 14 * 24 * 60 * 60
+        /// Resource, spin and hang reports across both report folders. They
+        /// share `crashReportAge`.
+        var resourceReports = 5
+        /// A report over this many bytes contributes its tail.
+        var resourceReportBytes = 4 * 1024 * 1024
     }
 
     struct Report: Equatable {
@@ -29,11 +45,21 @@ struct DiagnosticsBundle {
     var limits = Limits()
     var redactor: DiagnosticsRedactor
 
-    static func sources(logsRoot: URL, home: URL = FileManager.default.homeDirectoryForCurrentUser) -> Sources {
+    /// The file the bridge keeps beside `config.toml`.
+    static let loadJournalFileName = "load-journal.json"
+
+    static func sources(
+        logsRoot: URL,
+        home: URL = FileManager.default.homeDirectoryForCurrentUser,
+        supportRoot: URL = ClientPaths.supportURL,
+        systemReports: URL = URL(fileURLWithPath: "/Library/Logs/DiagnosticReports", isDirectory: true)
+    ) -> Sources {
         Sources(
             logsRoot: logsRoot,
             extensionLog: home.appending(path: LockScreenConfiguration.exchangeRelativePath).appending(path: "extension.log"),
-            crashReports: home.appending(path: "Library/Logs/DiagnosticReports"))
+            crashReports: CrashReportIndex.userReportsFolder(home: home),
+            loadJournal: supportRoot.appending(path: loadJournalFileName),
+            systemReports: systemReports)
     }
 
     /// Local time, POSIX locale, so the name sorts and does not pick up a
@@ -62,7 +88,9 @@ struct DiagnosticsBundle {
         var missing: [String] = []
         try collectLogs(into: staging, included: &included, missing: &missing)
         try collectExtensionLog(into: staging, included: &included, missing: &missing)
+        try collectLoadJournal(into: staging, included: &included, missing: &missing)
         try collectCrashReports(into: staging, at: date, included: &included, missing: &missing)
+        try collectResourceReports(into: staging, at: date, included: &included, missing: &missing)
         try write(
             redactor.redact(environment.joined(separator: "\n") + "\n"),
             to: staging.appendingPathComponent("environment.txt"))
@@ -169,35 +197,36 @@ struct DiagnosticsBundle {
         }
     }
 
+    /// Which wallpapers the app was opening when it died, and how often. Absent
+    /// is normal: the file exists only once a scene has been opened, so it is a
+    /// note, and the rest of the report is unaffected.
+    private func collectLoadJournal(into staging: URL, included: inout [String], missing: inout [String]) throws {
+        guard let source = sources.loadJournal else { return }
+        let relative = Self.loadJournalFileName
+        let data: Data
+        do {
+            data = try Data(contentsOf: source)
+        } catch {
+            let absent = (error as? CocoaError)?.code == .fileReadNoSuchFile
+            missing.append("\(relative) was not \(absent ? "present" : "readable")")
+            return
+        }
+        try write(redactor.redact(String(decoding: data, as: UTF8.self)), to: staging.appending(path: relative))
+        included.append(relative)
+    }
+
     private func collectCrashReports(
         into staging: URL,
         at date: Date,
         included: inout [String],
         missing: inout [String]
     ) throws {
-        let cutoff = date.addingTimeInterval(-limits.crashReportAge)
-        let files: [URL]
+        let matches: [ReportFile]
         do {
-            files = try FileManager.default.contentsOfDirectory(
-                at: sources.crashReports,
-                includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey],
-                options: [])
+            matches = try reportFiles(in: sources.crashReports, extensions: ["ips"], at: date).sorted(by: ReportFile.newestFirst)
         } catch {
             missing.append(crashReportWindowNote)
             return
-        }
-        let matches = files.compactMap { url -> (url: URL, modified: Date)? in
-            let name = url.lastPathComponent
-            guard name.hasPrefix("WallpaperMachine"), url.pathExtension.lowercased() == "ips" else { return nil }
-            guard let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .isRegularFileKey]),
-                  values.isRegularFile == true,
-                  let modified = values.contentModificationDate,
-                  modified >= cutoff, modified <= date
-            else { return nil }
-            return (url, modified)
-        }.sorted { lhs, rhs in
-            if lhs.modified != rhs.modified { return lhs.modified > rhs.modified }
-            return lhs.url.lastPathComponent < rhs.url.lastPathComponent
         }
         guard !matches.isEmpty else {
             missing.append(crashReportWindowNote)
@@ -215,9 +244,128 @@ struct DiagnosticsBundle {
         }
     }
 
+    /// The reports macOS writes when the app uses too much CPU or disk, or
+    /// stops responding. They name the code that was running, which a crash
+    /// report cannot do for a process that never crashed.
+    ///
+    /// Classified by file name only. The body differs between macOS releases
+    /// and is never parsed, only redacted.
+    private func collectResourceReports(
+        into staging: URL,
+        at date: Date,
+        included: inout [String],
+        missing: inout [String]
+    ) throws {
+        var matches: [ReportFile] = []
+        // The per-account folder is searched without a note: a missing or empty
+        // one is the normal case on a release that writes everything system-wide.
+        if let found = try? reportFiles(in: sources.crashReports, extensions: Self.resourceReportExtensions, at: date) {
+            matches += found
+        }
+        var systemUnreadable = false
+        if let system = sources.systemReports {
+            do {
+                matches += try reportFiles(in: system, extensions: Self.resourceReportExtensions, at: date)
+            } catch {
+                systemUnreadable = true
+            }
+        }
+        if systemUnreadable {
+            missing.append("macOS resource reports were not readable (the account may not be in the _analyticsusers group)")
+        } else if matches.isEmpty {
+            missing.append("no resource, spin or hang reports in the last \(reportAgeDays) days")
+        }
+
+        var names = Set<String>()
+        for report in matches.sorted(by: ReportFile.newestFirst).prefix(max(limits.resourceReports, 0)) {
+            let relative = "diagnostic-reports/" + uniqueReportName(report.url.lastPathComponent, taken: &names)
+            let slice: LogSlice
+            do {
+                slice = try Self.readLog(report.url, limit: limits.resourceReportBytes)
+            } catch {
+                missing.append("\(relative) could not be read")
+                continue
+            }
+            var text = redactor.redact(slice.text)
+            if slice.omitted > 0 {
+                text = "[truncated: first \(slice.omitted) bytes omitted]\n" + text
+            }
+            try write(text, to: staging.appending(path: relative))
+            included.append(relative)
+        }
+    }
+
+    private static let resourceReportExtensions: Set<String> = ["diag", "spin", "hang"]
+
+    private struct ReportFile {
+        var url: URL
+        var modified: Date
+
+        static func newestFirst(_ lhs: Self, _ rhs: Self) -> Bool {
+            if lhs.modified != rhs.modified { return lhs.modified > rhs.modified }
+            return lhs.url.lastPathComponent < rhs.url.lastPathComponent
+        }
+    }
+
+    /// Regular files directly in `folder` (so `Retired/` is skipped) that belong
+    /// to the app or its extension, have one of `extensions`, and were written
+    /// inside the report window. Throws when the folder cannot be listed.
+    private func reportFiles(in folder: URL, extensions: Set<String>, at date: Date) throws -> [ReportFile] {
+        let cutoff = date.addingTimeInterval(-limits.crashReportAge)
+        let files = try FileManager.default.contentsOfDirectory(
+            at: folder,
+            includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey],
+            options: [])
+        return files.compactMap { url -> ReportFile? in
+            guard url.lastPathComponent.hasPrefix("WallpaperMachine"),
+                  extensions.contains(url.pathExtension.lowercased())
+            else { return nil }
+            guard let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .isRegularFileKey]),
+                  values.isRegularFile == true,
+                  let modified = values.contentModificationDate,
+                  modified >= cutoff, modified <= date
+            else { return nil }
+            return ReportFile(url: url, modified: modified)
+        }
+    }
+
+    /// macOS names a report `<process>_<date>_<host name>[.cpu_resource].diag`,
+    /// and a Mac's host name is usually its owner's name. The redactor only
+    /// knows the account's names, so the host name is dropped from the name
+    /// the report is stored under. The process and the time still identify it.
+    /// A name in another shape has nothing recognisable to drop and goes
+    /// through the redactor instead.
+    private func uniqueReportName(_ name: String, taken: inout Set<String>) -> String {
+        let range = NSRange(location: 0, length: (name as NSString).length)
+        let stored: String
+        if let match = Self.hostNamePattern.firstMatch(in: name, range: range) {
+            let ns = name as NSString
+            stored = ns.substring(with: match.range(at: 1)) + ns.substring(with: match.range(at: 3))
+        } else {
+            stored = redactor.redact(name)
+        }
+        var candidate = stored
+        var attempt = 1
+        while !taken.insert(candidate).inserted {
+            attempt += 1
+            let dot = stored.firstIndex(of: ".") ?? stored.endIndex
+            candidate = "\(stored[..<dot])-\(attempt)\(stored[dot...])"
+        }
+        return candidate
+    }
+
+    private static let hostNamePattern: NSRegularExpression = {
+        try! NSRegularExpression(
+            pattern: #"^(.+_\d{4}-\d{2}-\d{2}-\d{6})_(.+?)((?:\.cpu_resource)?\.[A-Za-z]+)$"#,
+            options: [])
+    }()
+
+    private var reportAgeDays: Int {
+        Int(limits.crashReportAge / (24 * 60 * 60))
+    }
+
     private var crashReportWindowNote: String {
-        let days = Int(limits.crashReportAge / (24 * 60 * 60))
-        return "no crash reports in the last \(days) days"
+        "no crash reports in the last \(reportAgeDays) days"
     }
 
     private func readme(included: [String], missing: [String], at date: Date) -> String {
@@ -230,9 +378,9 @@ struct DiagnosticsBundle {
         Wallpaper Machine diagnostics
         Generated: \(generated)
 
-        This archive is for a bug report. It holds the newest application log sessions that fit in the export limit, the lock-screen extension log, recent crash reports, and the environment lines supplied at export.
+        This archive is for a bug report. It holds the newest application log sessions that fit in the export limit, the lock-screen extension log, the load journal (which wallpapers the app was opening when it last quit unexpectedly), recent crash reports, the resource, spin and hang reports macOS wrote about the app (too much CPU or disk use, or not responding), and the environment lines supplied at export.
 
-        Home folder paths were replaced with ~. The macOS user name was replaced with <user>. Steam account names were replaced with <account>.
+        Home folder paths were replaced with ~. The macOS user name was replaced with <user>. Steam account names were replaced with <account>. The Mac's host name was left out of the file names of macOS reports, and their beta program identifier was removed.
 
         Included:
         \(files)

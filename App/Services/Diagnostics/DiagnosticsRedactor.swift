@@ -1,7 +1,7 @@
 import Foundation
 
-/// Strips home paths, account names and credential values before a diagnostics
-/// bundle is written.
+/// Strips home paths, account names, credential values and the beta program
+/// identifier of macOS resource reports before a diagnostics bundle is written.
 ///
 /// Home paths are replaced before names. Doing it the other way turns
 /// `/Users/alice/Library` into `/Users/<user>/Library`, and the home path no
@@ -23,6 +23,7 @@ struct DiagnosticsRedactor {
     func redact(_ text: String) -> String {
         var text = Self.replaceCredentials(in: text)
         text = Self.replaceSteamSignIn(in: text)
+        text = Self.replaceBetaIdentifier(in: text)
         for home in homeForms {
             text = text.replacingOccurrences(of: home, with: "~")
         }
@@ -67,12 +68,29 @@ struct DiagnosticsRedactor {
         try! NSRegularExpression(pattern: #"Logging in user (['"])(.*?)\1"#, options: [])
     }()
 
+    /// The `Beta Identifier:` line of a macOS resource report: a GUID that stays
+    /// the same for every report from this install and says nothing about the
+    /// problem.
+    private static let betaIdentifierExpression: NSRegularExpression = {
+        try! NSRegularExpression(
+            pattern: #"^([ \t]*Beta Identifier:[ \t]*)\S.*$"#,
+            options: [.caseInsensitive, .anchorsMatchLines])
+    }()
+
     private static func replaceCredentials(in text: String) -> String {
         let ns = text as NSString
         return credentialExpression.stringByReplacingMatches(
             in: text,
             range: NSRange(location: 0, length: ns.length),
             withTemplate: "$1$2$3<redacted>")
+    }
+
+    private static func replaceBetaIdentifier(in text: String) -> String {
+        let ns = text as NSString
+        return betaIdentifierExpression.stringByReplacingMatches(
+            in: text,
+            range: NSRange(location: 0, length: ns.length),
+            withTemplate: "$1<redacted>")
     }
 
     private static func replaceSteamSignIn(in text: String) -> String {

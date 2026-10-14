@@ -20,6 +20,7 @@ use std::{
 use super::{
     scene_demand::{
         SceneBackend, SceneDemandReasons, SceneRuntimeReport, SceneUpdateMode, SceneVideoPath,
+        SurfaceHealth,
     },
     sys,
 };
@@ -94,7 +95,7 @@ impl SceneRegistry {
                 // SAFETY: the entry is alive for as long as this lock is held,
                 // and each of these reads is a relaxed atomic load in the
                 // renderer with no further locking.
-                let (mode, reasons, backend, fallback, video_path, optimization_applied) = unsafe {
+                let (mode, reasons, backend, fallback, video_path, optimization_applied, surface) = unsafe {
                     (
                         sys::owe_scene_wallpaper_update_mode(raw),
                         sys::owe_scene_wallpaper_demand_reasons(raw),
@@ -102,6 +103,7 @@ impl SceneRegistry {
                         read_fallback_reason(raw),
                         sys::owe_scene_wallpaper_video_path(raw),
                         sys::owe_scene_wallpaper_scene_optimization_applied(raw),
+                        read_surface_health(raw),
                     )
                 };
                 SceneRuntimeReport {
@@ -119,6 +121,7 @@ impl SceneRegistry {
                         1 => Some(true),
                         _ => None,
                     },
+                    surface,
                 }
             })
             .collect()
@@ -130,6 +133,30 @@ impl SceneRegistry {
         // settings pane for the rest of the session.
         self.entries.lock().unwrap_or_else(|error| error.into_inner())
     }
+}
+
+/// Reads the surface's frame-loop health.
+///
+/// `None` when the renderer declines to answer, which stays distinct from a
+/// healthy reading: a caller that acts on "stopped" must not mistake "unread"
+/// for "running".
+///
+/// # Safety
+///
+/// `raw` must point to a live scene.
+pub(super) unsafe fn read_surface_health(raw: *mut std::ffi::c_void) -> Option<SurfaceHealth> {
+    let mut out = sys::owe_surface_health::default();
+    // SAFETY: `out` is a valid, writable struct for the duration of the call.
+    if unsafe { sys::owe_scene_wallpaper_surface_health(raw, &mut out) } != 0 {
+        return None;
+    }
+    Some(SurfaceHealth::from_raw(
+        out.frames_completed,
+        out.frames_presented,
+        out.failed_frames,
+        out.last_present_age_ms,
+        out.stop_reason,
+    ))
 }
 
 /// Reads the backend fallback reason into an owned string.

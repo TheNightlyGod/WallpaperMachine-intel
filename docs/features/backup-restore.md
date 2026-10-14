@@ -13,7 +13,10 @@ events and temporary Focus recovery state remain local and are cleared on
 successful restore; rollback restores their original values. **Include the
 wallpaper library** also copies installed projects. Login sessions, passwords,
 keychain entries, logs, caches and shared scene resources are excluded, and the
-local scene-assets selection stays local and may need to be selected again. Only
+local scene-assets selection stays local and may need to be selected again. Time
+Machine and other backups of the whole Mac likewise skip the saved Steam sign-in,
+partial downloads and caches, but not the library ([Steam
+sign-in](workshop-downloads.md#steam-sign-in)). Only
 preferences saved in the app’s persistent domain are included; inherited system
 languages and registered defaults are excluded, including during conflict checks
 and rollback. Export checks the complete manifest size before copying payload

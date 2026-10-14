@@ -6,14 +6,26 @@ actor WallpaperImportService {
     enum DuplicatePolicy: String, CaseIterable, Identifiable, Sendable {
         case skip = "Skip existing"
         case keepBoth = "Keep both copies"
+        /// A project whose id is installed and whose content differs takes the installed one's place;
+        /// identical content is skipped, as with Keep both copies.
+        case replaceChanged = "Replace if changed"
         var id: String { rawValue }
     }
 
     struct Report: Sendable {
         var importedIDs: [String] = []
         var skipped: [String] = []
+        /// The part of `skipped` that Keep both copies left alone because the library already held
+        /// exactly the same content: nothing was copied.
+        var identical: [String] = []
+        /// The part of `importedIDs` that took the place of an installed project. Wallpaper options,
+        /// user files and collections are keyed by id, so they stay with the new files.
+        var replacedIDs: [String] = []
         var failures: [String] = []
         var cancelled = false
+        /// Folders whose name is not a Workshop id but whose manifest names the item they are
+        /// a copy of: folder name to item id. They are filed under that id.
+        var recognizedWorkshopIDs: [String: String] = [:]
     }
 
     struct ImportError: LocalizedError {
@@ -62,6 +74,8 @@ actor WallpaperImportService {
             .appendingPathComponent(Self.stagingPrefix + UUID().uuidString, isDirectory: true)
         try fm.createDirectory(at: staging, withIntermediateDirectories: false)
         defer { try? fm.removeItem(at: staging) }
+        // The copy in progress is disposable until the swap; a backup would only carry a half-copied project.
+        ClientPaths.excludeFromBackup(staging)
         let claim = try Self.claimStaging(staging)
         defer { close(claim) }
         var report = Report()
@@ -85,21 +99,38 @@ actor WallpaperImportService {
                         let isDirectory = try candidate.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true
                         let ext = candidate.pathExtension.lowercased()
                         let isImage = !isDirectory && Self.imageExtensions.contains(ext)
-                        let preferredID = isDirectory ? candidate.lastPathComponent
+                        var preferredID = isDirectory ? candidate.lastPathComponent
                             : (isImage ? Self.imageIDPrefix : "local-") + candidate.lastPathComponent
+                        if isDirectory, Self.workshopID(preferredID) == nil, let itemID = inferredWorkshopID(of: candidate) {
+                            // A Workshop project copied under another name is still that item: the
+                            // library files it under the id so updates, Steam links and duplicate
+                            // detection find it. An id that is already installed meets the policy below.
+                            report.recognizedWorkshopIDs[preferredID] = itemID
+                            AppLog.info("import: \(preferredID) recognized as Workshop item \(itemID)")
+                            preferredID = itemID
+                        }
                         guard isSafeRelativePath(preferredID), !preferredID.contains("/") else {
                             throw ImportError(message: String(localized: "The folder name cannot be used as a library identifier."))
                         }
                         var id = preferredID
                         var destination = managedRoot.appendingPathComponent(id, isDirectory: true)
+                        var replacing = false
                         if fm.fileExists(atPath: destination.path) {
-                            if duplicates == .skip {
-                                try validateProject(at: destination)
+                            switch try resolveDuplicate(duplicates, candidate: candidate, isDirectory: isDirectory,
+                                                        imageExtension: isImage ? ext : nil, installed: destination) {
+                            case .skip(let identical):
                                 report.skipped.append(candidate.lastPathComponent)
+                                if identical {
+                                    report.identical.append(candidate.lastPathComponent)
+                                    AppLog.info("import: \(id) is already in the library with the same content; nothing copied")
+                                }
                                 continue
+                            case .keepBoth:
+                                id += "-" + UUID().uuidString
+                                destination = managedRoot.appendingPathComponent(id, isDirectory: true)
+                            case .replace:
+                                replacing = true
                             }
-                            id += "-" + UUID().uuidString
-                            destination = managedRoot.appendingPathComponent(id, isDirectory: true)
                         }
                         let staged = staging.appendingPathComponent(UUID().uuidString, isDirectory: true)
                         defer { try? fm.removeItem(at: staged) }
@@ -134,8 +165,21 @@ actor WallpaperImportService {
                         }
                         try validateProject(at: staged)
                         try Task.checkCancellation()
-                        // moveItem never overwrites a concurrently created destination.
-                        try fm.moveItem(at: staged, to: destination)
+                        if replacing {
+                            // The new tree is complete and valid, and swapping it in is one step: the
+                            // library never lacks the wallpaper, and the old tree ends up at `staged`,
+                            // which the `defer` above removes. A failure leaves the installed one.
+                            try requireInstalledProject(destination)
+                            let code = Self.exchange(staged, with: destination)
+                            guard code == 0 else {
+                                throw Self.replaceFailure(id, "\(String(cString: strerror(code))).")
+                            }
+                            report.replacedIDs.append(id)
+                            AppLog.info("import: \(id) replaced with the imported copy")
+                        } else {
+                            // moveItem never overwrites a concurrently created destination.
+                            try fm.moveItem(at: staged, to: destination)
+                        }
                         report.importedIDs.append(id)
                     } catch is CancellationError {
                         throw CancellationError()
@@ -151,6 +195,77 @@ actor WallpaperImportService {
             }
         }
         return report
+    }
+
+    /// What an import does with a candidate whose library id is already taken.
+    private enum DuplicateOutcome {
+        /// The installed item stays. `identical` when the candidate holds exactly the same content.
+        case skip(identical: Bool)
+        /// The candidate is copied under a new id beside the installed item.
+        case keepBoth
+        /// The candidate differs from the installed item and takes its place.
+        case replace
+    }
+
+    /// Decides the fate of a candidate meeting an installed item. An installed item that is not a
+    /// valid wallpaper is an error, never a reason to skip.
+    private func resolveDuplicate(
+        _ policy: DuplicatePolicy, candidate: URL, isDirectory: Bool, imageExtension: String?, installed: URL
+    ) throws -> DuplicateOutcome {
+        switch policy {
+        case .skip:
+            try validateProject(at: installed)
+            return .skip(identical: false)
+        case .keepBoth:
+            // A second copy of what the library already holds only costs disk space and import time.
+            guard try sameContent(candidate: candidate, installed: installed, isDirectory: isDirectory,
+                                  imageExtension: imageExtension) else { return .keepBoth }
+            try validateProject(at: installed)
+            return .skip(identical: true)
+        case .replaceChanged:
+            // What the library already holds is never copied over itself.
+            if try sameContent(candidate: candidate, installed: installed, isDirectory: isDirectory,
+                               imageExtension: imageExtension) {
+                try validateProject(at: installed)
+                return .skip(identical: true)
+            }
+            // Refused before any byte is copied: replacing a folder that is not a wallpaper
+            // would discard files that are not ours to discard.
+            try requireInstalledProject(installed)
+            return .replace
+        }
+    }
+
+    /// Replacing needs an installed wallpaper to replace: a real folder, not a link, holding a
+    /// regular `project.json`. It need not be playable, so a damaged install can be repaired.
+    private func requireInstalledProject(_ installed: URL) throws {
+        guard holdsProjectManifest(installed) else {
+            throw Self.replaceFailure(installed.lastPathComponent, String(localized: "Its folder in the library has no project.json, so it is not an installed wallpaper."))
+        }
+    }
+
+    /// Whether `folder` is a real folder, not a link, holding a regular `project.json`: the least
+    /// that makes it a wallpaper's folder rather than somebody's. It need not be playable.
+    private func holdsProjectManifest(_ folder: URL) -> Bool {
+        guard let metadata = try? downloadMetadata(at: folder), metadata.st_mode & S_IFMT == S_IFDIR,
+              let manifest = try? downloadMetadata(at: folder.appendingPathComponent("project.json")),
+              manifest.st_mode & S_IFMT == S_IFREG else { return false }
+        return true
+    }
+
+    nonisolated private static func replaceFailure(_ id: String, _ reason: String) -> ImportError {
+        ImportError(message: String(localized: "Could not replace \(id) with the imported copy: \(reason) The installed version is unchanged."))
+    }
+
+    /// Swaps two folders in one step (`RENAME_SWAP`): `new` takes the place of `installed` and the
+    /// old tree ends up at `new`'s path. 0 on success, else the `errno` that stopped it.
+    nonisolated private static func exchange(_ new: URL, with installed: URL) -> Int32 {
+        let result = new.path.withCString { newPath in
+            installed.path.withCString { installedPath in
+                renamex_np(newPath, installedPath, UInt32(RENAME_SWAP))
+            }
+        }
+        return result == 0 ? 0 : errno
     }
 
     nonisolated static func stagingRoot(forLibrary library: URL) -> URL {
@@ -268,7 +383,8 @@ actor WallpaperImportService {
 
     /// Consumes a complete item from disposable Steam staging without copying payload bytes.
     /// A valid existing item is left untouched unless `replacing`, when the new tree takes its
-    /// place; the caller remains responsible for staging cleanup.
+    /// place, and then so is a damaged one that still holds its `project.json`; the caller remains
+    /// responsible for staging cleanup.
     ///
     /// A Workshop preset is assembled first: its base's content, the preset's own files on top,
     /// and the base's manifest carrying the preset's title and property values. The base comes
@@ -301,21 +417,15 @@ actor WallpaperImportService {
         try Task.checkCancellation()
         if replacing, let installed = try? downloadMetadata(at: destination), installed.st_mode & S_IFMT == S_IFDIR {
             // Only an installed wallpaper is replaced: the old tree ends up in staging, which the
-            // caller clears, so a folder that is not one is left where it is.
-            do {
-                try validateProject(at: destination)
-            } catch {
-                throw ImportError(message: String(localized: "The library’s folder for Workshop item \(itemID) is not an installed wallpaper, so its update was not put in its place. Move the folder out of the library and download the item again."))
+            // caller clears, so a folder that is not one is left where it is. A damaged one, such as
+            // a copy missing its entry file, still is: replacing is how it gets repaired.
+            guard holdsProjectManifest(destination) else {
+                throw ImportError(message: String(localized: "The library’s folder for Workshop item \(itemID) holds no project.json, so it is not an installed wallpaper and the new copy was not put in its place. Move the folder out of the library and download the item again."))
             }
             // An update swaps the new tree in and the old one out in one step, so the library never
             // lacks the wallpaper and a failure leaves the old version where it was.
-            let result = source.path.withCString { sourcePath in
-                destination.path.withCString { destinationPath in
-                    renamex_np(sourcePath, destinationPath, UInt32(RENAME_SWAP))
-                }
-            }
-            guard result == 0 else {
-                let code = errno
+            let code = Self.exchange(source, with: destination)
+            guard code == 0 else {
                 throw NSError(domain: NSPOSIXErrorDomain, code: Int(code), userInfo: [
                     NSFilePathErrorKey: destination.path,
                     NSLocalizedDescriptionKey: String(localized: "Could not replace Workshop item \(itemID) with its update: \(String(cString: strerror(code))). The installed version is unchanged.")
@@ -405,14 +515,55 @@ actor WallpaperImportService {
     /// The preset described by `root/project.json`, or nil when it is anything else; ordinary
     /// validation then reports what is wrong with it.
     private func presetManifest(at root: URL) -> Preset? {
-        let url = root.appendingPathComponent("project.json")
-        guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]),
-              values.isRegularFile == true, values.isSymbolicLink != true, (values.fileSize ?? 0) <= 16 * 1024 * 1024,
-              let data = try? Data(contentsOf: url), !data.starts(with: [0xEF, 0xBB, 0xBF]),
-              let manifest = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+        guard let manifest = readManifest(at: root),
               ((manifest["type"] as? String) ?? "").isEmpty,
               let dependency = Self.workshopID(manifest["dependency"]) else { return nil }
         return Preset(manifest: manifest, dependency: dependency)
+    }
+
+    /// The JSON object in `root/project.json`, or nil unless that is a regular file (not a link)
+    /// of at most 16 MB without a byte-order mark. Import validation still insists on UTF-8.
+    private func readManifest(at root: URL) -> [String: Any]? {
+        let url = root.appendingPathComponent("project.json")
+        guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]),
+              values.isRegularFile == true, values.isSymbolicLink != true, (values.fileSize ?? 0) <= 16 * 1024 * 1024,
+              let data = try? Data(contentsOf: url), !data.starts(with: [0xEF, 0xBB, 0xBF]) else { return nil }
+        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    }
+
+    /// The Workshop item a project folder belongs to although its name is not the id: the
+    /// manifest's `workshopid`, else the item its `workshopurl` points at. Only a whole positive
+    /// number counts. The folder name is not consulted (a title like "2077" is not an id), and a
+    /// manifest naming nothing usable leaves the folder name as the library id.
+    private func inferredWorkshopID(of folder: URL) -> String? {
+        guard let manifest = readManifest(at: folder) else { return nil }
+        // A fraction, an exponent (`1e3`) or a number too large for 64 bits is a measurement, not an identifier.
+        let isMeasurement = (manifest["workshopid"] as? NSNumber).map { ["f", "d"].contains(String(cString: $0.objCType)) } ?? false
+        if !isMeasurement, let id = Self.workshopID(manifest["workshopid"]) { return id }
+        guard let link = manifest["workshopurl"] as? String else { return nil }
+        return Self.workshopItemID(inLink: link)
+    }
+
+    /// The item a Workshop link names: `steam://url/CommunityFilePage/<id>`, a Steam Community
+    /// `filedetails` page (`?id=<id>`), or a `steam://openurl/` wrapper around one.
+    nonisolated static func workshopItemID(inLink link: String) -> String? {
+        let text = link.trimmingCharacters(in: .whitespacesAndNewlines)
+        let wrapper = "steam://openurl/"
+        if text.lowercased().hasPrefix(wrapper) { return workshopItemID(inLink: String(text.dropFirst(wrapper.count))) }
+        guard let components = URLComponents(string: text), let host = components.host?.lowercased() else { return nil }
+        switch components.scheme?.lowercased() {
+        case "steam":
+            let parts = components.path.split(separator: "/", omittingEmptySubsequences: true)
+            guard host == "url", parts.count == 2, parts[0].lowercased() == "communityfilepage" else { return nil }
+            return workshopID(String(parts[1]))
+        case "http", "https":
+            guard host == "steamcommunity.com" || host == "www.steamcommunity.com",
+                  components.path.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "/")) == "sharedfiles/filedetails",
+                  let ids = components.queryItems?.filter({ $0.name == "id" }), ids.count == 1 else { return nil }
+            return workshopID(ids[0].value)
+        default:
+            return nil
+        }
     }
 
     /// The first candidate folder holding an installable wallpaper to build the preset on.
@@ -551,17 +702,31 @@ actor WallpaperImportService {
         }
     }
 
+    /// Folders, relative to a chosen one, whose children can be projects: Workshop downloads in a
+    /// Steam library, and the `projects` folders of a Wallpaper Engine install, which a user may
+    /// pick as the library, as `steamapps`, `common`, the install itself, or a copy of it from
+    /// another computer.
+    private static let projectRoots: [String] = {
+        let workshop = ["", "steamapps/workshop/content/431960", "workshop/content/431960", "content/431960", "431960"]
+        let installs = ["steamapps/common/wallpaper_engine", "common/wallpaper_engine", "wallpaper_engine", "Wallpaper Engine", ""]
+        let projectFolders = ["projects/myprojects", "projects/defaultprojects"]
+        let installed = installs.flatMap { install in
+            projectFolders.map { folder in install.isEmpty ? folder : install + "/" + folder }
+        }
+        // The projects folder itself, or one of its two halves.
+        return workshop + installed + ["myprojects", "defaultprojects"]
+    }()
+
     private func discover(_ source: URL) throws -> [URL] {
         let fm = FileManager.default
         let values = try source.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
         guard values.isSymbolicLink != true else {
             throw ImportError(message: String(localized: "Symbolic links are not imported. Choose the original folder or file instead."))
         }
-        guard values.isDirectory == true else { return [source] }
+        guard values.isDirectory == true else { return [projectFolder(ofFile: source) ?? source] }
         if fm.fileExists(atPath: source.appendingPathComponent("project.json").path) { return [source] }
-        let relativeRoots = ["", "steamapps/workshop/content/431960", "workshop/content/431960", "content/431960", "431960"]
         var projects: [URL] = []
-        for relative in relativeRoots {
+        for relative in Self.projectRoots {
             try Task.checkCancellation()
             let root = relative.isEmpty ? source : source.appendingPathComponent(relative, isDirectory: true)
             guard fm.fileExists(atPath: root.path) else { continue }
@@ -573,9 +738,20 @@ actor WallpaperImportService {
             }
         }
         guard !projects.isEmpty else {
-            throw ImportError(message: String(localized: "No project.json found. Choose a wallpaper project, a folder containing projects, or a Steam library with steamapps/workshop/content/431960."))
+            throw ImportError(message: String(localized: "No project.json found. Choose a wallpaper project, a folder containing projects, a Steam library or a Wallpaper Engine folder."))
         }
         return projects.sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+    }
+
+    /// The project a chosen file belongs to: its own folder, when the file is the manifest, the
+    /// scene description or a package, and the folder holds a project manifest. Links are never
+    /// followed, neither the file nor the folder, so this is as strict as choosing the folder.
+    private func projectFolder(ofFile file: URL) -> URL? {
+        let name = file.lastPathComponent.lowercased()
+        guard name == "project.json" || name == "scene.json" || file.pathExtension.lowercased() == "pkg",
+              let metadata = try? downloadMetadata(at: file), metadata.st_mode & S_IFMT == S_IFREG else { return nil }
+        let folder = URL(fileURLWithPath: file.deletingLastPathComponent().path, isDirectory: true)
+        return holdsProjectManifest(folder) ? folder : nil
     }
 
     private func validateProject(at root: URL, requireNonemptyContent: Bool = false) throws {
@@ -658,5 +834,124 @@ actor WallpaperImportService {
         } else {
             throw ImportError(message: String(localized: "Unsupported special file: \(source.lastPathComponent). Only regular files and folders can be imported."))
         }
+    }
+
+    // MARK: Identical content
+
+    /// Entries of one tree a comparison lists before it gives up and calls the trees different.
+    private static let comparisonEntryLimit = 200_000
+    private static let comparisonChunk = 1024 * 1024
+
+    private struct TreeEntry: Equatable {
+        let isDirectory: Bool
+        let size: Int64
+    }
+
+    /// Whether the library item at `installed` is exactly what importing `candidate` would copy
+    /// into it, byte for byte. A folder must hold the same folders and files, of the same sizes,
+    /// with the same content. `.DS_Store` files are ignored on both sides: Finder adds them, and
+    /// no wallpaper reads them. So is the top-level `.mwe-user-assets` folder, the bridge the app
+    /// itself writes into an installed web wallpaper when the user picks a file or folder for one
+    /// of its properties: derived and regenerable, never part of what a project ships. A single
+    /// file is compared with the copy of it the item keeps (the file itself, or `image.<ext>` for
+    /// a picture).
+    ///
+    /// Anything doubtful counts as different: a link or special file, a tree too large to list, a
+    /// file that cannot be opened or that changes while it is read. The worst outcome is then the
+    /// old behaviour, a second copy; a project is never skipped on a guess. Reading stops at the
+    /// first difference. Throws only `CancellationError`, between chunks.
+    private func sameContent(candidate: URL, installed: URL, isDirectory: Bool, imageExtension: String?) throws -> Bool {
+        guard let installedInfo = try? downloadMetadata(at: installed), installedInfo.st_mode & S_IFMT == S_IFDIR else { return false }
+        let left = UnsafeMutableRawPointer.allocate(byteCount: Self.comparisonChunk, alignment: 16)
+        let right = UnsafeMutableRawPointer.allocate(byteCount: Self.comparisonChunk, alignment: 16)
+        defer { left.deallocate(); right.deallocate() }
+        guard isDirectory else {
+            let kept = imageExtension.map { "image.\($0)" } ?? candidate.lastPathComponent
+            return try Self.sameBytes(candidate.path, installed.appendingPathComponent(kept).path, left, right)
+        }
+        // The cheap check first: the same names and sizes, before a single byte is read.
+        guard let wanted = try Self.treeListing(candidate), let held = try Self.treeListing(installed),
+              wanted == held else { return false }
+        let files = wanted.filter { !$0.value.isDirectory }.keys.sorted()
+        // The manifest is the file most likely to differ and the quickest to read.
+        for relative in files.filter({ $0 == "project.json" }) + files.filter({ $0 != "project.json" }) {
+            guard try Self.sameBytes(candidate.path + "/" + relative, installed.path + "/" + relative, left, right) else { return false }
+        }
+        return true
+    }
+
+    /// Every file and folder below `root` by relative path, or nil when the tree holds anything
+    /// but regular files and folders (`.DS_Store` files and the app's own top-level user-asset
+    /// bridge aside), more than `comparisonEntryLimit` entries, or something that cannot be read.
+    private static func treeListing(_ root: URL) throws -> [String: TreeEntry]? {
+        var info = stat()
+        guard lstat(root.path, &info) == 0, info.st_mode & S_IFMT == S_IFDIR else { return nil }
+        var listing: [String: TreeEntry] = [:]
+        var pending = [""]
+        while let relative = pending.popLast() {
+            let folder = relative.isEmpty ? root.path : root.path + "/" + relative
+            guard let names = try? FileManager.default.contentsOfDirectory(atPath: folder) else { return nil }
+            for name in names {
+                try Task.checkCancellation()
+                var entry = stat()
+                guard lstat(folder + "/" + name, &entry) == 0 else { return nil }
+                let path = relative.isEmpty ? name : relative + "/" + name
+                switch entry.st_mode & S_IFMT {
+                case S_IFDIR:
+                    if relative.isEmpty && name == UserAssetStore.stagingDirectoryName { continue }
+                    listing[path] = TreeEntry(isDirectory: true, size: 0)
+                    pending.append(path)
+                case S_IFREG:
+                    if name == ".DS_Store" { continue }
+                    listing[path] = TreeEntry(isDirectory: false, size: Int64(entry.st_size))
+                default:
+                    return nil
+                }
+                if listing.count > comparisonEntryLimit { return nil }
+            }
+        }
+        return listing
+    }
+
+    /// Whether two regular files, neither a link, hold the same bytes. The buffers are
+    /// `comparisonChunk` bytes each.
+    private static func sameBytes(_ first: String, _ second: String,
+                                  _ firstBuffer: UnsafeMutableRawPointer, _ secondBuffer: UnsafeMutableRawPointer) throws -> Bool {
+        let left = open(first, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)
+        guard left >= 0 else { return false }
+        defer { close(left) }
+        let right = open(second, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)
+        guard right >= 0 else { return false }
+        defer { close(right) }
+        var leftInfo = stat()
+        var rightInfo = stat()
+        guard fstat(left, &leftInfo) == 0, fstat(right, &rightInfo) == 0,
+              leftInfo.st_mode & S_IFMT == S_IFREG, rightInfo.st_mode & S_IFMT == S_IFREG,
+              leftInfo.st_size == rightInfo.st_size else { return false }
+        var remaining = Int64(leftInfo.st_size)
+        while true {
+            try Task.checkCancellation()
+            let count = fill(firstBuffer, from: left)
+            guard count >= 0, count == fill(secondBuffer, from: right),
+                  memcmp(firstBuffer, secondBuffer, count) == 0 else { return false }
+            // The size read must be the size the file had when it was opened.
+            if count == 0 { return remaining == 0 }
+            remaining -= Int64(count)
+        }
+    }
+
+    /// Reads up to a chunk, more than once if the file system returns less. -1 on a read error.
+    private static func fill(_ buffer: UnsafeMutableRawPointer, from descriptor: Int32) -> Int {
+        var filled = 0
+        while filled < comparisonChunk {
+            let count = Darwin.read(descriptor, buffer + filled, comparisonChunk - filled)
+            if count < 0 {
+                if errno == EINTR { continue }
+                return -1
+            }
+            if count == 0 { break }
+            filled += count
+        }
+        return filled
     }
 }

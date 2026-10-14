@@ -49,10 +49,67 @@ them.
 Results open on Most popular this year and can be sorted by Highest rated
 (Steam's all-time `toprated`), Most popular today / Trending this week / Most
 popular this month / Most popular this year (Steam's `trend` sort with a `days`
-window of 1, 7, 30 or 365), Most subscribed, Newest or Relevance. Steam's public
-browse page has no "most voted" sort and silently treats unknown `browsesort`
-values as trending, so none is offered. Wallpaper Engine's "mobile compatible"
-box has no Steam tag behind it, so it is not offered either.
+window of 1, 7, 30 or 365), Most subscribed, Newest (Steam's `mostrecent`, by when an
+item was first published), Recently updated (Steam's `lastupdated`, by when it last
+changed, so an old wallpaper with a fresh update comes first) or Relevance. Recently
+updated reads the search text and every tag filter like the others and ignores the
+trending window. Steam's public browse page has no "most voted" sort and silently
+treats unknown `browsesort` values as trending, so none is offered. Wallpaper Engine's
+"mobile compatible" box has no Steam tag behind it, so it is not offered either.
+
+### Opening an item from a link or id
+
+Pasting a Workshop item's page link (`steamcommunity.com/sharedfiles/filedetails/?id=…`
+or `/workshop/filedetails/?id=…`, `http` or `https`), a `steam://url/CommunityFilePage/<id>`
+link or a bare id of six or more digits into the search field shows that item as one
+ordinary tile instead of sending the text to Steam as search words
+(`WorkshopLink.itemID(in:)`). Links are parsed as URLs, never by a pattern over free
+text, and ids are validated like any other (digits only, above zero); a short number
+such as a year, or a sentence that merely holds an id or a link, is still a search.
+Only the wallpapers list does this: collections, authors and subscriptions read the
+text as words.
+
+The lookup answers from Steam's public details endpoint, the one that already supplies
+every other source's tiles, so the download ring, inspector, Installed mark and update
+mark work as on any tile, and a collection opens through **Open collection**. It is a
+page of one (`WorkshopService.itemPage`), and Open on Steam goes to the item's page.
+The sidebar's age rating, tags and Type, and the sort, do not apply to an item asked
+for by name; the summary line says so while it is on show (`lookup` in the
+snapshot). Creator names cost a profile page fetch, so a looked-up tile shows the
+generic name; **More by this author** still works from the creator id.
+
+An item that cannot be shown fails like any load: the error banner with **Retry**, and
+the list on show stays. The message tells the reasons apart: Steam no longer serves the
+item (removed, hidden or an id that never existed), it belongs to another Steam app, or
+it is an Application wallpaper, which runs Windows programs and is never offered
+(`WorkshopService.lookup`). The panel looks a link up as soon as it is pasted and a bare
+id (six digits or more) when Return or Search is pressed, so typing an id never looks up
+its prefixes; a link typed by hand and ordinary words wait for the usual short pause.
+
+### When Steam changes the page's markup
+
+The wallpapers list reads Steam's browse page through the render context the page
+embeds and the `workshop_browse` query inside it. When Steam renames either (or the
+query's `results`), `decodeBrowse` throws `WorkshopLayoutChanged` instead of the generic
+failure, and `WorkshopService.browse` falls back to a degraded list instead of an
+error: it scans the page's bytes for the ids it names (item links, the
+`publishedfileid` key of a row in its JSON, also in the escaped form of the older
+`JSON.parse` literal, and the attribute of older tiles; `WorkshopService.itemIDs`),
+keeps the first 30 in page order, and asks the public details endpoint for them. The
+details endpoint already drops anything that is not a Wallpaper Engine item, so
+unrelated links the page carries fall away. The page keeps Steam's own filtering and
+order, because the request that fetched it carried them.
+
+The result is marked `isDegraded`: the summary line then says "Steam changed its
+Workshop page, so this list may be incomplete." instead of the result count (`degraded`
+in the snapshot), because the totals are only estimates. A full page of ids suggests
+one more page; a short one is the last, and a page past the first counts the pages
+before it as full. The fallback is logged once per run. The original failure stands,
+and no empty list is shown, when the page names no id, when no id belongs to a
+Wallpaper Engine item, and when the query is there but Steam answered it with a
+failure (`eresult` other than 1: a sign-in or access problem is not a layout change).
+Collections, which are read by the same decoder, are not listed this way: their pages
+carry every collection's children, so the ids they name are not the page's items.
 
 ### Tile thumbnails
 
@@ -273,8 +330,77 @@ measured network speed; the last percent is claimed only by Steam's own success
 line, then validation and import follow. An item Steam lists without a size keeps
 the spinning arc and the speed; if `nettop` is unavailable the tree alone is used.
 
-Downloads never subscribe on Steam and never apply automatically. Use **Show in
+The figure only moves forward. Each launch of SteamCMD starts its own network
+meter, and the staged tree can weigh less later than it did earlier, so the bytes
+and percentage shown never drop below the most the run has shown. After a relaunch
+inside a run the new meter counts only what it fetches, so it is added to what was
+shown when it started (still capped by the tree): the bar holds its place at the
+relaunch and moves on with the first new bytes, even when Steam has little left to
+fetch. Beside the
+speed, the queue rows, the inspector and the activity bar say how long is left
+(for example "4 min left"). The estimate is the bytes gained over the last 20
+seconds, smoothed so one burst does not swing it, and it stays hidden until four
+seconds of history exist, while the pace is under 1 KB/s, at the 99% cap, and for
+an item listed without a size. Seconds show under a minute and a half, minutes
+under an hour and a half, then hours; the figure is capped at 99 hours. With
+several downloads running the activity bar shows the slowest job's time, and only
+when every running job has an estimate. The shared scene resources use SteamCMD's
+own byte counters for the same estimate.
+
+Downloads never subscribe on Steam, and a download applies nothing unless you
+chose [Download and apply](#download-and-apply). Otherwise use **Show in
 library**, then Apply — see [Control panel](control-panel.md#selection-versus-apply).
+
+### Download and apply
+
+Under **Download**, the inspector of a Discover wallpaper offers **Download and
+apply**: one click that downloads the wallpaper and then applies it to the
+display the panel targets when you click. It is offered only where it can work:
+not for a collection, an Application, a wallpaper already in the library or
+with a download or waiting request, and not while the target display is
+disabled or mirroring another. The panel action takes the target from the
+panel and refuses such a display with the usual "selected display is
+unavailable" message before anything is queued. SteamCMD setup, the account and
+consent for shared scene resources come first, exactly as for **Download**.
+
+Applying a wallpaper you did not see arrive would be a surprise, so the choice
+is narrow:
+
+- It lives in memory only (`WorkshopStore.applyIntents`), never in
+  `workshop-requests.json` or `queue.json`: after a relaunch the downloads are
+  restored paused and apply nothing.
+- It is bound to the display, to that display's count of **your own** choices
+  (`UserCommandQueue.userRevision`, which a playlist, an automatic rule or an
+  update reload does not advance) and to an hour (`applyIntentLifetime`).
+  Choosing anything else for that display meanwhile, even while the apply waits
+  its turn behind another command, withdraws it; a choice for another display
+  does not. So do copying, swapping and applying a saved layout, for each
+  display they give a wallpaper to ([display layouts](display-layouts.md#missing-resources-and-failure-recovery)),
+  and clicking **Download and apply** itself (`UserCommandQueue.noteUserChoice`):
+  with two on one display the later click wins whichever wallpaper arrives
+  first, and the earlier one stays in the library with the note that you chose
+  another wallpaper.
+- It survives what a download goes through (waiting for setup, the sign-in, **Change
+  account**, **Try again**) and ends on **Cancel**, on dismissing the request,
+  or when a plain **Download** of the same wallpaper is asked for later.
+
+When the files are in the library (`WorkshopStore.finishInstall`: record the
+install, rescan the library, reload the displays of a replaced wallpaper) the
+apply runs from its own task, so a slow activation never holds a download slot.
+It is your own Apply: origin `user`, in the display's command slot, counted as
+your choice like any Apply. A scene whose shared assets are still downloading
+waits for that job and applies when it finishes; if the job ends without
+installing them, nothing is applied.
+
+While the choice stands the inspector reads **Will apply when the download
+finishes.** When the wallpaper arrives and is not applied, the inspector says why
+in a note, and the wallpaper stays in the library: you chose another wallpaper
+for the display, the download took more than an hour, or the apply was refused
+or failed (a display that went away, a type that cannot be played, a scene
+without its shared assets), with the reason. A note stays until the wallpaper is
+requested again, **Clear finished** in Downloads clears it, or the target
+display shows the wallpaper. The apply is logged like any other
+([diagnostics](diagnostics.md#wallpaper-activations)).
 
 ## SteamCMD setup
 
@@ -359,6 +485,17 @@ work.
   (`sessionConflictDetected`). A session Steam ends while no sibling is running is
   reported as an ordinary failure with a retry. Settings says when the queue is
   running one at a time.
+- **Dropped connections.** A download whose connection drops after sign-in
+  retries itself up to three times before it fails (see [Prompt and retry
+  handling](#prompt-and-retry-handling)); it keeps its slot while it waits.
+- **Sleep and wake.** A connection usually dies with the sleep and SteamCMD says
+  nothing, which used to leave the transfer idle until the five-minute inactivity
+  limit. When the Mac wakes (`NSWorkspace.didWakeNotification`, observed by the
+  manager and passed to every job that holds a slot) a transfer in progress is
+  watched for bytes: if none arrive within about 45 seconds it is restarted
+  through the same retry path as a dropped connection (see [Prompt and retry
+  handling](#prompt-and-retry-handling)); one that keeps receiving is left alone.
+  Jobs that are signing in, requesting, finishing or waiting are not touched.
 - **Cost of parallelism.** Every job signs in separately, a fixed cost per job, so
   extra slots mainly help batches of small items; large items share the link.
   SteamCMD's `@cMaxInitialDownloadSources` is not set.
@@ -366,9 +503,25 @@ work.
   session the runtime preparation, whether a saved sign-in was restored, each
   status change, the sign-in handoff and SteamCMD's exit status, so a stalled
   batch can be diagnosed from **Show download logs**.
-- **Activity bar.** It carries the running job's status, percentage and speed, or
-  the batch's count, mean percentage and summed speed while several run. The queue
-  footer states the slot rule.
+- **Activity bar.** It carries the running job's status, percentage, speed and
+  time left, or the batch's count, mean percentage, summed speed and slowest time
+  left while several run. The queue footer states the slot rule.
+- **Menu bar.** While downloads run, the menu bar menu has a line right under **Control
+  Panel**: **Downloads: 2 in progress, 40%**, or **Downloads: 2 in progress** when a figure
+  cannot be given. It counts the downloads that are moving or waiting for a slot or a
+  sign-in (`WorkshopDownloadManager.inProgressTransfers`): a paused job, a finished,
+  failed or cancelled one and the sign-in that downloads nothing are left out, and so is
+  a job that is pausing, which still holds its slot until its session closes. The percent
+  is the share of the bytes all of them expect that has arrived, so a large download
+  weighs more than a small one (the activity bar averages each job's own percentage
+  instead). It appears only when every counted job reports a size; a job that is queued,
+  signing in or listed without a size leaves the figure out rather than guessing it,
+  and it stops at 99% because only Steam's own success line claims the last percent.
+  The line is built each time the menu opens (`StatusMenuModel.DownloadActivity`), so it
+  is not live while the menu is open, and nothing runs while the menu is closed. It is
+  not offered while the app starts or quits. Choosing it opens Discover, where the
+  downloads button and its popover are; the menu has no per-download rows, cancel or
+  pause actions.
 - **Prompts.** Passwords and Steam Guard codes belong to that exact job; the
   dialog seeds the account per request, so switching requests cannot submit
   another one's sign-in. A submitted secret is cleared from the field immediately
@@ -402,7 +555,9 @@ work.
   terminal state and private SteamCMD runtime files are never included.
   Checkpoint publication retains recoverable pending and previous directories
   until the new checkpoint is published; resume recovers an interrupted
-  publication and cancel removes all three copies. The separately managed saved
+  publication and cancel removes all three copies. The folder holding the queue
+  and the checkpoints is excluded from Time Machine (see [Steam
+  sign-in](#steam-sign-in)). The separately managed saved
   sign-in remains subject to **Keep me signed in**. An interrupted process can
   lose bytes still in transient staging; the persisted job can still be resumed
   and Steam will redownload any missing content.
@@ -494,7 +649,16 @@ download, including after an app restart, restores only that account's cache and
 pre-fills its login name. Cache directories are restricted to `0700` and files to
 `0600`. Submitted passwords and Steam Guard codes are sent only to the private
 terminal and are never saved. Downloaded content, runtime programs and logs are
-not retained in the sign-in cache. Settings → **Library & Steam** shows the
+not retained in the sign-in cache. The sign-in cache is also marked as excluded
+from Time Machine and other backups of this Mac (`ClientPaths.excludeFromBackup`,
+re-applied each time the cache is replaced), so a restore or a new Mac asks for a
+Steam sign-in again; the same mark covers the staging folders of downloads and
+imports in progress, the partial downloads kept under `Downloads/Workshop` and
+the thumbnail caches under `Cache`. Every launch applies the mark to the sign-in
+and partial-download folders that already exist (`ClientPaths.prepareExcludedFolders`,
+which never creates them), so an update protects what an earlier version left
+behind without waiting for the next download or sign-in. The wallpaper library, retained user files
+and scene assets are backed up as before. Settings → **Library & Steam** shows the
 account as **Steam account · Signed in as <name>**; **Log out…** (confirmed
 natively, unavailable while downloads run) or turning the option off removes the
 local cache without signing other Steam devices out. Steam still controls expiry,
@@ -530,21 +694,64 @@ process's network total, the content landed on disk and an asset installation's
 own counts each restart the five minutes when they grow. A pass is also stopped
 after 30 minutes, but only once its bytes have stopped arriving as well, so a slow
 transfer that keeps moving is never cut short. A run that stalls after sign-in
-says it stopped receiving the download; only a stall while signing in points to
-Steam Guard.
+says it stopped receiving the download; only a stall in the run's first sign-in, or
+at a prompt that waits for you, points to Steam Guard. A retry that goes quiet while
+it signs in again is the connection, since Steam had already accepted the sign-in,
+and offers no authentication retry.
 
 After authentication is rejected or times out, **Try again** (or the failed tile's
 retry) starts a new private SteamCMD session for the selected wallpaper or asset
 installation and for the account name still in the form. The prior process is
 stopped and its private staging removed first. Supply a password or a fresh code
 when Steam asks: rejected requests are never reused, approval is never bypassed,
-and retries are never automatic. If Steam reports rate limiting, wait before
-retrying. Workshop content-access errors are a separate failure and offer no
-authentication retry.
+and authentication retries are never automatic. If Steam reports rate limiting,
+wait before retrying. Workshop content-access errors are a separate failure and
+offer no authentication retry.
+
+**Dropped connections.** Once Steam has accepted the sign-in, a Workshop item or
+scene-resource download whose connection drops is retried by itself: three
+times, after about 2, 8 and 30 seconds (each wait varies by up to 20% so parallel
+jobs do not return together), with the status reading "Connection lost; retrying
+(n of 3)…". A drop means Steam reporting a timeout, no connection or an
+unavailable service for a Workshop item, or the five-minute silence described
+above (for scene resources too). A silence is repeated only once, because each
+repeat can cost the whole five minutes again; a download whose connection gives no
+sign of life therefore fails after about ten minutes, and the three retries are for
+drops that Steam reports. The retry is a new SteamCMD launch in the same
+private staging, so Steam resumes from its partial manifests and the saved sign-in
+is still there: no password or Steam Guard prompt appears. The count starts over
+for a preset's base wallpaper. Pause and cancel work during the wait as at any
+other time. Once the retries are spent, the download fails with **Try again** and
+keeps what was downloaded; a reported drop says the connection dropped, where it
+used to be reported with the purchase requirement below. Nothing the user has
+to decide is retried: rejected passwords or Steam Guard, rate limits, access
+denied, a session ended by a sign-in elsewhere, a rejected saved sign-in, a
+generic or unrecognised failure (a removed or private item fails at once), a
+sign-in-only run, a failure or silence before Steam accepted the first sign-in,
+and SteamCMD exiting without confirming the download. Real SteamCMD output for a
+dropped connection has been checked only against a scripted stand-in.
+
+**After sleep.** When the Mac wakes while a transfer is running, the downloader
+starts a 45-second watch (`WorkshopDownloader.noteSystemResume`). A byte counter
+that grows after the wake ends the watch and changes nothing. If the grace period
+passes without a single new byte, the connection is taken to have died with the
+sleep and the pass is relaunched through the retry above, with the same count and
+waits: a wake restart uses up one of the three retries, and when none is left the
+download fails saying the connection stopped responding after the Mac woke. The
+watch belongs to the process that slept, so a relaunch (for any reason) starts
+without it, and a wake while the run is signing in or requesting is ignored. A
+sleep longer than the five-minute limit trips the inactivity check straight
+away, since it compares wall-clock dates (from the code; not observed on a real
+sleep). The 45 seconds is a guess that leaves Wi-Fi time to rejoin; it has not
+been measured on a real sleep.
 
 Parenthesized SteamCMD failures distinguish explicit credential rejection, Steam
 Guard, connection/service failures and rate limits, including compact result names
-such as `ServiceUnavailable` and `RateLimitExceeded`. Unrecognised reasons do not
+such as `ServiceUnavailable` and `RateLimitExceeded`. A download failure line is
+judged only once it is whole, because its reason comes last and decides whether
+the connection or the purchase is blamed: a read that ends at `failed` or inside
+the parentheses waits for the rest, and output that ends without a newline is
+judged when the process exits. Unrecognised reasons do not
 establish bad credentials: the app asks to check connectivity and export [a
 diagnostics report](diagnostics.md#diagnostics-report) if retries keep failing.
 Logs include the failure category, never the raw terminal reason or secrets.
@@ -566,6 +773,30 @@ non-destructive copies.
 A download interrupted by a crash leaves staging behind. The app reclaims only
 staging directories it can prove nothing is writing to.
 
+**Free space.** Before SteamCMD starts, the downloader checks that the disk holding
+the library can take the download, so one that cannot fit fails at once instead of
+stalling for the inactivity limit and blaming the connection. The check runs on
+every start, including a resume and **Try again**, and again before every
+automatic relaunch of SteamCMD (a retry after a dropped connection or a wake, or
+Steam asking to be started again), so a disk that filled during the first pass
+fails the retry with the same message instead of costing another pass. A
+Workshop item needs the part of its listed size not already staged, plus 15% for
+Steam's staging and 64 MiB of margin; whatever a paused or failed attempt kept as
+partial download data is counted from disk, so a retry only needs what is still
+missing. Free space is the figure macOS calls available for important usage,
+which includes space it can reclaim on demand. Shared scene resources have no
+listed size, so they need a fixed 3 GiB less whatever an earlier attempt already
+staged for them (counted from disk like an item's partial data, down to the 64 MiB
+margin): a lower bound meant to block only a clearly full disk, not yet tuned
+against a measured installation. When the disk is short
+the download fails with a message naming what it needs and what is available; its
+partial data is kept and **Try again** checks again. Nothing blocks a download
+whose size Steam does not list, a sign-in-only run, or a disk whose free space
+cannot be read. A preset's base wallpaper (size unknown) is not checked, and
+parallel jobs are checked one by one, not added together, so a bulk **Download the
+ones not in your library** or **Update N wallpapers** can report a shortfall on
+some jobs and not on others.
+
 ### Workshop presets
 
 A Workshop preset (category **Preset**, "Required items" on its page) is not a
@@ -584,8 +815,12 @@ written into the base property of the same name (`null` headings and undeclared
 names are ignored). The renderer reads the preset's files where they land, beside
 the base's `scene.pkg`: a scene mounts its folder under its package, so a property
 naming `files/clip.mp4` finds the clip while packaged files still win. A base
-fetched for a preset is not added to the library. A preset of a preset, or one
-naming itself, is rejected without publishing anything. Updating a preset
+fetched for a preset is not added to the library. If only the base's pass fails
+(after the automatic retries in [Prompt and retry
+handling](#prompt-and-retry-handling)), the error says the preset downloaded but
+its base (Workshop item N) did not, so nothing was added, and gives Steam's own
+reason; the partial download is kept and Try again picks up from it. A preset of
+a preset, or one naming itself, is rejected without publishing anything. Updating a preset
 reassembles it on the current base; an update of the base alone does not reach
 presets already installed. Importing a preset folder works the same way with the
 base found next to it or in the library.
@@ -616,10 +851,36 @@ wallpapers** while any have updates. An update is an ordinary Workshop download
 swaps the new folder in and the old one out in one step (`renamex_np` with
 `RENAME_SWAP`), so the library never lacks the wallpaper and a failure leaves the
 old version in place; the old folder is removed with the download's staging. Only a
-folder that holds an installed wallpaper is replaced: anything else under the
-item's id is left alone and the download says so. An update check still running
+folder that holds a wallpaper's `project.json` (a real file, not a link) is replaced:
+anything else under the item's id is left alone and the download says so. The folder
+need not play, which is what lets a reinstall repair it. An update check still running
 when the download finishes does not mark it outdated again. The item's saved
 options belong to its id and are kept. A display showing it then loads it again:
 applying alone would find nothing changed, so it is removed and applied again
-through the display's command slot. Moving a wallpaper to Trash forgets its update
+through the display's command slot. A wallpaper you are applying on that display
+meanwhile is never replaced by this reload: it gives way, and the new files load
+at the next update or launch. Moving a wallpaper to Trash forgets its update
 and install record.
+
+### Reinstall from Workshop
+
+An installed wallpaper whose id is a Workshop number can be downloaded again
+whether or not its author changed it: the inspector's **Reinstall from
+Workshop…** (the circular arrows beside Trash), and the same words under the
+Compatibility check when its **Installed project** or **Entry resources** check
+is unavailable, such as a missing entry file: the installed files are what a
+fresh copy repairs. The lock screen, target display, native video and shared
+scene resources checks never offer it, because a fresh copy of the wallpaper
+leaves those as they are. It asks first (**Reinstall this wallpaper?**), then
+`WorkshopStore.requestReinstall` asks Steam's details endpoint for the item, so
+what is downloaded is what the Workshop serves now, and hands it to the ordinary
+queue. SteamCMD setup, the account, shared scene resources, progress, checkpoints
+and the swap are the update path above, so the old folder is never deleted
+first: it is swapped out when the new one has arrived whole, a failed download
+leaves it in place, and the item's saved options, user files and collections
+(all kept by id) survive. A display showing it loads the new files. An item
+Steam no longer serves (removed or hidden) says so and nothing changes, and an
+Application item is refused. Nothing is offered while a download for the item is
+running or waiting for setup, and asking again then does nothing: the download is
+where to continue it. A damaged copy whose `project.json` no longer parses does
+not appear in the library at all, so it cannot be reinstalled from the panel.

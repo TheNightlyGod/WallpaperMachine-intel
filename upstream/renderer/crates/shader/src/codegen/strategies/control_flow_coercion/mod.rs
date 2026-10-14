@@ -5,7 +5,7 @@ use crate::tokenizer::{
 };
 /// Array subscript index coercions.
 mod array_index;
-/// Boolean-to-float declaration and compound-assignment coercions.
+/// Boolean-to-float declaration and assignment coercions.
 mod bool_coercion;
 /// Shared expression classifiers.
 mod expr;
@@ -26,7 +26,7 @@ use linkme::distributed_slice;
 
 use self::{
     array_index::FloatArraySubscriptIndex,
-    bool_coercion::{BoolFloatInitializer, FloatTimesBool},
+    bool_coercion::{BoolFloatInitializer, FloatBoolAssignment},
     expr::{NumericCondition, NumericConditionInput},
     for_bounds::IntegerForLoopCast,
     int_initializer::IntFloatInitializer,
@@ -107,9 +107,10 @@ impl Emitable for ControlFlowCoercionStrategy {
             {
                 context.context().fixups.push(fixup);
             }
-            if let Ok(fixup) = (FloatTimesBool {
+            if let Ok(fixup) = (FloatBoolAssignment {
                 statement,
                 facts: &facts,
+                token_facts: &token_facts,
             })
             .build_fixup(cursor)
             {

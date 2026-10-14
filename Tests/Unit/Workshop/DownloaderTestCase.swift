@@ -26,12 +26,16 @@ class DownloaderTestCase: XCTestCase {
   func startDownload(
     in root: URL, username: String = "localtest", itemID: String = "123456",
     libraryName: String = "Library", rememberSession: Bool = true, item: WorkshopItem? = nil,
-    networkMonitor: (any ProcessNetworkMonitoring)? = nil
+    networkMonitor: (any ProcessNetworkMonitoring)? = nil, checkpointDirectory: URL? = nil,
+    freeSpace: (@Sendable (URL) -> Int64?)? = nil, retryDelays: [TimeInterval] = [0, 0, 0],
+    runtimeProvider: (any SteamCMDRuntimeProviding)? = nil
   ) -> WorkshopDownloader {
     let downloader = WorkshopDownloader(
       sessionDirectory: root.appendingPathComponent("SteamSession"),
-      runtimeProvider: ShellRuntimeProvider(),
-      networkMonitor: networkMonitor ?? FixtureNetworkMonitor())
+      runtimeProvider: runtimeProvider ?? ShellRuntimeProvider(),
+      networkMonitor: networkMonitor ?? FixtureNetworkMonitor(),
+      checkpointDirectory: checkpointDirectory,
+      freeSpace: freeSpace ?? WorkshopDownloader.systemFreeSpace, retryDelays: retryDelays)
     let requestedItem = item ?? WorkshopItem(
       id: itemID, title: "Session fixture", creator: "Test", summary: "", previewURL: nil,
       tags: ["Video"], size: 0, subscriptions: 0)
@@ -310,6 +314,28 @@ struct ShellRuntimeProvider: SteamCMDRuntimeProviding {
   }
 }
 
+/// Notes, each time the downloader is about to launch SteamCMD, whether its staging directory
+/// is already kept out of backups. The directory is gone once the download ends.
+final class StagingBackupProbe: SteamCMDRuntimeProviding, @unchecked Sendable {
+  private let base = ShellRuntimeProvider()
+  private let lock = NSLock()
+  private var readings: [Bool] = []
+
+  var excludedAtLaunch: [Bool] { lock.withLock { readings } }
+
+  func resolve(executable: URL) throws -> SteamCMDRuntime { try base.resolve(executable: executable) }
+
+  func prepare(executable: URL, staging: URL) async throws -> URL {
+    try await base.prepare(executable: executable, staging: staging)
+  }
+
+  func validate(at root: URL) async throws {
+    try await base.validate(at: root)
+    let excluded = (try? root.resourceValues(forKeys: [.isExcludedFromBackupKey]))?.isExcludedFromBackup
+    lock.withLock { readings.append(excluded == true) }
+  }
+}
+
 /// The fixture exercises production filesystem/load-command validation, not Apple's trust policy.
 struct FixtureSystemAssessment: SteamCMDProcessRunning {
   func run(
@@ -349,6 +375,26 @@ final class FixtureNetworkMonitor: ProcessNetworkMonitoring {
   func stop() async {
     if running { stopCount += 1 }
     running = false
+  }
+}
+
+/// A disk whose free space the test decides, and which remembers what it was asked about.
+final class FreeSpaceProbe: @unchecked Sendable {
+  private let lock = NSLock()
+  private var free: Int64?
+  private var asked: [URL] = []
+
+  init(_ free: Int64?) { self.free = free }
+
+  var available: Int64? {
+    get { lock.withLock { free } }
+    set { lock.withLock { free = newValue } }
+  }
+
+  var questions: [URL] { lock.withLock { asked } }
+
+  var measure: @Sendable (URL) -> Int64? {
+    { url in self.lock.withLock { self.asked.append(url); return self.free } }
   }
 }
 

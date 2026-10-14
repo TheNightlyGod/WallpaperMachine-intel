@@ -33,6 +33,25 @@ final class LockScreenIdleExitTests: XCTestCase {
     XCTAssertEqual(exits, 1)
   }
 
+  func testOpenConnectionsFollowAcceptsAndCloses() async throws {
+    let idle = makeExit()
+    XCTAssertEqual(idle.openConnections, 0)
+    idle.connectionOpened()
+    idle.connectionOpened()
+    XCTAssertEqual(idle.openConnections, 2)
+    idle.connectionClosed()
+    XCTAssertEqual(idle.openConnections, 1)
+    idle.connectionOpened()
+    XCTAssertEqual(idle.openConnections, 2)
+
+    // A close the count never saw (an invalidation after an interruption) cannot go negative.
+    idle.connectionClosed()
+    idle.connectionClosed()
+    idle.connectionClosed()
+    XCTAssertEqual(idle.openConnections, 0)
+    try await settle()
+  }
+
   func testANewConnectionDuringTheGracePeriodKeepsTheProcess() async throws {
     let idle = makeExit()
     idle.connectionOpened()

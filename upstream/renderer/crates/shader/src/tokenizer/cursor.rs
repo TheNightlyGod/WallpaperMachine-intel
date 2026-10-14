@@ -65,6 +65,22 @@ impl<'tokens> TokenCursor<'tokens> {
         (start < self.tokens.len()).then_some(start)
     }
 
+    /// Finds the first token at or after `start` that can begin a statement.
+    ///
+    /// A JSON annotation trailing the previous declaration and a preprocessor
+    /// directive between statements belong to neither statement. A statement
+    /// read from one takes it for its first token, and a declaration then
+    /// takes it for its type.
+    #[must_use]
+    pub fn next_statement_start(self, start: usize) -> Option<usize> {
+        (start..self.tokens.len()).find(|index| {
+            !matches!(
+                self.tokens[*index].kind(),
+                TypedToken::Annotation(_) | TypedToken::Directive(_)
+            )
+        })
+    }
+
     /// Finds the previous token before `before`.
     #[must_use]
     pub fn previous_non_comment(self, before: usize) -> Option<usize> {
@@ -196,7 +212,7 @@ impl<'tokens> TokenCursor<'tokens> {
     /// semicolon, returning the statement start and semicolon token indices.
     #[must_use]
     pub fn next_semicolon_statement(self, cursor: &mut usize) -> Option<(usize, usize)> {
-        let start = self.next_non_comment(*cursor)?;
+        let start = self.next_statement_start(*cursor)?;
         let mut paren_depth = 0usize;
         let mut bracket_depth = 0usize;
 

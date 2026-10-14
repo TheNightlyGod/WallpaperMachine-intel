@@ -97,6 +97,8 @@ struct ScenePassDescription
     bool                     write_alpha { true };
     bool                     depth_test { false };
     bool                     depth_write { false };
+    /// The faces this draw discards; see `SceneMetalCullMode`.
+    MetalCullMode            cull_mode { kSceneCullMode };
     /// One entry per material texture slot, in slot order. An empty string is
     /// a slot the material leaves unbound, which must stay an empty slot
     /// rather than collapsing and shifting every later binding.

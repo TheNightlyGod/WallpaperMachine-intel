@@ -10,6 +10,10 @@ scripts/lib/dmg.py, which is mounted and verified before its `.sha256` sidecar i
 written. The image is for local use; LICENSING.md records why it is not cleared for
 distribution.
 
+The signed bundle, and again the copy inside the mounted image, must still carry what the
+lock screen extension and the permission prompts need: the extension's sandbox and
+entitlements, the Info.plist keys, and a matching signing team (scripts/lib/bundle_contract.py).
+
 Every bundled dylib keeps the minimum macOS it was built for, which for a Homebrew
 bottle is the host's release. When one is newer than the app's deployment target the
 bundle's `LSMinimumSystemVersion` is raised to match, so macOS refuses to open it
@@ -26,7 +30,7 @@ import shutil
 import subprocess
 import sys
 
-from lib import dmg
+from lib import bundle_contract, dmg
 from lib.glyphs import markers
 from lib.paths import RENDERER, ROOT, app_bundle
 
@@ -68,6 +72,13 @@ def sign(file, identity, *options):
         command.append("--timestamp=none")
     run([*command, *options, file])
 
+
+def report(warnings, reported):
+    """Print the warnings not shown yet: the image check reads the same signatures the bundle check just did."""
+    for warning in warnings:
+        if warning not in reported:
+            reported.add(warning)
+            print(f"{MARK.warn} {warning}")
 
 
 def dependencies(file):
@@ -306,6 +317,10 @@ def package(args):
         sign(extension, args.sign_identity, "--preserve-metadata=entitlements")
     sign(app, args.sign_identity, "--options", "0")
     run(["codesign", "--verify", "--deep", "--strict", app])
+    # A valid signature says nothing about what it signs: re-signing can drop an entitlement
+    # or a key silently, and the lock screen then fails on the user's Mac, not here.
+    reported = set()
+    report(bundle_contract.verify_bundle(app), reported)
     for file in [binary, *extension_binaries, *frameworks.glob("*.dylib")]:
         for dependency in dependencies(file):
             if dependency.startswith(str(prefix)):
@@ -316,7 +331,7 @@ def package(args):
     image = dmg.build(app, app.parent / dmg.image_name(version), dmg.volume_name(version), icon=resources / "AppIcon.icns")
     # Prove the image, not the build tree: users and the in-app updater install
     # exactly this file, and a bundle that does not survive the round trip is not one.
-    dmg.verify(image, version)
+    report(dmg.verify(image, version), reported)
     checksum = image.with_name(image.name + ".sha256")
     checksum.write_text(f"{sha256(image)}  {image.name}\n")
     if args.install:
@@ -349,7 +364,7 @@ def main():
     args = parser.parse_args()
     try:
         package(args)
-    except (PackagingError, dmg.DiskImageError) as error:
+    except (PackagingError, dmg.DiskImageError, bundle_contract.BundleContractError) as error:
         print(f"{MARK.missing} {error}", file=sys.stderr)
         return 1
     return 0

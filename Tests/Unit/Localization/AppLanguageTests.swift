@@ -73,6 +73,30 @@ final class AppLanguageTests: XCTestCase {
     XCTAssertEqual(store.effective.tag, "zh-Hans")
   }
 
+  func testEveryShippedLanguageNamesItsWallpaperEngineLocale() throws {
+    let codes = AppLanguage.supported.map(\.wallpaperEngineLocale)
+    XCTAssertEqual(Set(codes).count, codes.count, "Two languages cannot read the same label table first")
+    for code in codes {
+      XCTAssertNotNil(
+        code.range(of: "^[a-z]{2}-[a-z]{2,3}$", options: .regularExpression),
+        "\(code) is not a Wallpaper Engine locale code")
+    }
+    let expected = ["en": "en-us", "zh-Hans": "zh-chs", "zh-Hant": "zh-cht", "ja": "ja-jp"]
+    XCTAssertEqual(
+      Dictionary(uniqueKeysWithValues: AppLanguage.supported.map { ($0.tag, $0.wallpaperEngineLocale) }),
+      expected)
+
+    // Whatever the language, a wallpaper that only ships English still gets read.
+    for language in AppLanguage.supported {
+      let locales = language.labelLocales
+      XCTAssertEqual(locales.first, language.wallpaperEngineLocale, language.tag)
+      XCTAssertEqual(locales.last, "en-us", language.tag)
+      XCTAssertEqual(Set(locales).count, locales.count, "\(language.tag): repeated locale")
+    }
+    XCTAssertEqual(AppLanguage.english.labelLocales, ["en-us"])
+    XCTAssertEqual(AppLanguage.named("ja")?.labelLocales, ["ja-jp", "en-us"])
+  }
+
   func testSnapshotOffersEveryShippedLanguageByItsOwnName() throws {
     let suite = try Suite(self)
     let store = AppLanguageStore(defaults: suite.defaults, systemLanguages: ["en"])

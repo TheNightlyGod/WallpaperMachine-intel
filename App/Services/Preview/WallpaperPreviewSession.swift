@@ -8,6 +8,9 @@ protocol WallpaperPreviewSurface: AnyObject {
     func start() async throws
     func setPaused(_ paused: Bool) throws
     func setMuted(_ muted: Bool) throws
+    /// Shows newer property values on the running preview without starting it again. `json`
+    /// has the same shape as the request's `propertiesJSON`.
+    func applyProperties(_ json: String) throws
     func stop()
 }
 
@@ -26,6 +29,8 @@ final class WallpaperPreviewSession {
     private let load: Load
     private let makeSurface: Factory
     private let sleep: @Sendable (Duration) async throws -> Void
+    private let refreshes: PropertyPreviewScheduler
+    private let warn: @MainActor (String) -> Void
     private(set) var phase: Phase = .closed
     private(set) var title = ""
     private(set) var selection: Selection?
@@ -34,18 +39,35 @@ final class WallpaperPreviewSession {
     private(set) var visible = false
     private(set) var request: WallpaperPreviewRequest?
     private(set) var surface: (any WallpaperPreviewSurface)?
+    /// The draft picks a picture or file other than the one the preview started with. A
+    /// preview reads those only when it starts, so **Reload preview** shows them.
+    private(set) var needsReload = false
     private var operation: Task<Void, Never>?
     private var deadline: Task<Void, Never>?
     private var generation: UInt64 = 0
     private var ready = false
+    /// The draft changed since the surface last took it in.
+    private var propertiesStale = false
+    /// What the surface shows, in the form `LivePropertyPayload` writes; nil until it is changed.
+    private var shownProperties: String?
+    /// The last problem logged for a refresh, so one that keeps recurring is logged once.
+    private var lastRefreshProblem: String?
     var onChange: (() -> Void)?
     var onSurface: ((NSView?) -> Void)?
 
+    private static let refreshKey = "properties"
+
+    /// `refreshes` waits for a draft to settle before the preview follows it; `warn` receives
+    /// what could not be shown, which never fails the preview.
     init(load: @escaping Load, makeSurface: @escaping Factory,
-         sleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }) {
+         sleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
+         refreshes: PropertyPreviewScheduler? = nil,
+         warn: @escaping @MainActor (String) -> Void = { AppLog.warn($0) }) {
         self.load = load
         self.makeSurface = makeSurface
         self.sleep = sleep
+        self.refreshes = refreshes ?? PropertyPreviewScheduler()
+        self.warn = warn
     }
 
     func open(_ selection: Selection) {
@@ -92,6 +114,26 @@ final class WallpaperPreviewSession {
         }
         if !visible { deadline?.cancel(); deadline = nil }
         else if !ready, surface != nil, phase == .loading { armDeadline(ticket: generation) }
+        if visible { refreshPropertiesIfNeeded() }
+    }
+
+    /// The property draft of `wallpaperID` changed. The preview follows it once the edits stop,
+    /// when it is showing and ready; a hidden or still loading preview takes the newest draft
+    /// once, when it can. Other wallpapers, a closed or failed preview, and a video (no property
+    /// reaches its player) are left alone.
+    ///
+    /// `whileDragging` says a slider or colour is being dragged, whose steps arrive spaced
+    /// already and never stop for the quiet period an edit waits out, so the preview follows the
+    /// newest one as soon as it has taken the one before.
+    func propertiesDidChange(wallpaperID: String, whileDragging: Bool = false) {
+        guard let selection, selection.wallpaperID == wallpaperID else { return }
+        switch phase {
+        case .closed, .failed: return
+        case .loading, .playing, .paused: break
+        }
+        if request?.kind == .video { return }
+        propertiesStale = true
+        refreshPropertiesIfNeeded(delay: whileDragging ? .zero : nil)
     }
 
     func togglePause() {
@@ -147,6 +189,56 @@ final class WallpaperPreviewSession {
         deadline = nil
         ready = true
         updatePhase()
+        refreshPropertiesIfNeeded()
+    }
+
+    private func refreshPropertiesIfNeeded(delay: Duration? = nil) {
+        guard propertiesStale, ready, visible, surface != nil else { return }
+        let ticket = generation
+        refreshes.schedule(key: Self.refreshKey, delay: delay) { [weak self] in await self?.refreshProperties(ticket: ticket) }
+    }
+
+    /// Reads the draft again and shows what changed. Open-time text overrides are dropped: they
+    /// describe what was typed when the preview opened, and a later edit must win over them.
+    private func refreshProperties(ticket: UInt64) async {
+        guard ticket == generation, propertiesStale, visible, ready, var latestSelection = selection else { return }
+        propertiesStale = false
+        latestSelection.textOverrides = [:]
+        do {
+            let latest = try await load(latestSelection)
+            try Task.checkCancellation()
+            guard ticket == generation, let surface, let started = request else { return }
+            // Hidden meanwhile: the window does no work, and the next time it shows takes the draft.
+            guard visible else { propertiesStale = true; return }
+            let frozen = started.frozenPropertyIDs.union(latest.frozenPropertyIDs)
+            guard let merged = LivePropertyPayload.merge(started: started.propertiesJSON, latest: latest.propertiesJSON,
+                                                         frozen: frozen) else {
+                reportRefreshProblem("the properties could not be read")
+                return
+            }
+            if needsReload != merged.frozenChanged {
+                needsReload = merged.frozenChanged
+                onChange?()
+            }
+            let shown = shownProperties ?? LivePropertyPayload.canonical(started.propertiesJSON)
+            if merged.json != shown {
+                try surface.applyProperties(merged.json)
+                shownProperties = merged.json
+            }
+            lastRefreshProblem = nil
+        } catch is CancellationError {
+            return
+        } catch {
+            guard ticket == generation else { return }
+            // The preview keeps playing what it has; the next edit tries again.
+            reportRefreshProblem(error.localizedDescription)
+        }
+    }
+
+    private func reportRefreshProblem(_ message: String) {
+        guard lastRefreshProblem != message else { return }
+        lastRefreshProblem = message
+        warn("wallpaper preview: property edits were not shown: \(message)")
     }
 
     private func updatePhase() {
@@ -178,6 +270,11 @@ final class WallpaperPreviewSession {
         operation = nil
         deadline?.cancel()
         deadline = nil
+        refreshes.cancel(Self.refreshKey)
+        propertiesStale = false
+        shownProperties = nil
+        lastRefreshProblem = nil
+        needsReload = false
         surface?.onReady = nil
         surface?.onFailure = nil
         surface?.stop()

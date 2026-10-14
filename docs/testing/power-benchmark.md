@@ -93,7 +93,9 @@ A desktop run (which needs authorization, see [Authorization
 boundary](#authorization-boundary)) is taken serially, with the display set and
 power source unchanged across a comparison: quit the app with an Apple Event and
 wait until it has exited (`open` can fail with `-600` for a few seconds after
-that), launch with `open --env WALLPAPER_MACHINE_DIAGNOSTICS=60 --env
+that; `kill -TERM <pid>` quits it the same way, but a second signal ends it at once,
+perhaps before the desktop picture is restored, so wait for the exit), launch with
+`open --env WALLPAPER_MACHINE_DIAGNOSTICS=60 --env
 WALLPAPER_MACHINE_DIAGNOSTICS_DELAY=120`, and start a 60-second measurement 120
 seconds after launch. These independently started windows approximately overlap;
 the delay alone does not synchronize their boundaries. The diagnostics report's
@@ -104,8 +106,12 @@ actual power window. Neither the configured ceiling nor timer-wakeup counts
 provide elapsed time or displayed-frame counts.
 
 The app opens its control panel at launch, so each such run includes it, and
-animated GIF previews on the library page add WebContent and WindowServer work;
-say whether the panel was open. System power includes every other application,
+animated GIF previews add WebContent and WindowServer work (Discover animates the
+tiles on screen; Installed shows still covers and animates only the tile under
+the pointer or keyboard focus, see [control panel](../features/control-panel.md));
+say whether the panel was open and on which tab. The saving from Installed's
+still covers has not been measured: compare a run with the panel open on
+Installed against a build before the change. System power includes every other application,
 so it is only comparable against a paired baseline taken minutes from the run;
 the app's own CPU and GPU percentages are the steadier signal.
 
@@ -138,7 +144,10 @@ not comparable with later ones.
 For an app-level comparison, identify the exact executable PID and sum only its
 resource coalition (the app and its XPC/WebKit helpers), not every WebContent
 process on the machine. Reject windows containing another WallpaperMachine
-instance or a change in the tested presentation state. A closed-panel sample
+instance or a change in the tested presentation state. A second copy opened on
+the same library hands over to the first (or shows an alert when it is another
+copy of the app) instead of running beside it, so only copies given separate
+isolated `WALLPAPER_MACHINE_HOME` directories can run at once. A closed-panel sample
 must remain without an on-screen panel throughout; it is not a playback test.
 
 `proc_pid_rusage` supplies resident bytes and physical-footprint bytes. Report
@@ -279,7 +288,14 @@ one aggregated report, headed by how long the window actually ran
 one when `WALLPAPER_MACHINE_DIAGNOSTICS=<seconds>` is set in the environment,
 `WALLPAPER_MACHINE_DIAGNOSTICS_DELAY=<seconds>` after launch when that is set
 too; a value that is not whole seconds starts nothing. Without the first
-variable nothing is started, nothing counts and no timer exists.
+variable this starts nothing, counts nothing and creates no timer.
+
+The renderer's counters have one other user: when **Send performance data** is on,
+a 60 s [frame window](../features/telemetry.md#frame-windows) every four hours turns
+the renderer half on and off again. A run with `WALLPAPER_MACHINE_DIAGNOSTICS` in
+its environment opens no such window, so a measured window is never mixed with one.
+For any other measurement, record in the manifest that **Send performance data** was
+off.
 
 The counters exist to answer one question per condition: did the work for a
 surface nobody can see actually stop? A count that keeps rising for an occluded
@@ -303,7 +319,9 @@ decode-correctness defect.
 |---|---|---|
 | Settings → Performance → Advanced → Experimental → Content pacing (`experimental.content_pacing`) | Tick at the configured ceiling | Pace video to its observed content rate |
 | `WALLPAPER_MACHINE_FEEDBACK_COPIES=1` | Native Metal trades textures for a copy a layer only makes to read the image it draws into | Every such copy is made as a copy; the picture is byte-identical either way |
+| `WALLPAPER_MACHINE_METAL_TARGET_SHARING=0` | Native Metal lets targets never alive together share images, and traded copies share a small set | Every target keeps an image of its own; the picture is byte-identical either way, the target memory is not |
 | Settings → Performance → Advanced → Video playback (`video_backend` in the app config) | Compatibility: every wallpaper on the scene engine | Native video preferred: eligible plain local videos on the platform player |
+| Settings → Performance → Advanced → Scene renderer (`scene_renderer` in the app config) | See [scene rendering](../features/scene-rendering.md#scene-renderer) | The other renderer for every scene it can draw; headless, `LocalProjectEnergyIsMeasuredHeadlessly` ([renderer.md](renderer.md#ccmake-test-binaries)) runs one scene on either |
 
 `WALLPAPER_MACHINE_CONTENT_PACING=1` switches content pacing on in headless
 probes. An explicit setting wins over it and the app pushes its saved value at
@@ -336,11 +354,17 @@ it and is never claimed to be one with no pre-buffering.
 | T1 | Single display, static or low-frequency scene | Idle ticks and dirty propagation |
 | T2 | 1080p/4K/ultrawide video at 24/30/60 FPS | Decode, conversion, frame rate, pool budget |
 | T3 | Simple, multi-layer post-processed, particle and video-texture scenes | CPU versus GPU versus bandwidth |
-| T4 | Web wallpaper with and without a cooperating pause listener | Whether host-side suspension is real |
+| T4 | Web wallpaper with and without a cooperating pause listener, covered and paused (Play/Pause, battery Pause) | Whether host-side suspension is real; a paused page is detached after a 3 s first-frame grace, so measure after it (not yet run) |
 | T5 | Two displays, one visible one occluded, then both occluded | Per-surface policy and shared consumers |
 | T6 | Lock screen, unlock, display sleep, system preview | Joint app/extension presentation ownership |
 | T7 | Rapid wallpaper switching, hot-plug, window and resolution changes | Reclaim, recovery, leaks |
 | T8 | Broken input, unsupported format, repeated web crashes | Whether error paths keep burning power |
+| T9 | One scene with Send performance data on, across a frame window, against off | What telemetry's 60 s counter window costs (not yet run) |
+
+Every condition is measured with **Send performance data** off, or with
+`WALLPAPER_MACHINE_DIAGNOSTICS` set, which keeps telemetry's frame windows closed.
+The cost of those windows themselves (T9, not yet run) is the same scene with the
+switch on against off, over a window that contains one.
 
 Wallpaper material comes from the local corpus
 ([wallpaper-corpus.md](wallpaper-corpus.md)) or synthetic fixtures. Copyrighted

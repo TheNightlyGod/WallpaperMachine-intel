@@ -518,4 +518,9 @@ void WPShaderValueUpdater::SetNodeData(void* nodeAddr, uint32_t material_slot,
     m_nodeDataMap[nodeAddr][material_slot] = data;
 }
 
+void WPShaderValueUpdater::ForgetNode(SceneNode* node) {
+    m_nodeDataMap.erase(node);
+    m_nodeUniformInfoMap.erase(node);
+}
+
 void WPShaderValueUpdater::SetTexelSize(float x, float y) { m_texelSize = { x, y }; }

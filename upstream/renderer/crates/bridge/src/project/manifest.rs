@@ -5,11 +5,16 @@
 //! `title`, raw HTML description, `preview` filename, and every
 //! `general.properties` entry as a `ProjectProperty` for the editor panel.
 
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use serde_json::Value;
 use wallpaper_core::project::WallpaperProjectType;
 
+use super::condition::Condition;
+use super::localization::ProjectLocalization;
 use super::property::{
     ComboOption, DirectoryMode, FileFilter, FileMedia, PropertyKind, PropertyMetadata,
     PropertyValue,
@@ -27,6 +32,10 @@ pub struct ProjectModel {
     /// project directory.
     pub entry_file: Option<String>,
     pub properties: Vec<ProjectProperty>,
+    /// The project's own translated label text (`general.localization`).
+    /// Shared rather than owned: editing a slider clones the whole model for
+    /// every tick, and a real table runs to hundreds of kilobytes.
+    pub localization: Arc<ProjectLocalization>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -88,9 +97,10 @@ impl ProjectModel {
             .filter(|file| !file.is_empty())
             .map(str::to_string);
 
-        let properties = obj
-            .get("general")
-            .and_then(Value::as_object)
+        let general = obj.get("general").and_then(Value::as_object);
+        let localization = general.map(ProjectLocalization::from_general).unwrap_or_default();
+
+        let properties = general
             .and_then(|g| g.get("properties"))
             .and_then(Value::as_object)
             .map(|properties| {
@@ -271,7 +281,21 @@ impl ProjectModel {
             preview_file,
             entry_file,
             properties,
+            localization: Arc::new(localization),
         })
+    }
+
+    /// How many properties carry a visibility rule that cannot be read. Such a
+    /// property is shown rather than hidden, so a wrongly shown control is
+    /// explained by this count. A blank rule is no rule at all.
+    #[must_use]
+    pub fn unreadable_condition_count(&self) -> usize {
+        self.properties
+            .iter()
+            .filter_map(|property| property.condition.as_deref())
+            .filter(|condition| !condition.trim().is_empty())
+            .filter(|condition| Condition::parse(condition).is_err())
+            .count()
     }
 
     /// Loads and parses a project, resolving `preview_file` against the
@@ -365,6 +389,60 @@ mod tests {
         assert_eq!(m.properties[0].id, "combo1");
         assert_eq!(m.properties[1].id, "slide1");
         assert_eq!(m.properties[2].id, "bool1");
+    }
+
+    #[test]
+    fn unreadable_condition_count_ignores_blank_and_readable_rules() {
+        let model = ProjectModel::parse(
+            "1",
+            r#"{
+            "type":"scene","general":{"properties":{
+                "none":{"type":"bool","value":true,"text":"none"},
+                "blank":{"type":"bool","value":true,"text":"blank","condition":""},
+                "spaces":{"type":"bool","value":true,"text":"spaces","condition":"   "},
+                "plain":{"type":"bool","value":true,"text":"plain","condition":"none.value"},
+                "grouped":{"type":"bool","value":true,"text":"grouped","condition":"(none.value || blank.value) && [1, 2].includes(plain.value)"},
+                "call":{"type":"bool","value":true,"text":"call","condition":"Math.abs(none.value)"},
+                "pair":{"type":"bool","value":true,"text":"pair","condition":"none.value == blank.value"}
+            }}
+        }"#,
+        )
+        .unwrap();
+        assert_eq!(model.unreadable_condition_count(), 2);
+    }
+
+    #[test]
+    fn project_without_localization_has_an_empty_table() {
+        let plain = ProjectModel::parse("1", MIN_JSON).unwrap();
+        assert!(plain.localization.is_empty());
+        let no_general = ProjectModel::parse("1", r#"{"type":"scene"}"#).unwrap();
+        assert!(no_general.localization.is_empty());
+        let wrong_shape =
+            ProjectModel::parse("1", r#"{"type":"scene","general":{"localization":[1,2]}}"#)
+                .unwrap();
+        assert!(wrong_shape.localization.is_empty());
+    }
+
+    #[test]
+    fn project_localization_is_read_from_general_and_shared_by_clones() {
+        let model = ProjectModel::parse(
+            "1",
+            r#"{
+            "type":"scene","general":{
+                "localization":{"en-us":{"ui_size":"Size"},"zh-chs":{"ui_size":"大小"}},
+                "properties":{"size":{"type":"slider","text":"ui_size","value":1}}
+            }
+        }"#,
+        )
+        .unwrap();
+        let chinese = vec!["zh-chs".to_owned(), "en-us".to_owned()];
+        assert_eq!(model.localization.resolve("ui_size", &chinese), Some("大小"));
+        // Properties are read as before; the label stays the project's token.
+        assert_eq!(model.properties[0].label_html, "ui_size");
+        // Editing a property clones the model on every change; the table, which
+        // can be hundreds of kilobytes, must not be copied with it.
+        let copy = model.clone();
+        assert!(Arc::ptr_eq(&model.localization, &copy.localization));
     }
 
     #[test]

@@ -28,9 +28,12 @@ impl<'src> PreprocessorDirective<'src> {
             .trim()
             .strip_prefix('#')
             .map_or(text.trim(), str::trim_start);
-        let (keyword, raw_body) = trimmed
-            .split_once(char::is_whitespace)
-            .map_or((trimmed, ""), |(name, rest)| (name, rest.trim_start()));
+        // The keyword is an identifier, so it ends at the first other
+        // character: `#if(A == B)` and `#endif// note` are conditionals too.
+        let keyword_end = trimmed
+            .find(|character: char| !(character == '_' || character.is_ascii_alphanumeric()))
+            .unwrap_or(trimmed.len());
+        let (keyword, raw_body) = (&trimmed[..keyword_end], trimmed[keyword_end..].trim_start());
         let name = DirectiveName {
             raw: trimmed,
             source: keyword,
@@ -696,7 +699,9 @@ impl<'src> DirectiveBody<'src> {
             if character == '"' && !previous_was_escape {
                 in_quotes = !in_quotes;
             }
-            if !in_quotes && character == '<' {
+            // Only an `#include <path>` body opens angle brackets; elsewhere
+            // `<` is a comparison and must not hide a trailing comment.
+            if !in_quotes && index == 0 && character == '<' {
                 in_angles = true;
             }
             if !in_quotes && character == '>' {

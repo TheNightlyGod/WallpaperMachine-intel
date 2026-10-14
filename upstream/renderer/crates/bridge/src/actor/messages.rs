@@ -5,8 +5,8 @@ use crate::{
     api::{
         BridgeAppSnapshot, BridgeDisplayMode, BridgeDisplayMutationBundle,
         BridgeDisplaySettingsRow, BridgeError, BridgeLibrarySnapshot, BridgeLockScreenScene,
-        BridgeMonitorInformationSnapshot, BridgePlaybackState, BridgePropertyValue,
-        BridgeNativeVideoWallpaper, BridgeRendererCountersReport,
+        BridgeMonitorInformationSnapshot, BridgePlaybackState, BridgePropertyEdit, BridgePropertyValue,
+        BridgeNativeVideoWallpaper, BridgeQualityThrottleCause, BridgeRendererCountersReport,
         BridgeScalingMode, BridgeSettingsSnapshot, BridgeSnapshotBundle, BridgeWallpaperEntry,
         BridgeWallpaperKind, BridgeWallpaperMutationBundle, BridgeWallpaperOptionsSnapshot,
         BridgeWebWallpaper,
@@ -34,6 +34,8 @@ pub struct GetLockScreenScenes;
 pub struct GetWallpaperPreview {
     pub wallpaper_id: String,
     pub display_id: String,
+    /// Values shown without being saved, made to the draft for this export only.
+    pub pending: Vec<BridgePropertyEdit>,
 }
 
 pub struct GetWebWallpapers;
@@ -86,6 +88,11 @@ pub struct SelectWallpaper {
 pub struct RefreshLibrary;
 
 pub struct RefreshDisplays;
+
+/// Opens a wallpaper that the load journal holds back, at the user's request.
+pub struct ReleaseHeldWallpaper {
+    pub wallpaper_id: String,
+}
 
 pub struct PollMousePosition;
 
@@ -178,6 +185,33 @@ pub struct SetScalingFactor {
     pub factor: f64,
 }
 
+/// Moves a wallpaper on one display. An axis left as `None` keeps its saved
+/// value.
+pub struct SetDisplayPosition {
+    pub wallpaper_id: String,
+    pub display_id: String,
+    pub pan_x: Option<f64>,
+    pub pan_y: Option<f64>,
+}
+
+/// Shows a wallpaper at a position on one display while a drag toward it is
+/// under way. Nothing is saved; an axis left as `None` keeps its saved value.
+pub struct PreviewDisplayPosition {
+    pub wallpaper_id: String,
+    pub display_id: String,
+    pub pan_x: Option<f64>,
+    pub pan_y: Option<f64>,
+}
+
+/// Shows a wallpaper's pending property edits on every scene that draws it
+/// (`show`), or puts back what is saved (`!show`). Nothing is saved.
+pub struct PreviewWallpaperProperties {
+    pub wallpaper_id: String,
+    pub show: bool,
+    /// Values shown without being saved, made to the draft for this call only.
+    pub pending: Vec<BridgePropertyEdit>,
+}
+
 pub struct SetTargetFps {
     pub wallpaper_id: String,
     pub display_id: String,
@@ -213,6 +247,10 @@ pub struct SetAudioSuppressed {
     pub suppressed: bool,
 }
 
+pub struct SetLabelLanguages {
+    pub locales: Vec<String>,
+}
+
 pub struct SetRendererCountersEnabled {
     pub enabled: bool,
 }
@@ -233,6 +271,10 @@ pub struct SetRenderScale {
 
 pub struct SetFrameRateCap {
     pub cap: Option<u32>,
+}
+
+pub struct SetQualityThrottle {
+    pub causes: Vec<BridgeQualityThrottleCause>,
 }
 
 pub struct SetBatteryQualityProfile {
@@ -356,8 +398,16 @@ pub struct RestorePropertyDefault {
     pub property_id: String,
 }
 
+pub struct RestoreAllPropertyDefaults {
+    pub wallpaper_id: String,
+}
+
 pub struct ApplyWallpaperOptions {
     pub wallpaper_id: String,
+    /// The user chose this (Apply, a click on a tile, Try again), as opposed
+    /// to a playlist, a rule or a schedule moving a display. Only the user's
+    /// apply lifts the load journal's hold on the wallpaper.
+    pub user_initiated: bool,
 }
 
 pub struct CancelWallpaperOptions {
@@ -387,6 +437,9 @@ pub struct CompleteRestoreAfterReconcile {
 pub struct ReconcileFailed {
     pub error: BridgeError,
     pub generation: u64,
+    /// A wallpaper whose hold the failed apply lifted so that the reconcile
+    /// would plan it. Nothing was opened, so the hold goes back.
+    pub restore_hold: Option<String>,
 }
 
 pub struct CompleteAudioResponse {
@@ -409,6 +462,7 @@ pub type TestMutationReply = Result<(), BridgeError>;
 pub type SelectWallpaperReply = AllSnapshotsReply;
 pub type RefreshLibraryReply = AllSnapshotsReply;
 pub type RefreshDisplaysReply = AllSnapshotsReply;
+pub type ReleaseHeldWallpaperReply = AllSnapshotsReply;
 pub type PollMousePositionReply = Result<(), BridgeError>;
 pub type SetFilterReply = AllSnapshotsReply;
 pub type DisplayMutationReply = Result<BridgeDisplayMutationBundle, crate::api::BridgeError>;
@@ -428,6 +482,7 @@ pub type SetPresentationSuspendedReply = Result<(), BridgeError>;
 pub type SetDisplayPresentationSuspendedReply = Result<(), BridgeError>;
 pub type SetPresentationUnloadedReply = AllSnapshotsReply;
 pub type SetAudioSuppressedReply = AllSnapshotsReply;
+pub type SetLabelLanguagesReply = Result<(), BridgeError>;
 pub type SetPowerSourceReply = AllSnapshotsReply;
 pub type InitialFrameReadyReply = AllSnapshotsReply;
 pub type ShutdownReply = Result<(), BridgeError>;
@@ -439,6 +494,7 @@ pub type RendererCountersReply = Result<BridgeRendererCountersReport, BridgeErro
 pub type SetVideoBackendReply = AllSnapshotsReply;
 pub type SetRenderScaleReply = AllSnapshotsReply;
 pub type SetFrameRateCapReply = AllSnapshotsReply;
+pub type SetQualityThrottleReply = AllSnapshotsReply;
 pub type SetBatteryQualityProfileReply = AllSnapshotsReply;
 pub type SetContentPacingEnabledReply = AllSnapshotsReply;
 pub type SetSharedVideoDecodeEnabledReply = AllSnapshotsReply;

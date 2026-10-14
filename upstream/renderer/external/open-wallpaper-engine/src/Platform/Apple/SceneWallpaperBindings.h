@@ -29,6 +29,8 @@ typedef void (*owe_pointer_input_callback)(void* user_data, bool accepts_pointer
 typedef void (*owe_pointer_input_callback_drop)(void* user_data);
 typedef void (*owe_audio_requirement_callback)(void* user_data, bool requires_audio);
 typedef void (*owe_audio_requirement_callback_drop)(void* user_data);
+typedef void (*owe_render_failure_callback)(void* user_data);
+typedef void (*owe_render_failure_callback_drop)(void* user_data);
 
 /*
  * One `engine.openUserShortcut` request: the property the wallpaper named and
@@ -124,6 +126,26 @@ int owe_scene_wallpaper_set_paused(owe_scene_wallpaper* scene, bool paused);
  */
 int owe_scene_wallpaper_set_render_scale(owe_scene_wallpaper* scene, double scale);
 
+/*
+ * Sets where the presented wallpaper sits inside the slack the display leaves
+ * around it, as one fraction per axis: 0 puts the wallpaper's leading edge on
+ * the display's (left, and top), 1 its trailing edge (right, and bottom), 0.5
+ * centres it, which is also the default. The slack is the display minus the
+ * wallpaper, so one fraction places a wallpaper that leaves bars (Fit,
+ * Original size, a scale factor below 1) and one that overflows the display
+ * (Fill, a scale factor above 1) alike. An axis with no slack, such as Stretch
+ * at a scale factor of 1, is unmoved by any value.
+ *
+ * Both values must be finite; they are clamped to [0, 1]. Applied live: the
+ * project is not reparsed, nothing is rebuilt and video keeps playing, and the
+ * pointer, the Mission Control picture and the drawable all follow it. Safe
+ * before the first frame: the value is retained and applied once the surface
+ * exists, and it survives surface reconfiguration and a change of renderer.
+ *
+ * Returns 0 on success, non-zero on failure.
+ */
+int owe_scene_wallpaper_set_framing(owe_scene_wallpaper* scene, double pan_x, double pan_y);
+
 /* Direct first-frame notification forwarding from SceneWallpaper. */
 int owe_scene_wallpaper_set_first_frame_callback(owe_scene_wallpaper* scene,
                                                  owe_first_frame_callback callback,
@@ -170,6 +192,23 @@ int owe_scene_wallpaper_set_user_shortcut_callback(
 int owe_scene_wallpaper_set_audio_requirement_callback(
     owe_scene_wallpaper* scene, owe_audio_requirement_callback callback, void* user_data,
     owe_audio_requirement_callback_drop drop_user_data);
+
+/*
+ * Reports, on the native main looper, that a scene which had already presented
+ * a frame failed one and stopped drawing (a swapchain, acquire, present or
+ * submit the surface could not take). One call per failure, no payload: the
+ * surface health reading says what failed, and rendering stays stopped until
+ * the host rebuilds the surface (begin/finish_surface_reconfigure) or the scene.
+ * Not replayed when installed, and not raised for a failure before the first
+ * presented frame, which the host's own first-frame wait already covers.
+ * Optional: a host that does not install it is unaffected. Requires an
+ * initialized scene. Success transfers user_data ownership to drop_user_data;
+ * failure does not. Replacing/clearing keeps old userdata alive until its last
+ * queued/in-flight callback is released. A null callback clears notifications.
+ */
+int owe_scene_wallpaper_set_render_failure_callback(
+    owe_scene_wallpaper* scene, owe_render_failure_callback callback, void* user_data,
+    owe_render_failure_callback_drop drop_user_data);
 
 /* Direct mouse/pointer forwarding to SceneWallpaper. Coordinates are normalized canvas space. */
 int owe_scene_wallpaper_mouse_input(owe_scene_wallpaper* scene, double x, double y);
@@ -220,6 +259,12 @@ const char* owe_property_media_integration_enabled(void);
 const char* owe_property_force_shader_refresh(void);
 const char* owe_property_project_property_override_json(void);
 const char* owe_property_project_property_reset(void);
+/*
+ * String property taking a flat JSON object: the whole property state to show on
+ * the running scene without loading it again. It is never remembered, so any
+ * later load shows the saved look. Set it with owe_scene_wallpaper_set_property_string.
+ */
+const char* owe_property_project_property_preview_json(void);
 
 /*
  * Process-wide playback options, applied to every renderer scene.
@@ -308,6 +353,45 @@ bool owe_scene_on_demand_enabled(void);
  */
 int      owe_scene_wallpaper_update_mode(void* scene);
 uint32_t owe_scene_wallpaper_demand_reasons(void* scene);
+
+/*
+ * Whether one scene's frame loop is alive, and whether it stopped after a
+ * failure.
+ *
+ * Like the update mode this is pull-only and unaffected by whether renderer
+ * counting is enabled: a settings pane shows it and a host acts on it, so it
+ * cannot depend on a diagnostic switch. Reading it takes no lock and does no
+ * work on the render thread.
+ *
+ * `frames_completed` counts frames that ran to the end, whether or not they
+ * reached the display. A frame that would repeat the picture completes without
+ * presenting, so a healthy still scene keeps this number moving while
+ * `frames_presented` stays flat; liveness must be read from this one.
+ * `failed_frames` counts frames lost to a failure inside the draw and is never
+ * reset. `last_present_age_ms` is UINT64_MAX until something has been
+ * presented, and on a still scene it grows without anything being wrong.
+ *
+ * `stop_reason` is an `owe_surface_stop_reason`. A non-running value means the
+ * surface stopped drawing because something failed, not because it was paused
+ * or is idle, and stays latched until a scene, a surface or a rebuilt graph
+ * lets it draw again.
+ */
+typedef enum owe_surface_stop_reason {
+    OWE_SURFACE_STOP_RUNNING = 0,
+    OWE_SURFACE_STOP_FRAME_FAILED = 1,
+    OWE_SURFACE_STOP_GRAPH_FAILED = 2
+} owe_surface_stop_reason;
+
+typedef struct owe_surface_health {
+    uint64_t frames_completed;
+    uint64_t frames_presented;
+    uint64_t failed_frames;
+    uint64_t last_present_age_ms;
+    uint32_t stop_reason;
+} owe_surface_health;
+
+/* 0 on success. Non-zero, and `out` untouched, when `scene` or `out` is null. */
+int owe_scene_wallpaper_surface_health(void* scene, owe_surface_health* out);
 
 /*
  * Scene renderer preference, process-wide. Compatibility by default.

@@ -174,8 +174,9 @@ export function createPixivPage({ $, send, run, escapeHTML, icon, button, morph,
     const target = (state.displays || []).find(display => display.id === state.targetDisplayID);
     const canActivate = installed && target?.enabled && target.mode !== 'mirror';
     const job = (page().downloads || []).find(each => each.id === item.libraryID);
-    const activateLabel = target?.wallpaperID === item.libraryID ? t('Reapply wallpaper') : t('Apply wallpaper');
-    const activation = installed ? button('', 'activate', { id: item.libraryID }, { icon: 'play', title: activateLabel, className: 'primary inspector-play', disabled: !canActivate }) : '';
+    const reapplies = target?.wallpaperID === item.libraryID;
+    const activateLabel = reapplies ? t('Reapply wallpaper') : t('Apply wallpaper');
+    const activation = installed ? button('', reapplies ? 'reapplyWallpaper' : 'activate', { id: item.libraryID }, { icon: 'play', title: activateLabel, className: 'primary inspector-play', disabled: !canActivate }) : '';
     const download = installed ? '' : job?.pending
       ? `${button(t('Pause download'), 'pixivPause', { id: job.id }, { className: 'quiet' })}${button(t('Cancel'), 'pixivCancel', { id: job.id }, { icon: 'close', className: 'quiet' })}`
       : job?.status === 'paused' ? `${button(t('Resume download'), 'pixivResume', { id: job.id }, { icon: 'play', className: 'primary' })}${button(t('Cancel'), 'pixivCancel', { id: job.id }, { className: 'quiet' })}`

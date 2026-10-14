@@ -43,15 +43,35 @@ enum class MetalCullMode : uint32_t
     Back = 2,
 };
 
-/// The cull mode every scene pass is drawn with.
-///
-/// It must be `None`, and for two reasons that both matter. The compatibility
-/// backend rasterizes with `VK_CULL_MODE_NONE`, so anything else would draw a
-/// different picture. And any clip-space transform folded into the projection
-/// also reverses triangle winding, so a cull mode tuned for one winding would
-/// make geometry vanish the moment that fold stops being the identity. Named
-/// here rather than written at the call site so the invariant can be asserted.
+/// The cull mode a scene pass is drawn with when its target has no depth
+/// attachment: none, as the compatibility backend rasterizes such passes with
+/// `VK_CULL_MODE_NONE`. A pass into a depth-attached target -- a model, a
+/// skybox -- takes its material's cull mode instead, on either backend
+/// (`SceneMetalCullMode`). Named here rather than written at the call site so
+/// the invariant can be asserted.
 inline constexpr MetalCullMode kSceneCullMode = MetalCullMode::None;
+
+/// Whether the front face of a culled pass is the counter-clockwise one.
+///
+/// The compatibility backend culls with `VK_FRONT_FACE_COUNTER_CLOCKWISE`
+/// behind a negative viewport height; this is the same faces on Metal's
+/// unflipped viewport. Any clip-space transform folded into the projection
+/// that mirrors an axis would reverse it, which is why it is named.
+inline constexpr bool kSceneFrontFaceCounterClockwise = true;
+
+/// The cull mode a material asks for, applied where the compatibility backend
+/// applies it: only to a pass whose target has a depth attachment.
+[[nodiscard]] constexpr MetalCullMode SceneMetalCullMode(CullMode material_cull_mode,
+                                                         bool     target_has_depth)
+{
+    if (! target_has_depth) return kSceneCullMode;
+    switch (material_cull_mode) {
+    case CullMode::Front: return MetalCullMode::Front;
+    case CullMode::Back: return MetalCullMode::Back;
+    case CullMode::None: break;
+    }
+    return MetalCullMode::None;
+}
 
 /// The colour-attachment blend state for one authored blend mode.
 struct MetalBlendState

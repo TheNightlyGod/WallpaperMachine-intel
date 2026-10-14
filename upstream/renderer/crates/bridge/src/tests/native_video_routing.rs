@@ -82,7 +82,7 @@ async fn commit(bridge: &crate::api::WallpaperBridge, wallpaper: &str, display: 
         .await
         .unwrap();
     bridge
-        .apply_wallpaper_options(wallpaper.into())
+        .apply_wallpaper_options(wallpaper.into(), true)
         .await
         .unwrap();
 }
@@ -196,7 +196,7 @@ async fn retarget_fps(bridge: &crate::api::WallpaperBridge, wallpaper: &str, dis
         .await
         .unwrap();
     bridge
-        .apply_wallpaper_options(wallpaper.into())
+        .apply_wallpaper_options(wallpaper.into(), true)
         .await
         .unwrap();
 }
@@ -330,7 +330,7 @@ async fn the_native_descriptor_carries_the_users_own_settings() {
 
     bridge.set_volume("300".into(), 0.25).await.unwrap();
     bridge.set_muted("300".into(), true).await.unwrap();
-    bridge.apply_wallpaper_options("300".into()).await.unwrap();
+    bridge.apply_wallpaper_options("300".into(), true).await.unwrap();
 
     let native = bridge.native_video_wallpapers().await.unwrap();
     assert_eq!(native.len(), 1);

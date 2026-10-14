@@ -36,6 +36,7 @@
 #include <Eigen/Dense>
 
 #include <algorithm>
+#include <atomic>
 #include <limits>
 #include <charconv>
 #include <chrono>
@@ -526,6 +527,9 @@ public:
         const std::lock_guard lock { m_mutex };
         forgetArchivesLocked();
     }
+
+    /// Lets every write already scheduled run, keeping the open archives.
+    void finishArchiveWrites() { waitForArchiveWrites(); }
 #endif
 
     [[nodiscard]] MetalPipelineArchiveStatus archiveStatus() const
@@ -1017,17 +1021,41 @@ private:
         }
         if (collector == nil || url == nil) return;
 
-        // Written beside the real file and moved over it. Another process
+        // Serialised in this process's own temporary folder, never beside the
+        // store. Metal writes a scratch file next to the destination and
+        // corrupts the heap when that folder is deleted under it (a double free
+        // in its error path), and the store lives in a regenerable cache that
+        // clearing the cache or removing a wallpaper deletes whenever it likes.
+        // Only plain file operations touch the store's folder, and those fail
+        // cleanly when it has gone.
+        NSFileManager* files   = [NSFileManager defaultManager];
+        NSURL*         scratch = [NSURL
+            fileURLWithPath:[NSTemporaryDirectory()
+                                stringByAppendingPathComponent:
+                                    [NSString stringWithFormat:@"owe-pipelines-%d-%llu.metallib-archive",
+                                                               getpid(),
+                                                               ++m_archive_scratch_serial]]];
+        NSError* failure = nil;
+        if (! [collector serializeToURL:scratch error:&failure]) {
+            LOG_INFO("metal pipeline archive could not be written: %s",
+                     failure != nil ? failure.localizedDescription.UTF8String : "unknown");
+            [files removeItemAtURL:scratch error:nil];
+            return;
+        }
+
+        // Then beside the real file and moved over it. Another process
         // writing the same store at the same moment replaces it whole rather
         // than interleaving with this one, and a reader never opens a file that
         // is half written.
         NSURL* staged = [NSURL
             fileURLWithPath:[[url path] stringByAppendingFormat:@".tmp%d", getpid()]];
-        NSError* failure = nil;
-        if (! [collector serializeToURL:staged error:&failure]) {
-            LOG_INFO("metal pipeline archive could not be written: %s",
-                     failure != nil ? failure.localizedDescription.UTF8String : "unknown");
-            [[NSFileManager defaultManager] removeItemAtURL:staged error:nil];
+        [files removeItemAtURL:staged error:nil];
+        NSError* stage_error = nil;
+        if (! [files moveItemAtURL:scratch toURL:staged error:&stage_error]) {
+            LOG_INFO("metal pipeline archive could not be published: %s",
+                     stage_error != nil ? stage_error.localizedDescription.UTF8String
+                                        : "unknown");
+            [files removeItemAtURL:scratch error:nil];
             return;
         }
         NSError* replace_error = nil;
@@ -1089,6 +1117,8 @@ private:
     std::atomic<uint64_t>                     m_archive_collected { 0 };
     std::atomic<uint64_t>                     m_archive_published { 0 };
     std::atomic<uint64_t>                     m_archive_writes_pending { 0 };
+    /// Names each write's scratch file. Touched only on `m_archive_queue`.
+    uint64_t                                  m_archive_scratch_serial { 0 };
 };
 
 bool FoldsOnLeft(std::string_view name)
@@ -1106,6 +1136,18 @@ bool FoldsOnRight(std::string_view name)
 /// so a power comparison can measure the texture trade against it in one
 /// binary. A measurement switch only: both ways draw the same bytes. Read
 /// once, like the other A/B switches.
+/// Whether targets that are never alive at once share an image. On by
+/// default; `WALLPAPER_MACHINE_METAL_TARGET_SHARING=0` turns it off for an A/B
+/// or to read every target's own pixels after a frame.
+std::atomic<bool>& TargetSharingSwitch()
+{
+    static std::atomic<bool> enabled { [] {
+        const char* value = std::getenv("WALLPAPER_MACHINE_METAL_TARGET_SHARING");
+        return value == nullptr || std::string_view(value) != "0";
+    }() };
+    return enabled;
+}
+
 bool FeedbackCopiesForcedByEnvironment()
 {
     static const bool forced = [] {
@@ -1182,6 +1224,7 @@ struct MetalRender::Impl
     double               display_scale_factor { 1.0 };
     WallpaperScalingMode scaling_mode { WallpaperScalingMode::NONE };
     double               scaling_factor { 1.0 };
+    WallpaperFraming     framing {};
     bool                 horizontal_flip { false };
     bool                 video_paused { false };
     float                video_rate { 1.0f };
@@ -1304,6 +1347,11 @@ struct MetalRender::Impl
         NSUInteger                         index_element_size { sizeof(uint16_t) };
         std::vector<SceneMesh::DrawRange>  draw_ranges;
         uint32_t                           vertex_count { 0 };
+        /// A texture slot the shader samples names nothing: the render graph
+        /// found no producer for it (a layer texture whose layer draws no
+        /// composite). The compatibility backend then neither draws nor clears
+        /// the step, every frame, and neither does this one.
+        bool                               unproduced_input { false };
 
         // ---- geometry the runtime rewrites every frame (particles)
         /// True when the mesh behind this pass is dynamic. Everything below is
@@ -1347,6 +1395,9 @@ struct MetalRender::Impl
     /// copy plan at runtime has to know which images to give back and which to
     /// allocate again.
     std::unordered_set<std::string>                     owned_targets;
+    /// Targets the reuse table pinned, whose pixels must survive the frame;
+    /// they never share an image.
+    std::unordered_set<std::string>                     pinned_target_keys;
     /// Depth attachments, keyed by the colour target they belong to. Created
     /// only for targets a pass actually depth-tests, at that target's size
     /// (which already honours renderScale). Post-process passes that do not
@@ -1539,6 +1590,38 @@ struct MetalRender::Impl
     /// between a copy and its reader -- so each reader takes its own by target.
     std::vector<std::pair<id<MTLTexture>, id<MTLTexture>>> opening_copies;
 
+    /// Traded copies of one source that share a small set of images instead
+    /// of each keeping one. A copy takes an image from the set when it runs
+    /// -- the source's own when it trades, a free one when it is blitted --
+    /// and gives one back once its last reader has been encoded, so the set
+    /// only has to cover the copies alive at the same time, not every copy.
+    struct PooledCopy
+    {
+        std::size_t index { 0 };
+        std::string key;
+        __strong id<MTLTexture>* slot { nullptr };
+    };
+    struct PooledTrade
+    {
+        std::string                 source_key;
+        __strong id<MTLTexture>*    source_slot { nullptr };
+        std::vector<std::size_t>    source_passes;
+        std::vector<PooledCopy>     copies;
+        std::vector<id<MTLTexture>> images;
+        std::vector<id<MTLTexture>> free;
+    };
+    std::vector<PooledTrade> pooled_trades;
+    /// Per description: the group and copy a pooled copy step belongs to.
+    std::vector<std::pair<int, int>> pooled_copy_at;
+    /// Per description: the pooled copies whose image is free again from this
+    /// pass on, because the pass before it was their last reader.
+    std::vector<std::vector<std::pair<int, int>>> pooled_release_at;
+    /// What every pooled name held when the frame began, put back if the
+    /// frame is abandoned.
+    std::vector<std::pair<__strong id<MTLTexture>*, id<MTLTexture>>> pooled_snapshot;
+    /// Pooled copies run this frame; a frame that ran one is not a repeat.
+    uint32_t pooled_moves { 0 };
+
     bool fail(std::string message)
     {
         last_error = std::move(message);
@@ -1572,9 +1655,26 @@ struct MetalRender::Impl
     /// The uniform write, the geometry upload and the encoder all ask this one
     /// question, so they cannot disagree about a pass.
     bool passDraws(std::size_t index) const;
+    /// Whether the step's clear applies this frame. A step the compatibility
+    /// backend drops for an input nothing produces drops its clear with it.
+    bool passClears(std::size_t index) const;
     /// Decides which copies are replaced by a trade of textures. Called after
     /// the reuse table is built, because a reused image must keep its texture.
     void planFeedbackSwaps();
+    /// Lets targets whose lifetimes in the frame do not overlap share one
+    /// image. Called after the reuse table is built, because a pinned target
+    /// must keep its own.
+    void shareTargetImages(Scene& scene);
+    /// Turns the traded copies of a source into a pooled trade where every
+    /// one of them qualifies. Called after the trades are planned.
+    void planPooledTrades(Scene& scene);
+    /// Gives every pooled copy an image of its own again, before a change of
+    /// plan, so nothing is left sharing outside a pooled trade.
+    void releasePooledTrades();
+    /// The frame-start state of the pooled trades: free sets and snapshot.
+    void beginPooledTrades();
+    /// Puts every pooled name back to what it held when the frame began.
+    void abandonPooledTrades(Scene& scene);
     bool ensureSceneCopyPipeline(MTLPixelFormat format);
     /// Whether the reader of copy `index` renders this frame. A reader that
     /// neither draws nor clears opens no render pass, so it could not copy
@@ -1711,6 +1811,10 @@ void MetalRender::Impl::releaseGraph()
     feedback_swaps.clear();
     frame_swaps.clear();
     opening_copies.clear();
+    pooled_trades.clear();
+    pooled_copy_at.clear();
+    pooled_release_at.clear();
+    pooled_snapshot.clear();
     images.clear();
     runtime_image_rings.clear();
     runtime_image_keys.clear();
@@ -2374,6 +2478,7 @@ bool MetalRender::Impl::passDraws(std::size_t index) const
 {
     const auto& pass = prepared[index];
     if (pass.kind != MetalPassKind::CustomShader || pass.pipeline == nil) return false;
+    if (pass.unproduced_input) return false;
     const auto& desc = descriptions[index];
     return desc.visibility_node == nullptr || desc.visibility_node->EffectiveVisible() ||
            (desc.visibility_node->MustProduce() && ! desc.target_key.empty() &&
@@ -2399,6 +2504,230 @@ bool MetalRender::Impl::ensureSceneCopyPipeline(MTLPixelFormat format)
     }
     scene_copy_pipelines.emplace(static_cast<uint32_t>(format), pipeline);
     return true;
+}
+
+void MetalRender::Impl::shareTargetImages(Scene& scene)
+{
+    if (! TargetSharingSwitch().load()) return;
+
+    // The span of passes each target is touched in, and whether it can give
+    // its image up outside that span. A target qualifies only if nothing
+    // before or after the span in a frame expects its pixels: its first touch
+    // in a frame is a clear that really happens (a clear step, or a draw that
+    // opens with a clear and is not dropped for an input nothing produces),
+    // nothing copies into or out of it (which keeps copy elision and texture
+    // trades to their own images), and it is not carried into the next frame,
+    // pinned by the reuse table, mip-mapped, depth-attached or the output the
+    // composition and the posters read.
+    struct Span
+    {
+        std::size_t first { 0 };
+        std::size_t last { 0 };
+        bool        seen { false };
+        bool        shareable { true };
+    };
+    std::unordered_map<std::string, Span> spans;
+    const auto touch = [&spans](const std::string& key, std::size_t index, bool opens_clean) {
+        if (key.empty()) return;
+        auto& span = spans[key];
+        if (! span.seen) {
+            span.seen      = true;
+            span.first     = index;
+            span.shareable = opens_clean;
+        }
+        span.last = index;
+    };
+    for (std::size_t i = 0; i < descriptions.size(); ++i) {
+        const auto& desc = descriptions[i];
+        switch (desc.kind) {
+        case MetalPassKind::Copy:
+            for (const auto* key : { &desc.source_key, &desc.target_key }) {
+                touch(*key, i, false);
+                if (! key->empty()) spans[*key].shareable = false;
+            }
+            break;
+        case MetalPassKind::Clear: touch(desc.target_key, i, true); break;
+        case MetalPassKind::CustomShader: {
+            // Reads come first: a draw samples before it writes.
+            for (const auto& key : desc.texture_keys) touch(key, i, false);
+            const bool clears = desc.load_action == MetalLoadAction::Clear &&
+                                (i >= prepared.size() || ! prepared[i].unproduced_input);
+            touch(desc.target_key, i, clears);
+            break;
+        }
+        case MetalPassKind::Virtual:
+        case MetalPassKind::Unsupported: break;
+        }
+    }
+
+    const auto output = scene.ResolveRenderTargetName(SpecTex_Default);
+    struct Candidate
+    {
+        std::string key;
+        Span        span;
+    };
+    std::vector<Candidate> candidates;
+    for (const auto& [key, span] : spans) {
+        if (! span.shareable || key == output) continue;
+        if (owned_targets.count(key) == 0 || target_aliases.count(key) != 0) continue;
+        if (pinned_target_keys.count(key) != 0 || depth_targets.count(key) != 0) continue;
+        const auto texture = targets.find(key);
+        if (texture == targets.end() || texture->second == nil ||
+            texture->second.mipmapLevelCount != 1) {
+            continue;
+        }
+        const auto* target = scene.FindRenderTarget(key);
+        if (target == nullptr || target->carriesPreviousFrame) continue;
+        candidates.push_back({ key, span });
+    }
+    // Earliest first, so each target takes the first image of its shape that
+    // is free by then: the interval colouring that uses fewest images.
+    std::sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b) {
+        return a.span.first != b.span.first ? a.span.first < b.span.first : a.key < b.key;
+    });
+    struct Image
+    {
+        id<MTLTexture> texture { nil };
+        std::size_t    free_after { 0 };
+    };
+    std::vector<Image> images;
+    for (const auto& candidate : candidates) {
+        id<MTLTexture> own = targets.at(candidate.key);
+        Image*         reuse = nullptr;
+        for (auto& image : images) {
+            if (image.free_after >= candidate.span.first) continue;
+            if (image.texture.width != own.width || image.texture.height != own.height ||
+                image.texture.pixelFormat != own.pixelFormat || image.texture.usage != own.usage) {
+                continue;
+            }
+            reuse = &image;
+            break;
+        }
+        if (reuse == nullptr) {
+            images.push_back({ own, candidate.span.last });
+            continue;
+        }
+        // The target's own image is released with this assignment; the one it
+        // takes over was cleared at compile like every other and is cleared
+        // again by this target's first draw each frame.
+        targets[candidate.key] = reuse->texture;
+        reuse->free_after      = candidate.span.last;
+    }
+}
+
+void MetalRender::Impl::planPooledTrades(Scene& scene)
+{
+    pooled_trades.clear();
+    pooled_copy_at.assign(descriptions.size(), { -1, -1 });
+    pooled_release_at.assign(descriptions.size() + 1, {});
+    if (! TargetSharingSwitch().load()) return;
+
+    // Every traded copy, grouped by the source it copies.
+    std::map<std::string, std::vector<std::size_t>> by_source;
+    for (std::size_t i = 0; i < feedback_swaps.size(); ++i) {
+        if (feedback_swaps[i].valid) by_source[feedback_swaps[i].source_key].push_back(i);
+    }
+    const auto reads = [](const ScenePassDescription& desc, const std::string& key) {
+        if (desc.kind == MetalPassKind::Copy) return desc.source_key == key;
+        return std::find(desc.texture_keys.begin(), desc.texture_keys.end(), key) !=
+               desc.texture_keys.end();
+    };
+
+    for (auto& [source, copies] : by_source) {
+        const auto source_found = targets.find(source);
+        if (source_found == targets.end() || source_found->second == nil) continue;
+        // Each copy has to be the only writer of its name, be read only by
+        // later draws, and hold nothing a later frame reads. Otherwise the
+        // source keeps its ordinary trades.
+        std::vector<std::pair<std::size_t, std::size_t>> spans; // copy index, last reader
+        bool qualifies = true;
+        for (const auto i : copies) {
+            const auto& key = feedback_swaps[i].copy_key;
+            const auto* target = scene.FindRenderTarget(key);
+            if (target == nullptr || target->carriesPreviousFrame ||
+                feedback_swaps[i].copy_passes != std::vector<std::size_t> { i } ||
+                pinned_target_keys.count(key) != 0) {
+                qualifies = false;
+                break;
+            }
+            std::size_t last = i;
+            for (std::size_t j = 0; j < descriptions.size() && qualifies; ++j) {
+                if (j == i || ! reads(descriptions[j], key)) continue;
+                if (j < i || descriptions[j].kind != MetalPassKind::CustomShader) qualifies = false;
+                last = std::max(last, j);
+            }
+            if (! qualifies) break;
+            spans.emplace_back(i, last);
+        }
+        if (! qualifies) continue;
+
+        // The most copies alive at once, simulated in pass order: a copy takes
+        // an image when it runs and gives one back after its last reader.
+        std::size_t live = 0, most = 0;
+        for (std::size_t j = 0; j < descriptions.size(); ++j) {
+            for (const auto& [copy, last] : spans) {
+                if (last + 1 == j) --live;
+            }
+            for (const auto& [copy, last] : spans) {
+                if (copy == j) most = std::max(most, ++live);
+            }
+        }
+
+        PooledTrade group;
+        group.source_key    = source;
+        group.source_slot   = &source_found->second;
+        group.source_passes = feedback_swaps[copies.front()].source_passes;
+        group.images.push_back(source_found->second);
+        const int index = static_cast<int>(pooled_trades.size());
+        for (std::size_t k = 0; k < copies.size(); ++k) {
+            const auto  i     = copies[k];
+            const auto& key   = feedback_swaps[i].copy_key;
+            auto        found = targets.find(key);
+            // The first `most` copies' own images become the set; the rest are
+            // released. Every copy name starts on one of the set's images,
+            // which it holds no pixels of until it runs.
+            if (group.images.size() < most + 1) group.images.push_back(found->second);
+            found->second = group.images.back();
+            owned_targets.erase(key);
+            group.copies.push_back({ i, key, &found->second });
+            pooled_copy_at[i] = { index, static_cast<int>(k) };
+            pooled_release_at[spans[k].second + 1].emplace_back(index, static_cast<int>(k));
+        }
+        pooled_trades.push_back(std::move(group));
+    }
+}
+
+void MetalRender::Impl::releasePooledTrades()
+{
+    for (auto& group : pooled_trades) {
+        for (auto& copy : group.copies) {
+            // Removed from the names this renderer owns when it was pooled, so
+            // the reallocation that follows gives it a fresh, cleared image.
+            targets.erase(copy.key);
+        }
+    }
+    pooled_trades.clear();
+}
+
+void MetalRender::Impl::beginPooledTrades()
+{
+    pooled_snapshot.clear();
+    pooled_moves = 0;
+    for (auto& group : pooled_trades) {
+        pooled_snapshot.emplace_back(group.source_slot, *group.source_slot);
+        group.free.clear();
+        for (id<MTLTexture> image : group.images) {
+            if (image != *group.source_slot) group.free.push_back(image);
+        }
+        for (auto& copy : group.copies) pooled_snapshot.emplace_back(copy.slot, *copy.slot);
+    }
+}
+
+void MetalRender::Impl::abandonPooledTrades(Scene& scene)
+{
+    for (auto& [slot, texture] : pooled_snapshot) *slot = texture;
+    pooled_snapshot.clear();
+    if (! pooled_trades.empty()) refreshPassTargets(scene);
 }
 
 void MetalRender::Impl::planFeedbackSwaps()
@@ -2492,7 +2821,13 @@ bool MetalRender::Impl::feedbackReaderRenders(std::size_t index) const
 {
     const auto reader = feedback_swaps[index].reader;
     if (reader < static_skip.size() && static_skip[reader] != 0) return false;
-    return passDraws(reader) || descriptions[reader].load_action == MetalLoadAction::Clear;
+    return passDraws(reader) || passClears(reader);
+}
+
+bool MetalRender::Impl::passClears(std::size_t index) const
+{
+    if (descriptions[index].load_action != MetalLoadAction::Clear) return false;
+    return index >= prepared.size() || ! prepared[index].unproduced_input;
 }
 
 void MetalRender::Impl::tradeFeedbackTextures(std::size_t index)
@@ -2626,8 +2961,21 @@ bool MetalRender::Impl::prepareDraw(Scene& scene, std::size_t index, PreparedPas
         if (! desc.texture_keys[slot].empty()) message += ": " + desc.texture_keys[slot];
         return fail(std::move(message));
     };
+    out.unproduced_input = false;
     for (std::size_t i = 0; i < desc.texture_keys.size(); ++i) {
         if (! out.texture_slots[i].bound()) continue;
+        // No name at all is not an image that failed to load here: nothing in
+        // the scene was going to produce it, on either renderer. A name that
+        // does not load is still a whole-scene fallback below.
+        if (desc.texture_keys[i].empty()) {
+            if (! out.unproduced_input) {
+                LOG_INFO("metal render: %s samples slot %zu, which nothing in the scene produces; "
+                         "the step is skipped as on the compatibility renderer",
+                         material->name.c_str(), i);
+            }
+            out.unproduced_input = true;
+            continue;
+        }
         id<MTLSamplerState> sampler = nil;
         id<MTLTexture> texture = resolveTexture(scene, desc.texture_keys[i], &sampler);
         // A video texture has no frame yet at compile time, which is not a
@@ -3440,6 +3788,16 @@ void MetalRender::Impl::computeDemandReasons(Scene& scene, rg::RenderGraph& grap
         }
     }
 
+    // A target the frame reads before it writes it hands each frame's result
+    // to the next: a trail keeps fading and an accumulation keeps converging
+    // with nothing else changing, so the clock has to keep running for it.
+    for (const auto& [name, target] : scene.renderTargets) {
+        if (target.carriesPreviousFrame && targets.contains(name)) {
+            reasons |= vulkan::DynamicReason::Feedback;
+            break;
+        }
+    }
+
     // A compiled graph that yielded no shader pass is not a still scene; it is
     // a graph this analysis did not understand.
     if (! saw_shader_pass || ! understood_every_pass) {
@@ -3561,6 +3919,7 @@ bool MetalRender::Impl::applySceneOptimizationSetting(Scene& scene, id<MTLComman
     // The whole plan, not just the flag: the copy plan decides which targets
     // exist at all, so turning the setting back on with only `enabled = true`
     // would leave elided copies unexecuted and aliased images unallocated.
+    releasePooledTrades();
     releaseSceneOptimization();
     planCopyElision(scene);
 
@@ -3611,6 +3970,8 @@ bool MetalRender::Impl::applySceneOptimizationSetting(Scene& scene, id<MTLComman
     refreshPassTargets(scene);
     compileStaticCache(scene);
     planFeedbackSwaps();
+    planPooledTrades(scene);
+    refreshPassTargets(scene);
     optimization_applied = enabled;
     return true;
 }
@@ -3720,11 +4081,22 @@ void MetalRender::Impl::compileStaticCache(Scene& scene)
     static_cache.Compile(descs);
     static_samples.assign(descriptions.size(), vulkan::StaticPassSample {});
 
+    pinned_target_keys.clear();
+    std::unordered_map<const void*, uint32_t> keys_per_image;
+    for (const auto& [key, texture] : targets) {
+        (void)key;
+        if (texture != nil) ++keys_per_image[(__bridge const void*)texture];
+    }
     for (std::size_t i = 0; i < static_cache.TargetCount(); ++i) {
         if (! static_cache.TargetCacheable(i)) continue;
         const auto& key   = static_cache.TargetKey(i);
         const auto  found = targets.find(key);
         if (found == targets.end()) continue;
+        // A shared image is redrawn by another target every frame, so the
+        // pixels this one would keep are not there to keep.
+        if (found->second == nil || keys_per_image[(__bridge const void*)found->second] > 1) {
+            continue;
+        }
         const auto* target = scene.FindRenderTarget(key);
         if (target == nullptr || target->width <= 0 || target->height <= 0) continue;
         uint64_t bytes = static_cast<uint64_t>(target->width) *
@@ -3737,6 +4109,7 @@ void MetalRender::Impl::compileStaticCache(Scene& scene)
         if (static_pinned_bytes + bytes > kStaticCacheBudgetBytes) continue;
         static_cache.SetTargetPinned(i, true, bytes);
         static_pinned_bytes += bytes;
+        pinned_target_keys.insert(key);
     }
     if (static_pinned_bytes != 0) {
         vulkan::AdjustSceneOptimizationPinnedBytes(static_cast<int64_t>(static_pinned_bytes));
@@ -3995,7 +4368,11 @@ bool MetalRender::Impl::compile(Scene& scene, rg::RenderGraph& graph)
     // Last: it reads the prepared passes' sprite maps and the allocated
     // targets, so both have to exist before a target can be called reusable.
     compileStaticCache(scene);
+    shareTargetImages(scene);
+    refreshPassTargets(scene);
     planFeedbackSwaps();
+    planPooledTrades(scene);
+    refreshPassTargets(scene);
     optimization_applied = vulkan::SceneOptimizationEnabled();
     graph_ready = true;
     last_error.clear();
@@ -4014,7 +4391,7 @@ WallpaperScalingLayout MetalRender::Impl::scalingLayout(const Scene& scene, uint
         1u, static_cast<uint32_t>(std::lround(static_cast<double>(height) / scale_factor)));
     return ComputeWallpaperScalingLayout(scaling_mode, source_extent.width, source_extent.height,
                                          logical_width, logical_height, scale_factor,
-                                         scaling_factor);
+                                         scaling_factor, framing.pan_x, framing.pan_y);
 }
 
 // ---------------------------------------------------------------------------
@@ -4181,6 +4558,14 @@ void MetalRender::SetWallpaperScalingFactor(double factor)
     pImpl->present_gate.Invalidate();
 }
 
+void MetalRender::SetWallpaperFraming(const WallpaperFraming& framing)
+{
+    // Like the scaling factor: the frame after a pan must present, not be
+    // skipped as a repeat of one decided before it.
+    pImpl->framing = NormalizeWallpaperFraming(framing);
+    pImpl->present_gate.Invalidate();
+}
+
 void MetalRender::SetWallpaperHorizontalFlip(bool enabled)
 {
     pImpl->horizontal_flip = enabled;
@@ -4306,7 +4691,11 @@ bool MetalRender::drawFrame(Scene& scene, bool* presented)
         id<MTLBuffer> uniforms = impl.uniform_rings[impl.frame_slot];
         auto*         uniform_base = static_cast<uint8_t*>(uniforms.contents);
 
-        if (scene.shaderValueUpdater != nullptr) scene.shaderValueUpdater->FrameBegin();
+        // `FrameBegin` is the host's, once per frame before it draws, as for
+        // the compatibility backend: it steps the parallax cursor's smoothing
+        // by the frame time and places puppet attachments. Calling it here as
+        // well stepped the smoothing twice per frame, so the parallax on this
+        // backend chased the cursor twice as fast.
         for (std::size_t i = 0; i < impl.prepared.size(); ++i) {
             auto&       pass = impl.prepared[i];
             const auto& desc = impl.descriptions[i];
@@ -4354,13 +4743,15 @@ bool MetalRender::drawFrame(Scene& scene, bool* presented)
         // would reuse a target the GPU never wrote.
         impl.frame_swaps.clear();
         impl.opening_copies.clear();
-        const auto abandon_frame = [&impl](std::string message) {
+        impl.beginPooledTrades();
+        const auto abandon_frame = [&impl, &scene](std::string message) {
             // Its command buffer never runs, so every texture still holds what
             // it held when the frame began, and every name has to point back at
             // it.
             for (auto swap = impl.frame_swaps.rbegin(); swap != impl.frame_swaps.rend(); ++swap) {
                 impl.tradeFeedbackTextures(*swap);
             }
+            impl.abandonPooledTrades(scene);
             impl.frame_swaps.clear();
             impl.opening_copies.clear();
             impl.static_cache.InvalidateAll();
@@ -4417,6 +4808,7 @@ bool MetalRender::drawFrame(Scene& scene, bool* presented)
             // pass inherits it, so each draw sets what differs, nil included.
             id<MTLRenderPipelineState>  pipeline { nil };
             id<MTLDepthStencilState>    depth_stencil { nil };
+            MetalCullMode               cull_mode { kSceneCullMode };
         };
         OpenRenderPass open;
         const auto close_pass = [&open]() {
@@ -4431,6 +4823,15 @@ bool MetalRender::drawFrame(Scene& scene, bool* presented)
         for (std::size_t i = 0; i < impl.prepared.size(); ++i) {
             auto&       pass = impl.prepared[i];
             const auto& desc = impl.descriptions[i];
+            // A pooled copy whose last reader has been encoded gives its image
+            // back. Any later use of it is a copy step, which ends the open
+            // render pass first, and the GPU runs this command buffer in order.
+            if (i < impl.pooled_release_at.size()) {
+                for (const auto& [g, k] : impl.pooled_release_at[i]) {
+                    auto& group = impl.pooled_trades[static_cast<std::size_t>(g)];
+                    group.free.push_back(*group.copies[static_cast<std::size_t>(k)].slot);
+                }
+            }
             // A reused target is left exactly as the last frame wrote it. No
             // encoder is created for a skipped pass, because creating one would
             // apply its load action -- a clear would erase the pixels the plan
@@ -4451,6 +4852,45 @@ bool MetalRender::drawFrame(Scene& scene, bool* presented)
                 const auto source = impl.targets.find(desc.source_key);
                 if (source == impl.targets.end()) continue;
                 close_pass();
+                if (i < impl.pooled_copy_at.size() && impl.pooled_copy_at[i].first >= 0) {
+                    auto& group =
+                        impl.pooled_trades[static_cast<std::size_t>(impl.pooled_copy_at[i].first)];
+                    auto& copy = group.copies[static_cast<std::size_t>(impl.pooled_copy_at[i].second)];
+                    if (group.free.empty()) return abandon_frame("a pooled copy found no free image");
+                    id<MTLTexture> next = group.free.back();
+                    group.free.pop_back();
+                    id<MTLTexture> image = *group.source_slot;
+                    ++impl.pooled_moves;
+                    if (impl.feedbackReaderRenders(i)) {
+                        // Traded: the copy's name takes the image as it stands
+                        // and the source carries on in a free one, which its
+                        // reader fills first when it loads.
+                        *copy.slot         = image;
+                        *group.source_slot = next;
+                        for (const auto k : group.source_passes) impl.pass_targets[k] = next;
+                        if (group.source_key == impl.scene_output_key) {
+                            impl.scene_output_target = next;
+                        }
+                        if (impl.feedback_swaps[i].prefix) impl.opening_copies.emplace_back(next, image);
+                    } else {
+                        // Nothing redraws the source before it is read again,
+                        // so the copy is made into a free image.
+                        *copy.slot          = next;
+                        impl.pass_targets[i] = next;
+                        id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
+                        [blit copyFromTexture:image
+                                  sourceSlice:0
+                                  sourceLevel:0
+                                    toTexture:next
+                             destinationSlice:0
+                             destinationLevel:0
+                                   sliceCount:1
+                                   levelCount:1];
+                        [blit endEncoding];
+                        ++impl.frame_encodes.blit_passes;
+                    }
+                    continue;
+                }
                 if (i < impl.feedback_swaps.size() && impl.feedback_swaps[i].valid &&
                     impl.feedbackReaderRenders(i)) {
                     // The copy's name takes the image as it stands; the source's
@@ -4496,7 +4936,7 @@ bool MetalRender::drawFrame(Scene& scene, bool* presented)
             // the graph decided. Without one it needs no render pass at all,
             // and the target keeps what the passes before it left there.
             const bool draws  = impl.passDraws(i);
-            const bool clears = desc.load_action == MetalLoadAction::Clear;
+            const bool clears = impl.passClears(i);
             if (! draws && ! clears) {
                 if (desc.generate_mipmaps) {
                     close_pass();
@@ -4552,13 +4992,13 @@ bool MetalRender::drawFrame(Scene& scene, bool* presented)
                 open.clear_color      = desc.clear_color;
                 ++impl.frame_encodes.render_passes;
                 if (target == impl.scene_output_target) ++impl.frame_encodes.scene_output_passes;
-                // Folding the clip-space transform into the projection also
-                // decides triangle winding, so the cull mode has to be the one
-                // the compatibility backend uses -- it renders with
-                // VK_CULL_MODE_NONE. Enabling back-face culling here would
-                // silently drop half of every scene the moment the fold stops
-                // being the identity.
+                // Culling follows the compatibility backend: none for a pass
+                // without depth, the material's for one with it, against the
+                // same front faces. Each draw sets the mode it needs below.
                 [open.encoder setCullMode:static_cast<MTLCullMode>(kSceneCullMode)];
+                [open.encoder setFrontFacingWinding:kSceneFrontFaceCounterClockwise
+                                                        ? MTLWindingCounterClockwise
+                                                        : MTLWindingClockwise];
                 if (opens_with_copy) {
                     [open.encoder setViewport:(MTLViewport) { 0.0, 0.0, (double)target.width,
                                                               (double)target.height, 0.0, 1.0 }];
@@ -4600,6 +5040,10 @@ bool MetalRender::drawFrame(Scene& scene, bool* presented)
                 if (pass.depth_stencil != open.depth_stencil) {
                     [encoder setDepthStencilState:pass.depth_stencil];
                     open.depth_stencil = pass.depth_stencil;
+                }
+                if (desc.cull_mode != open.cull_mode) {
+                    [encoder setCullMode:static_cast<MTLCullMode>(desc.cull_mode)];
+                    open.cull_mode = desc.cull_mode;
                 }
 
                 const std::size_t geometry_slot =
@@ -4778,7 +5222,8 @@ bool MetalRender::drawFrame(Scene& scene, bool* presented)
         // presenting again would put the same picture back.
         const bool nothing_encoded = impl.frame_encodes.render_passes == 0 &&
                                      impl.frame_encodes.blit_passes == 0 &&
-                                     impl.frame_swaps.empty() && impl.video.empty();
+                                     impl.frame_swaps.empty() && impl.pooled_moves == 0 &&
+                                     impl.video.empty();
         if (vulkan::SceneOptimizationEnabled() && nothing_encoded &&
             impl.present_gate.Matches(impl.present_key, {})) {
             // The buffer holds nothing and is dropped uncommitted, so the slot
@@ -4969,6 +5414,8 @@ MetalRender::FrameEncodeCountsForTests MetalRender::LastFrameEncodeCountsForTest
     return { last.render_passes, last.scene_output_passes, last.blit_passes };
 }
 
+void MetalRender::SetTargetSharingForTests(bool enabled) { TargetSharingSwitch().store(enabled); }
+
 uint64_t MetalRender::RenderTargetBytesForTests() const
 {
     if (pImpl == nullptr) return 0;
@@ -4989,6 +5436,11 @@ uint64_t MetalRender::ProgramCompilesForTests() { return MetalProgramCache::shar
 bool MetalRender::PipelineArchiveServesEverySeenPipelineForTests()
 {
     return MetalProgramCache::shared().archiveServesEverySeenPipeline();
+}
+
+void MetalRender::WaitForPipelineArchiveWritesForTests()
+{
+    MetalProgramCache::shared().finishArchiveWrites();
 }
 #endif
 

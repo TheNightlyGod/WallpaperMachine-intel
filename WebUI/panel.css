@@ -269,6 +269,12 @@ small, .muted { color: var(--muted); }
 .top-actions select { max-width: 180px; }
 .error-banner { display: flex; align-items: center; gap: 10px; padding: 9px 18px; color: var(--danger); background: var(--danger-surface); border-bottom: 1px solid var(--danger-line); flex: none; }
 .error-banner p { flex: 1; }
+/* Wallpapers the app left out of this session after it quit unexpectedly while loading them: a
+   warning with one row per wallpaper and its own way back, not an error to dismiss. */
+.held-banner { display: grid; flex: none; color: var(--warning); background: color-mix(in srgb, var(--warning) 12%, var(--bg)); border-bottom: 1px solid color-mix(in srgb, var(--warning) 34%, var(--line)); }
+.held-row { display: flex; align-items: center; gap: 10px; padding: 9px 18px; }
+.held-row + .held-row { border-top: 1px solid color-mix(in srgb, var(--warning) 20%, var(--line)); }
+.held-row p { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 #main { position: relative; flex: 1; min-height: 0; overflow: hidden; }
 /* The first-run guide lives in welcome.css; it covers the whole window, top bar included. */
 /* The inspector's width is a function of the window width alone: 260px at the 760px
@@ -524,6 +530,7 @@ details[open] > summary svg { transform: rotate(90deg); }
 .inspector-actions { margin-top: 4px; gap: 6px; }
 .actions.inspector-actions > .primary { flex: 1 1 100%; min-height: var(--control-height); }
 .inspector-actions > .wide { flex: 1; min-width: 0; }
+.actions.inspector-actions > .wide:is(.inspector-apply-download, .inspector-apply-all) { flex: 1 1 100%; }
 .inspector-actions > :not(.primary) { font-size: 12px; min-height: var(--control-height-compact); padding: 4px 6px; }
 .inspector-actions > .wide .button-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .inspector-section { border-top: 1px solid var(--divider); display: grid; gap: 12px; padding-top: 12px; padding-bottom: 12px; }
@@ -596,6 +603,11 @@ button.property-reset { width: var(--control-height-compact); min-width: var(--c
 .property-label hr { border: 0; border-top: 1px solid var(--line-strong); margin: 14px 0; }
 .property-label p { margin: 8px 0; }
 .property-description { font-size: 13px; line-height: 1.4; }
+/* Beside the presets above the controls rather than next to Apply, so a stray click on Apply never restores. */
+.property-tools { display: flex; justify-content: flex-end; }
+.property-tools button.link { font-size: 12px; }
+.property-group { margin: 14px 0 2px; padding-bottom: 4px; border-bottom: 1px solid var(--divider); font-size: 12px; font-weight: 600; color: var(--text); }
+.property-group:first-child { margin-top: 2px; }
 .property-label center { display: block; text-align: center; }
 .property-label a, .property-label [data-action="openExternal"] { color: var(--accent); font: inherit; text-align: inherit; text-decoration: none; background: transparent; border: 0; padding: 0; min-height: 0; }
 .property-label [data-action="openExternal"]:hover { color: var(--text); text-decoration: underline; text-underline-offset: 2px; }
@@ -607,6 +619,7 @@ button.property-reset { width: var(--control-height-compact); min-width: var(--c
 .display-options { border-top: 1px solid var(--line); padding-top: 10px; }
 .display-options:first-child { border-top: 0; padding-top: 0; }
 .display-options .section-content { display: grid; gap: 12px; padding-top: 12px; }
+.position-rows { display: grid; gap: 10px; }
 .empty-state { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 24px; gap: 12px; }
 .empty-state h1 { font-size: 18px; }
 .empty-state p { max-width: 44ch; color: var(--muted); }

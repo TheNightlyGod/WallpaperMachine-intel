@@ -82,6 +82,12 @@ public:
     /// here is unsupported on both, not a Metal-only fallback.
     std::unordered_set<int32_t> layer_texture_sources;
     std::string                 layer_texture_error;
+    /// Layers the current render graph leaves out, each the top of a subtree:
+    /// hidden by a settled visibility (`SceneNode::VisibilitySettled`) of their
+    /// own or an ancestor's, and sampled by no other layer. Written by
+    /// `sceneToRenderGraph`. Once one of them is visible again the runtime asks
+    /// for a new graph, which draws it.
+    std::vector<std::weak_ptr<SceneNode>> render_excluded_nodes;
 
     /// Whether a frame of this scene has reached the surface.
     ///

@@ -312,6 +312,15 @@ gtest_discover_tests(
     PROPERTIES TIMEOUT 30
     DISCOVERY_TIMEOUT 60
 )
+add_executable(wallpaper_scaling_test wallpaper_scaling_test.cpp)
+target_link_libraries(wallpaper_scaling_test PRIVATE ${PROJECT_NAME} wpScene wpVulkan GTest::gtest_main)
+target_include_directories(wallpaper_scaling_test PRIVATE . ${CMAKE_SOURCE_DIR}/src)
+target_compile_features(wallpaper_scaling_test PRIVATE cxx_std_20)
+gtest_discover_tests(
+    wallpaper_scaling_test
+    PROPERTIES TIMEOUT 30
+    DISCOVERY_TIMEOUT 60
+)
 add_executable(particle_mouse_controlpoint_test particle_mouse_controlpoint_test.cpp)
 target_link_libraries(particle_mouse_controlpoint_test PRIVATE ${PROJECT_NAME} wpScene wpParticle wpAudio nlohmann_json::nlohmann_json GTest::gtest_main)
 target_include_directories(particle_mouse_controlpoint_test PRIVATE .)
@@ -336,6 +345,15 @@ target_include_directories(layer_texture_reference_test PRIVATE . ${CMAKE_SOURCE
 target_compile_features(layer_texture_reference_test PRIVATE cxx_std_20)
 gtest_discover_tests(
     layer_texture_reference_test
+    PROPERTIES TIMEOUT 30
+    DISCOVERY_TIMEOUT 60
+)
+add_executable(project_property_preview_test project_property_preview_test.cpp)
+target_link_libraries(project_property_preview_test PRIVATE ${PROJECT_NAME} wpVulkanRender wpVulkan wpRGraph wpScene wpAudio wpFs nlohmann_json::nlohmann_json GTest::gtest_main)
+target_include_directories(project_property_preview_test PRIVATE . ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/src/Scene/VulkanRender ${CMAKE_SOURCE_DIR}/src/Scene/RenderGraph/include)
+target_compile_features(project_property_preview_test PRIVATE cxx_std_20)
+gtest_discover_tests(
+    project_property_preview_test
     PROPERTIES TIMEOUT 30
     DISCOVERY_TIMEOUT 60
 )
@@ -406,6 +424,20 @@ target_compile_features(video_frame_pacing_test PRIVATE cxx_std_20)
 gtest_discover_tests(
     video_frame_pacing_test
     TEST_PREFIX video_frame_pacing_test.
+    PROPERTIES TIMEOUT 30
+    DISCOVERY_TIMEOUT 60
+)
+
+# What a surface says about its own frame loop. Header-only atomics with the
+# clock passed in, so the counter-examples need no device, no renderer and no
+# wall-clock wait.
+add_executable(surface_health_test surface_health_test.cpp)
+target_link_libraries(surface_health_test PRIVATE GTest::gtest_main)
+target_include_directories(surface_health_test PRIVATE . ${CMAKE_SOURCE_DIR}/src)
+target_compile_features(surface_health_test PRIVATE cxx_std_20)
+gtest_discover_tests(
+    surface_health_test
+    TEST_PREFIX surface_health_test.
     PROPERTIES TIMEOUT 30
     DISCOVERY_TIMEOUT 60
 )

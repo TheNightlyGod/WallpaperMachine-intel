@@ -5,7 +5,10 @@ import AppKit
 final class WallpaperPreviewWindowController: NSWindowController, NSWindowDelegate {
     let session: WallpaperPreviewSession
     var onClosed: (() -> Void)?
+    /// The black backdrop; the stage sits inside it, so a window of any shape shows the display's
+    /// proportions with bars instead of stretching the wallpaper.
     private let container = NSView()
+    private let stage = NSView()
     private let playButton = NSButton()
     private let muteButton = NSButton()
     private let reloadButton = NSButton()
@@ -15,9 +18,15 @@ final class WallpaperPreviewWindowController: NSWindowController, NSWindowDelega
     private var screensAwake = true
     private var unlocked = true
     private var sessionActive = true
+    private let displayAspect: @MainActor (String) -> CGFloat?
+    private var stageAspect = WallpaperPreviewWindowController.defaultAspect
+    private var stageAspectConstraint: NSLayoutConstraint?
 
-    init(session: WallpaperPreviewSession) {
+    /// `displayAspect` answers width over height for a renderer display id, `nil` when that
+    /// display is not attached; the stage then takes the common 16:9.
+    init(session: WallpaperPreviewSession, displayAspect: @escaping @MainActor (String) -> CGFloat? = { _ in nil }) {
         self.session = session
+        self.displayAspect = displayAspect
         super.init(window: nil)
         session.onSurface = { [weak self] view in self?.attach(view) }
         session.onChange = { [weak self] in self?.render() }
@@ -26,6 +35,9 @@ final class WallpaperPreviewWindowController: NSWindowController, NSWindowDelega
     required init?(coder: NSCoder) { nil }
 
     func present(_ selection: WallpaperPreviewSession.Selection) {
+        // Before the session opens, so the new surface is created at the display's proportions.
+        // A window that is already open keeps the size the user gave it; only the stage changes.
+        setStageAspect(displayAspect(selection.displayID))
         if window == nil { makeWindow() }
         session.open(selection)
         showWindow(nil)
@@ -34,16 +46,44 @@ final class WallpaperPreviewWindowController: NSWindowController, NSWindowDelega
         updateVisibility()
     }
 
-    /// Pure sizing rule so small and rotated displays can be checked without opening a window.
-    static func contentSize(visibleSize: CGSize) -> CGSize {
-        let width = max(1, min(1000, visibleSize.width - 40))
-        let height = max(1, min(width * 9 / 16 + 96, visibleSize.height - 80))
+    /// Shown in place of the playback status while the draft picks a picture or file that only
+    /// a fresh preview can show.
+    static var reloadNote: String { String(localized: "Reload preview to show the picture or files you chose.") }
+
+    /// Height of the buttons, status and note under the stage.
+    static let controlsHeight: CGFloat = 96
+    /// The narrowest content that still holds the localized control row; a portrait stage gets
+    /// bars beside it rather than a window too narrow for its buttons.
+    static let minimumContentWidth: CGFloat = 480
+    static let defaultAspect: CGFloat = 16.0 / 9.0
+
+    /// The stage proportions for a display: its own width over height, within the range a
+    /// window can reasonably show, or 16:9 when the display is unknown.
+    static func resolvedAspect(_ aspect: CGFloat?) -> CGFloat {
+        guard let aspect, aspect.isFinite, aspect > 0 else { return defaultAspect }
+        return min(DisplayGeometry.aspectRange.upperBound, max(DisplayGeometry.aspectRange.lowerBound, aspect))
+    }
+
+    /// Pure sizing rule so small, rotated and unusually shaped displays can be checked without
+    /// opening a window. The stage is at most 1000 points wide and takes the display's shape; a
+    /// stage too tall for the screen shrinks in width instead of being letterboxed. `nil` is 16:9.
+    static func contentSize(visibleSize: CGSize, aspect: CGFloat? = nil) -> CGSize {
+        let ratio = resolvedAspect(aspect)
+        let tallest = max(1, visibleSize.height - 80 - controlsHeight)
+        var stageWidth = max(1, min(1000, visibleSize.width - 40))
+        var stageHeight = stageWidth / ratio
+        if stageHeight > tallest {
+            stageHeight = tallest
+            stageWidth = max(1, stageHeight * ratio)
+        }
+        let width = max(min(minimumContentWidth, max(1, visibleSize.width - 40)), stageWidth)
+        let height = max(1, min(stageHeight + controlsHeight, visibleSize.height - 80))
         return CGSize(width: width, height: height)
     }
 
     private func makeWindow() {
         let visible = NSScreen.main?.visibleFrame.size ?? CGSize(width: 1280, height: 800)
-        let size = Self.contentSize(visibleSize: visible)
+        let size = Self.contentSize(visibleSize: visible, aspect: stageAspect)
         let window = NSWindow(contentRect: CGRect(origin: .zero, size: size),
             styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: true)
         self.window = window
@@ -53,6 +93,7 @@ final class WallpaperPreviewWindowController: NSWindowController, NSWindowDelega
         window.acceptsMouseMovedEvents = true
         window.title = String(localized: "Wallpaper Preview")
         window.contentMinSize = CGSize(width: min(480, size.width), height: min(320, size.height))
+        ControlPanelWindow.moveToActiveSpace(window)
         window.center()
         window.contentView = makeContentView(size: size)
         for name in [NSApplication.didHideNotification, NSApplication.didUnhideNotification] {
@@ -75,6 +116,21 @@ final class WallpaperPreviewWindowController: NSWindowController, NSWindowDelega
         container.layer?.backgroundColor = NSColor.black.cgColor
         container.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(container)
+        stage.identifier = NSUserInterfaceItemIdentifier("preview-stage")
+        stage.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(stage)
+        // The largest box of the display's shape inside the backdrop: full width when the
+        // backdrop is wider than the shape, full height otherwise.
+        let fillWidth = stage.widthAnchor.constraint(equalTo: container.widthAnchor)
+        fillWidth.priority = NSLayoutConstraint.Priority(999)
+        NSLayoutConstraint.activate([
+            stage.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+            stage.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+            stage.widthAnchor.constraint(lessThanOrEqualTo: container.widthAnchor),
+            stage.heightAnchor.constraint(lessThanOrEqualTo: container.heightAnchor),
+            fillWidth,
+        ])
+        setStageAspect(stageAspect)
 
         for (button, action) in [(playButton, #selector(togglePause)), (muteButton, #selector(toggleMute)), (reloadButton, #selector(reload))] {
             button.target = self
@@ -140,12 +196,23 @@ final class WallpaperPreviewWindowController: NSWindowController, NSWindowDelega
         observers.append((center, token))
     }
 
+    /// Reshapes the stage; `nil` is 16:9. The surface follows through its autoresizing mask, so a
+    /// scene's drawable and a page's viewport see the same proportions the display will give them.
+    func setStageAspect(_ aspect: CGFloat?) {
+        stageAspect = Self.resolvedAspect(aspect)
+        guard stage.superview != nil else { return }  // the constraint is installed with the content view
+        stageAspectConstraint?.isActive = false
+        let constraint = stage.widthAnchor.constraint(equalTo: stage.heightAnchor, multiplier: stageAspect)
+        constraint.isActive = true
+        stageAspectConstraint = constraint
+    }
+
     private func attach(_ view: NSView?) {
-        for child in container.subviews { child.removeFromSuperview() }
+        for child in stage.subviews { child.removeFromSuperview() }
         guard let view else { return }
-        view.frame = container.bounds
+        view.frame = stage.bounds
         view.autoresizingMask = [.width, .height]
-        container.addSubview(view)
+        stage.addSubview(view)
     }
 
     private func render() {
@@ -163,8 +230,8 @@ final class WallpaperPreviewWindowController: NSWindowController, NSWindowDelega
         switch session.phase {
         case .closed: status.stringValue = ""
         case .loading: status.stringValue = String(localized: "Loading preview…")
-        case .playing: status.stringValue = String(localized: "Playing preview")
-        case .paused: status.stringValue = String(localized: "Preview paused")
+        case .playing: status.stringValue = session.needsReload ? Self.reloadNote : String(localized: "Playing preview")
+        case .paused: status.stringValue = session.needsReload ? Self.reloadNote : String(localized: "Preview paused")
         case .failed(let message): status.stringValue = message
         }
         status.toolTip = status.stringValue

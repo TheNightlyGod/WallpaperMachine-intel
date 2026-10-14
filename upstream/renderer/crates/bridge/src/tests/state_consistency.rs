@@ -115,7 +115,7 @@ async fn a_reassigned_web_wallpaper_rejects_its_previous_startup_revision() {
     let previous = bridge.web_wallpapers().await.unwrap().remove(0);
     bridge.eject_wallpaper_from_display("7".into(), "100".into()).await.unwrap();
     bridge.set_display_config_enabled("100".into(), "7".into(), true).await.unwrap();
-    bridge.apply_wallpaper_options("100".into()).await.unwrap();
+    bridge.apply_wallpaper_options("100".into(), true).await.unwrap();
     let current = bridge.web_wallpapers().await.unwrap().remove(0);
     assert_ne!(previous.startup_revision, current.startup_revision);
     let stale = bridge.report_host_wallpaper_startup(7, "100".into(), previous.startup_revision,
@@ -364,7 +364,7 @@ async fn video_backend_survives_older_apply_completion() {
     let job = std::thread::spawn(move || {
         tokio::runtime::Runtime::new()
             .unwrap()
-            .block_on(other.apply_wallpaper_options("200".into()))
+            .block_on(other.apply_wallpaper_options("200".into(), true))
     });
     assert!(gate.wait_until_blocked(Duration::from_secs(2)));
     b.set_video_backend("native_preferred".into())
@@ -390,7 +390,7 @@ async fn failed_repair_does_not_block_future_repairs() {
         .await
         .unwrap();
     e.fail_reconcile_with("review transient failure");
-    assert!(b.apply_wallpaper_options("200".into()).await.is_err());
+    assert!(b.apply_wallpaper_options("200".into(), true).await.is_err());
     tokio::time::timeout(Duration::from_secs(2), async {
         while b.app_snapshot().await.unwrap().errors.len() < 2 {
             tokio::task::yield_now().await;
@@ -405,7 +405,7 @@ async fn failed_repair_does_not_block_future_repairs() {
     let job = std::thread::spawn(move || {
         tokio::runtime::Runtime::new()
             .unwrap()
-            .block_on(other.apply_wallpaper_options("200".into()))
+            .block_on(other.apply_wallpaper_options("200".into(), true))
     });
     assert!(gate.wait_until_blocked(Duration::from_secs(2)));
     b.pause_all().await.unwrap();
