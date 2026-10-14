@@ -109,6 +109,22 @@ def build_mediaremote_adapter(build_env):
     return framework
 
 
+def get_project_versions():
+    marketing_version = "1.4.1"
+    project_version = "34"
+    proj_yml = ROOT / "project.yml"
+    if proj_yml.is_file():
+        text = proj_yml.read_text(encoding="utf-8")
+        import re
+        m_mkt = re.search(r'MARKETING_VERSION:\s*["\']?([^"\'\n]+)', text)
+        if m_mkt:
+            marketing_version = m_mkt.group(1).strip()
+        m_ver = re.search(r'CURRENT_PROJECT_VERSION:\s*["\']?([^"\'\n]+)', text)
+        if m_ver:
+            project_version = m_ver.group(1).strip()
+    return marketing_version, project_version
+
+
 def build_app_bundle(configuration="Release", env=None):
     """Compile binaries with swiftc and assemble WallpaperMachine.app."""
     prefix = get_brew_prefix()
@@ -182,6 +198,8 @@ def build_app_bundle(configuration="Release", env=None):
     shutil.copy2(ROOT / "Resources/StarterWallpaper/preview.jpg", appex_resources / "preview.jpg")
     shutil.copy2(EXTENSION / "Phosphene-LICENSE.txt", appex_resources / "Phosphene-LICENSE.txt")
     
+    marketing_version, project_version = get_project_versions()
+
     ext_plist = {
         "CFBundleDevelopmentRegion": "en",
         "CFBundleDisplayName": "WallpaperMachine Wallpapers",
@@ -190,8 +208,8 @@ def build_app_bundle(configuration="Release", env=None):
         "CFBundleInfoDictionaryVersion": "6.0",
         "CFBundleName": "WallpaperMachineExtension",
         "CFBundlePackageType": "XPC!",
-        "CFBundleShortVersionString": "1.3.3",
-        "CFBundleVersion": "32",
+        "CFBundleShortVersionString": marketing_version,
+        "CFBundleVersion": project_version,
         "LSMinimumSystemVersion": "15.0",
         "EXAppExtensionAttributes": {
             "EXExtensionPointIdentifier": "com.apple.wallpaper"
@@ -270,8 +288,8 @@ def build_app_bundle(configuration="Release", env=None):
     main_plist["CFBundleIdentifier"] = "app.wallpapermachine"
     main_plist["CFBundleName"] = "WallpaperMachine"
     main_plist["CFBundlePackageType"] = "APPL"
-    main_plist["CFBundleShortVersionString"] = "1.3.3"
-    main_plist["CFBundleVersion"] = "32"
+    main_plist["CFBundleShortVersionString"] = marketing_version
+    main_plist["CFBundleVersion"] = project_version
     main_plist["LSMinimumSystemVersion"] = "15.0"
     main_plist["CFBundleIconFile"] = "AppIcon"
     main_plist["CFBundleIconName"] = "AppIcon"
