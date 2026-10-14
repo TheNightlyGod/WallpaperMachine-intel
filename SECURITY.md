@@ -6,7 +6,7 @@ can be turned against the person using it, please tell us privately first.
 
 ## Report a vulnerability
 
-Use **[Report a vulnerability](https://github.com/WallpaperMachine/WallpaperMachine/security/advisories/new)**
+Use **[Report a vulnerability](https://github.com/TheNightlyGod/WallpaperMachine-intel/security/advisories/new)**
 on the repository's Security tab. Only the maintainers see the report, and the
 fix and advisory are prepared with you there. If you can't use GitHub, email
 support@wallpapermachine.app with "Security" in the subject.
@@ -63,5 +63,5 @@ published with a SHA-256 checksum and a build provenance attestation. To check
 one came from this repository's workflow:
 
 ```sh
-gh attestation verify WallpaperMachine-*-arm64.dmg --repo WallpaperMachine/WallpaperMachine
+gh attestation verify WallpaperMachine-*-x86_64.dmg --repo TheNightlyGod/WallpaperMachine-intel
 ```

@@ -48,7 +48,7 @@ there, and **Check for Updates…** is never held.
 A check reads the Latest release's update manifest, not the REST API: anonymous
 API requests are limited to 60 an hour per public IP, shared with every app and
 device behind that address. The manifest is a release asset,
-`https://github.com/WallpaperMachine/WallpaperMachine/releases/latest/download/WallpaperMachine-update.json`
+`https://github.com/TheNightlyGod/WallpaperMachine-intel/releases/latest/download/WallpaperMachine-update.json`
 (`AppUpdateConfiguration.latestManifestURL`). github.com redirects it to the file
 on the release marked Latest (drafts never resolve), and such a download does not
 count against the API limit. It is the release object in the API's shape, so

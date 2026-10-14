@@ -455,7 +455,8 @@ def install_footer(version, target=None, built_from=None):
     """
     image = dmg.image_name(display_version(version))
     tag = f"v{display_version(version)}"
-    requirement = f"Apple silicon (arm64), macOS {target} or later." if target else "Apple silicon (arm64)."
+    arch_label = "Intel Mac (x86_64)" if "x86_64" in image else "Apple silicon (arm64)"
+    requirement = f"{arch_label}, macOS {target} or later." if target else f"{arch_label}."
     lines = [
         NOTES_END,
         "",

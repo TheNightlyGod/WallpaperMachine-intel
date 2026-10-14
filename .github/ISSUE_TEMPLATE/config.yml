@@ -5,11 +5,11 @@
 blank_issues_enabled: true
 contact_links:
   - name: Question or help
-    url: https://github.com/WallpaperMachine/WallpaperMachine/discussions/categories/q-a
+    url: https://github.com/TheNightlyGod/WallpaperMachine-intel/discussions/categories/q-a
     about: Ask how to install, set up or use WallpaperMachine.
   - name: Install guide
     url: https://www.wallpapermachine.app/guides/install/
     about: From the download to the first-run guide, including Open Anyway on first launch.
   - name: Security vulnerability
-    url: https://github.com/WallpaperMachine/WallpaperMachine/security/advisories/new
+    url: https://github.com/TheNightlyGod/WallpaperMachine-intel/security/advisories/new
     about: Report it privately, never in a public issue. See SECURITY.md.
