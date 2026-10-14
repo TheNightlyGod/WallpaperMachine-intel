@@ -494,7 +494,7 @@ notes file that becomes the release body and the image bytes, and
 `scripts/publish_release.py` attaches it. It is the release object in the REST
 API's shape: `tag_name`, `html_url`, `prerelease`, `body` and one asset with
 `name`, `browser_download_url`, `size` and a `sha256:` `digest`. The app reads it
-from `https://github.com/WallpaperMachine/WallpaperMachine/releases/latest/download/WallpaperMachine-update.json`,
+from `https://github.com/TheNightlyGod/WallpaperMachine-intel/releases/latest/download/WallpaperMachine-update.json`,
 which github.com redirects to the file on the release marked Latest. A draft never
 resolves, and `publish_release.py` makes the release public only after the image,
 sidecar and manifest are uploaded. The name is
@@ -504,13 +504,11 @@ and an image not named as below.
 
 What a release must satisfy:
 
-- the repository is `WallpaperMachine/WallpaperMachine`
-  (`AppUpdateConfiguration.repository`). Builds up to 1.0.0 still ask for
-  `bobbyhuang-dev/WallpaperMachine` and reach it only through GitHub's rename
-  redirect, so never create a repository at that old path;
+- the repository is `TheNightlyGod/WallpaperMachine-intel`
+  (`AppUpdateConfiguration.repository`);
 - the release is not a draft or prerelease, and its tag is `vx.y.z` (no
   prerelease suffixes, no `nightly`);
-- the disk image is named exactly `WallpaperMachine-<x.y.z>-arm64.dmg` — what
+- the disk image is named `WallpaperMachine-<x.y.z>-x86_64.dmg` — what
   `AppUpdateConfiguration.assetName(for:)` returns and what `scripts/package.py`
   produces (`image_name` in `scripts/lib/dmg.py`). The app can fall back to another
   product `.dmg`, but never downloads the `.sha256` sidecar, zips, feeds or
@@ -558,10 +556,10 @@ use the preceding tag.
    then `### 简体中文`, and the model wrote both. The app bundles both translations;
    the GitHub release page shows only the English notes.
 3. Confirm the called Build run passed the test gate, verified the mounted
-   image, and published `WallpaperMachine-x.y.z-arm64.dmg` with its `.sha256`
+   image, and published `WallpaperMachine-x.y.z-x86_64.dmg` with its `.sha256`
    sidecar, `WallpaperMachine-update.json` and a provenance attestation. The
    manifest's `digest` must equal the sidecar's checksum:
-   `curl -sL https://github.com/WallpaperMachine/WallpaperMachine/releases/latest/download/WallpaperMachine-update.json`.
+   `curl -sL https://github.com/TheNightlyGod/WallpaperMachine-intel/releases/latest/download/WallpaperMachine-update.json`.
 4. Read the release body on the page: it should contain only the English notes
    from the current `CHANGELOG.md` section, followed by the install footer,
    without a Chinese section or raw commit list. The **Full changelog** link

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -43,6 +44,8 @@ class XcodeSettingTests(unittest.TestCase):
     def xcodebuild_arguments(self, *arguments):
         calls = []
         with mock.patch.object(sys, "argv", ["build.py", "--swift-only", *arguments]), \
+                mock.patch.object(shutil, "which", return_value="/usr/bin/xcodebuild"), \
+                mock.patch.object(subprocess, "check_output", return_value="Xcode 16"), \
                 mock.patch.object(build, "build_environment", return_value={}), \
                 mock.patch.object(build, "run", side_effect=lambda command, *_, **__: calls.append(command)), \
                 mock.patch("builtins.print"):

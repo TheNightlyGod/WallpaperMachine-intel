@@ -128,6 +128,9 @@ def main():
             print(f"{MARK.ok} {module.relative_to(ROOT)}: {ran}", flush=True)
         if failed_modules:
             return failed_modules[0]
+    if not (shutil.which("xcodegen") and shutil.which("xcodebuild")):
+        print(f"{MARK.ok} All unit tests passed. (Skipping Xcode integration tests: xcodegen/xcodebuild not present)")
+        return 0
     # `--use-cache` leaves the project untouched when project.yml has not changed,
     # so Xcode's incremental build state survives between runs.
     subprocess.run(["xcodegen", "generate", "--use-cache", "--quiet"], cwd=ROOT, check=True)

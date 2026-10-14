@@ -6,18 +6,18 @@
   <img src="https://github.com/user-attachments/assets/df92d34d-b718-4d58-b8e9-b002c4915516" width="100%" alt="一台 Mac 的桌面轮流播放 WallpaperMachine 的六张动态壁纸：水波中的千咲、月球上的 Lucy、雪地里的红牛 F1 赛车、黄昏中的流萤、雨中公交站的艾莲，以及 Into The Abyss，上方是 macOS 菜单栏，下方是程序坞。">
 </a>
 
-<h3 align="center">Wallpaper Engine 壁纸，现已来到 macOS。</h3>
+<h3 align="center">Wallpaper Engine 壁纸，现已来到 Intel macOS。</h3>
 
 <p align="center">
-  一款免费、开源的 Mac 应用，直接从 Steam 创意工坊获取 Wallpaper Engine 的<br>场景、视频和网页壁纸，在你的桌面上播放。献给每一位想在 Mac 上用 Wallpaper Engine 的人。
+  一款免费、开源的 Mac 应用，直接从 Steam 创意工坊获取 Wallpaper Engine 的<br>场景、视频和网页壁纸，在你的桌面上播放。针对 Intel (x86_64) Mac 进行了完整适配与修复的分支版本。
 </p>
 
 <p align="center">
-  <a href="https://github.com/WallpaperMachine/WallpaperMachine/releases/latest"><img src="https://img.shields.io/github/v/release/WallpaperMachine/WallpaperMachine?label=version&color=0a84ff" alt="最新版本"></a>
-  <a href="https://github.com/WallpaperMachine/WallpaperMachine/actions/workflows/version.yml"><img src="https://img.shields.io/github/actions/workflow/status/WallpaperMachine/WallpaperMachine/version.yml?branch=main&label=build" alt="构建与发布状态"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/WallpaperMachine/WallpaperMachine?color=blue" alt="许可证：GPL-2.0"></a>
-  <img src="https://img.shields.io/badge/macOS_15%2B-Apple_silicon-111111?logo=apple&logoColor=white" alt="macOS 15 或更高版本，Apple 芯片">
-  <a href="https://github.com/WallpaperMachine/WallpaperMachine/stargazers"><img src="https://img.shields.io/github/stars/WallpaperMachine/WallpaperMachine" alt="GitHub 星标"></a>
+  <a href="https://github.com/TheNightlyGod/WallpaperMachine-intel/releases/latest"><img src="https://img.shields.io/github/v/release/TheNightlyGod/WallpaperMachine-intel?label=version&color=0a84ff" alt="最新版本"></a>
+  <a href="https://github.com/TheNightlyGod/WallpaperMachine-intel/actions/workflows/version.yml"><img src="https://img.shields.io/github/actions/workflow/status/TheNightlyGod/WallpaperMachine-intel/version.yml?branch=main&label=build" alt="构建与发布状态"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/TheNightlyGod/WallpaperMachine-intel?color=blue" alt="许可证：GPL-2.0"></a>
+  <img src="https://img.shields.io/badge/macOS_15%2B-Intel_(x86__64)-111111?logo=apple&logoColor=white" alt="macOS 15 或更高版本，Intel (x86_64)">
+  <a href="https://github.com/TheNightlyGod/WallpaperMachine-intel/stargazers"><img src="https://img.shields.io/github/stars/TheNightlyGod/WallpaperMachine-intel" alt="GitHub 星标"></a>
 </p>
 
 <p align="center">
@@ -27,7 +27,7 @@
 </p>
 
 <p align="center">
-  <sub>macOS 15 Sequoia 或更高版本&ensp;·&ensp;Apple 芯片（M1 或更新机型）&ensp;·&ensp;<a href="https://github.com/WallpaperMachine/WallpaperMachine/releases/latest">发布说明与校验和</a></sub>
+  <sub>macOS 15 Sequoia 或更高版本&ensp;·&ensp;Intel 芯片（x86_64）&ensp;·&ensp;<a href="https://github.com/TheNightlyGod/WallpaperMachine-intel/releases/latest">发布说明与校验和</a></sub>
 </p>
 
 <p align="center">
@@ -55,7 +55,7 @@
 
 ## 快速开始
 
-1. **下载**最新版本的[免费磁盘映像](https://www.wallpapermachine.app/download)。
+1. **下载**最新版本的[免费磁盘映像](https://github.com/TheNightlyGod/WallpaperMachine-intel/releases/latest)。
 2. **安装**：打开它，把 WallpaperMachine 拖到“应用程序”文件夹。
 3. **打开它。** 下载版暂未经过公证，macOS 会拦下首次启动：在“系统设置 → 隐私与安全性”中点按一次**仍要打开**即可。
 
@@ -96,12 +96,12 @@
 - **全部开源。** 应用、渲染器和场景引擎都在这个仓库中，以 GPL-2.0 许可证发布。没有闭源核心，也没有付费功能：每个人用到的应用都一样。
 - **公开构建。** 每个版本都由 [GitHub Actions](docs/release.md#build-buildyml) 从打了标签的提交构建并测试，然后附带 SHA-256 校验和与构建来源证明（build provenance attestation）发布。验证下载的文件确实来自本仓库的工作流：
   ```sh
-  gh attestation verify WallpaperMachine-*-arm64.dmg --repo WallpaperMachine/WallpaperMachine
+  gh attestation verify WallpaperMachine-*-x86_64.dmg --repo TheNightlyGod/WallpaperMachine-intel
   ```
 - **没有追踪。** 应用只在你需要时联网：Steam 用于创意工坊，pixiv 在你打开它时使用，GitHub 用于检查更新；只有在你打开[发送性能数据](docs/features/telemetry.md)后，才会每天发送一份小报告，内容是加载耗时、帧率和你的 Mac 型号。报告不包含名称、文件或账户信息，关闭后会删除已发送的数据。登录信息和密码保存在你的 Mac 上。
 - **可校验的更新。** 内置更新程序只安装 SHA-256 与发布版本一致的磁盘映像；无法验证的会被[拒绝，绝不会未经校验就安装](docs/features/updates.md#downloading)。
 - **持续维护。** 新版本发布频繁，每一版都以英文和简体中文写进[更新日志](CHANGELOG.md)。
-- **问题有处可报。** 任意壁纸详情中的**无法正常使用？在 GitHub 上反馈**会打开一个预先填好的 [issue](https://github.com/WallpaperMachine/WallpaperMachine/issues)；[诊断报告](docs/features/diagnostics.md)会在你分享之前移除你的个人文件夹路径、Mac 用户名和 Steam 账户名。
+- **问题有处可报。** 任意壁纸详情中的**无法正常使用？在 GitHub 上反馈**会打开一个预先填好的 [issue](https://github.com/TheNightlyGod/WallpaperMachine-intel/issues)；[诊断报告](docs/features/diagnostics.md)会在你分享之前移除你的个人文件夹路径、Mac 用户名和 Steam 账户名。
 
 ## Rust 核心 · Metal 图形
 
@@ -143,21 +143,21 @@ Wallpaper Engine 本身是为 Windows 打造的。WallpaperMachine 是一款独�
 <details>
 <summary><b>适用于哪些 Mac？</b></summary>
 
-WallpaperMachine 为搭载 Apple 芯片（M1 或更新机型）、运行 macOS 15 Sequoia 或更高版本的 Mac 打造；动态锁屏需要 macOS 26 Tahoe 或更高版本。不支持 Intel 芯片的 Mac。
+适用于搭载 Intel 处理器（x86_64）、运行 macOS 15 Sequoia 或更高版本的 Mac（包括官方支持机型以及通过 OpenCore Legacy Patcher 运行 macOS 15 的 Intel Mac）。本分支针对 Intel 硬件提供了完整的适配、Bug 修复及无需完整 Xcode.app 的命令行构建支持。
 
 </details>
 
 <details>
 <summary><b>所有壁纸都能用吗？</b></summary>
 
-WallpaperMachine 支持场景、视频和网页渲染。兼容性因壁纸而异；支持这些格式并不代表每个创意工坊项目都能呈现完全一致的效果，应用程序（Application）类壁纸也无法运行。如果某张壁纸显示不对，在它的详情中点按**无法正常使用？在 GitHub 上反馈**，会打开一个填好该壁纸信息的新 [GitHub issue](https://github.com/WallpaperMachine/WallpaperMachine/issues)，供你检查后提交。如需附上日志，请在“设置 → 存储 → 故障排查”中导出[诊断报告](docs/features/diagnostics.md)，其中的个人文件夹路径、Mac 用户名和 Steam 账户名会先被替换掉。
+WallpaperMachine 支持场景、视频和网页渲染。兼容性因壁纸而异；支持这些格式并不代表每个创意工坊项目都能呈现完全一致的效果，应用程序（Application）类壁纸也无法运行。如果某张壁纸显示不对，在它的详情中点按**无法正常使用？在 GitHub 上反馈**，会打开一个填好该壁纸信息的新 [GitHub issue](https://github.com/TheNightlyGod/WallpaperMachine-intel/issues)，供你检查后提交。如需附上日志，请在“设置 → 存储 → 故障排查”中导出[诊断报告](docs/features/diagnostics.md)，其中的个人文件夹路径、Mac 用户名和 Steam 账户名会先被替换掉。
 
 </details>
 
 <details>
 <summary><b>如何获取？</b></summary>
 
-签名版可以从 [GitHub 最新发布](https://github.com/WallpaperMachine/WallpaperMachine/releases/latest)免费下载，你也可以[用源代码自行构建](#开源与自行构建)。该版本未经公证，macOS 会拦下首次启动，直到你在“系统设置 → 隐私与安全性”中点按“仍要打开”。[安装指南](https://www.wallpapermachine.app/zh/guides/install/)会带你从下载一直走到首次使用引导。此后应用会自行检查新版本；在能替换自身副本的情况下，它会提供**重启并更新**。
+签名版可以从 [GitHub 最新发布](https://github.com/TheNightlyGod/WallpaperMachine-intel/releases/latest)免费下载，你也可以[用源代码自行构建](#开源与自行构建)。该版本未经公证，macOS 会拦下首次启动，直到你在“系统设置 → 隐私与安全性”中点按“仍要打开”。[安装指南](https://www.wallpapermachine.app/zh/guides/install/)会带你从下载一直走到首次使用引导。此后应用会自行检查新版本；在能替换自身副本的情况下，它会提供**重启并更新**。
 
 </details>
 
@@ -178,13 +178,13 @@ WallpaperMachine 支持场景、视频和网页渲染。兼容性因壁纸而异
 <details>
 <summary><b>在哪里提问或提出功能建议？</b></summary>
 
-问题请发到 [Discussions](https://github.com/WallpaperMachine/WallpaperMachine/discussions/categories/q-a)，想法请提交[功能建议](https://github.com/WallpaperMachine/WallpaperMachine/issues/new?template=feature_request.yml)，中文即可。壁纸显示不对，请使用它详情中的**无法正常使用？在 GitHub 上反馈**。安全问题请私下报告，见 [SECURITY.md](SECURITY.md)。
+问题请发到 [Discussions](https://github.com/TheNightlyGod/WallpaperMachine-intel/discussions/categories/q-a)，想法请提交[功能建议](https://github.com/TheNightlyGod/WallpaperMachine-intel/issues/new?template=feature_request.yml)，中文即可。壁纸显示不对，请使用它详情中的**无法正常使用？在 GitHub 上反馈**。安全问题请私下报告，见 [SECURITY.md](SECURITY.md)。
 
 </details>
 
 ## 开源与自行构建
 
-完整源代码就在这里。构建需要搭载 Apple 芯片的 Mac、Xcode 26（macOS 15.6 或更高版本）、用 `xcode-select` 选定的完整 Xcode，以及[先决条件](docs/build.md#prerequisites)中列出的 Homebrew 软件包；渲染器和场景引擎内置在[`upstream/`](upstream) 中，而不是以子模块引入。
+完整源代码就在这里。构建需要搭载 Intel 处理器（x86_64）的 Mac、macOS 15 Sequoia 或更高版本，可以使用完整 Xcode 或仅使用 Xcode Command Line Tools（`xcode-select --install`），以及 Rust、CMake 与[先决条件](docs/build.md#prerequisites)中列出的 Homebrew 软件包；渲染器和场景引擎内置在[`upstream/`](upstream) 中，而不是以子模块引入。
 
 ```sh
 python3 scripts/install_ffmpeg.py                  # 本项目的 LGPL FFmpeg 构建

@@ -69,7 +69,7 @@ reasons are in [LICENSING.md](LICENSING.md#supporter-model-free-signed-download-
 
 - **Star the repository**, so more Mac users find it.
 - **Report a wallpaper that looks wrong.** **Not working? Report on GitHub** in
-  its details opens an [issue](https://github.com/WallpaperMachine/WallpaperMachine/issues)
+  its details opens an [issue](https://github.com/TheNightlyGod/WallpaperMachine-intel/issues)
   with the wallpaper's information filled in.
 - **Send a fix.** [CONTRIBUTING.md](CONTRIBUTING.md) explains how to work on the
   code.

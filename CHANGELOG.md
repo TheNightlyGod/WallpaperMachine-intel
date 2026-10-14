@@ -192,7 +192,7 @@ Native Metal 成为默认场景渲染器，新增实时属性预览和壁纸位�
 - 网页壁纸在首次更新后只接收已更改的属性，网页不再在每次编辑时重复初始化
 - 在运行 macOS 27 的 MacBook 上，性能设置中的能耗再次显示每小时电池占比
 
-**Full changelog**: https://github.com/WallpaperMachine/WallpaperMachine/compare/v1.3.3...v1.4.1
+**Full changelog**: https://github.com/TheNightlyGod/WallpaperMachine-intel/compare/v1.3.3...v1.4.1
 
 ## 1.4.0 — 2026-10-13
 

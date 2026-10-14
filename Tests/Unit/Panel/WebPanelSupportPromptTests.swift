@@ -117,7 +117,7 @@ final class WebPanelSupportPromptTests: ControlPanelTestCase {
 
   func testChoicesOpenRepositoryAndLocalizedPricingThroughInjectedOpener() async throws {
     for (choice, language, destination) in [
-      ("star", "en", "https://github.com/WallpaperMachine/WallpaperMachine"),
+      ("star", "en", AppUpdateConfiguration.repositoryURL.absoluteString),
       ("supporter", "en", "https://www.wallpapermachine.app/pricing/"),
       ("supporter", "zh-Hans", "https://www.wallpapermachine.app/zh/pricing/"),
     ] {

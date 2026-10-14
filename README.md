@@ -8,19 +8,19 @@
   <img src="https://github.com/user-attachments/assets/df92d34d-b718-4d58-b8e9-b002c4915516" width="100%" alt="A Mac desktop cycling through six live wallpapers played by WallpaperMachine: Chisaki over rippling water, Lucy on the Moon, a Red Bull F1 car in the snow, Firefly at dusk, Ellen at a rainy bus stop and Into The Abyss, under the macOS menu bar and Dock.">
 </a>
 
-<h3 align="center">Wallpaper Engine wallpapers, now on macOS.</h3>
+<h3 align="center">Wallpaper Engine wallpapers, now on Intel macOS.</h3>
 
 <p align="center">
   A free, open-source Mac app that plays Wallpaper Engine scene, video and web wallpapers<br>
-  on your desktop, straight from the Steam Workshop. For anyone who wanted Wallpaper Engine on a Mac.
+  on your desktop, straight from the Steam Workshop. Forked and patched with full Intel (x86_64) Mac support.
 </p>
 
 <p align="center">
-  <a href="https://github.com/WallpaperMachine/WallpaperMachine/releases/latest"><img src="https://img.shields.io/github/v/release/WallpaperMachine/WallpaperMachine?label=version&color=0a84ff" alt="Latest version"></a>
-  <a href="https://github.com/WallpaperMachine/WallpaperMachine/actions/workflows/version.yml"><img src="https://img.shields.io/github/actions/workflow/status/WallpaperMachine/WallpaperMachine/version.yml?branch=main&label=build" alt="Build and release status"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/WallpaperMachine/WallpaperMachine?color=blue" alt="License: GPL-2.0"></a>
-  <img src="https://img.shields.io/badge/macOS_15%2B-Apple_silicon-111111?logo=apple&logoColor=white" alt="macOS 15 or later on Apple silicon">
-  <a href="https://github.com/WallpaperMachine/WallpaperMachine/stargazers"><img src="https://img.shields.io/github/stars/WallpaperMachine/WallpaperMachine" alt="GitHub stars"></a>
+  <a href="https://github.com/TheNightlyGod/WallpaperMachine-intel/releases/latest"><img src="https://img.shields.io/github/v/release/TheNightlyGod/WallpaperMachine-intel?label=version&color=0a84ff" alt="Latest version"></a>
+  <a href="https://github.com/TheNightlyGod/WallpaperMachine-intel/actions/workflows/version.yml"><img src="https://img.shields.io/github/actions/workflow/status/TheNightlyGod/WallpaperMachine-intel/version.yml?branch=main&label=build" alt="Build and release status"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/TheNightlyGod/WallpaperMachine-intel?color=blue" alt="License: GPL-2.0"></a>
+  <img src="https://img.shields.io/badge/macOS_15%2B-Intel_(x86__64)-111111?logo=apple&logoColor=white" alt="macOS 15 or later on Intel (x86_64)">
+  <a href="https://github.com/TheNightlyGod/WallpaperMachine-intel/stargazers"><img src="https://img.shields.io/github/stars/TheNightlyGod/WallpaperMachine-intel" alt="GitHub stars"></a>
 </p>
 
 <p align="center">
@@ -30,7 +30,7 @@
 </p>
 
 <p align="center">
-  <sub>macOS 15 Sequoia or later&ensp;·&ensp;Apple silicon (M1 or later)&ensp;·&ensp;<a href="https://github.com/WallpaperMachine/WallpaperMachine/releases/latest">Release notes and checksums</a></sub>
+  <sub>macOS 15 Sequoia or later&ensp;·&ensp;Intel Mac (x86_64)&ensp;·&ensp;<a href="https://github.com/TheNightlyGod/WallpaperMachine-intel/releases/latest">Release notes and checksums</a></sub>
 </p>
 
 <p align="center">
@@ -61,7 +61,7 @@
 
 ## Quick start
 
-1. **Download** the [free disk image](https://www.wallpapermachine.app/download) for the latest version.
+1. **Download** the [free disk image](https://github.com/TheNightlyGod/WallpaperMachine-intel/releases/latest) for the latest version.
 2. **Install**: open it and drag WallpaperMachine to Applications.
 3. **Open it.** The download isn't notarized yet, so macOS holds the first launch:
    click **Open Anyway** in System Settings → Privacy & Security, once.
@@ -118,7 +118,7 @@ without opening the window.
   published with a SHA-256 checksum and a build provenance attestation. Check a
   download came from this repository's workflow:
   ```sh
-  gh attestation verify WallpaperMachine-*-arm64.dmg --repo WallpaperMachine/WallpaperMachine
+  gh attestation verify WallpaperMachine-*-x86_64.dmg --repo TheNightlyGod/WallpaperMachine-intel
   ```
 - **No tracking.** The app goes online only for what you ask of it: Steam for the
   Workshop, pixiv when you open it, GitHub for update checks, and, only if you turn
@@ -133,7 +133,7 @@ without opening the window.
   in the [changelog](CHANGELOG.md), in English and 简体中文.
 - **Problems get a real path.** **Not working? Report on GitHub** in any
   wallpaper's details opens a prefilled
-  [issue](https://github.com/WallpaperMachine/WallpaperMachine/issues), and
+  [issue](https://github.com/TheNightlyGod/WallpaperMachine-intel/issues), and
   [diagnostics reports](docs/features/diagnostics.md) remove your home folder,
   Mac user name and Steam account names before you share them.
 
@@ -188,8 +188,7 @@ wallpaper, Aurora Drift, plays without either. More in
 <details>
 <summary><b>Which Macs is it built for?</b></summary>
 
-Macs with Apple silicon (M1 or later) running macOS 15 Sequoia or later. The
-animated lock screen needs macOS 26 Tahoe or later. Intel Macs aren't supported.
+Intel Macs (x86_64) running macOS 15 Sequoia or later (including supported Mac models and Macs running macOS 15 via OpenCore Legacy Patcher). This fork provides complete compatibility, bug fixes and standalone build tooling for Intel Mac hardware.
 
 </details>
 
@@ -200,7 +199,7 @@ WallpaperMachine supports scene, video and web rendering. Compatibility varies
 by wallpaper; support for these formats does not mean every Workshop item will
 render identically, and Application wallpapers don't run. If one looks wrong,
 **Not working? Report on GitHub** in its details opens a new
-[GitHub issue](https://github.com/WallpaperMachine/WallpaperMachine/issues) with
+[GitHub issue](https://github.com/TheNightlyGod/WallpaperMachine-intel/issues) with
 that wallpaper's information filled in, for you to check and send. To attach
 logs, export a [diagnostics report](docs/features/diagnostics.md) from
 Settings → Storage → Troubleshooting. Home folder paths, your Mac user name and
@@ -212,7 +211,7 @@ Steam account names are replaced first.
 <summary><b>How do I get it?</b></summary>
 
 Download the signed build free from the
-[latest release](https://github.com/WallpaperMachine/WallpaperMachine/releases/latest),
+[latest release](https://github.com/TheNightlyGod/WallpaperMachine-intel/releases/latest),
 or [build it from the source](#open-source-free-to-build). The build is not
 notarized, so macOS holds its first launch until you click Open Anyway in
 System Settings → Privacy & Security. The
@@ -237,8 +236,8 @@ is the same with or without it. What it includes and how to become one:
 <details>
 <summary><b>Where do I ask a question or suggest a feature?</b></summary>
 
-Questions go to [Discussions](https://github.com/WallpaperMachine/WallpaperMachine/discussions/categories/q-a),
-and ideas to a [feature request](https://github.com/WallpaperMachine/WallpaperMachine/issues/new?template=feature_request.yml).
+Questions go to [Discussions](https://github.com/TheNightlyGod/WallpaperMachine-intel/discussions/categories/q-a),
+and ideas to a [feature request](https://github.com/TheNightlyGod/WallpaperMachine-intel/issues/new?template=feature_request.yml).
 For a wallpaper that looks wrong, use **Not working? Report on GitHub** in its
 details. Security problems are reported privately: see [SECURITY.md](SECURITY.md).
 
@@ -246,8 +245,7 @@ details. Security problems are reported privately: see [SECURITY.md](SECURITY.md
 
 ## Open source. Free to build.
 
-The complete source is here. It builds on a Mac with Apple silicon, Xcode 26 (macOS 15.6 or later), a
-full Xcode selected with `xcode-select` and the Homebrew packages listed under
+The complete source is here. It builds on an Intel Mac running macOS 15 Sequoia or later, using either full Xcode or just Xcode Command Line Tools (`xcode-select --install`), Rust, CMake, and the Homebrew packages listed under
 [Prerequisites](docs/build.md#prerequisites); the renderer and scene engine are
 vendored under [`upstream/`](upstream), not pulled in as submodules.
 
