@@ -17,6 +17,7 @@ import argparse
 from datetime import datetime
 import os
 from pathlib import Path
+import platform
 import plistlib
 import shutil
 import subprocess
@@ -198,7 +199,8 @@ def main():
             # the app-icon name actool would otherwise look for in the catalog.
             settings = [f"EXCLUDED_SOURCE_FILE_NAMES={APP_ICON.name}", "ASSETCATALOG_COMPILER_APPICON_NAME="]
         settings += args.xcode_setting
-        run(["xcodebuild", "-project", XCODEPROJ.name, "-scheme", "WallpaperMachine", "-configuration", args.configuration, "-derivedDataPath", BUILD, "build", *settings], env=env, stage=f"xcodebuild-{args.configuration}")
+        destination = ["-destination", f"platform=macOS,arch={platform.machine()}"]
+        run(["xcodebuild", "-project", XCODEPROJ.name, "-scheme", "WallpaperMachine", "-configuration", args.configuration, *destination, f"ARCHS={platform.machine()}", "-derivedDataPath", BUILD, "build", *settings], env=env, stage=f"xcodebuild-{args.configuration}")
         if compiled_icon:
             install_app_icon(app_bundle(args.configuration), compiled_icon)
     else:
