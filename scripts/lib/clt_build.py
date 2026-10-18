@@ -10,7 +10,7 @@ import shutil
 import subprocess
 import sys
 
-from .paths import ROOT, APP, EXTENSION, SHARED, WEB_UI, PRODUCTS, BUILD, GENERATED_BRIDGE, RENDERER
+from .paths import ROOT, APP, EXTENSION, SHARED, PRODUCTS, BUILD, GENERATED_BRIDGE, RENDERER
 from .glyphs import markers
 
 MARK = markers()
@@ -269,7 +269,10 @@ def build_app_bundle(configuration="Release", env=None):
     app_icon = resources / "AppIcon.icns"
     compile_app_icon(app_icon)
 
-    shutil.copytree(WEB_UI, resources / "WebUI", dirs_exist_ok=True)
+    if (ROOT / "WebUI").is_dir():
+        shutil.copytree(ROOT / "WebUI", resources / "WebUI", dirs_exist_ok=True)
+    if (ROOT / "Resources/ReleaseBanners").is_dir():
+        shutil.copytree(ROOT / "Resources/ReleaseBanners", resources / "ReleaseBanners", dirs_exist_ok=True)
     shutil.copytree(ROOT / "Resources/StarterWallpaper", resources / "StarterWallpaper", dirs_exist_ok=True)
     shutil.copy2(ROOT / "CHANGELOG.md", resources / "CHANGELOG.md")
     shutil.copy2(ROOT / "upstream/mediaremote-adapter/bin/mediaremote-adapter.pl", resources / "mediaremote-adapter.pl")
