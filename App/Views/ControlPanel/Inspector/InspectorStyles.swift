@@ -337,8 +337,15 @@ struct PanelAnnouncer {
   static let voiceOver = PanelAnnouncer { AccessibilityNotification.Announcement($0).post() }
 }
 
+private struct PanelAnnouncerKey: EnvironmentKey {
+  static let defaultValue = PanelAnnouncer.voiceOver
+}
+
 extension EnvironmentValues {
-  @Entry var panelAnnouncer = PanelAnnouncer.voiceOver
+  var panelAnnouncer: PanelAnnouncer {
+    get { self[PanelAnnouncerKey.self] }
+    set { self[PanelAnnouncerKey.self] = newValue }
+  }
 }
 
 extension View {

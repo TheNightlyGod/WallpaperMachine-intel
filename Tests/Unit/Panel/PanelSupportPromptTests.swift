@@ -101,7 +101,7 @@ final class PanelSupportPromptTests: PanelTestCase {
   /// interface; either spends the offer.
   func testChoicesOpenTheRepositoryAndLocalizedPricingThroughTheInjectedOpener() async throws {
     for (choice, language, destination) in [
-      (SupportPromptChoice.star, "en", "https://github.com/WallpaperMachine/WallpaperMachine"),
+      (SupportPromptChoice.star, "en", AppUpdateConfiguration.repositoryURL.absoluteString),
       (.supporter, "en", "https://www.wallpapermachine.app/pricing/"),
       (.supporter, "zh-Hans", "https://www.wallpapermachine.app/zh/pricing/"),
       (.supporter, "zh-Hant", "https://www.wallpapermachine.app/zh/pricing/"),

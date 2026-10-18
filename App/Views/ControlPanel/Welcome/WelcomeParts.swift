@@ -4,11 +4,25 @@ import SwiftUI
 // `Text` (which follows the panel's language through the environment) and their actions as
 // closures, and read the panel theme for every colour.
 
+private struct WelcomeIsCompactKey: EnvironmentKey {
+  static let defaultValue = false
+}
+
+private struct WelcomeGroupHasFocusKey: EnvironmentKey {
+  static let defaultValue = false
+}
+
 extension EnvironmentValues {
   /// The card is short (a small window): pages use their tighter spacing and a smaller hero.
-  @Entry var welcomeIsCompact = false
+  var welcomeIsCompact: Bool {
+    get { self[WelcomeIsCompactKey.self] }
+    set { self[WelcomeIsCompactKey.self] = newValue }
+  }
   /// The choice group around a tile has keyboard focus, so its chosen tile draws a focus ring.
-  @Entry var welcomeGroupHasFocus = false
+  var welcomeGroupHasFocus: Bool {
+    get { self[WelcomeGroupHasFocusKey.self] }
+    set { self[WelcomeGroupHasFocusKey.self] = newValue }
+  }
 }
 
 // MARK: - Surfaces

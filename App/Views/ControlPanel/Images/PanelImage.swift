@@ -1,10 +1,18 @@
 import SwiftUI
 
+private struct PanelImagesKey: EnvironmentKey {
+  static let defaultValue: PanelImagePipeline? = nil
+}
+
 extension EnvironmentValues {
   /// The pipeline `PanelImage` loads through. The root view sets it from the controller; without
   /// one, an image shows its placeholder.
-  @Entry var panelImages: PanelImagePipeline?
+  var panelImages: PanelImagePipeline? {
+    get { self[PanelImagesKey.self] }
+    set { self[PanelImagesKey.self] = newValue }
+  }
 }
+
 
 /// A still from the pipeline: loads when it appears or its source changes, stops waiting when it
 /// disappears, and shows a placeholder until the image is ready.

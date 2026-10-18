@@ -111,8 +111,15 @@ struct SettingsRowContext: Equatable {
   let hint: String?
 }
 
+private struct SettingsRowKey: EnvironmentKey {
+  static let defaultValue: SettingsRowContext? = nil
+}
+
 extension EnvironmentValues {
-  @Entry var settingsRow: SettingsRowContext?
+  var settingsRow: SettingsRowContext? {
+    get { self[SettingsRowKey.self] }
+    set { self[SettingsRowKey.self] = newValue }
+  }
 }
 
 extension View {
