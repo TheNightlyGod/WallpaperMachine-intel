@@ -137,7 +137,6 @@ def build_app_bundle(configuration="Release", env=None):
     resources = contents / "Resources"
     frameworks = contents / "Frameworks"
     extensions = contents / "Extensions"
-    plugins = contents / "PlugIns"
 
     # Clean existing app bundle
     if app_dir.exists():
@@ -220,9 +219,6 @@ def build_app_bundle(configuration="Release", env=None):
 
     # Sign extension
     run_cmd(["codesign", "--force", "--sign", "-", "--entitlements", str(EXTENSION / "WallpaperExtension.entitlements"), str(appex_dir)], cwd=ROOT, env=build_env)
-
-    # Also duplicate into Contents/PlugIns
-    shutil.copytree(appex_dir, plugins / "WallpaperMachineExtension.appex", symlinks=True)
 
     # 3. Main App binary
     app_files = []
