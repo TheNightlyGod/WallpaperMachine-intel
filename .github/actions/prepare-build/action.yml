@@ -39,11 +39,18 @@ runs:
       # formula, so its version can key the FFmpeg cache before FFmpeg is looked at.
       run: |
         set -euo pipefail
-        brew install --quiet xcodegen cmake quickjs-ng glslang freetype lz4 \
-          vulkan-loader vulkan-headers molten-vk eigen nlohmann-json argparse shaderc \
-          spirv-tools glm dav1d ccache
-        echo "dav1d=$(brew list --versions dav1d | tr ' ' '-')" >> "$GITHUB_OUTPUT"
         prefix="$(brew --prefix)"
+        rm -rf "${prefix}/var/homebrew/tmp" /private/tmp/homebrew-unpack* || true
+        packages=(xcodegen cmake quickjs-ng glslang freetype lz4 \
+          vulkan-loader vulkan-headers molten-vk eigen nlohmann-json argparse shaderc \
+          spirv-tools glm dav1d ccache)
+        if ! brew install --quiet "${packages[@]}"; then
+          echo "brew install encountered a transient conflict; cleaning tmp and retrying..."
+          rm -rf "${prefix}/var/homebrew/tmp" /private/tmp/homebrew-unpack* || true
+          brew cleanup || true
+          brew install --quiet "${packages[@]}"
+        fi
+        echo "dav1d=$(brew list --versions dav1d | tr ' ' '-')" >> "$GITHUB_OUTPUT"
         echo "prefix=${prefix}" >> "$GITHUB_OUTPUT"
         echo "arch=$(uname -m)" >> "$GITHUB_OUTPUT"
         # Bottles, FFmpeg and compiled objects differ per macOS release, so every
