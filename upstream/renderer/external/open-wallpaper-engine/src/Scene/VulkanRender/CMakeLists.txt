@@ -25,6 +25,7 @@ PRIVATE
 	wpVulkan
     wpScene
     wpRGraph
+    nlohmann_json::nlohmann_json
 )
 target_include_directories(${LIB_NAME} PUBLIC include PRIVATE include/VulkanRender .)
 target_compile_options(${LIB_NAME} PRIVATE ${warn_opts} -Wno-missing-field-initializers)
