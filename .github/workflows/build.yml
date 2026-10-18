@@ -62,7 +62,7 @@ jobs:
     # The oldest runner that carries Xcode 26. Homebrew pours bottles built for the
     # runner's own release, and the app bundles those dylibs, so the runner's macOS
     # is the lowest release the published app can launch on (docs/build.md).
-    runs-on: macos-15
+    runs-on: macos-15-intel
     timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
