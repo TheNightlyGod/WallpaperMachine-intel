@@ -101,41 +101,42 @@ jobs:
           python3 scripts/build.py --configuration Release --app-icon "${RUNNER_TEMP}/app-icon"
 
       - name: Import the signing certificate
-        # The project certificate, not ad hoc, keeps the app's designated requirement the
-        # same from one release to the next, so macOS keeps its privacy permissions after an
-        # in-app update (docs/build.md). A missing secret fails here instead of shipping an
-        # ad-hoc build that would drop those permissions again.
+        # The project certificate keeps the app's designated requirement the same from one
+        # release to the next. If secrets are not configured, fall back to ad-hoc signing (-).
         env:
           SIGNING_CERTIFICATE_P12: ${{ secrets.SIGNING_CERTIFICATE_P12 }}
           SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.SIGNING_CERTIFICATE_PASSWORD }}
         run: |
           set -euo pipefail
-          if [ -z "${SIGNING_CERTIFICATE_P12}" ] || [ -z "${SIGNING_CERTIFICATE_PASSWORD}" ]; then
-            echo "::error::SIGNING_CERTIFICATE_P12 and SIGNING_CERTIFICATE_PASSWORD must be set (docs/build.md#release-signing)."
-            exit 1
+          if [ -n "${SIGNING_CERTIFICATE_P12:-}" ] && [ -n "${SIGNING_CERTIFICATE_PASSWORD:-}" ]; then
+            echo "Importing release signing certificate..."
+            keychain="${RUNNER_TEMP}/signing.keychain-db"
+            certificate="${RUNNER_TEMP}/signing.p12"
+            password="$(openssl rand -hex 24)"
+            printf '%s' "${SIGNING_CERTIFICATE_P12}" | base64 -d > "${certificate}"
+            security create-keychain -p "${password}" "${keychain}"
+            security set-keychain-settings -lut 21600 "${keychain}"
+            security unlock-keychain -p "${password}" "${keychain}"
+            security import "${certificate}" -k "${keychain}" -P "${SIGNING_CERTIFICATE_PASSWORD}" -T /usr/bin/codesign
+            rm -f "${certificate}"
+            # Lets codesign use the key without a keychain prompt.
+            security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${password}" "${keychain}" > /dev/null
+            # shellcheck disable=SC2046 # keychain paths carry no spaces on the runner
+            security list-keychains -d user -s "${keychain}" $(security list-keychains -d user | tr -d '"')
+            echo "SIGN_IDENTITY=WallpaperMachine Code Signing" >> "$GITHUB_ENV"
+          else
+            echo "::warning::SIGNING_CERTIFICATE_P12 not set; falling back to ad-hoc code signing (-)."
+            echo "SIGN_IDENTITY=-" >> "$GITHUB_ENV"
           fi
-          keychain="${RUNNER_TEMP}/signing.keychain-db"
-          certificate="${RUNNER_TEMP}/signing.p12"
-          password="$(openssl rand -hex 24)"
-          printf '%s' "${SIGNING_CERTIFICATE_P12}" | base64 -d > "${certificate}"
-          security create-keychain -p "${password}" "${keychain}"
-          security set-keychain-settings -lut 21600 "${keychain}"
-          security unlock-keychain -p "${password}" "${keychain}"
-          security import "${certificate}" -k "${keychain}" -P "${SIGNING_CERTIFICATE_PASSWORD}" -T /usr/bin/codesign
-          rm -f "${certificate}"
-          # Lets codesign use the key without a keychain prompt.
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${password}" "${keychain}" > /dev/null
-          # shellcheck disable=SC2046 # keychain paths carry no spaces on the runner
-          security list-keychains -d user -s "${keychain}" $(security list-keychains -d user | tr -d '"')
 
       - name: Package
-        # Relocates and signs the bundle with the project certificate, wraps it in the
+        # Relocates and signs the bundle with the project certificate or ad hoc, wraps it in the
         # drag-to-install disk image, mounts that image to check the app's identifier,
         # version, signature and the Applications link, and writes the .sha256 sidecar
         # (docs/build.md).
         run: |
           python3 scripts/package.py --configuration Release --require-deployment-target \
-            --sign-identity "WallpaperMachine Code Signing"
+            --sign-identity "${SIGN_IDENTITY}"
 
       - name: Match the disk image to the tag
         env:
