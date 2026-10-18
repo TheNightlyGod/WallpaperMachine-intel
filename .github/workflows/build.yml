@@ -118,12 +118,28 @@ jobs:
             security set-keychain-settings -lut 21600 "${keychain}"
             security unlock-keychain -p "${password}" "${keychain}"
             security import "${certificate}" -k "${keychain}" -P "${SIGNING_CERTIFICATE_PASSWORD}" -T /usr/bin/codesign
+
+            # Add certificate to trusted roots for code signing so codesign finds it
+            pem="${RUNNER_TEMP}/signing.pem"
+            if openssl pkcs12 -in "${certificate}" -out "${pem}" -nodes -passin "pass:${SIGNING_CERTIFICATE_PASSWORD}" 2>/dev/null; then
+              security add-trusted-cert -r trustRoot -p codeSign -k "${keychain}" "${pem}" || true
+              rm -f "${pem}"
+            fi
             rm -f "${certificate}"
+
             # Lets codesign use the key without a keychain prompt.
-            security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${password}" "${keychain}" > /dev/null
+            security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${password}" "${keychain}" > /dev/null 2>&1 || true
             # shellcheck disable=SC2046 # keychain paths carry no spaces on the runner
             security list-keychains -d user -s "${keychain}" $(security list-keychains -d user | tr -d '"')
-            echo "SIGN_IDENTITY=WallpaperMachine Code Signing" >> "$GITHUB_ENV"
+
+            identity="$(security find-identity -p codesigning "${keychain}" | grep -o '".*"' | head -n 1 | tr -d '"' || true)"
+            if [ -n "${identity}" ]; then
+              echo "Using code signing identity: ${identity}"
+              echo "SIGN_IDENTITY=${identity}" >> "$GITHUB_ENV"
+            else
+              echo "::warning::No valid code signing identity found in imported keychain; falling back to ad-hoc (-)."
+              echo "SIGN_IDENTITY=-" >> "$GITHUB_ENV"
+            fi
           else
             echo "::warning::SIGNING_CERTIFICATE_P12 not set; falling back to ad-hoc code signing (-)."
             echo "SIGN_IDENTITY=-" >> "$GITHUB_ENV"
