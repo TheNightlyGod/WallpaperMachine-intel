@@ -40,7 +40,7 @@ def get_brew_prefix():
 
 def compile_app_icon(output_icns: Path):
     """Generate AppIcon.icns using sips and iconutil."""
-    icon_src = WEB_UI / "app-icons/day.png"
+    icon_src = APP / "Resources/Assets.xcassets/AppIconDay.imageset/day.png"
     if not icon_src.is_file():
         raise FileNotFoundError(f"Missing icon source: {icon_src}")
     

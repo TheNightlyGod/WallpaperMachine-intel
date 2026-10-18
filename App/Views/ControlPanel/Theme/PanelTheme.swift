@@ -25,9 +25,16 @@ struct PanelTheme: Equatable, Sendable {
   }
 }
 
+private struct PanelThemeKey: EnvironmentKey {
+  static let defaultValue = PanelTheme(appearance: .light)
+}
+
 extension EnvironmentValues {
   /// The palettes of the panel the view is in; the defaults outside one (previews, tests).
-  @Entry var panelTheme = PanelTheme(appearance: .light)
+  var panelTheme: PanelTheme {
+    get { self[PanelThemeKey.self] }
+    set { self[PanelThemeKey.self] = newValue }
+  }
 }
 
 extension View {
