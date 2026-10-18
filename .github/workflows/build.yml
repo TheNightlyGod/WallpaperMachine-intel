@@ -143,12 +143,13 @@ jobs:
         run: |
           set -euo pipefail
           directory="build/Build/Products/Release"
-          name="WallpaperMachine-${TAG#v}-arm64.dmg"
-          if [ ! -f "${directory}/${name}" ]; then
-            echo "::error::No ${name} in ${directory}. scripts/package.py names the image from the built bundle's CFBundleShortVersionString, so the version bump never reached this build."
+          dmg_file="$(ls -1 "${directory}"/WallpaperMachine-${TAG#v}-*.dmg 2>/dev/null | head -n 1 || true)"
+          if [ -z "${dmg_file}" ] || [ ! -f "${dmg_file}" ]; then
+            echo "::error::No WallpaperMachine-${TAG#v}-*.dmg in ${directory}. scripts/package.py names the image from the built bundle's CFBundleShortVersionString, so the version bump never reached this build."
             ls -1 "${directory}"/*.dmg 2>/dev/null || true
             exit 1
           fi
+          name="$(basename "${dmg_file}")"
           cp "${directory}/${name}" "${directory}/${name}.sha256" "${RUNNER_TEMP}/release/"
           {
             echo "### \`${name}\`"
@@ -216,7 +217,12 @@ jobs:
           TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
-          name="WallpaperMachine-${TAG#v}-arm64.dmg"
+          dmg_file="$(ls -1 "${RUNNER_TEMP}/release"/WallpaperMachine-${TAG#v}-*.dmg 2>/dev/null | head -n 1 || true)"
+          if [ -z "${dmg_file}" ] || [ ! -f "${dmg_file}" ]; then
+            echo "::error::No WallpaperMachine-${TAG#v}-*.dmg in ${RUNNER_TEMP}/release."
+            exit 1
+          fi
+          name="$(basename "${dmg_file}")"
           {
             echo "image=${RUNNER_TEMP}/release/${name}"
             echo "checksum=${RUNNER_TEMP}/release/${name}.sha256"

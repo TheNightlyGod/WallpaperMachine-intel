@@ -19,6 +19,7 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -76,7 +77,7 @@ def xcodebuild_command(scheme, target, result, only=None, parallel=True):
     command = [
         "xcodebuild", "-project", XCODEPROJ.name,
         "-scheme", scheme, "-configuration", "Debug", "-derivedDataPath", str(BUILD),
-        "-destination", "platform=macOS,arch=arm64", "-resultBundlePath", str(result),
+        "-destination", f"platform=macOS,arch={platform.machine()}", "-resultBundlePath", str(result),
     ]
     command += ["-only-testing:" + identifier for identifier in test_identifiers(target, only)]
     # Test classes run in parallel worker processes. Every suite already isolates its
