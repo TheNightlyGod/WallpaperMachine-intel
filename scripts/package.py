@@ -62,15 +62,28 @@ def run(args):
     subprocess.run(list(map(str, args)), check=True)
 
 
+FALLBACK_TO_ADHOC = False
+
+
 def sign(file, identity, *options):
     """Ad hoc (`-`) by default. Release builds pass the project certificate, whose designated
     requirement (identifier plus certificate) stays the same from one release to the next,
     so macOS privacy permissions survive an update; an ad-hoc requirement is the build's
     cdhash, which every release changes."""
-    command = ["codesign", "--force", "--sign", identity]
-    if identity != "-":
+    global FALLBACK_TO_ADHOC
+    target_identity = "-" if FALLBACK_TO_ADHOC else identity
+    command = ["codesign", "--force", "--sign", target_identity]
+    if target_identity != "-":
         command.append("--timestamp=none")
-    run([*command, *options, file])
+    try:
+        run([*command, *options, file])
+    except subprocess.CalledProcessError:
+        if target_identity != "-":
+            print(f"{MARK.warn} codesign failed with identity {target_identity!r}, falling back to ad hoc (-)", file=sys.stderr)
+            FALLBACK_TO_ADHOC = True
+            run(["codesign", "--force", "--sign", "-", *options, file])
+        else:
+            raise
 
 
 def report(warnings, reported):
