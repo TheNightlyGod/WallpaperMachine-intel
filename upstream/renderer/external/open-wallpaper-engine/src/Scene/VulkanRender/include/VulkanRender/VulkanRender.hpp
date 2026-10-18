@@ -3,6 +3,7 @@
 #include "Core/RendererCounters.hpp"
 #include "RenderGraph/RenderGraph.hpp"
 #include "Presentation/WallpaperScaling.hpp"
+#include "Scene/include/Scene/SceneResolution.hpp"
 #include "SceneWallpaperSurface.hpp"
 #include "Swapchain/ExSwapchain.hpp"
 #include "Type.hpp"
@@ -55,12 +56,24 @@ public:
     /// resuming a paused wallpaper.
     void InvalidatePresentedFrame();
 
+    /// Releases the compiled graph and everything that belongs to it: the scene's
+    /// videos are closed.
     bool clearLastRenderGraph();
+    /// The first half of building the same scene's graph again, as the host does
+    /// whenever something the graph is made of changes under a scene that is
+    /// playing. The scene's videos are not closed: their decoders are kept open for
+    /// the `compileRenderGraph` that follows, which takes back the ones its graph
+    /// still uses and closes the rest with it. The video then does not start over
+    /// at the head of its clip, and a video packaged in the scene is not read
+    /// again. Only for a compile of the scene that was drawing, which must follow.
+    bool clearLastRenderGraphForRebuild();
     bool compileRenderGraph(Scene&, rg::RenderGraph&);
-    /// Applies a new internal rasterization scale to an already compiled graph.
-    /// Keeps the parsed scene, the render graph, uploaded images and live video
-    /// decoders; only render targets and the passes that attach them are rebuilt.
-    bool ApplyRenderScale(Scene&, rg::RenderGraph&, double scale);
+    /// Applies a new internal rasterization scale, and the resolution the scene
+    /// is rasterized at, to an already compiled graph. Keeps the parsed scene,
+    /// the render graph, uploaded images and live video decoders; only render
+    /// targets and the passes that attach them are rebuilt, and only when one of
+    /// the two changes what this scene rasterizes.
+    bool ApplyRenderScale(Scene&, rg::RenderGraph&, double scale, SceneResolution resolution);
     /// Rebuilds the copy plan and the reuse table for the current scene
     /// optimisation setting, without reparsing the project, reopening a video
     /// or resetting a timeline. Called at a frame boundary when the setting

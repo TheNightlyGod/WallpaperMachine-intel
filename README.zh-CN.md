@@ -1,5 +1,5 @@
-<!-- README.md in 简体中文: change both together. Wording follows the app's zh-Hans catalogs
-     (WebUI/locales/zh-Hans.js, App/Resources/Localizable.xcstrings) and the website's /zh/ pages. The Supporter list between the markers is written by scripts/update_sponsors.py, as in README.md. -->
+<!-- README.md in 简体中文: change both together. Wording follows the app's zh-Hans catalog
+     (App/Resources/Localizable.xcstrings) and the website's /zh/ pages. The Supporter list between the markers is written by scripts/update_sponsors.py, as in README.md. -->
 <p align="center"><sub><a href="README.md">English</a>&ensp;·&ensp;<b>简体中文</b></sub></p>
 
 <a href="https://www.wallpapermachine.app/zh/">
@@ -42,11 +42,11 @@
 </p>
 
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/1284cc37-34eb-4618-b4b1-efe7c2ce8127" width="100%" alt="WallpaperMachine 窗口的“已安装”标签页：左侧是合集、类型、年龄分级和标签筛选，中间是 Steam 创意工坊壁纸的网格，右侧检查器显示所选壁纸的预览、兼容性检查和选项。">
+  <img src="https://github.com/user-attachments/assets/9526d41a-4764-4df9-a678-22d75982a7fd" width="100%" alt="深色外观下的 WallpaperMachine 窗口：顶部是“壁纸库”“Steam 创意工坊”“pixiv”和“设置”标签页，中间是已安装壁纸的网格并标出了正在播放的那张，右侧检查器显示它的预览、兼容性检查和选项，底部是正在播放的内容。">
 </p>
 
 <p align="center">
-  <sub>左侧是筛选，中间是你的壁纸库，右侧是所选壁纸的选项。按下播放，它就成为你的桌面。</sub>
+  <sub>中间是你的壁纸库，右侧是所选壁纸的选项，底部是正在播放的内容。点按“应用壁纸”，它就成为你的桌面。</sub>
 </p>
 
 <p align="center">
@@ -68,11 +68,11 @@
 
 ## 应用一览
 
-一个窗口，四个标签页：发现、pixiv、已安装和设置。网站在一个演示壁纸库上运行着同一套界面，你可以[在浏览器中试用](https://www.wallpapermachine.app/zh/#app)。关闭窗口后，应用会继续在菜单栏中运行，你可以在那里暂停、恢复、静音，或切换到上一张、下一张或随机一张壁纸；有多台显示器时，每台显示器都可以单独操作。
+一个顶部带标签页的窗口：你的壁纸库（全部壁纸、收藏和你的合集）、浏览 Steam 创意工坊和 pixiv，以及设置；正在播放的壁纸显示在窗口底部的栏中。网站提供了它在一个示例壁纸库上的演示，你可以[在浏览器中试用](https://www.wallpapermachine.app/zh/#app)。关闭窗口后，应用会继续在菜单栏中运行，你可以在那里暂停、恢复、静音，或切换到上一张、下一张或随机一张壁纸；有多台显示器时，每台显示器都可以单独操作。
 
 | 功能 | 作用 |
 | --- | --- |
-| [**应用壁纸**](docs/features/control-panel.md#selection-versus-apply) | 场景、视频或[网页](docs/features/web-wallpapers.md)壁纸：按下播放，它就成为你的桌面。单击壁纸只是选中它。 |
+| [**应用壁纸**](docs/features/control-panel.md#selection-versus-apply) | 场景、视频或[网页](docs/features/web-wallpapers.md)壁纸：点按“应用壁纸”，它就成为你的桌面。单击壁纸只是选中它。 |
 | [**预览**](docs/features/wallpaper-properties.md#live-preview) | 在单独的窗口中试看已安装的场景、视频或网页壁纸，使用当前选项和独立的播放控制，再决定是否更换桌面。滑块、颜色和开关会随你的调整即时显示。 |
 | [**创意工坊**](docs/features/workshop-downloads.md) | 实时的 Steam 创意工坊，浏览无需登录，还有[合集、每位作者的壁纸和你的订阅](docs/features/workshop-downloads.md#collections-authors-and-subscriptions)。下载在应用内进行，可同时下载多个，需要拥有 Wallpaper Engine 的 Steam 账户。已有壁纸的[更新](docs/features/workshop-downloads.md#updates)每天检查一次，一键安装。 |
 | [**pixiv**](docs/features/pixiv.md) | pixiv 的插画排行榜和标签搜索。作品的任意一页都能保存为静态壁纸；登录 pixiv 后可查看仅限会员的作品，账户允许的话还能查看 R-18 作品。 |
@@ -107,7 +107,7 @@
 
 | 层 | 作用 |
 | --- | --- |
-| **Swift 外壳** | AppKit 应用。控制面板是 `WKWebView` 中的 HTML（[`WebUI/`](WebUI)），[网页壁纸](docs/features/web-wallpapers.md)在各自的 web view 中运行。 |
+| **Swift 外壳** | AppKit 应用。控制面板是原生 SwiftUI 界面（[`App/Views/ControlPanel`](App/Views/ControlPanel)），[网页壁纸](docs/features/web-wallpapers.md)在各自的 web view 中运行。 |
 | **Rust 核心** | 内置的渲染器（[`upstream/renderer`](upstream/renderer)）：负责显示器、壁纸窗口、视频解码和音频捕获，通过 uniffi 桥接到 Swift。 |
 | **C++ 场景引擎** | Open Wallpaper Engine，静态链接进 Rust 核心，负责绘制场景壁纸。 |
 | **Metal** | 场景直接用原生 Metal 渲染，原生渲染器无法绘制的场景会回退为经由 MoltenVK 在 Metal 上运行的 Vulkan。AVFoundation 视频可在[设置 → 性能](docs/features/performance.md)中选择开启，场景渲染器也可在那里改为兼容模式。 |
@@ -220,7 +220,7 @@ python3 scripts/build.py --configuration Release   # 渲染器、绑定、Xcode 
 
 <!-- supporters:start: written by scripts/update_sponsors.py from the website's sponsor wall; edits here are overwritten -->
 <p align="center">
-  <a href="https://www.wallpapermachine.app/#sponsors"><img src="https://www.wallpapermachine.app/sponsors/wall?v=30fe4b2f9944" width="100%" alt="WallpaperMachine Supporters: xwei12, ReinforceZwei. 2 Supporters on the wall. 2 more support privately."></a>
+  <a href="https://www.wallpapermachine.app/#sponsors"><img src="https://www.wallpapermachine.app/sponsors/wall?v=8baa903db4aa" width="100%" alt="WallpaperMachine Supporters: xwei12, umitsurumi, ReinforceZwei, hahagei2580. 4 Supporters on the wall. 1 more supports privately."></a>
 </p>
 <!-- supporters:end -->
 
@@ -230,7 +230,7 @@ python3 scripts/build.py --configuration Release   # 渲染器、绑定、Xcode 
 
 源代码以 GNU 通用公共许可证第 2 版（仅限该版本）提供（[LICENSE](LICENSE)）。内置的渲染器采用 GPL-2.0-only，应用外壳由它衍生而来；上游代码保留其各自的版权和许可声明，记录在 [upstream/provenance.json](upstream/provenance.json) 中。无论是否为支持者，每位接收者都享有 GPL 授予的全部权利。
 
-**目前还没有任何二进制文件获准分发。** Apache-2.0 组件（MoltenVK、Vulkan loader、SPIRV-Tools、部分 glslang 以及内置的 spirv_reflect）存在于每个构建的链接闭包中，与 GPLv2 不兼容。[LICENSING.md](LICENSING.md) 记录了相关政策、支持者模式、每个组件的许可证、尚未解决的障碍以及解决办法。创意工坊壁纸归其创作者所有，场景资源来自你所拥有的 Wallpaper Engine；应用两者都不附带。
+**目前还没有任何二进制文件获准分发。** Apache-2.0 组件（MoltenVK、Vulkan loader、SPIRV-Tools、部分 glslang、内置的 spirv_reflect，以及渲染器链接的若干 Rust crate，例如 codespan-reporting 和 miette）存在于每个构建的链接闭包中，与 GPLv2 不兼容。[LICENSING.md](LICENSING.md) 记录了相关政策、支持者模式、每个组件的许可证、尚未解决的障碍以及解决办法。创意工坊壁纸归其创作者所有，场景资源来自你所拥有的 Wallpaper Engine；应用两者都不附带。
 
 ## 友情链接
 
@@ -239,7 +239,7 @@ python3 scripts/build.py --configuration Release   # 渲染器、绑定、Xcode 
 <br>
 
 <p align="center">
-  <img src="WebUI/app-icons/day.png" width="72" alt="WallpaperMachine 应用图标">
+  <img src="App/Resources/Assets.xcassets/AppIconDay.imageset/day.png" width="72" alt="WallpaperMachine 应用图标">
 </p>
 
 <p align="center">

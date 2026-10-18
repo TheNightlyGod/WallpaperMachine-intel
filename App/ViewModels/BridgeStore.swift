@@ -1125,6 +1125,14 @@ final class BridgeStore {
         apply(bundle)
     }
 
+    /// How many pixels a 2D scene is rasterized with, `"display"` or `"canvas"`. A preference every
+    /// running 2D scene follows live, by resizing its render targets in place: nothing is reparsed (on
+    /// Native Metal the scene's own video layers are reopened, as for any render-scale change).
+    func setSceneResolutionAsync(_ mode: String) async throws {
+        let bundle = try await bridge.setSceneResolution(mode: mode)
+        apply(bundle)
+    }
+
     func applyWallpaperOptionsAsync(wallpaperId: String, userInitiated: Bool = false) async throws {
         await waitForIdleActivation()
         try requireIdleWallpaperEdits(id: wallpaperId)
@@ -1448,6 +1456,7 @@ final class BridgeStore {
                 sceneOnDemandEnabled: false,
                 sceneVideoPlaneSamplingEnabled: false,
                 sceneRenderer: "native_metal_preferred",
+                sceneResolution: "display",
                 sceneUpdateModes: [],
                 sceneRenderers: [],
                 userAssetsPath: "",

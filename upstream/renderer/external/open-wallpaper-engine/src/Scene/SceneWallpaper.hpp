@@ -9,6 +9,7 @@
 #include "Core/SurfaceHealth.hpp"
 #include "Presentation/WallpaperFraming.hpp"
 #include "Scene/include/Scene/SceneBackendSelection.hpp"
+#include "Scene/include/Scene/SceneResolution.hpp"
 #include "Scene/include/Scene/SceneVideoPath.hpp"
 #include "Scene/include/Scene/SceneUpdateDemand.hpp"
 #include "Swapchain/ExSwapchain.hpp"

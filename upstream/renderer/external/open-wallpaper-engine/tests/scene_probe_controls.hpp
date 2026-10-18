@@ -105,7 +105,10 @@ public:
             }
         }
         scene.pointerPosition = {x_, y_};
-        if (scene.shaderValueUpdater) scene.shaderValueUpdater->MouseInput(x_, y_);
+        if (scene.shaderValueUpdater) {
+            scene.shaderValueUpdater->MouseInput(x_, y_);
+            scene.shaderValueUpdater->MouseButtonsInput(buttons_);
+        }
         auto& runtime = *scene.runtime;
         runtime.SetCursorViewport(CursorViewport {
             .origin = Eigen::Vector2f(mapping.origin_x, mapping.origin_y),

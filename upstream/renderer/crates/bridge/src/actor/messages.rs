@@ -11,7 +11,9 @@ use crate::{
         BridgeWallpaperKind, BridgeWallpaperMutationBundle, BridgeWallpaperOptionsSnapshot,
         BridgeWebWallpaper,
     },
-    config::{AppConfig, SceneRendererModeCfg, VideoBackendModeCfg, WallpaperConfig},
+    config::{
+        AppConfig, SceneRendererModeCfg, SceneResolutionCfg, VideoBackendModeCfg, WallpaperConfig,
+    },
     power::PowerSource,
 };
 
@@ -265,6 +267,10 @@ pub struct SetSceneRenderer {
     pub mode: SceneRendererModeCfg,
 }
 
+pub struct SetSceneResolution {
+    pub resolution: SceneResolutionCfg,
+}
+
 pub struct SetRenderScale {
     pub scale: f32,
 }
@@ -500,6 +506,7 @@ pub type SetContentPacingEnabledReply = AllSnapshotsReply;
 pub type SetSharedVideoDecodeEnabledReply = AllSnapshotsReply;
 pub type SetSceneOptimizationEnabledReply = AllSnapshotsReply;
 pub type SetSceneRendererReply = AllSnapshotsReply;
+pub type SetSceneResolutionReply = AllSnapshotsReply;
 pub type SetSceneOnDemandEnabledReply = AllSnapshotsReply;
 pub type SetSceneVideoPlaneSamplingEnabledReply = AllSnapshotsReply;
 pub type SetWebAudioSubscribedReply = Result<(), BridgeError>;

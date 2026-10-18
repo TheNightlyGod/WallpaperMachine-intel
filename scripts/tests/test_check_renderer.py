@@ -6,6 +6,7 @@ import importlib.util
 import contextlib
 import io
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -169,6 +170,15 @@ class RealtimeRegistryTests(unittest.TestCase):
                 suite, test = name.split(".")
                 with self.subTest(name=name):
                     self.assertRegex(sources, rf"TEST(_F)?\(\s*{suite},\s*{test}\s*\)")
+
+
+class RegistryCoverageTests(unittest.TestCase):
+    def test_every_test_executable_runs_in_the_check_or_says_why_not(self):
+        cmake = (check_renderer.RENDERER / "external/open-wallpaper-engine/tests/CMakeLists.txt").read_text()
+        built = set(re.findall(r"add_executable\(\s*(\w+)", cmake))
+        run = {*check_renderer.REGRESSION_BINARIES, check_renderer.OFFSCREEN_PROBE, check_renderer.RELOAD_PROBE}
+        self.assertEqual(built - run - set(check_renderer.MANUAL_BINARIES), set())
+        self.assertEqual(run & set(check_renderer.MANUAL_BINARIES), set())
 
 
 class GateExitStatusTests(unittest.TestCase):

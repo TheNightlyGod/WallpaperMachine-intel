@@ -67,8 +67,9 @@ inline void ResolveLayerParallax(nlohmann::json& objects) {
     }
     for (std::size_t i = 0; i < objects.size(); ++i) {
         if (roots[i] == none || roots[i] == i) continue;
+        // A root without the key has Wallpaper Engine's default depth.
         objects[i]["parallaxDepth"] = objects[roots[i]].value(
-            "parallaxDepth", nlohmann::json::array({0.0f, 0.0f}));
+            "parallaxDepth", nlohmann::json::array({1.0f, 1.0f}));
     }
 }
 

@@ -23,7 +23,7 @@ the renderer's real final pixels, not a screen capture and not a Workshop cover,
 scaling and cropping match the live wallpaper. Rendering, JPEG encoding and the
 system's thumbnail compositor still take time, so an update is not instant.
 
-**Settings › General › Startup & desktop › Update the Mission Control picture every 5
+**Settings › Desktop & Lock Screen › Desktop › Update the Mission Control picture every 5
 minutes** (`PlaybackPreferences.refreshesDesktopPicturePeriodically`, off by default)
 retakes the poster every five minutes while the wallpaper plays, for wallpapers that
 change over time; the wait may run up to 30 seconds longer so the system can share the
@@ -39,7 +39,7 @@ user's own wallpaper again.
 
 ### Leaving macOS's own wallpaper alone
 
-**Settings › General › Startup & desktop › Use the wallpaper as the macOS desktop
+**Settings › Desktop & Lock Screen › Desktop › Use the wallpaper as the macOS desktop
 picture** (`PlaybackPreferences.writesDesktopPicture`, on by default) decides whether
 the app installs posters at all. Turned off, the app never changes macOS's wallpaper
 settings: Mission Control and the Spaces bar show the user's own picture, as does the
@@ -201,6 +201,20 @@ journal, and finally another display's original. With no recoverable original it
 that desktop untouched and reports the failure through `AppLog`; live playback
 continues without new posters there.
 
+Another app can delete a picture it set, as a wallpaper app clearing out its old
+downloads does, and macOS refuses to show a file that does not exist. Writing that
+original back would fail on every attempt and so refuse every quit. So whenever a
+desktop is put back (at quit, when its display stops playing, when the switch is turned
+off, and in the launch repair), an original whose file is gone counts as unavailable. The
+desktop gets the next original whose file is still there, in the order above (another
+desktop on its display, its effective image, its journal, another display's). When none
+is left it gets macOS's default picture
+(`/System/Library/CoreServices/DefaultDesktop.heic`, written as the file that link points
+to). `AppLog` records the missing file and what was put back instead. Only a definite "no
+such file" counts. A file the app may not look at, such as one in a folder macOS's
+privacy protection covers, is written back as before. Files are looked at only while a
+desktop is being put back, never for each poster.
+
 A desktop showing anything but a poster was changed outside the app and keeps that
 choice on restoration. When a display stops showing a live wallpaper, its desktops are
 restored while the others keep their posters.
@@ -253,7 +267,8 @@ cancelled, since the quit restores the desktop itself). The native lock-screen s
 then restores its own selections
 (without a lock-screen service, on macOS earlier than 26, restoration starts
 directly), and the poster service restores the originals: it puts each desktop's
-journaled original back, checks image references in the native store read-only, and
+journaled original back (or, when that file is gone, [the next one that still
+exists](#the-journal-of-originals)), checks image references in the native store read-only, and
 retries asynchronous restoration for about five seconds (25 attempts, 200 ms apart)
 while WallpaperAgent reloads. Quit waits for every restored desktop to read back and for any poster write
 still in flight; one that lands late is restored again.

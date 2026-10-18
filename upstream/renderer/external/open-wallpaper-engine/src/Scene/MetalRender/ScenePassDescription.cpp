@@ -68,6 +68,39 @@ void ForEachRead(const ScenePassDescription& desc, const std::function<void(cons
     }
 }
 
+/// Clears the scene's own image before a pass that reads it ahead of anything
+/// drawing into it this frame.
+///
+/// The compatibility backend clears that image to the background at the start
+/// of every frame; this one clears it in the first pass that draws into it. A
+/// pass that samples or copies it before then -- a layer blending with the
+/// screen, or reading the frame buffer, ahead of any other layer -- would read
+/// whatever the image held: nothing on the first frame, and the previous
+/// frame's picture after it, where the compatibility backend reads the
+/// background.
+void ClearSceneBeforeAnEarlyRead(Scene& scene, std::vector<ScenePassDescription>& out)
+{
+    const auto scene_key = scene.ResolveRenderTargetName(std::string(SpecTex_Default));
+    for (std::size_t i = 0; i < out.size(); ++i) {
+        bool reads = false;
+        ForEachRead(out[i], [&](const std::string& key) { reads = reads || key == scene_key; });
+        if (reads) {
+            ScenePassDescription clear;
+            clear.kind                   = MetalPassKind::Clear;
+            clear.name                   = "clear scene before its first reader";
+            clear.target_key             = scene_key;
+            clear.load_action            = MetalLoadAction::Clear;
+            clear.uses_scene_clear_color = true;
+            clear.clear_color = { scene.clearColor[0], scene.clearColor[1], scene.clearColor[2],
+                                  1.0f };
+            if (! TargetExtent(scene, scene_key, clear.target_width, clear.target_height)) return;
+            out.insert(out.begin() + static_cast<std::ptrdiff_t>(i), std::move(clear));
+            return;
+        }
+        if (out[i].kind != MetalPassKind::Virtual && out[i].target_key == scene_key) return;
+    }
+}
+
 /// Places mip generation at the last writer of each mip-mapped target before a
 /// reader of it, and at its final writer. Walked in execution order, so a target
 /// written, read, written and read again is regenerated twice rather than once.
@@ -249,6 +282,7 @@ bool BuildScenePassDescriptions(Scene& scene, const rg::RenderGraph& graph,
     }
 
     if (out.empty()) return set_error("the render graph draws nothing");
+    ClearSceneBeforeAnEarlyRead(scene, out);
     PlaceMipmapGeneration(scene, out);
     return true;
 }

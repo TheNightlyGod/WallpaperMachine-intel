@@ -6,6 +6,8 @@
 #include "Core/StringHelper.hpp"
 
 #include <sstream>
+#include <algorithm>
+#include <cmath>
 
 using namespace wallpaper::wpscene;
 
@@ -41,10 +43,10 @@ void read_vec3_setting(
     nlohmann::json*        setting,
     bool*                  dynamic)
 {
-    if (!json.contains(key) || destination == nullptr || setting == nullptr || dynamic == nullptr) return;
+    if (!json.contains(key) || destination == nullptr || setting == nullptr) return;
 
     *setting = json.at(key);
-    *dynamic = has_dynamic_setting(*setting);
+    if (dynamic != nullptr) *dynamic = has_dynamic_setting(*setting);
 
     const auto& source = unwrap_setting(*setting);
     if (source.is_array() && source.size() >= 3) {
@@ -103,8 +105,20 @@ bool ParticleControlpoint::FromJson(const nlohmann::json& json) {
 bool ParticleRender::FromJson(const nlohmann::json& json) {
     GET_JSON_NAME_VALUE(json, "name", name);
 
+    // Each renderer fills the keys a file leaves out with its own numbers.
+    if (name == "rope") {
+        subdivision = 4.0f;
+        uvsmoothing = true;
+    } else if (name == "ropetrail") {
+        length      = 1.0f;
+        segments    = 4.0f;
+        subdivision = 1.0f;
+    }
+
     if (sstart_with(name, "rope")) {
         GET_JSON_NAME_VALUE_NOWARN(json, "subdivision", subdivision);
+        // Truncated, never rounded, and kept inside what the renderer supports.
+        subdivision = std::clamp(std::trunc(subdivision), 0.0f, 32.0f);
         if (json.contains("uvscale")) {
             uvscale_setting = json.at("uvscale");
             const auto& source = unwrap_setting(uvscale_setting);
@@ -116,12 +130,16 @@ bool ParticleRender::FromJson(const nlohmann::json& json) {
             if (source.is_boolean()) uvscrolling = source.get<bool>();
             else if (source.is_number()) uvscrolling = source.get<float>() != 0.0f;
         }
-        if (json.contains("uvsmoothing")) {
+        // Smoothing belongs to the plain rope and is only read while the
+        // texture is not scrolling; a rope trail has none.
+        if (name == "rope" && json.contains("uvsmoothing")) {
             uvsmoothing_setting = json.at("uvsmoothing");
             const auto& source  = unwrap_setting(uvsmoothing_setting);
             if (source.is_boolean()) uvsmoothing = source.get<bool>();
             else if (source.is_number()) uvsmoothing = source.get<float>() != 0.0f;
         }
+        if (uvscrolling) uvsmoothing = false;
+        if (name != "rope") uvsmoothing = false;
     }
     if (name == "spritetrail") {
         GET_JSON_NAME_VALUE_NOWARN(json, "length", length);
@@ -131,6 +149,8 @@ bool ParticleRender::FromJson(const nlohmann::json& json) {
     if (name == "ropetrail") {
         GET_JSON_NAME_VALUE_NOWARN(json, "length", length);
         GET_JSON_NAME_VALUE_NOWARN(json, "segments", segments);
+        length   = std::max(length, 0.001f);
+        segments = std::clamp(std::trunc(segments), 2.0f, 32.0f);
     }
     return true;
 }
@@ -155,9 +175,19 @@ bool Emitter::FromJson(const nlohmann::json& json) {
         json, "audioprocessingfrequencystart", audioprocessingfrequencystart);
     GET_JSON_NAME_VALUE_NOWARN(json, "audioprocessingfrequencyend", audioprocessingfrequencyend);
     GET_JSON_NAME_VALUE_NOWARN(json, "controlpoint", controlpoint);
+    GET_JSON_NAME_VALUE_NOWARN(json, "delay", delay);
+    GET_JSON_NAME_VALUE_NOWARN(json, "duration", duration);
+    GET_JSON_NAME_VALUE_NOWARN(json, "minperiodicduration", minperiodicduration);
+    GET_JSON_NAME_VALUE_NOWARN(json, "maxperiodicduration", maxperiodicduration);
+    GET_JSON_NAME_VALUE_NOWARN(json, "minperiodicdelay", minperiodicdelay);
+    GET_JSON_NAME_VALUE_NOWARN(json, "maxperiodicdelay", maxperiodicdelay);
+    GET_JSON_NAME_VALUE_NOWARN(json, "maxtoemitperperiod", maxtoemitperperiod);
+    GET_JSON_NAME_VALUE_NOWARN(json, "cone", cone);
 
     if (controlpoint >= 8) LOG_ERROR("wrong controlpoint %d", controlpoint);
-    controlpoint = controlpoint % 8; // limited to 0-7
+    // Wallpaper Engine keeps 0..6 and names the last control point for
+    // anything else, a negative index included.
+    controlpoint = static_cast<u32>(controlpoint) < 7u ? controlpoint : 7;
 
     uint32_t _raw_flags { 0 };
     GET_JSON_NAME_VALUE_NOWARN(json, "flags", _raw_flags);
@@ -174,9 +204,26 @@ bool Emitter::FromJson(const nlohmann::json& json) {
 
 bool ParticleInstanceoverride::FromJosn(const nlohmann::json& json) {
     enabled = true;
-    for (const char* key : { "alpha", "size", "lifetime", "rate", "speed", "count", "color", "colorn" }) {
+    for (const char* key : { "alpha", "size", "lifetime", "rate", "speed", "count", "color", "colorn",
+                             "brightness" }) {
         remember_user_binding(json, key, &bindings);
     }
+    for (int i = 0; i < 8; ++i) {
+        const std::string point = "controlpoint" + std::to_string(i);
+        const std::string angle = "controlpointangle" + std::to_string(i);
+        remember_user_binding(json, point.c_str(), &bindings);
+        remember_user_binding(json, angle.c_str(), &bindings);
+        std::array<float, 3> value {};
+        if (json.contains(point) && GET_JSON_NAME_VALUE_NOWARN(json, point, value)) {
+            controlpointSet[i] = true;
+            controlpoint[i]    = value;
+        }
+        if (json.contains(angle) && GET_JSON_NAME_VALUE_NOWARN(json, angle, value)) {
+            controlpointangleSet[i] = true;
+            controlpointangle[i]    = value;
+        }
+    }
+    GET_JSON_NAME_VALUE_NOWARN(json, "brightness", brightness);
     GET_JSON_NAME_VALUE_NOWARN(json, "alpha", alpha);
     GET_JSON_NAME_VALUE_NOWARN(json, "size", size);
     GET_JSON_NAME_VALUE_NOWARN(json, "lifetime", lifetime);
@@ -204,15 +251,16 @@ bool Particle::FromJson(const nlohmann::json& json, fs::VFS& vfs) {
         emi.FromJson(el);
         emitters.push_back(emi);
     }
-    if (json.contains("renderer")) {
+    // Wallpaper Engine appends a sprite renderer unless the key holds an array;
+    // an array the file wrote empty is kept, and then nothing is drawn.
+    const bool has_renderer_list = json.contains("renderer") && json.at("renderer").is_array();
+    if (has_renderer_list) {
         for (const auto& el : json.at("renderer")) {
             ParticleRender pr;
             pr.FromJson(el);
             renderers.push_back(pr);
         }
-    }
-    // add sprite if no renderers
-    if (renderers.empty()) {
+    } else {
         ParticleRender pr;
         pr.name = "sprite";
         renderers.push_back(pr);
@@ -279,8 +327,8 @@ bool WPParticleObject::FromJson(const nlohmann::json& json, fs::VFS& vfs) {
     GET_JSON_NAME_VALUE_NOWARN(json, "id", id);
     GET_JSON_NAME_VALUE_NOWARN(json, "parent", parent_id);
     read_vec3_setting(json, "origin", &origin, &origin_setting, &dynamic_origin);
-    read_vec3_setting(json, "angles", &angles, &angles_setting, &dynamic_angles);
-    read_vec3_setting(json, "scale", &scale, &scale_setting, &dynamic_scale);
+    read_vec3_setting(json, "angles", &angles, &angles_setting, nullptr);
+    read_vec3_setting(json, "scale", &scale, &scale_setting, nullptr);
     GET_JSON_NAME_VALUE_NOWARN(json, "parallaxDepth", parallaxDepth);
     ParseDependencies(json, dependencies);
 

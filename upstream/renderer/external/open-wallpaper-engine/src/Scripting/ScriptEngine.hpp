@@ -31,6 +31,9 @@ struct ScriptHostContext {
     uint32_t        mouse_buttons_down { 0 };
     uint32_t        mouse_buttons_pressed { 0 };
     uint32_t        mouse_buttons_released { 0 };
+    // Lower-case BCP-47 tag of the interface language, which a script is told in
+    // `applyGeneralSettings({ language })`.
+    std::string     language { "en-us" };
 };
 
 struct ScriptStartupMetrics {
@@ -71,7 +74,8 @@ public:
         std::map<std::string, DynamicValue*> script_properties, DynamicValue initial_value,
         ScriptHostContext host_context, JSRuntime* shared_runtime, JSContext* shared_context,
         std::string exports_object_name, std::string script_properties_name,
-        PropertyScriptValueSemantic semantic = PropertyScriptValueSemantic::Generic);
+        PropertyScriptValueSemantic semantic = PropertyScriptValueSemantic::Generic,
+        int animation_layer_index = -1);
     ~PropertyScriptProgram();
 
     PropertyScriptProgram(const PropertyScriptProgram&)            = delete;
@@ -81,6 +85,9 @@ public:
     const ScriptProgramCapabilities& Capabilities() const noexcept { return m_capabilities; }
     DynamicValueUniquePtr Evaluate(const ScriptHostContext& host_context,
                                    const DynamicValue&      current_value);
+    /// Whether the last `Evaluate` got a value from `update()`. When it did not
+    /// (it returned nothing, or threw), `Evaluate` hands back the current value.
+    bool                  UpdateReturnedValue() const noexcept { return m_update_returned_value; }
     void                  ApplyProjectProperties(const ProjectProperties& project_properties,
                                                   const ProjectProperties& changed_properties);
     void                  DispatchCursorClick(const ScriptHostContext& host_context);
@@ -94,6 +101,15 @@ public:
     void                  DispatchMediaThumbnailChanged(const Eigen::Vector3f& primary_color,
                                                         const Eigen::Vector3f& text_color);
     void                  DispatchMediaEventJson(std::string_view event_json);
+    // The display's size or the interface language changed since the script
+    // started. A script that has not run `init` yet has nothing to be told:
+    // `init` reads the current values.
+    void                  DispatchResizeScreen(const ScriptHostContext& host_context);
+    void                  DispatchGeneralSettings(const ScriptHostContext& host_context);
+    // Runs the script's `destroy()` once, if it started. Called when the scene
+    // or the script is torn down, while what the script could still touch is
+    // alive.
+    void                  Destroy();
 
 private:
     void UpdateHostContext(const ScriptHostContext& host_context);
@@ -111,6 +127,11 @@ private:
     bool                                 m_owns_context = false;
     bool                                 m_valid        = false;
     bool                                 m_init_called  = false;
+    bool                                 m_update_returned_value = false;
+    bool                                 m_destroyed    = false;
+    // The animation layer this script is attached to (`animationlayers[i]`), or -1
+    // when it is attached to the layer itself. `thisObject` is that animation layer.
+    int                                  m_animation_layer_index = -1;
 };
 
 class SceneScriptProgram {
@@ -141,6 +162,9 @@ public:
     void               DispatchMediaEventJson(std::string_view event_json);
     void               ApplyProjectProperties(const ProjectProperties& project_properties,
                                                const ProjectProperties& changed_properties);
+    void               DispatchResizeScreen(const ScriptHostContext& host_context);
+    void               DispatchGeneralSettings(const ScriptHostContext& host_context);
+    void               Destroy();
 
 private:
     void ApplyUserProperties(const ProjectProperties& property_changes);
@@ -156,6 +180,7 @@ private:
     ScriptProgramCapabilities m_capabilities;
     bool                 m_owns_context = false;
     bool                 m_valid        = false;
+    bool                 m_destroyed    = false;
 };
 
 class ScriptEngine {
@@ -177,7 +202,8 @@ public:
         SceneRuntimeContext* runtime, std::string script_source, std::string current_layer_name,
         std::map<std::string, DynamicValue*> script_properties, DynamicValue initial_value,
         ScriptHostContext           host_context,
-        PropertyScriptValueSemantic semantic = PropertyScriptValueSemantic::Generic);
+        PropertyScriptValueSemantic semantic = PropertyScriptValueSemantic::Generic,
+        int                         animation_layer_index = -1);
     std::unique_ptr<SceneScriptProgram>
     CreateSceneScriptProgram(SceneRuntimeContext& runtime, std::string script_source,
                              std::string current_layer_name, ProjectProperties project_properties,
@@ -187,6 +213,11 @@ public:
     // Nothing else may have refreshed `engine` this tick, so it is updated here.
     void RunAnimationEventCallbacks(const ScriptHostContext& host_context,
                                     std::string_view event_name, double frame);
+    // Listeners registered with `engine.on('resizeScreen', ...)`, once per resize.
+    void RunResizeScreenCallbacks(const ScriptHostContext& host_context);
+    // `addEndedCallback` listeners of one animation layer of a puppet layer.
+    void NotifyAnimationLayerEnded(const ScriptHostContext& host_context,
+                                   std::string_view layer_name, int animation_layer_index);
 
 private:
     JSRuntime* m_runtime         = nullptr;

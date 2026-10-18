@@ -46,7 +46,10 @@ Routine verification **must not**:
 - sign in to Steam, run a real SteamCMD login, or approve a Gatekeeper prompt,
 - replace or restart the installed `/Applications/WallpaperMachine.app`.
 
-Each of those requires an explicit user decision. `python3 scripts/test.py --ui`
+Each of those requires an explicit user decision, with one standing exception: a
+wallpaper fix may wake the Parallels Windows VM, capture Wallpaper Engine's frames
+in it with Wallpaper Engine muted, and suspend it again
+([wallpaper-engine-reference.md](wallpaper-engine-reference.md)). `python3 scripts/test.py --ui`
 and the manual smoke checklist take over the desktop and are neither part of
 routine verification nor a required release gate. See
 [../../AGENTS.md](../../AGENTS.md) for the agent-facing form of this rule and
@@ -72,7 +75,7 @@ with an installed newer interpreter (for example, `python3.12`).
 | Media/device integration | `Tests/Unit/NativeVideo/`, `Tests/Unit/Library/VideoLetterboxProbeMediaTests.swift` | `WALLPAPER_MACHINE_MEDIA_TESTS=1 python3 scripts/test.py` — opt-in only |
 | Live Steam pages / native SteamCMD install | `Tests/Unit/Workshop/WorkshopTests.swift`, `Tests/Unit/Steam/SteamCMDLiveInstallTests.swift` | `WALLPAPER_MACHINE_NETWORK_TESTS=1 python3 scripts/test.py` — opt-in only |
 | Rust crates | `upstream/renderer/crates/` | `python3 scripts/check_rust.py` runs the isolated release checks and reports exclusions/skips; individual Cargo commands remain available |
-| C++ renderer tests | `upstream/renderer/external/open-wallpaper-engine` | `python3 scripts/check_renderer.py` uses one `REGRESSION_BINARIES` registry for build, execution and the verdict, plus image/reload probes. Some test binaries (`scene_schema_tests`, `script_runtime_compat_test`, `mouse_input_test` and others) are not in that list and are built and run by hand; [renderer.md](renderer.md#ccmake-test-binaries) lists them and the commands |
+| C++ renderer tests | `upstream/renderer/external/open-wallpaper-engine` | `python3 scripts/check_renderer.py` uses one `REGRESSION_BINARIES` registry for build, execution and the verdict, plus image/reload probes. Every test binary the regression docs name is registered, and every other test executable is too or is listed with its reason in `MANUAL_BINARIES`; [renderer.md](renderer.md#ccmake-test-binaries) lists what a registered binary must do without (a window, an audio device, shared temporary files) and how to run one by hand while iterating |
 | Headless GPU probes | same CMake tree | explicitly invoked executables (`offscreen_scene_probe`, `scene_reload_cycle_probe`, `playback_gpu_test`, `wpdump`); see [renderer.md](renderer.md) |
 
 `python3 scripts/test.py` is the routine gate: it runs the Python script test
@@ -159,19 +162,16 @@ path. A test that passes alone but fails in the gate is the symptom; reproduce
 it with `python3 scripts/test.py --serial` and fix the shared state rather than
 the scheduling. UI runs are always serial: they drive one desktop.
 
-CI's `test` job runs `--serial` too. On hosted macOS runners, parallel runs
-intermittently fail one offscreen control-panel test with
-`InvalidTransition { phase: idle targetPhase: failed(deinit) }` — WebKit drops a
-`callAsyncJavaScript` call unanswered — while the same tests pass locally in
-parallel; on the runner, serial costs almost no wall clock. When it recurs, the
-panel fixture's error says whether the page reloaded meanwhile, and the
-`test-logs-<tag>` artifact carries the run's WebKit and jetsam reports.
+The Test workflow's `native` job runs `--serial` too: on hosted macOS runners serial
+costs almost no wall clock (the step's comment in `.github/workflows/test.yml` has the
+timings), and the `test-logs-<run id>-native` artifact carries the run's crash and
+jetsam reports when a run fails there and not locally.
 
 The per-test `UserDefaults` suite is not only a parallelism concern: the unit
 bundle runs inside the real app as its test host, so `UserDefaults.standard`
 *is* `app.wallpapermachine`, the preferences of the installed app. Any
-`WebPanelController` (or other store) built without `defaults:` writes there —
-the first-run welcome's `welcomeSeen` flag, sidebar choices, favorites — and
+`PanelController` (or other store) built without `defaults:` writes there —
+the first-run welcome's `welcomeSeen` flag, the learned drag-select hint, favorites — and
 silently changes what the app does at the next launch. Pass the test's own
 suite everywhere; `PanelFixture` does.
 
@@ -192,21 +192,41 @@ preference domain names follow the same override. The suite pins English and
 marks onboarding/launch announcements complete. Launch arguments pin Foundation's
 native language without changing the system domain. Teardown stops the test app,
 then removes the suite and support root, including when setup or a test fails.
-System-global readers (title-bar double-click behavior, system language and
-desktop-click preferences) keep their original domains.
+System-global readers (system language and desktop-click preferences) keep their
+original domains.
 
 The same rule covers a second shape: a test that measures a *wall-clock window*
 rather than shared state. It is still a race, it can lose alone as well as in
-the gate, and widening the sleep only moves the threshold. Two in
-`ControlPanelShellTests` were fixed rather than tolerated, and both fixes are
-the pattern to copy. One latched a snapshot count, submitted a form and read
-the count 50 ms later, so a push already in flight when the count was latched
-was indistinguishable from one the submit caused; it drains with
-`panel.quiet()` before the window. The other read `getBoundingClientRect`
-straight after `setFrameSize`, catching the layout before the page had
-reflowed; it waits for `window.innerWidth` to reach the new width. Measure
-"what did this action cause" from a settled state, and wait for a state the
-page can report rather than for a duration.
+the gate, and widening the sleep only moves the threshold. Measure "what did
+this action cause" from a settled state: await the task `controller.launch`
+returns instead of sleeping, drain what is already in flight before latching a
+count, drive timers with `ManualSleeper` (`Tests/Unit/Support/`), and wait for a
+state the model or view reports (`PanelFixture.waitUntil`) rather than for a
+duration. `waitUntil`'s two-second default is short for a loaded machine; a new
+panel test that waits on real work gives it a longer timeout.
+
+A test double that holds an answer suspends the task, never the thread:
+`PixivGate` and `PixivHeldTransport` (`Tests/Unit/Pixiv/`) hold pixiv's
+answers until the test opens the gate or the request is cancelled. A
+`DispatchSemaphore` in a fixture's answer blocks a concurrency-pool thread that
+cancellation cannot reach, so a fixture that shuts down waits out its timeout, and
+the answer lets itself through when the test runs slowly. A timed-out wait was also
+reported by Xcode's thread performance checker as a priority inversion, and the
+test host symbolicates that report on the main thread; under the gate's load that
+has held a test until its time allowance ran out. AppKit raises the same report
+itself: the first time a focused text field with unchecked text is removed, the
+main thread waits for its data detectors to load. So `test.py` turns the checker's
+priority-inversion reports off in the test host (`PERFC_DISABLE_PRIORITY_INVERSIONS`,
+forwarded as `TEST_RUNNER_PERFC_DISABLE_PRIORITY_INVERSIONS`), and a blocking
+wait in a fixture now shows only as a slow test. Work off the main actor needs its
+own sync point: a nonisolated `async` double such as `ManualSleep` runs on the
+global executor, so flushing the main queue does not show it has run; wait for the
+state it records.
+
+A failed assertion in the app-hosted bundle can take about two minutes to
+report while XCTest symbolicates the failing frame, so a failure inside a loop
+or a hosted panel can read as a hang or a timeout; look for the assertion in the
+log before raising a timeout.
 
 Before blaming your own change for a timing-shaped gate failure, confirm
 ownership: revert the change and run the gate again. A failure that survives
@@ -216,8 +236,8 @@ five times its usual wall clock is measuring contention.
 ## Verification tiers
 
 The full gate compiles the Debug app and test bundle and then runs well over a
-thousand native tests, several of which drive offscreen WebKit or a real PTY
-downloader; the test phase alone takes minutes, before any Release build. Match
+thousand native tests, several of which host the panel in offscreen windows,
+load web wallpapers in offscreen web views or drive a real PTY downloader; the test phase alone takes minutes, before any Release build. Match
 the effort to the change:
 
 | Change | While iterating | Before reporting |
@@ -226,6 +246,7 @@ the effort to the change:
 | New feature or cross-domain change | targeted runs as above | full gate once, log entry; Release build only if delivery was requested |
 | Rust crates | `cargo test` in the touched crate | full gate plus `scripts/check_rust.py` |
 | Renderer / bridge | `cargo test` or the touched CMake target | full gate plus `scripts/check_rust.py` and `scripts/check_renderer.py` |
+| How a wallpaper looks | as above for the layer touched | as above, plus a before/after comparison with Wallpaper Engine's frames ([wallpaper-engine-reference.md](wallpaper-engine-reference.md)) |
 | Docs only | link, path and command check | nothing else |
 
 `--only` skips the Python script tests and prints a warning: it is an
@@ -266,7 +287,8 @@ they do not establish.
 
 1. **Pick the lowest layer that can observe the behavior.** Renderer semantics
    go to Rust or C++; bridge state goes to `wallpaper-bridge`; app services,
-   stores and panel bridging go to `Tests/Unit/<Domain>/`; developer-script
+   stores and the control panel's controller and view models go to
+   `Tests/Unit/<Domain>/` (`Panel/` for the panel); developer-script
    behavior goes to `scripts/tests/`. `Tests/UI/` is a last resort — it controls
    the desktop and therefore cannot be part of routine verification.
 2. **Keep it device-free.** No windows, no screenshots, no audio device, no
@@ -280,6 +302,15 @@ they do not establish.
    checkout runs green — see [wallpaper-corpus.md](wallpaper-corpus.md).
 5. **Use original synthetic fixtures** when you need content; do not check in
    Workshop packages or other copyrighted assets.
+6. **Expect the CI gate to run on macOS 26.** CI's runner is a macOS 26 VM
+   while developers may be on a later macOS. There SwiftUI builds no
+   accessibility tree for an unshown window until a client has contacted the app;
+   `PanelTestCase` does that once (`AccessibilityClient`), so panel tests read the
+   tree through it. Behaviour of an unshown window that only macOS 27 shows
+   (toolbar overflow, sidebar arrow keys) skips earlier with
+   `PanelTestSupport.skipBeforeMacOS27`, which leaves it unverified there.
+   `gh workflow run test.yml --ref <branch>` runs the gate on that runner
+   ([release.md](../release.md#test-testyml)).
 6. **Record the result** when the change calls for a log entry (a feature or
    cross-domain change, a changed documented behavior, or on request — see
    [Verification tiers](#verification-tiers)): the counts, the command, and what

@@ -9,6 +9,7 @@
 #include "SpecTexs.hpp"
 #include "Scene/Scene.h"
 #include "Scene/SceneRenderTarget.h"
+#include "Presentation/WallpaperScaling.hpp"
 #include "Utils/Algorism.h"
 #include "VulkanRender/StaticSubgraphCache.hpp"
 
@@ -269,11 +270,71 @@ inline VkExtent2D ResolveSceneSourceExtent(const wallpaper::Scene& scene,
 }
 
 /// The authored canvas and the internal raster it is drawn at. Equal at render
-/// scale 1.0.
+/// scale 1.0 with the canvas resolution; the display resolution makes the raster
+/// the size the canvas is presented at instead.
 struct SceneRasterExtents {
     VkExtent2D source {};
     VkExtent2D raster {};
 };
+
+/// What the output a scene is presented on means for its raster.
+struct SceneRasterSurface {
+    /// Output pixels per layout point, the display's backing scale.
+    double   display_scale_factor { 1.0 };
+    /// The longest side a render target may have on this device. Zero when the
+    /// device's limit is not known, which caps nothing.
+    uint32_t max_dimension { 0 };
+};
+
+/// Whether `Scene::resolution` decides anything for this scene.
+///
+/// A perspective scene already rasterizes at the output size, and a plain video
+/// keeps the size of the frame it copies, so for neither is there a canvas whose
+/// raster could be sized one way or the other.
+inline bool SceneResolutionAffectsRaster(const wallpaper::Scene& scene) {
+    return ! scene.display_sized && ! scene.single_video_source;
+}
+
+/// The output pixels the authored canvas covers once it is presented: the FILL
+/// layout the renderers lay it out with, scaled by the display's backing factor.
+/// A canvas whose aspect differs from the output's is filled, so this extent
+/// keeps the canvas aspect and exceeds the output along one axis; the
+/// presentation crops the excess, and that crop is not this function's concern.
+///
+/// The user's zoom is left out on purpose: it changes with a slider and must
+/// not rebuild the graph every time it moves, so the raster is sized for the
+/// placement every display starts from.
+inline VkExtent2D ResolveSceneDisplayExtent(const VkExtent2D& source, const VkExtent2D& output,
+                                            double display_scale_factor) {
+    const double factor =
+        std::isfinite(display_scale_factor) && display_scale_factor > 0.0 ? display_scale_factor
+                                                                          : 1.0;
+    // Rounded to the same whole points the renderers lay the canvas out in, so
+    // the raster matches the viewport they present it into.
+    const auto logical = [factor](uint32_t pixels) {
+        return static_cast<uint32_t>(
+            std::max(1L, std::lround(static_cast<double>(pixels) / factor)));
+    };
+    const auto layout = wallpaper::ComputeWallpaperScalingLayout(
+        wallpaper::WallpaperScalingMode::FILL, source.width, source.height,
+        logical(output.width), logical(output.height), factor, 1.0);
+    return {
+        static_cast<uint32_t>(std::max(1, layout.viewport_px.width)),
+        static_cast<uint32_t>(std::max(1, layout.viewport_px.height)),
+    };
+}
+
+/// Shrinks `extent` so its longest side fits `max_dimension`, keeping the
+/// aspect. Zero means the limit is unknown, and nothing is shrunk.
+inline VkExtent2D CapRasterExtent(const VkExtent2D& extent, uint32_t max_dimension) {
+    const uint32_t longest = std::max(extent.width, extent.height);
+    if (max_dimension == 0 || longest <= max_dimension) return extent;
+    const double shrink = static_cast<double>(max_dimension) / static_cast<double>(longest);
+    return {
+        static_cast<uint32_t>(ResolveScreenBoundRenderTargetDimension(extent.width, shrink)),
+        static_cast<uint32_t>(ResolveScreenBoundRenderTargetDimension(extent.height, shrink)),
+    };
+}
 
 /// Re-bakes `g_TextureNResolution` for every material slot that samples a
 /// screen-bound render target.
@@ -335,13 +396,13 @@ inline void RefreshScreenBoundTextureResolutions(Scene& scene) {
             if (pass == nullptr || pass->node == nullptr) continue;
             refresh(pass->node.get());
             auto* mesh = pass->node->Mesh();
-            if (mesh == nullptr) continue;
+            if (mesh == nullptr || pass->source_texel_radius <= 0.0f) continue;
             for (const auto& material : mesh->MaterialSlots()) {
-                if (material == nullptr || material->name != "hdr_downsample" ||
-                    material->textures.empty()) continue;
+                if (material == nullptr || material->textures.empty()) continue;
                 const auto* source = scene.FindRenderTarget(material->textures.front());
                 if (source == nullptr || source->width <= 0 || source->height <= 0) continue;
-                const float x = 0.5f / source->width, y = 0.5f / source->height;
+                const float x = pass->source_texel_radius / source->width;
+                const float y = pass->source_texel_radius / source->height;
                 material->customShader.constValues["g_RenderVar0"] =
                     std::array<float, 4>{x, y, -x, -y};
             }
@@ -349,8 +410,9 @@ inline void RefreshScreenBoundTextureResolutions(Scene& scene) {
     }
 }
 
-inline SceneRasterExtents ResolveScreenBoundRenderTargetSizes(Scene&            scene,
-                                                              const VkExtent2D& fallback_extent) {
+inline SceneRasterExtents ResolveScreenBoundRenderTargetSizes(Scene&                    scene,
+                                                              const VkExtent2D&         fallback_extent,
+                                                              const SceneRasterSurface& surface = {}) {
     const auto source_extent = ResolveSceneSourceExtent(scene, fallback_extent);
     if (scene.display_sized) {
         const double aspect = double(source_extent.width) / source_extent.height;
@@ -362,13 +424,26 @@ inline SceneRasterExtents ResolveScreenBoundRenderTargetSizes(Scene&            
             }
         }
     }
-    const auto render_scale  = ResolveSceneRenderScale(scene);
-    const VkExtent2D raster_extent {
-        static_cast<uint32_t>(
-            ResolveScreenBoundRenderTargetDimension(source_extent.width, render_scale)),
-        static_cast<uint32_t>(
-            ResolveScreenBoundRenderTargetDimension(source_extent.height, render_scale)),
-    };
+    const auto render_scale = ResolveSceneRenderScale(scene);
+    // The raster starts from the canvas, or from the size the canvas is
+    // presented at when the scene is asked to rasterize for the display. Only
+    // then is it bounded by the device: the canvas has always been allowed to
+    // be whatever the author made it.
+    const bool display_raster = scene.resolution == wallpaper::SceneResolution::Display &&
+                                SceneResolutionAffectsRaster(scene);
+    const auto raster_basis =
+        display_raster ? ResolveSceneDisplayExtent(source_extent, fallback_extent,
+                                                   surface.display_scale_factor)
+                       : source_extent;
+    const uint32_t max_dimension = display_raster ? surface.max_dimension : 0u;
+    const VkExtent2D raster_extent = CapRasterExtent(
+        {
+            static_cast<uint32_t>(
+                ResolveScreenBoundRenderTargetDimension(raster_basis.width, render_scale)),
+            static_cast<uint32_t>(
+                ResolveScreenBoundRenderTargetDimension(raster_basis.height, render_scale)),
+        },
+        max_dimension);
 
     for (auto& item : scene.renderTargets) {
         auto& target = item.second;
@@ -397,6 +472,11 @@ inline SceneRasterExtents ResolveScreenBoundRenderTargetSizes(Scene&            
                     source_extent.height, target.bind.scale);
             }
             ResolveScreenBoundRenderTargetSize(target, raster_extent);
+            if (max_dimension > 0) {
+                const auto limit = static_cast<i32>(max_dimension);
+                target.width     = std::min(target.width, limit);
+                target.height    = std::min(target.height, limit);
+            }
         }
     }
     RefreshScreenBoundTextureResolutions(scene);
@@ -454,9 +534,7 @@ inline void ApplyCameraFillMode(wallpaper::Scene& scene, wallpaper::FillMode fil
     }
     // The extent the orthographic camera actually shows, so a camera layer's
     // zoom narrows perspective layers exactly as it does the rest.
-    if (! gPerCam.FovLocked()) {
-        gPerCam.SetFov(algorism::CalculatePersperctiveFov(1000.0f, gCam.VisibleHeight()));
-    }
+    FitCanvasPerspective(gPerCam, gCam);
     gCam.Update();
     gPerCam.Update();
     scene.UpdateLinkedCamera("global");

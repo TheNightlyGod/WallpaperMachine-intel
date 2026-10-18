@@ -1,15 +1,19 @@
 use serde::{Serialize, Serializer};
 
-/// Playback state value expected by Wallpaper Engine media scripts.
+/// Playback state as Wallpaper Engine media scripts read it from
+/// `event.state`: `PLAYBACK_STOPPED` 0, `PLAYBACK_PLAYING` 1,
+/// `PLAYBACK_PAUSED` 2. The discriminants are those numbers and are what
+/// serializes; a host's own numbering is mapped to these variants by name where
+/// the host's value enters (see `BridgeMediaSnapshot::into_state`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum MediaPlaybackState {
-    /// Audio is currently progressing.
-    Playing = 0,
-    /// A player is active but playback is paused.
-    Paused = 1,
     /// No active player is available.
-    Stopped = 2,
+    Stopped = 0,
+    /// Audio is currently progressing.
+    Playing = 1,
+    /// A player is active but playback is paused.
+    Paused = 2,
 }
 
 impl Serialize for MediaPlaybackState {
@@ -60,6 +64,22 @@ impl MediaPollResult {
 #[cfg(test)]
 mod snapshot_tests {
     use super::*;
+
+    #[test]
+    fn playback_state_serializes_as_the_numbers_scripts_compare_against() {
+        let number = |state| serde_json::to_string(&state).unwrap();
+        assert_eq!(number(MediaPlaybackState::Stopped), "0");
+        assert_eq!(number(MediaPlaybackState::Playing), "1");
+        assert_eq!(number(MediaPlaybackState::Paused), "2");
+    }
+
+    #[test]
+    fn playback_event_carries_the_script_number_not_a_host_numbering() {
+        let json = |state| MediaIntegrationEvent::PlaybackChanged { state }.to_json().unwrap();
+        assert_eq!(json(MediaPlaybackState::Playing), r#"{"type":"mediaPlaybackChanged","state":1}"#);
+        assert_eq!(json(MediaPlaybackState::Paused), r#"{"type":"mediaPlaybackChanged","state":2}"#);
+        assert_eq!(json(MediaPlaybackState::Stopped), r#"{"type":"mediaPlaybackChanged","state":0}"#);
+    }
 
     #[test]
     fn changed_cover_replays_thumbnail_event_even_when_colors_match() {

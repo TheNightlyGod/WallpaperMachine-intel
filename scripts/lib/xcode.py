@@ -177,7 +177,10 @@ def summarize(summary: dict):
         parts.append(f"{expected} expected failures")
     lines = [f"{verdict}: {', '.join(parts)} of {total}{duration}"]
     for failure in summary.get("testFailures", []):
-        name = failure.get("testIdentifier") or failure.get("testName") or "?"
+        # Newer xcresulttool numbers `testIdentifier` and names the test in `testIdentifierString`.
+        identifier = failure.get("testIdentifier")
+        name = (failure.get("testIdentifierString") or (identifier if isinstance(identifier, str) else None)
+                or failure.get("testName") or "?")
         text = " ".join(str(failure.get("failureText", "")).split())
         lines.append(f"  FAIL {name}: {text}" if text else f"  FAIL {name}")
     warnings = summary.get("runtimeWarnings") or []

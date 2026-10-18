@@ -35,6 +35,10 @@ private final class MemoryDesktopWorkspace: DesktopPictureWorkspace {
         return unreadable.contains(target) ? nil : pictures[target]
     }
     func setPicture(_ picture: DesktopPicture, target: DesktopPictureTarget) throws {
+        // macOS refuses a picture whose file does not exist, as `NSWorkspace` does.
+        if picture.url.isFileURL, access(picture.url.path, F_OK) != 0, errno == ENOENT {
+            throw CocoaError(.fileNoSuchFile)
+        }
         if failures.contains(target) {
             refused.append(target)
             throw CocoaError(.fileWriteNoPermission)
@@ -100,11 +104,15 @@ final class DesktopWallpaperTests: XCTestCase {
     }
     override func tearDownWithError() throws { try FileManager.default.removeItem(at: root) }
 
-    /// A user wallpaper; never inside the ledger's own poster folder.
+    /// A user wallpaper whose file exists; never inside the ledger's own poster folder.
     private func original(_ name: String) -> DesktopPicture {
-        DesktopPicture(url: root.appendingPathComponent("User Pictures/" + name + ".heic"),
-                       scaling: Int(NSImageScaling.scaleProportionallyDown.rawValue),
-                       allowClipping: true, fill: [0.1, 0.2, 0.3, 1])
+        let url = root.appendingPathComponent("User Pictures/" + name + ".heic")
+        if !FileManager.default.fileExists(atPath: url.path) {
+            try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? Data([0]).write(to: url)
+        }
+        return DesktopPicture(url: url, scaling: Int(NSImageScaling.scaleProportionallyDown.rawValue),
+                              allowClipping: true, fill: [0.1, 0.2, 0.3, 1])
     }
 
     @MainActor
@@ -489,6 +497,83 @@ final class DesktopWallpaperTests: XCTestCase {
         XCTAssertEqual(workspace.pictures[two], original("two"))
         XCTAssertFalse(DesktopWallpaperLedger.hasRecordedOriginals(in: root))
         XCTAssertTrue(try posterNames().isEmpty, "the posters themselves are deleted once nothing shows them")
+    }
+
+    /// Another app can delete the picture it had set, as a wallpaper app clearing out its
+    /// downloads does. A desktop whose original is gone gets another display's original that
+    /// is still there, both when its display stops playing and at quit, instead of a write
+    /// that fails on every attempt and so refuses every quit.
+    @MainActor
+    func testAnOriginalWhoseFileIsGoneGivesWayToAnotherDisplaysOriginal() throws {
+        let workspace = MemoryDesktopWorkspace()
+        let gone = original("deleted-by-another-app"), kept = original("kept")
+        workspace.pictures = [one: gone, two: gone, external: kept]
+        let ledger = try DesktopWallpaperLedger(folder: root, workspace: workspace)
+        try ledger.synchronize(posters: ["1": Data([1]), "2": Data([2])], liveDisplays: ["1", "2"])
+        try FileManager.default.removeItem(at: gone.url)
+
+        try ledger.synchronize(posters: ["2": Data([2])], liveDisplays: ["2"])
+        XCTAssertEqual(workspace.pictures[one], kept)
+        XCTAssertEqual(workspace.pictures[two], kept)
+        XCTAssertNotEqual(workspace.pictures[external], kept, "the display still playing keeps its poster")
+
+        try ledger.restoreAll()
+        XCTAssertEqual(workspace.pictures[external], kept)
+        XCTAssertFalse(DesktopWallpaperLedger.hasRecordedOriginals(in: root))
+    }
+
+    /// When every recorded original is gone, the quit and the launch repair (a fresh sync over
+    /// the journal) put back macOS's default picture, written as the file its link points to.
+    @MainActor
+    func testEveryOriginalGoneGivesWayToTheMacOSDefaultPicture() async throws {
+        let workspace = MemoryDesktopWorkspace()
+        let gone = original("deleted-by-another-app")
+        workspace.pictures = [one: gone, two: gone, external: gone]
+        let first = try DesktopWallpaperLedger(folder: root, workspace: workspace)
+        try first.synchronize(posters: ["1": Data([1]), "2": Data([2])], liveDisplays: ["1", "2"])
+        try FileManager.default.removeItem(at: gone.url)
+        let system = root.appendingPathComponent("System", isDirectory: true)
+        let link = system.appendingPathComponent("DefaultDesktop.heic")
+        let sync = try DesktopWallpaperSync(folder: root, workspace: workspace, surfaces: { [] },
+                                            frameCenter: NotificationCenter(), systemDefaultPicture: link)
+
+        do {
+            try await sync.restoreForTermination(wait: {})
+            XCTFail("With no picture left at all there is nothing to put back")
+        } catch {
+            XCTAssertEqual(error as? DesktopWallpaperLedger.Failure, .originalUnavailable)
+            XCTAssertTrue(DesktopWallpaperLedger.hasRecordedOriginals(in: root), "the journal stays for a later run")
+        }
+
+        let picture = system.appendingPathComponent("Default.heic")
+        try FileManager.default.createDirectory(at: system, withIntermediateDirectories: true)
+        try Data([0]).write(to: picture)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: picture)
+        try await sync.restoreForTermination(wait: {})
+        for target in [one, two, external] {
+            XCTAssertEqual(workspace.pictures[target]?.url, picture.resolvingSymlinksInPath())
+        }
+        XCTAssertFalse(DesktopWallpaperLedger.hasRecordedOriginals(in: root))
+        XCTAssertTrue(try posterNames().isEmpty)
+    }
+
+    /// Only a file that is certainly gone gives way. One the app may not look at, as in a
+    /// folder macOS's privacy protection covers, is still put back as it was.
+    @MainActor
+    func testAnOriginalTheAppMayNotLookAtIsStillPutBack() throws {
+        let workspace = MemoryDesktopWorkspace()
+        let closed = original("closed")
+        workspace.pictures = [one: closed, two: closed]
+        let ledger = try DesktopWallpaperLedger(folder: root, workspace: workspace,
+                                                systemDefaultPicture: root.appendingPathComponent("no-default.heic"))
+        try ledger.synchronize(posters: ["1": Data([1])], liveDisplays: ["1"])
+        let folder = closed.url.deletingLastPathComponent()
+        try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: folder.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: folder.path) }
+
+        try ledger.restoreAll()
+        XCTAssertEqual(workspace.pictures[one], closed)
+        XCTAssertEqual(workspace.pictures[two], closed)
     }
 
     @MainActor

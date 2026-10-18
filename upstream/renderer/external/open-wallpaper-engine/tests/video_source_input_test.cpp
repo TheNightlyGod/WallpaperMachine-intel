@@ -7,9 +7,14 @@
 // half-written file. Everything below drives the production construction path -
 // `CreateVideoProjectImage` followed by `CreateVideoTextureSource` - over media
 // the test encodes for itself.
+//
+// The last group is the clock a consumer gives a source: a source opened when
+// the scene is already some way into the clip, and what a jump of that clock
+// costs the decoder.
 
 #include "Image.hpp"
 #include "Video/FfmpegVideoTextureSource.hpp"
+#include "Video/VideoSeekPolicy.hpp"
 #include "Video/VideoTextureSource.hpp"
 #include "Scene/SceneWallpaper.hpp"
 #include "synthetic_video.hpp"
@@ -28,6 +33,7 @@ extern "C" {
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstdlib>
 #include <cstdint>
@@ -491,6 +497,176 @@ TEST_F(VideoSourceInput, DestroyingASourceMidDecodeCancelsPromptly) {
     unprimed_source.reset();
 
     EXPECT_TRUE(CacheEntriesAddedSince(cache_before).empty());
+}
+
+/// A source on a clip of `seconds` seconds, with nothing yet asked of it.
+class VideoSourceClock : public VideoSourceInput {
+protected:
+    std::shared_ptr<VideoTextureSource> Open(const std::string& name, int seconds) {
+        EXPECT_TRUE(WriteSyntheticVideo(project_dir / name, seconds, name));
+        std::string error;
+        auto        image = CreateVideoProjectImage(project_dir, name, &error);
+        EXPECT_NE(image, nullptr) << error;
+        if (image == nullptr) return nullptr;
+        auto source = CreateVideoTextureSource(*image, &error);
+        EXPECT_NE(source, nullptr) << error;
+        return source;
+    }
+
+    /// Plays on from `start_seconds` at the pace of a wall clock, as a scene
+    /// does when it is drawn in real time, and returns whether the frame on
+    /// offer is within `tolerance` of that clock: as soon as it is, or, with
+    /// `until_arrival` off, once `budget` has run out. Each step is one call of
+    /// a draw -- the clock is handed over, then a frame is asked for -- and a
+    /// step is far shorter than a seek.
+    static bool FollowsTheClock(VideoTextureSource& source, double start_seconds,
+                                double tolerance, std::chrono::milliseconds budget,
+                                bool until_arrival = true) {
+        std::string error;
+        const auto  begin = std::chrono::steady_clock::now();
+        bool        near  = false;
+        while (std::chrono::steady_clock::now() - begin < budget) {
+            const double clock =
+                start_seconds +
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count();
+            if (! source.syncPlayback(VideoPlaybackState { false, 1.0f, clock }, &error)) return false;
+            if (! source.refreshFrame(&error)) return false;
+            near = std::abs(source.currentFrame().pts_seconds - clock) <= tolerance;
+            if (near && until_arrival) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return near;
+    }
+};
+
+// A scene whose graph is rebuilt keeps its videos open, but one that is opened
+// while its clock is already some way into the clip still happens: a scene that
+// falls back to the other renderer, a surface split off a shared decoder. The open
+// costs what opening at the head costs, however far in the clock is: it waits for
+// no seek, and the seek to the clock is asked for once, on the first call that
+// gives the source that clock after it has opened, and left to land. A source that
+// waited for the seek would hold the render thread for as long as the seek takes,
+// which on a clip of any size is more than a frame, and fail the open outright when
+// it takes more than a few seconds.
+TEST_F(VideoSourceClock, AReopenedSourceIsSoughtToTheClockOnceAndLeftToLand) {
+    auto source = Open("reopened.mp4", 10);
+    ASSERT_NE(source, nullptr);
+    std::string error;
+    // Even a clock handed over before the open is not one the open seeks to.
+    ASSERT_TRUE(source->syncPlayback(VideoPlaybackState { false, 1.0f, 6.5 }, &error)) << error;
+    ASSERT_TRUE(source->prime(&error)) << error;
+    EXPECT_NEAR(source->currentFrame().pts_seconds, 0.0, 0.1) << "the open waited for a seek";
+    EXPECT_EQ(source->sourceStats().seek_requests, 0u);
+
+    ASSERT_TRUE(source->syncPlayback(VideoPlaybackState { false, 1.0f, 6.5 }, &error)) << error;
+    ASSERT_TRUE(source->refreshFrame(&error)) << error;
+    // The call that gives the clock returns with the head still on offer: it asked
+    // for the seek and did not wait for it.
+    EXPECT_NEAR(source->currentFrame().pts_seconds, 0.0, 0.1)
+        << "the first call with the clock waited for the seek";
+    EXPECT_EQ(source->sourceStats().seek_requests, 1u)
+        << "the seek was not asked for as soon as the source had the clock";
+    // A frame lasts a thirtieth of a second, and the first one at or after the
+    // clock may be the one that started just before it.
+    EXPECT_TRUE(FollowsTheClock(*source, 6.5, 0.15, std::chrono::seconds(2)))
+        << "the frame on offer stayed at " << source->currentFrame().pts_seconds
+        << " s with the clock at 6.5 s and after";
+    EXPECT_EQ(source->sourceStats().seek_requests, 1u);
+
+    // Past the end of a clip the clock wraps, as it does while playing: a 3 second
+    // clip at 7.2 seconds is in its third pass, 1.2 seconds in.
+    auto looping = Open("reopened-looping.mp4", 3);
+    ASSERT_NE(looping, nullptr);
+    ASSERT_TRUE(looping->prime(&error)) << error;
+    EXPECT_TRUE(FollowsTheClock(*looping, 7.2, 0.15, std::chrono::seconds(2)))
+        << "the frame on offer stayed at " << looping->currentFrame().pts_seconds
+        << " s with the clock at 7.2 s and after";
+    EXPECT_EQ(looping->sourceStats().seek_requests, 1u);
+}
+
+// The picture of a jump of the clock has to arrive even when frames are asked for
+// faster than a seek takes. A seek asked for again on every call restarts the
+// decode from the keyframe each time, so the display never leaves the frame it had.
+TEST_F(VideoSourceClock, AJumpOfTheClockLandsWhileFramesAreAskedForFasterThanASeekTakes) {
+    auto source = Open("jumped.mp4", 10);
+    ASSERT_NE(source, nullptr);
+    std::string error;
+    ASSERT_TRUE(source->prime(&error)) << error;
+    ASSERT_NEAR(source->currentFrame().pts_seconds, 0.0, 0.1);
+
+    // A seek of a few frames' decode lands in well under a second; the two are for a
+    // busy machine. The number of seeks is not: one that takes longer is waited for.
+    EXPECT_TRUE(FollowsTheClock(*source, 7.5, 0.15, std::chrono::seconds(2)))
+        << "the frame on offer stayed at " << source->currentFrame().pts_seconds
+        << " s with the clock at 7.5 s and after";
+    EXPECT_EQ(source->sourceStats().seek_requests, 1u)
+        << "the decoder was sent back to the keyframe again on call after call";
+}
+
+// What a jump costs is a seek, and a source that is kept up with needs none.
+TEST_F(VideoSourceClock, ASourceThatIsKeptUpWithNeverSeeks) {
+    auto source = Open("kept-up.mp4", 10);
+    ASSERT_NE(source, nullptr);
+    std::string error;
+    ASSERT_TRUE(source->prime(&error)) << error;
+    EXPECT_TRUE(FollowsTheClock(*source, 0.0, 0.15, std::chrono::seconds(2), false));
+    EXPECT_EQ(source->sourceStats().seek_requests, 0u) << "playing on from the start asked for a seek";
+}
+
+// A seek that is on its way is waited for only while the clock still wants what it
+// is fetching. A clock that goes back before it, or runs on past it by more than a
+// second, is a new jump and gets its own seek.
+TEST_F(VideoSourceClock, AClockThatLeavesASeekBehindAsksForAnother) {
+    auto source = Open("left-behind.mp4", 10);
+    ASSERT_NE(source, nullptr);
+    std::string error;
+    ASSERT_TRUE(source->prime(&error)) << error;
+
+    ASSERT_TRUE(source->syncPlayback(VideoPlaybackState { false, 1.0f, 8.0 }, &error)) << error;
+    ASSERT_TRUE(source->refreshFrame(&error)) << error;
+    const auto after_first = source->sourceStats().seek_requests;
+    EXPECT_EQ(after_first, 1u);
+
+    // Back to 2 seconds before the first seek can have delivered.
+    ASSERT_TRUE(source->syncPlayback(VideoPlaybackState { false, 1.0f, 2.0 }, &error)) << error;
+    ASSERT_TRUE(source->refreshFrame(&error)) << error;
+    EXPECT_GT(source->sourceStats().seek_requests, after_first);
+    EXPECT_TRUE(FollowsTheClock(*source, 2.0, 0.15, std::chrono::seconds(5)))
+        << "the frame on offer stayed at " << source->currentFrame().pts_seconds << " s";
+}
+
+// The arithmetic behind that wait. A clip small enough to test is seeked in a few
+// milliseconds, so what a seek of seconds is waited for, and not asked for again,
+// is shown here.
+TEST(VideoSeekPolicy, ASeekIsWaitedForAsLongAsItTakesWhileTheClockOnlyRunsOn) {
+    constexpr double kBack = 0.067, kForward = 1.0;
+    // The clock still stands where the seek was sent.
+    EXPECT_TRUE(SeekOnItsWayCoversClock(8.2, 8.2, 0.0, 1.0, kBack, kForward));
+    // Four seconds on, the clock has run four seconds, which waiting explains.
+    EXPECT_TRUE(SeekOnItsWayCoversClock(8.2, 12.2, 4.0, 1.0, kBack, kForward));
+    EXPECT_TRUE(SeekOnItsWayCoversClock(8.2, 16.2, 4.0, 2.0, kBack, kForward))
+        << "a clock at twice the pace runs twice as far in the same wait";
+    EXPECT_FALSE(SeekOnItsWayCoversClock(8.2, 16.2, 4.0, 1.0, kBack, kForward));
+    // A clock that has run on further than that, by more than the slack, has jumped.
+    EXPECT_FALSE(SeekOnItsWayCoversClock(8.2, 20.0, 4.0, 1.0, kBack, kForward));
+    EXPECT_FALSE(SeekOnItsWayCoversClock(8.2, 13.3, 4.0, 1.0, kBack, kForward));
+    // So has one that has gone back before the target by more than the slack.
+    EXPECT_TRUE(SeekOnItsWayCoversClock(8.2, 8.15, 0.5, 1.0, kBack, kForward));
+    EXPECT_FALSE(SeekOnItsWayCoversClock(8.2, 2.0, 0.5, 1.0, kBack, kForward));
+    // A clock slower than real time, or a wait that reads as negative, is not given credit.
+    EXPECT_EQ(ClockRunOnSeconds(4.0, 0.5), 4.0);
+    EXPECT_EQ(ClockRunOnSeconds(4.0, 0.0), 4.0);
+    EXPECT_EQ(ClockRunOnSeconds(-1.0, 1.0), 0.0);
+}
+
+TEST(VideoSeekPolicy, ALandingThatCameLateIsCaughtUpWithByDecodingOn) {
+    // A source that has not seeked leaves a frame a second behind the clock alone.
+    EXPECT_EQ(ForwardResyncSeconds(1.0 / 30.0, 8.0, 0.0), 1.0);
+    // The span of a long queue at a slow frame rate is longer than that.
+    EXPECT_DOUBLE_EQ(ForwardResyncSeconds(0.25, 8.0, 0.0), 4.0);
+    // A seek that took 3.6 seconds landed 3.6 seconds behind the clock; asking for
+    // another because of that would land as late again.
+    EXPECT_DOUBLE_EQ(ForwardResyncSeconds(1.0 / 30.0, 8.0, ClockRunOnSeconds(3.6, 1.0)), 4.6);
 }
 
 // A plain video wallpaper has no material, particle, uniform or script that

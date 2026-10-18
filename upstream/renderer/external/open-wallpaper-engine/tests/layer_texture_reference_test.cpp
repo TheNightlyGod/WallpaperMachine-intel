@@ -6,6 +6,7 @@
 #include "Fs/Fs.h"
 #include "Fs/MemBinaryStream.h"
 #include "Fs/VFS.h"
+#include "Image.hpp"
 #include "Runtime/SceneRuntimeContext.hpp"
 #include "Scene/Scene.h"
 #include "Scene/SceneCamera.h"
@@ -393,6 +394,252 @@ TEST(LayerTextureReference, CompositeAddressingFollowsTheSourceLayersClampUvs) {
     EXPECT_EQ(wrap_for(""), clamp);
 }
 
+// A texture whose header is all the parser reads: one pixel, `flags` as the
+// header carries them (bit 0 asks for point sampling, bit 1 for clamping).
+std::string TextureHeaderBytes(uint32_t flags) {
+    std::string bytes;
+    const auto  append = [&bytes](const void* data, std::size_t size) {
+        bytes.append(static_cast<const char*>(data), size);
+    };
+    const auto stamp = [&](const char* text) { append(text, 9); };
+    const auto i32   = [&](int32_t value) { append(&value, sizeof(value)); };
+    stamp("TEXV0005");
+    stamp("TEXI0001");
+    i32(9); // R8
+    append(&flags, sizeof(flags));
+    for (int index = 0; index < 4; ++index) i32(1);
+    i32(0);
+    stamp("TEXB0003");
+    i32(1);
+    i32(static_cast<int32_t>(ImageType::UNKNOWN));
+    i32(0);
+    return bytes;
+}
+
+// The render targets of an image layer are sampled by the passes of its effect
+// chain and by whoever reads its composite. Wallpaper Engine point-samples them
+// when the layer asks (`nointerpolation`) or when its texture's header does, and
+// wraps them instead of clamping when `clampuvs` is off.
+TEST(LayerTextureReference, LayerTargetsFollowNointerpolationClampuvsAndTheTextureHeader) {
+    const auto material = [](std::string_view texture) {
+        return std::string(R"({"passes":[{"blending":"translucent","cullmode":"nocull",)") +
+               R"("depthtest":"disabled","depthwrite":"disabled","shader":"genericimage",)" +
+               R"("textures":[")" + std::string(texture) + R"("]}]})";
+    };
+    auto files = CopyEffectFiles();
+    files["/img_linear.json"]   = R"({"width":64,"height":32,"material":"mat_linear.json"})";
+    files["/mat_linear.json"]   = material("linear");
+    files["/materials/linear.tex"] = TextureHeaderBytes(0);
+    files["/img_point.json"]    = R"({"width":64,"height":32,"material":"mat_point.json"})";
+    files["/mat_point.json"]    = material("point");
+    files["/materials/point.tex"] = TextureHeaderBytes(1);
+    files["/linked_mat.json"] =
+        R"({"passes":[{"shader":"genericimage","textures":["_rt_imageLayerComposite_14_a"]}]})";
+
+    fs::VFS vfs;
+    auto    parsed = ParseScene(vfs, R"([
+        {"id":10,"name":"plain","image":"img_linear.json",
+         "effects":[{"file":"effects/copy/effect.json","id":90,"visible":true}]},
+        {"id":11,"name":"nointerp","image":"img_linear.json","nointerpolation":true,
+         "effects":[{"file":"effects/copy/effect.json","id":91,"visible":true}]},
+        {"id":12,"name":"wrapped","image":"img_linear.json","clampuvs":false,
+         "effects":[{"file":"effects/copy/effect.json","id":92,"visible":true}]},
+        {"id":13,"name":"header","image":"img_point.json",
+         "effects":[{"file":"effects/copy/effect.json","id":93,"visible":true}]},
+        {"id":14,"name":"source","image":"img_point.json","visible":false},
+        {"id":15,"name":"reader","image":"linked.json","dependencies":[14]}
+      ])", files);
+    ASSERT_NE(parsed, nullptr);
+
+    const auto ping_pong = [&](std::string_view layer) {
+        SceneNode* node = nullptr;
+        for (auto& child : parsed->sceneGraph->GetChildren()) {
+            if (child->Name() == layer) node = child.get();
+        }
+        EXPECT_NE(node, nullptr) << layer;
+        if (node == nullptr) return TextureSample {};
+        const auto* target =
+            parsed->FindRenderTarget(std::string(WE_EFFECT_PPONG_PREFIX_A.data()) + node->Camera());
+        EXPECT_NE(target, nullptr) << layer;
+        const auto* other =
+            parsed->FindRenderTarget(std::string(WE_EFFECT_PPONG_PREFIX_B.data()) + node->Camera());
+        EXPECT_NE(other, nullptr) << layer;
+        if (target == nullptr || other == nullptr) return TextureSample {};
+        EXPECT_EQ(other->sample.wrapS, target->sample.wrapS) << layer;
+        EXPECT_EQ(other->sample.magFilter, target->sample.magFilter) << layer;
+        return target->sample;
+    };
+    const auto expect_sample = [](const TextureSample& sample, TextureWrap wrap,
+                                  TextureFilter filter, std::string_view what) {
+        EXPECT_EQ(sample.wrapS, wrap) << what;
+        EXPECT_EQ(sample.wrapT, wrap) << what;
+        EXPECT_EQ(sample.magFilter, filter) << what;
+        EXPECT_EQ(sample.minFilter, filter) << what;
+    };
+    expect_sample(ping_pong("plain"), TextureWrap::CLAMP_TO_EDGE, TextureFilter::LINEAR, "plain");
+    expect_sample(ping_pong("nointerp"), TextureWrap::CLAMP_TO_EDGE, TextureFilter::NEAREST,
+                  "nointerpolation");
+    expect_sample(ping_pong("wrapped"), TextureWrap::REPEAT, TextureFilter::LINEAR, "clampuvs off");
+    expect_sample(ping_pong("header"), TextureWrap::CLAMP_TO_EDGE, TextureFilter::NEAREST,
+                  "point-sampled texture header");
+
+    // The composite another layer reads takes the layer's filter as well.
+    const auto* composite = parsed->FindRenderTarget(LayerCompositeTargetKey(14));
+    ASSERT_NE(composite, nullptr);
+    expect_sample(composite->sample, TextureWrap::CLAMP_TO_EDGE, TextureFilter::NEAREST,
+                  "composite of a point-sampled layer");
+}
+
+// A layer another layer reads is given its composite before its own material
+// is loaded, so the filter the composite takes from the layer's texture header
+// cannot come from what an earlier layer loaded: a point-sampled texture that no
+// other layer has used yet must still give a point-sampled composite, in the
+// same filter as the layer's own ping-pong pair, whichever layer is parsed first.
+TEST(LayerTextureReference, ACompositeFollowsItsLayersTextureHeaderWhateverIsParsedFirst) {
+    const auto material = [](std::string_view texture) {
+        return std::string(R"({"passes":[{"blending":"translucent","cullmode":"nocull",)") +
+               R"("depthtest":"disabled","depthwrite":"disabled","shader":"genericimage",)" +
+               R"("textures":[")" + std::string(texture) + R"("]}]})";
+    };
+    const auto files = [&] {
+        auto files = CopyEffectFiles();
+        files["/img_point.json"]       = R"({"width":64,"height":32,"material":"mat_point.json"})";
+        files["/mat_point.json"]       = material("only_user");
+        files["/materials/only_user.tex"] = TextureHeaderBytes(1);
+        files["/img_other.json"]       = R"({"width":64,"height":32,"material":"mat_other.json"})";
+        files["/mat_other.json"]       = material("only_user");
+        files["/img_plain.json"]       = R"({"width":64,"height":32,"material":"mat_plain.json"})";
+        files["/mat_plain.json"]       = material("plain_user");
+        files["/materials/plain_user.tex"] = TextureHeaderBytes(0);
+        files["/linked_mat.json"] =
+            R"({"passes":[{"shader":"genericimage","textures":["_rt_imageLayerComposite_1_a"]}]})";
+        return files;
+    };
+    const auto filter_of_composite = [&](std::string_view objects, int32_t id) {
+        fs::VFS vfs;
+        auto    parsed = ParseScene(vfs, objects, files());
+        EXPECT_NE(parsed, nullptr);
+        const auto* target =
+            parsed == nullptr ? nullptr : parsed->FindRenderTarget(LayerCompositeTargetKey(id));
+        EXPECT_NE(target, nullptr);
+        return target == nullptr ? TextureFilter::LINEAR : target->sample.magFilter;
+    };
+
+    // The only layer to use a point-sampled texture, read by a later layer.
+    EXPECT_EQ(filter_of_composite(R"([
+        {"id":1,"name":"source","image":"img_point.json","visible":false},
+        {"id":2,"name":"reader","image":"linked.json","dependencies":[1]}
+      ])", 1), TextureFilter::NEAREST);
+    // And when it is the first of two to use it, or comes after the reader's
+    // other inputs: the same.
+    EXPECT_EQ(filter_of_composite(R"([
+        {"id":1,"name":"source","image":"img_point.json","visible":false},
+        {"id":3,"name":"later","image":"img_other.json"},
+        {"id":2,"name":"reader","image":"linked.json","dependencies":[1]}
+      ])", 1), TextureFilter::NEAREST);
+    EXPECT_EQ(filter_of_composite(R"([
+        {"id":3,"name":"earlier","image":"img_other.json"},
+        {"id":1,"name":"source","image":"img_point.json","visible":false},
+        {"id":2,"name":"reader","image":"linked.json","dependencies":[1]}
+      ])", 1), TextureFilter::NEAREST);
+    // A texture without the flag is not point-sampled however it is reached.
+    EXPECT_EQ(filter_of_composite(R"([
+        {"id":1,"name":"source","image":"img_plain.json","visible":false},
+        {"id":2,"name":"reader","image":"linked.json","dependencies":[1]}
+      ])", 1), TextureFilter::LINEAR);
+    // A layer whose texture cannot be read keeps the linear default rather than
+    // the point sampling of a header that was never read.
+    EXPECT_EQ(filter_of_composite(R"([
+        {"id":1,"name":"source","image":"image.json","visible":false},
+        {"id":2,"name":"reader","image":"linked.json","dependencies":[1]}
+      ])", 1), TextureFilter::LINEAR);
+
+    // With an effect chain of its own, the composite and the ping-pong pair
+    // registered after the material agree.
+    fs::VFS vfs;
+    auto    parsed = ParseScene(vfs, R"([
+        {"id":1,"name":"source","image":"img_point.json",
+         "effects":[{"file":"effects/copy/effect.json","id":90,"visible":true}]},
+        {"id":2,"name":"reader","image":"linked.json","dependencies":[1]}
+      ])", files());
+    ASSERT_NE(parsed, nullptr);
+    const auto* composite = parsed->FindRenderTarget(LayerCompositeTargetKey(1));
+    ASSERT_NE(composite, nullptr);
+    SceneNode* node = nullptr;
+    for (auto& child : parsed->sceneGraph->GetChildren()) {
+        if (child->Name() == "source") node = child.get();
+    }
+    ASSERT_NE(node, nullptr);
+    const auto* ping_pong =
+        parsed->FindRenderTarget(std::string(WE_EFFECT_PPONG_PREFIX_A.data()) + node->Camera());
+    ASSERT_NE(ping_pong, nullptr);
+    EXPECT_EQ(composite->sample.magFilter, TextureFilter::NEAREST);
+    EXPECT_EQ(ping_pong->sample.magFilter, composite->sample.magFilter);
+    EXPECT_EQ(ping_pong->sample.minFilter, composite->sample.minFilter);
+}
+
+// Only image, text and model layers are tested for the cursor. A light, a
+// camera, a particle emitter and a plain group are registered as layers the
+// cursor never reaches, and an image layer carries its own `solid` and
+// `disablepropagation`.
+TEST(LayerTextureReference, LightsCamerasParticlesAndGroupsAreNeverHitTestedForTheCursor) {
+    const ProjectProperties properties {};
+    fs::VFS                 vfs;
+    auto files = std::map<std::string, std::string> {
+        { "/particle.json",
+          R"({"emitter":[{"name":"emit","id":1}],"material":"mat.json","maxcount":4,"starttime":0})" },
+    };
+    auto parsed = ParseScene(vfs, R"([
+        {"id":1,"name":"image","image":"image.json","solid":false,"disablepropagation":true},
+        {"id":2,"name":"group","origin":"0 0 0"},
+        {"id":3,"name":"lamp","light":"point","origin":"8 8 100","color":"1 1 1","radius":50,
+         "intensity":1},
+        {"id":4,"name":"shot","camera":"default","origin":[8,4,500],"angles":[0,0,0],"fov":50},
+        {"id":5,"name":"sparks","particle":"particle.json","origin":[8,4,0],
+         "solid":true,"disablepropagation":true}
+      ])", files, &properties);
+    ASSERT_NE(parsed, nullptr);
+    ASSERT_NE(parsed->runtime, nullptr);
+    const auto target = [&](std::string_view name) {
+        return parsed->runtime->NodeCursorTargetOf(name);
+    };
+    ASSERT_TRUE(target("image").has_value());
+    EXPECT_TRUE(target("image")->hittable);
+    EXPECT_FALSE(target("image")->solid);
+    EXPECT_TRUE(target("image")->blocks);
+    for (const char* name : { "group", "lamp", "shot", "sparks" }) {
+        SCOPED_TRACE(name);
+        ASSERT_TRUE(target(name).has_value()) << "the kind of layer was never registered";
+        EXPECT_FALSE(target(name)->hittable);
+    }
+}
+
+// The cursor is tested against image, text and model layers that are solid, and
+// only those; a plain group is never a target.
+TEST(LayerTextureReference, ImageLayersAndGroupsRegisterTheirCursorTargeting) {
+    const ProjectProperties properties {};
+    fs::VFS                 vfs;
+    auto parsed = ParseScene(vfs, R"([
+        {"id":1,"name":"plain","image":"image.json"},
+        {"id":2,"name":"ghost","image":"image.json","solid":false},
+        {"id":3,"name":"blocker","image":"image.json","disablepropagation":true},
+        {"id":4,"name":"group","origin":"0 0 0"}
+      ])", {}, &properties);
+    ASSERT_NE(parsed, nullptr);
+    ASSERT_NE(parsed->runtime, nullptr);
+    const auto target = [&](std::string_view name) {
+        return parsed->runtime->NodeCursorTargetOf(name);
+    };
+    ASSERT_TRUE(target("plain").has_value());
+    EXPECT_TRUE(target("plain")->hittable);
+    EXPECT_TRUE(target("plain")->solid);
+    EXPECT_FALSE(target("plain")->blocks);
+    EXPECT_FALSE(target("ghost")->solid);
+    EXPECT_TRUE(target("blocker")->blocks);
+    ASSERT_TRUE(target("group").has_value());
+    EXPECT_FALSE(target("group")->hittable);
+}
+
 TEST(LayerTextureReference, ExternalMaterialsKeepHiddenTransitiveProducers) {
     const ProjectProperties properties {};
     fs::VFS                 vfs;
@@ -692,6 +939,177 @@ TEST(LayerTextureReference, ComposeChildrenKeepTheirPlaceInsideTheLayer) {
     EXPECT_NEAR(corner.y(), (5.0 + 4.0) / 16.0, 1e-4);
 }
 
+// Wallpaper Engine composes a layer from the flags and the shader of its model,
+// not from the model's name, so the depth-testing variant of the composition
+// layer composes its children the same way.
+TEST(LayerTextureReference, TheDepthTestedComposeModelComposesLikeTheOthers) {
+    fs::VFS vfs;
+    auto    parsed = ParseScene(vfs, R"([
+        {"id":1,"name":"container","image":"models/util/composelayer_depthtest.json",
+         "size":[64,32],"origin":[32,16,0],"copybackground":false},
+        {"id":2,"name":"child","parent":1,"image":"small.json","origin":[10,5,0]}
+      ])",
+      {{ "/models/util/composelayer_depthtest.json",
+         R"({"passthrough":true,"material":"materials/util/composelayer.json"})" },
+       { "/materials/util/composelayer.json",
+         R"({"passes":[{"blending":"translucent","cullmode":"nocull","depthtest":"enabled","depthwrite":"disabled","shader":"genericimage","textures":["_rt_FullFrameBuffer"]}]})" },
+       { "/materials/util/effectpassthrough.json",
+         R"({"passes":[{"blending":"normal","cullmode":"nocull","depthtest":"disabled","depthwrite":"disabled","shader":"genericimage"}]})" },
+       { "/small.json", R"({"width":16,"height":8,"material":"mat.json"})" }});
+    ASSERT_NE(parsed, nullptr);
+    AddScreenTarget(*parsed);
+    const auto graph = sceneToRenderGraph(*parsed);
+    ASSERT_NE(graph, nullptr);
+    const auto* child = FindPassByNode(*graph, "child");
+    ASSERT_NE(child, nullptr);
+
+    const auto corner = CardCornerNdc(*parsed, *child, { 8.0, 4.0 });
+    EXPECT_NEAR(corner.x(), (10.0 + 8.0) / 32.0, 1e-4);
+    EXPECT_NEAR(corner.y(), (5.0 + 4.0) / 16.0, 1e-4);
+}
+
+// A project layer is sized by the scene's canvas, not by the size the scene file
+// saved for it; the layer's position stays the scene file's.
+TEST(LayerTextureReference, AProjectLayerTakesTheCanvasSizeAndKeepsItsOrigin) {
+    const ProjectProperties properties {};
+    fs::VFS                 vfs;
+    auto parsed = ParseScene(vfs, R"([
+        {"id":1,"name":"project","image":"models/util/projectlayer.json",
+         "size":[10,10],"origin":[40,12,0]},
+        {"id":2,"name":"plain","image":"models/util/solid.json","size":[10,10],"origin":[40,12,0]}
+      ])",
+      {{ "/models/util/projectlayer.json",
+         R"({"passthrough":true,"autosize":true,"projectlayer":true,"material":"materials/util/composelayer.json"})" },
+       { "/models/util/solid.json",
+         R"({"autosize":true,"material":"materials/util/composelayer.json"})" },
+       { "/materials/util/composelayer.json",
+         R"({"passes":[{"blending":"translucent","cullmode":"nocull","depthtest":"disabled","depthwrite":"disabled","shader":"genericimage","textures":["_rt_FullFrameBuffer"]}]})" }},
+      &properties);
+    ASSERT_NE(parsed, nullptr);
+    ASSERT_NE(parsed->runtime, nullptr);
+    // The scene's canvas is 64 by 32.
+    EXPECT_TRUE(parsed->runtime->NodeSize("project").isApprox(Eigen::Vector2f(64.0f, 32.0f)));
+    EXPECT_TRUE(parsed->runtime->NodeTranslate("project").isApprox(Eigen::Vector3f(40.0f, 12.0f, 0.0f)));
+    // `autosize` alone sizes from the texture, which the scene file's size already is.
+    EXPECT_TRUE(parsed->runtime->NodeSize("plain").isApprox(Eigen::Vector2f(10.0f, 10.0f)));
+}
+
+// What a `shape` object needs of an effect: its shader only compiles with the
+// DIRECTDRAW combo on, which the scene file never sets, and a uniform tells two
+// effects apart.
+std::map<std::string, std::string> ShapeEffectFiles() {
+    const std::string vert = std::string(kVert);
+    const std::string frag = R"(#if ! DIRECTDRAW
+#error the shape did not force DIRECTDRAW on
+#endif
+uniform vec3 g_Tint; // {"material":"tint","default":"1 1 1"}
+varying vec2 v_TexCoord;
+void main() {
+  gl_FragColor = vec4(g_Tint * v_TexCoord.x, 1.0);
+}
+)";
+    std::map<std::string, std::string> files {
+        { "/materials/effects/shaft.json",
+          R"({"passes":[{"shader":"effects/shaft","blending":"normal","cullmode":"nocull",)"
+          R"("depthtest":"disabled","depthwrite":"disabled","textures":[null]}]})" },
+        { "/shaders/effects/shaft.vert", vert },
+        { "/shaders/effects/shaft.frag", frag },
+    };
+    for (const std::string name : { "first", "second" }) {
+        files["/effects/" + name + "/effect.json"] =
+            R"({"name":")" + name +
+            R"(","passes":[{"material":"materials/effects/shaft.json"}]})";
+    }
+    return files;
+}
+
+// A `shape` object is a quad as tall as the canvas on both axes, drawn through its
+// last effect straight onto the scene, additively, with the effect's DIRECTDRAW
+// combo forced on. With `point0` to `point3` on the first effect's first pass the
+// quad is the one those four corners make.
+TEST(LayerTextureReference, AShapeDrawsItsLastEffectAdditivelyOntoTheScene) {
+    const ProjectProperties properties {};
+    fs::VFS                 vfs;
+    auto parsed = ParseScene(vfs, R"([
+        {"id":1,"name":"shaft","shape":"quad","origin":[32,16,0],"visible":true,
+         "effects":[
+           {"file":"effects/first/effect.json","id":10,"visible":true,
+            "passes":[{"constantshadervalues":{"tint":"1 0 0","point0":"0.25 0.25",
+              "point1":"0.75 0.25","point2":"0.9 0.75","point3":"0.1 0.75"}}]},
+           {"file":"effects/second/effect.json","id":11,"visible":true,
+            "passes":[{"constantshadervalues":{"tint":"0 1 0"}}]}]},
+        {"id":2,"name":"whole","shape":"quad","origin":[32,16,0],"visible":true,
+         "effects":[{"file":"effects/first/effect.json","id":12,"visible":true}]},
+        {"id":3,"name":"hidden","shape":"quad","visible":false,
+         "effects":[{"file":"effects/first/effect.json","id":13,"visible":true}]}
+      ])", ShapeEffectFiles(), &properties);
+    ASSERT_NE(parsed, nullptr);
+
+    SceneNode* shaft = nullptr;
+    SceneNode* whole = nullptr;
+    SceneNode* hidden = nullptr;
+    for (auto& child : parsed->sceneGraph->GetChildren()) {
+        if (child->Name() == "shaft") shaft = child.get();
+        if (child->Name() == "whole") whole = child.get();
+        if (child->Name() == "hidden") hidden = child.get();
+    }
+    ASSERT_NE(shaft, nullptr);
+    ASSERT_NE(whole, nullptr);
+    ASSERT_NE(hidden, nullptr);
+    // An object that is not shown is not drawn at all.
+    EXPECT_EQ(hidden->Mesh(), nullptr);
+
+    // The quad of the four corners, as `(p.x, 1 - p.y)` of a 32 unit square about
+    // the layer, with the corner as its texture coordinates; it is the last
+    // effect's material that draws it.
+    ASSERT_NE(shaft->Mesh(), nullptr);
+    const auto& vertices = shaft->Mesh()->GetVertexArray(0);
+    ASSERT_EQ(vertices.VertexCount(), 4u);
+    const auto offsets  = vertices.GetAttrOffsetMap();
+    const auto position = offsets.at(std::string(WE_IN_POSITION)).offset / sizeof(float);
+    const auto texcoord = offsets.at(std::string(WE_IN_TEXCOORD)).offset / sizeof(float);
+    std::vector<std::array<float, 4>> got;
+    for (std::size_t index = 0; index < vertices.VertexCount(); ++index) {
+        const float* v = vertices.Data() + index * vertices.OneSize();
+        got.push_back({ v[position], v[position + 1], v[texcoord], v[texcoord + 1] });
+    }
+    std::sort(got.begin(), got.end());
+    std::vector<std::array<float, 4>> expected;
+    for (const auto& corner : std::vector<std::array<float, 2>> {
+             { 0.25f, 0.25f }, { 0.75f, 0.25f }, { 0.9f, 0.75f }, { 0.1f, 0.75f } }) {
+        expected.push_back({ 32.0f * corner[0] - 16.0f, 32.0f * (1.0f - corner[1]) - 16.0f,
+                             corner[0], corner[1] });
+    }
+    std::sort(expected.begin(), expected.end());
+    ASSERT_EQ(got.size(), expected.size());
+    for (std::size_t index = 0; index < got.size(); ++index) {
+        for (std::size_t lane = 0; lane < 4; ++lane) {
+            EXPECT_NEAR(got[index][lane], expected[index][lane], 1e-4f) << index << "/" << lane;
+        }
+    }
+    const auto* material = shaft->Mesh()->Material();
+    ASSERT_NE(material, nullptr);
+    EXPECT_EQ(material->blenmode, BlendMode::Additive);
+    ASSERT_TRUE(material->customShader.constValues.contains("g_Tint"));
+    EXPECT_FLOAT_EQ(material->customShader.constValues.at("g_Tint")[0], 0.0f)
+        << "the first effect was drawn instead of the last";
+    EXPECT_FLOAT_EQ(material->customShader.constValues.at("g_Tint")[1], 1.0f);
+
+    // Without the four corners it is the whole square, as tall as the canvas.
+    ASSERT_NE(whole->Mesh(), nullptr);
+    const auto [lower, upper] = CardCorners(*whole->Mesh());
+    EXPECT_TRUE(lower.isApprox(Eigen::Vector2d(-16.0, -16.0)));
+    EXPECT_TRUE(upper.isApprox(Eigen::Vector2d(16.0, 16.0)));
+
+    // And it reaches the scene's own target as a pass of its own.
+    AddScreenTarget(*parsed);
+    const auto graph = sceneToRenderGraph(*parsed);
+    ASSERT_NE(graph, nullptr);
+    const auto* pass = FindPassByNode(*graph, "shaft");
+    ASSERT_NE(pass, nullptr);
+    EXPECT_EQ(pass->desc().output, std::string(SpecTex_Default));
+}
+
 // A compose layer that only copies the background behind it adds nothing on
 // screen and used to be skipped outright. A mask drawn after other layers can
 // still sample it to paint that background back -- a toggle's clouds clipped to
@@ -854,104 +1272,127 @@ void main() {
 // the text wherever it sits on screen, and, hidden, it was never drawn at all.
 // Its card is laid out again whenever the text changes, so its composite moves
 // and resizes with it, one texel per unit as an image's is: a consumer may place
-// the image by its size.
+// the image by its size. Texels are the card's width and height with the fraction
+// cut off, as Wallpaper Engine builds a text card's buffers, as the scene loads
+// and again after every relayout. A spacing of 0.2 between glyphs gives both texts
+// below a fractional card with a fraction of .6, where cutting and rounding differ.
 TEST(LayerTextureReference, ASampledTextLayerIsItsCardInItsOwnComposite) {
-    // With an effect the layer draws at an effect capacity larger than its
-    // card, and what is sampled is still the card. Declared as a dependency the
+    // With an effect the layer draws through the chain's buffers, and what is
+    // sampled is the chain's final card. Declared as a dependency the
     // reference is known before the text is parsed; named only in a material
     // file it is found while the consumer is parsed.
-    for (const bool with_effect : { false, true }) {
-        for (const bool declared : { true, false }) {
-            SCOPED_TRACE(std::string(with_effect ? "with an effect" : "plain") +
-                         (declared ? ", declared" : ", found in a material"));
-            auto files = CopyEffectFiles();
-            files["/linked_mat.json"] =
-                R"({"passes":[{"blending":"translucent","cullmode":"nocull","depthtest":"disabled","depthwrite":"disabled","shader":"genericimage","textures":["_rt_imageLayerComposite_416_a"]}]})";
-            // Left-aligned in a box narrower than the text, the card overflows to
-            // the right and is not centred on the layer's origin.
-            const std::string objects =
-                std::string(R"([
-                {"id":680,"name":"marquee","image":"linked.json")") +
-                (declared ? R"(,"dependencies":[416])" : "") + R"(},
-                {"id":416,"name":"title","text":"Wind","font":"Arial","pointsize":20,
-                 "padding":0,"size":[24,40],"horizontalalign":"left",
-                 "origin":[50,20,0],"visible":false)" +
-                (with_effect ? R"(,"effects":[{"file":"effects/copy/effect.json","visible":true}])"
-                             : "") +
-                "}]";
-            const ProjectProperties properties {};
-            fs::VFS                 vfs;
-            auto parsed = ParseScene(vfs, objects, files, &properties);
-            ASSERT_NE(parsed, nullptr);
-            ASSERT_NE(parsed->runtime, nullptr);
-            EXPECT_TRUE(parsed->layer_texture_error.empty()) << parsed->layer_texture_error;
-            AddScreenTarget(*parsed);
-            auto& runtime = *parsed->runtime;
+    for (const bool fractional : { false, true }) {
+        bool a_fraction_rounds_up = false;
+        for (const bool with_effect : { false, true }) {
+            for (const bool declared : { true, false }) {
+                SCOPED_TRACE(std::string(fractional ? "fractional card, " : "whole card, ") +
+                             (with_effect ? "with an effect" : "plain") +
+                             (declared ? ", declared" : ", found in a material"));
+                auto files = CopyEffectFiles();
+                files["/linked_mat.json"] =
+                    R"({"passes":[{"blending":"translucent","cullmode":"nocull","depthtest":"disabled","depthwrite":"disabled","shader":"genericimage","textures":["_rt_imageLayerComposite_416_a"]}]})";
+                // Left-aligned, the card hangs to the right of the layer's origin and is
+                // not centred on it.
+                const std::string objects =
+                    std::string(R"([
+                    {"id":680,"name":"marquee","image":"linked.json")") +
+                    (declared ? R"(,"dependencies":[416])" : "") + R"(},
+                    {"id":416,"name":"title","text":"Wind","font":"Arial","pointsize":20,
+                     "padding":0,"horizontalalign":"left",
+                     "origin":[50,20,0],"visible":false)" +
+                    (fractional ? R"(,"spacing":"0.2 0")" : "") +
+                    (with_effect ? R"(,"effects":[{"file":"effects/copy/effect.json","visible":true}])"
+                                 : "") +
+                    "}]";
+                const ProjectProperties properties {};
+                fs::VFS                 vfs;
+                auto parsed = ParseScene(vfs, objects, files, &properties);
+                ASSERT_NE(parsed, nullptr);
+                ASSERT_NE(parsed->runtime, nullptr);
+                EXPECT_TRUE(parsed->layer_texture_error.empty()) << parsed->layer_texture_error;
+                AddScreenTarget(*parsed);
+                auto& runtime = *parsed->runtime;
 
-            // The pass that draws the title into its composite, and the card it
-            // draws there.
-            struct Composite {
-                const vulkan::CustomShaderPass* pass { nullptr };
-                Eigen::Vector2d                 lower, upper;
-            };
-            const auto find_composite = [&](const rg::RenderGraph& graph) {
-                Composite found;
-                found.pass = FindPassByOutput(graph, LayerCompositeTargetKey(416));
-                if (found.pass == nullptr || found.pass->desc().node->Mesh() == nullptr)
+                // The pass that draws the title into its composite, and the card it
+                // draws there.
+                struct Composite {
+                    const vulkan::CustomShaderPass* pass { nullptr };
+                    Eigen::Vector2d                 lower, upper;
+                };
+                const auto find_composite = [&](const rg::RenderGraph& graph) {
+                    Composite found;
+                    found.pass = FindPassByOutput(graph, LayerCompositeTargetKey(416));
+                    if (found.pass == nullptr || found.pass->desc().node->Mesh() == nullptr)
+                        return found;
+                    std::tie(found.lower, found.upper) =
+                        CardCorners(*found.pass->desc().node->Mesh());
                     return found;
-                std::tie(found.lower, found.upper) =
-                    CardCorners(*found.pass->desc().node->Mesh());
-                return found;
-            };
-            const auto expect_composite_is_the_card = [&](const Composite& composite) {
-                ASSERT_NE(composite.pass, nullptr) << "the title was never drawn into a composite";
-                auto* owner = composite.pass->desc().visibility_node != nullptr
-                                        ? composite.pass->desc().visibility_node
-                                        : composite.pass->desc().node;
-                EXPECT_EQ(owner->Name(), "title");
-                EXPECT_TRUE(owner->MustProduce()) << "hidden, the title would never be drawn";
-                // The card the title shows on screen, whichever mesh draws it.
-                ASSERT_NE(owner->Mesh(), nullptr);
-                const auto [card_lower, card_upper] = CardCorners(*owner->Mesh());
-                EXPECT_NEAR(composite.lower.x(), card_lower.x(), 1e-3);
-                EXPECT_NEAR(composite.lower.y(), card_lower.y(), 1e-3);
-                EXPECT_NEAR(composite.upper.x(), card_upper.x(), 1e-3);
-                EXPECT_NEAR(composite.upper.y(), card_upper.y(), 1e-3);
-                ExpectCardFillsItsTarget(*parsed, *composite.pass, composite.lower, composite.upper);
-                const auto* target = parsed->FindRenderTarget(LayerCompositeTargetKey(416));
-                ASSERT_NE(target, nullptr);
-                EXPECT_EQ(target->width, std::lround(composite.upper.x() - composite.lower.x()));
-                EXPECT_EQ(target->height, std::lround(composite.upper.y() - composite.lower.y()));
-            };
+                };
+                const auto expect_composite_is_the_card = [&](const Composite& composite) {
+                    ASSERT_NE(composite.pass, nullptr) << "the title was never drawn into a composite";
+                    auto* owner = composite.pass->desc().visibility_node != nullptr
+                                            ? composite.pass->desc().visibility_node
+                                            : composite.pass->desc().node;
+                    EXPECT_EQ(owner->Name(), "title");
+                    EXPECT_TRUE(owner->MustProduce()) << "hidden, the title would never be drawn";
+                    // The card the title shows on screen, whichever mesh draws it. With an
+                    // effect the composite is the card the chain ends in, cut to the
+                    // buffers it is drawn into: short of the text's own by half the
+                    // fraction they cut off on each side.
+                    ASSERT_NE(owner->Mesh(), nullptr);
+                    const auto [card_lower, card_upper] = CardCorners(*owner->Mesh());
+                    const double slack = fractional && with_effect ? 0.5 : 1e-3;
+                    EXPECT_NEAR(composite.lower.x(), card_lower.x(), slack);
+                    EXPECT_NEAR(composite.lower.y(), card_lower.y(), slack);
+                    EXPECT_NEAR(composite.upper.x(), card_upper.x(), slack);
+                    EXPECT_NEAR(composite.upper.y(), card_upper.y(), slack);
+                    ExpectCardFillsItsTarget(*parsed, *composite.pass, composite.lower, composite.upper);
+                    const auto* target = parsed->FindRenderTarget(LayerCompositeTargetKey(416));
+                    ASSERT_NE(target, nullptr);
+                    // The card's size in texels: its width and height with the fraction
+                    // cut off.
+                    const auto card = runtime.NodeSize("title");
+                    EXPECT_EQ(target->width, std::max(4, static_cast<int32_t>(card.x())))
+                        << card.x();
+                    EXPECT_EQ(target->height, std::max(4, static_cast<int32_t>(card.y())))
+                        << card.y();
+                    a_fraction_rounds_up =
+                        a_fraction_rounds_up || card.x() - std::floor(card.x()) >= 0.5f;
+                };
 
-            auto graph = sceneToRenderGraph(*parsed);
-            ASSERT_NE(graph, nullptr);
-            const auto* marquee = FindPassByNode(*graph, "marquee");
-            ASSERT_NE(marquee, nullptr);
-            ASSERT_FALSE(marquee->desc().textures.empty());
-            EXPECT_EQ(marquee->desc().textures[0], GenLinkTex(416));
-            const auto* link = FindLinkCopy(*graph, GenLinkTex(416));
-            ASSERT_NE(link, nullptr) << "the marquee was given nothing to sample";
-            EXPECT_EQ(link->desc().src, LayerCompositeTargetKey(416));
+                auto graph = sceneToRenderGraph(*parsed);
+                ASSERT_NE(graph, nullptr);
+                const auto* marquee = FindPassByNode(*graph, "marquee");
+                ASSERT_NE(marquee, nullptr);
+                ASSERT_FALSE(marquee->desc().textures.empty());
+                EXPECT_EQ(marquee->desc().textures[0], GenLinkTex(416));
+                const auto* link = FindLinkCopy(*graph, GenLinkTex(416));
+                ASSERT_NE(link, nullptr) << "the marquee was given nothing to sample";
+                EXPECT_EQ(link->desc().src, LayerCompositeTargetKey(416));
 
-            const auto before = find_composite(*graph);
-            expect_composite_is_the_card(before);
-            ASSERT_NE(before.pass, nullptr);
-            ASSERT_GT(std::abs((before.lower.x() + before.upper.x()) * 0.5), 1.0)
-                << "the fixture's card must sit off the layer's origin";
+                const auto before = find_composite(*graph);
+                expect_composite_is_the_card(before);
+                ASSERT_NE(before.pass, nullptr);
+                ASSERT_GT(std::abs((before.lower.x() + before.upper.x()) * 0.5), 1.0)
+                    << "the fixture's card must sit off the layer's origin";
 
-            // A longer title widens the card while the layer stays hidden.
-            ASSERT_TRUE(runtime.SetNodeText("title", "Wind over the river"));
-            ASSERT_TRUE(PumpTextLayout(runtime, "title"))
-                << "a hidden text layer another samples was never laid out again";
-            EXPECT_TRUE(runtime.ConsumeSceneGraphMutationFlag())
-                << "the composite outgrew its target and nothing asked for a new graph";
-            graph = sceneToRenderGraph(*parsed);
-            ASSERT_NE(graph, nullptr);
-            const auto after = find_composite(*graph);
-            expect_composite_is_the_card(after);
-            ASSERT_NE(after.pass, nullptr);
-            EXPECT_GT(after.upper.x() - after.lower.x(), before.upper.x() - before.lower.x());
+                // A longer title widens the card while the layer stays hidden.
+                ASSERT_TRUE(runtime.SetNodeText("title", "Wind over the river"));
+                ASSERT_TRUE(PumpTextLayout(runtime, "title"))
+                    << "a hidden text layer another samples was never laid out again";
+                EXPECT_TRUE(runtime.ConsumeSceneGraphMutationFlag())
+                    << "the composite outgrew its target and nothing asked for a new graph";
+                graph = sceneToRenderGraph(*parsed);
+                ASSERT_NE(graph, nullptr);
+                const auto after = find_composite(*graph);
+                expect_composite_is_the_card(after);
+                ASSERT_NE(after.pass, nullptr);
+                EXPECT_GT(after.upper.x() - after.lower.x(), before.upper.x() - before.lower.x());
+            }
+        }
+        if (fractional) {
+            EXPECT_TRUE(a_fraction_rounds_up)
+                << "no card had a fraction of .5 or more, so rounding and cutting agree";
         }
     }
 }
@@ -1423,6 +1864,243 @@ TEST(CameraFraming, AFullscreenEffectCoversAPerspectiveScene) {
     parsed->activeCamera->SetFov(75);
     parsed->activeCamera->Update();
     ExpectCardFillsItsTarget(*parsed, *post, half_extent);
+}
+
+// Wallpaper Engine lays a fullscreen layer over the whole screen and takes only
+// its visibility from the hierarchy. Placed by the world matrix, the result of
+// a layer under a translated, scaled or turned group was drawn as a copy of
+// the screen shifted by the group, with the screen's own corner showing in the
+// opposite one.
+TEST(CameraFraming, AFullscreenLayerCoversTheScreenWhereverItsParentSits) {
+    struct Group {
+        const char* name;
+        const char* origin;
+        const char* scale;
+        const char* angles;
+    };
+    constexpr std::array<Group, 4> groups { {
+        { "translated", "[20,10,0]", "[1,1,1]", "[0,0,0]" },
+        { "scaled", "[20,10,0]", "[1.5,1.5,1]", "[0,0,0]" },
+        { "turned", "[20,10,0]", "[1,1,1]", "[0,0,0.3]" },
+        { "scaled and turned", "[-12,7,0]", "[0.6,1.5,1]", "[0,0,-0.7]" },
+    } };
+    for (const auto& group : groups) {
+        SCOPED_TRACE(group.name);
+        fs::VFS vfs;
+        auto    extra = CopyEffectFiles();
+        extra["/post.json"] = R"({"fullscreen":true,"passthrough":true,"material":"mat.json"})";
+        // The post layer sits two groups down: the inner group carries the
+        // transform under test, the outer one moves it again.
+        const ProjectProperties properties;
+        auto parsed = ParseScene(vfs,
+                                 std::string(R"([
+            {"id":1,"name":"backdrop","image":"image.json","origin":[32,16,0]},
+            {"id":3,"name":"outer","origin":[5,-4,0]},
+            {"id":4,"name":"inner","parent":3,"origin":)") +
+                                     group.origin + R"(,"scale":)" + group.scale +
+                                     R"(,"angles":)" + group.angles + R"(},
+            {"id":2,"name":"post","parent":4,"image":"post.json",
+             "effects":[{"file":"effects/copy/effect.json","visible":true}]}
+          ])",
+                                 std::move(extra), &properties);
+        ASSERT_NE(parsed, nullptr);
+        ASSERT_NE(parsed->runtime, nullptr);
+        AddScreenTarget(*parsed);
+        const auto graph = sceneToRenderGraph(*parsed);
+        ASSERT_NE(graph, nullptr);
+        const auto* post = FindPassByOutput(*graph, SpecTex_Default);
+        ASSERT_NE(post, nullptr);
+        ASSERT_NE(post, FindPassByNode(*graph, "backdrop"));
+
+        // As the parser leaves it, and again after the runtime has ticked: every
+        // tick it copies each layer's world matrix onto its effect's final card.
+        ExpectCardFillsItsTarget(*parsed, *post, { 32.0, 16.0 });
+        for (int tick = 0; tick < 3; ++tick) parsed->runtime->Tick(1.0 / 60.0);
+        ExpectCardFillsItsTarget(*parsed, *post, { 32.0, 16.0 });
+    }
+}
+
+// Camera parallax moves a whole tree by its outermost layer's distance from the
+// middle of the view. A fullscreen layer is placed by the canvas alone, so the
+// group it sits in carries it nowhere there either.
+TEST(CameraFraming, ParallaxDoesNotCarryAFullscreenLayerWithItsParent) {
+    fs::VFS vfs;
+    auto    extra = CopyEffectFiles();
+    extra["/post.json"] = R"({"fullscreen":true,"passthrough":true,"material":"mat.json"})";
+    MountFiles(vfs, std::move(extra));
+    audio::SoundManager sound;
+    WPSceneParser       parser;
+    auto                parsed = parser.Parse("fullscreen-parallax", ParallaxSceneJson(R"([
+        {"id":3,"name":"group","origin":[20,10,0]},
+        {"id":2,"name":"post","parent":3,"image":"post.json",
+         "effects":[{"file":"effects/copy/effect.json","visible":true}]}
+      ])"),
+                                     vfs,
+                                     sound);
+    ASSERT_NE(parsed, nullptr);
+    AddScreenTarget(*parsed);
+    // The cursor at rest in the middle of the view, so the only thing that
+    // could move the layer is where its group sits.
+    parsed->shaderValueUpdater->MouseInput(0.5, 0.5);
+    parsed->frameTime = 1.0;
+    parsed->shaderValueUpdater->FrameBegin();
+
+    const auto graph = sceneToRenderGraph(*parsed);
+    ASSERT_NE(graph, nullptr);
+    const auto* post = FindPassByOutput(*graph, SpecTex_Default);
+    ASSERT_NE(post, nullptr);
+    ExpectCardFillsItsTarget(*parsed, *post, { 32.0, 16.0 });
+}
+
+// A group decides whether the fullscreen layer under it shows, though no longer
+// where: hiding the group hides the layer, and showing it again brings back a
+// card that still covers the screen.
+TEST(CameraFraming, AGroupStillDecidesWhetherAFullscreenLayerShows) {
+    const ProjectProperties properties { { "open", RuntimeScalarValue::Bool(true) } };
+    fs::VFS                 vfs;
+    auto                    extra = CopyEffectFiles();
+    extra["/post.json"] = R"({"fullscreen":true,"passthrough":true,"material":"mat.json"})";
+    auto parsed = ParseScene(vfs, R"([
+        {"id":1,"name":"backdrop","image":"image.json","origin":[32,16,0]},
+        {"id":3,"name":"group","origin":[20,10,0],"visible":{"user":"open","value":true}},
+        {"id":2,"name":"post","parent":3,"image":"post.json",
+         "effects":[{"file":"effects/copy/effect.json","visible":true}]}
+      ])",
+                             std::move(extra), &properties);
+    ASSERT_NE(parsed, nullptr);
+    ASSERT_NE(parsed->runtime, nullptr);
+    AddScreenTarget(*parsed);
+    auto&      runtime = *parsed->runtime;
+    const auto tick    = [&runtime](bool open) {
+        runtime.PreviewProjectPropertyOverride({ { "open", RuntimeScalarValue::Bool(open) } });
+        runtime.Tick(1.0 / 60.0);
+    };
+    const auto graph = sceneToRenderGraph(*parsed);
+    ASSERT_NE(graph, nullptr);
+    const auto* post = FindPassByOutput(*graph, SpecTex_Default);
+    ASSERT_NE(post, nullptr);
+    ASSERT_NE(post, FindPassByNode(*graph, "backdrop"));
+
+    // The pass shows exactly when the layer does: its own switch and every
+    // group above it.
+    const auto* owner = post->desc().visibility_node != nullptr ? post->desc().visibility_node
+                                                                : post->desc().node;
+    ASSERT_NE(owner, nullptr);
+    tick(true);
+    EXPECT_TRUE(owner->EffectiveVisible());
+    ExpectCardFillsItsTarget(*parsed, *post, { 32.0, 16.0 });
+    tick(false);
+    EXPECT_FALSE(runtime.NodeVisible("group"));
+    EXPECT_TRUE(runtime.NodeVisible("post")) << "the layer's own switch was never touched";
+    EXPECT_FALSE(owner->EffectiveVisible()) << "a hidden group left its fullscreen layer shown";
+    tick(true);
+    EXPECT_TRUE(owner->EffectiveVisible());
+    ExpectCardFillsItsTarget(*parsed, *post, { 32.0, 16.0 });
+}
+
+// A fullscreen layer is drawn over the whole screen whatever its own transform,
+// but the layers below it are placed from the transform the scene saved for it
+// (none saved, none added) under the groups it sits in. Placed from the screen
+// centre the layer is drawn at, a picture saved at the middle of the canvas was
+// drawn a whole canvas away.
+TEST(CameraFraming, TheChildrenOfAFullscreenLayerAreSavedAgainstItsSavedTransform) {
+    struct Case {
+        const char* name;
+        const char* post_fields;
+        const char* group;
+        Eigen::Vector3d expected;  // the child's world position
+    };
+    const std::array<Case, 4> cases { {
+        { "no origin", "", "", { 7.0, 9.0, 0.0 } },
+        { "an origin saved", R"("origin":[5,3,0],)", "", { 12.0, 12.0, 0.0 } },
+        { "a scale saved", R"("origin":[5,3,0],"scale":[2,2,1],)", "", { 19.0, 21.0, 0.0 } },
+        { "under a moved group", "", R"("parent":3,)", { 27.0, 19.0, 0.0 } },
+    } };
+    for (const auto& item : cases) {
+        SCOPED_TRACE(item.name);
+        fs::VFS vfs;
+        auto    extra = CopyEffectFiles();
+        extra["/post.json"] = R"({"fullscreen":true,"passthrough":true,"material":"mat.json"})";
+        const ProjectProperties properties;
+        auto parsed = ParseScene(vfs,
+                                 std::string(R"([
+            {"id":3,"name":"group","origin":[20,10,0]},
+            {"id":2,"name":"post",)") + item.post_fields +
+                                     item.group + R"("image":"post.json",
+             "effects":[{"file":"effects/copy/effect.json","visible":true}]},
+            {"id":4,"name":"picture","parent":2,"origin":[7,9,0]}
+          ])",
+                                 std::move(extra), &properties);
+        ASSERT_NE(parsed, nullptr);
+        ASSERT_NE(parsed->runtime, nullptr);
+        for (int tick = 0; tick < 2; ++tick) parsed->runtime->Tick(1.0 / 60.0);
+        const Eigen::Matrix4d picture = parsed->runtime->NodeTransformMatrix("picture");
+        EXPECT_NEAR(picture(0, 3), item.expected.x(), 1.0e-4);
+        EXPECT_NEAR(picture(1, 3), item.expected.y(), 1.0e-4);
+        // The layer itself still covers the screen, whatever was saved for it.
+        AddScreenTarget(*parsed);
+        const auto graph = sceneToRenderGraph(*parsed);
+        ASSERT_NE(graph, nullptr);
+        const auto* post = FindPassByOutput(*graph, SpecTex_Default);
+        ASSERT_NE(post, nullptr);
+        ExpectCardFillsItsTarget(*parsed, *post, { 32.0, 16.0 });
+    }
+}
+
+// The camera perspective layers of a 2D scene draw through keeps the lens the
+// scene authored and follows the canvas plane: whatever frames the canvas -- a
+// fill mode, a camera layer's zoom and pan -- puts its eye (visible height / 2) /
+// tan(fov / 2) from the plane and over the point the orthographic view looks at,
+// so a layer on the plane lands where it does without the perspective.
+TEST(CameraFraming, APerspectiveCameraKeepsItsLensAndFollowsEveryWayTheCanvasIsFramed) {
+    fs::VFS vfs;
+    auto    parsed = ParseScene(vfs, R"([
+        {"id":1,"name":"backdrop","image":"image.json","origin":[32,16,0]}
+      ])");
+    ASSERT_NE(parsed, nullptr);
+    const auto& canvas      = *parsed->cameras.at("global");
+    const auto& perspective = *parsed->cameras.at("global_perspective");
+    const double fov        = perspective.Fov();
+
+    const auto expect_framed = [&](const std::string& what) {
+        SCOPED_TRACE(what);
+        EXPECT_DOUBLE_EQ(perspective.Fov(), fov) << "the lens is the scene's, not the framing's";
+        EXPECT_DOUBLE_EQ(perspective.Aspect(), canvas.Aspect());
+        const auto centre = canvas.GetPosition();
+        const auto eye    = perspective.GetPosition();
+        EXPECT_NEAR(eye.x(), centre.x(), 1e-4);
+        EXPECT_NEAR(eye.y(), centre.y(), 1e-4);
+        EXPECT_NEAR(eye.z(), (canvas.VisibleHeight() / 2.0) / std::tan(fov * M_PI / 360.0), 1e-3);
+        for (const auto& [fx, fy] : {std::pair { -0.5, -0.5 }, std::pair { 0.5, 0.5 },
+                                     std::pair { 0.3, -0.2 }}) {
+            const Eigen::Vector4d point(centre.x() + fx * canvas.VisibleWidth(),
+                                        centre.y() + fy * canvas.VisibleHeight(), 0.0, 1.0);
+            const Eigen::Vector4d flat = canvas.GetViewProjectionMatrix() * point;
+            const Eigen::Vector4d deep = perspective.GetViewProjectionMatrix() * point;
+            EXPECT_NEAR(deep.x() / deep.w(), flat.x() / flat.w(), 1e-5);
+            EXPECT_NEAR(deep.y() / deep.w(), flat.y() / flat.w(), 1e-5);
+        }
+    };
+
+    expect_framed("as parsed");
+    struct Output {
+        FillMode    mode;
+        const char* name;
+        uint32_t    width;
+        uint32_t    height;
+    };
+    for (const auto& output : { Output { FillMode::STRETCH, "stretch", 300, 90 },
+                                Output { FillMode::ASPECTFIT, "fit wide", 400, 100 },
+                                Output { FillMode::ASPECTFIT, "fit tall", 100, 400 },
+                                Output { FillMode::ASPECTCROP, "crop wide", 400, 100 },
+                                Output { FillMode::ASPECTCROP, "crop tall", 100, 400 } }) {
+        vulkan::ApplyCameraFillMode(*parsed, output.mode, output.width, output.height);
+        expect_framed(output.name);
+    }
+    parsed->FrameCanvas(2.0, Eigen::Vector2f(8.0f, 4.0f));
+    expect_framed("zoomed and panned");
+    parsed->FrameCanvas(1.0, Eigen::Vector2f(0.0f, 0.0f));
+    expect_framed("back to the whole canvas");
 }
 
 // The static-result cache reuses a target's pixels while every pass writing it

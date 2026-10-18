@@ -42,9 +42,14 @@ public:
     std::string name;
     float       length { 0.05f };
     float       maxlength { 10.0f };
-    float       subdivision { 3.0f };
+    /// Points added between two connected particles (rope) or two recorded
+    /// trail points (rope trail); each pair is then drawn as one more piece
+    /// than this. A whole number in 0..32: Wallpaper Engine truncates the
+    /// value it reads and clamps it.
+    float       subdivision { 4.0f };
     float       minlength { 0.0f };
-    float       segments { 10.0f };
+    /// Rope trail only: how many recorded segments a trail holds, 2..32.
+    float       segments { 4.0f };
     float       uvscale { 1.0f };
     bool        uvscrolling { false };
     bool        uvsmoothing { false };
@@ -66,6 +71,8 @@ public:
     enum class FlagEnum : uint32_t
     {
         one_per_frame = 1,
+        // Emit in windows separated by pauses (flags & 4).
+        periodic = 2,
     };
     using EFlags = BitFlags<FlagEnum>;
 
@@ -88,6 +95,16 @@ public:
     i32                  controlpoint { 0 };
     i32                  id;
     EFlags               flags;
+    // Timing keys; zero is Wallpaper Engine's default for each.
+    float                delay { 0.0f };
+    float                duration { 0.0f };
+    float                minperiodicduration { 0.0f };
+    float                maxperiodicduration { 0.0f };
+    float                minperiodicdelay { 0.0f };
+    float                maxperiodicdelay { 0.0f };
+    u32                  maxtoemitperperiod { 0 };
+    // sphererandom only: 0 is the whole sphere, 1 a single direction.
+    float                cone { 0.0f };
     std::string          name;
     float                rate { 5.0f };
 };
@@ -100,15 +117,35 @@ public:
         wordspace             = 0, // 1
         spritenoframeblending = 1, // 2
         perspective           = 2, // 4
+        // The file keeps the scene object's `instanceoverride.speed` away from
+        // its emitters, movement, turbulence, vortex, control point attraction
+        // and position oscillation (the editor's "ignore speed override").
+        ignorespeedoverride   = 4, // 16
+        // The file keeps the scene object's `instanceoverride.size` away from its
+        // `sizerandom` draws and its `sizechange` ramps (the editor's "ignore size
+        // override").
+        ignoresizeoverride    = 7, // 128
     };
     using EFlags = BitFlags<FlagEnum>;
 
 public:
     bool FromJson(const nlohmann::json&, fs::VFS&);
 
+    /// Whether the scene object's speed override reaches this file's
+    /// speed-driven records.
+    bool AppliesSpeedOverride() const { return ! flags[FlagEnum::ignorespeedoverride]; }
+
+    /// Whether the scene object's size override reaches this file's size
+    /// records: the size draw and every size ramp.
+    bool AppliesSizeOverride() const { return ! flags[FlagEnum::ignoresizeoverride]; }
+
     std::vector<Emitter>              emitters;
     std::vector<nlohmann::json>       initializers;
     std::vector<nlohmann::json>       operators;
+    /// The `renderer` list. A file that leaves the key out (or holds anything
+    /// but an array there) gets one default sprite renderer, as Wallpaper
+    /// Engine appends one; an array the file wrote empty stays empty, and such
+    /// a system simulates (its particles still spawn children) but draws nothing.
     std::vector<ParticleRender>       renderers;
     std::vector<ParticleControlpoint> controlpoints;
 
@@ -117,9 +154,16 @@ public:
     std::vector<ParticleChild> children;
 
     std::string animationmode;
+    /// Whether a sprite sheet cross-fades a frame into the next. A `randomframe`
+    /// particle shows one frame picked at random, so it never does, as Wallpaper
+    /// Engine treats it as if the file had set the no-blending flag.
+    bool BlendsSpriteFrames() const {
+        return ! flags[FlagEnum::spritenoframeblending] && animationmode != "randomframe";
+    }
     float       sequencemultiplier { 1.0f };
     uint32_t    maxcount { 1 };
-    uint32_t    starttime { 0 };
+    /// Seconds the system is simulated for before its first frame.
+    float       starttime { 0.0f };
     EFlags      flags { 0 };
 };
 class ParticleChild {
@@ -161,6 +205,18 @@ public:
     float                size { 1.0f };
     std::array<float, 3> color { 1.0f, 1.0f, 1.0f };
     std::array<float, 3> colorn { 1.0f, 1.0f, 1.0f };
+    /// Multiplies the colour tint, in a scene that renders HDR (`hdr` below).
+    float                brightness { 1.0f };
+    /// Set by the scene parser from the scene's own HDR switch. Brightness has
+    /// no effect without it.
+    bool                 hdr { false };
+    /// `controlpoint0`..`controlpoint7`: where the scene puts the control point
+    /// instead of the preset's own offset. Unset keys leave the preset alone.
+    std::array<bool, 8>                  controlpointSet {};
+    std::array<std::array<float, 3>, 8>  controlpoint {};
+    /// `controlpointangle0`..`7`: Euler angles in radians (x, y, z).
+    std::array<bool, 8>                  controlpointangleSet {};
+    std::array<std::array<float, 3>, 8>  controlpointangle {};
     std::map<std::string, std::string> bindings;
 };
 
@@ -173,11 +229,10 @@ public:
     std::array<float, 3>     origin { 0.0f, 0.0f, 0.0f };
     std::array<float, 3>     scale { 1.0f, 1.0f, 1.0f };
     std::array<float, 3>     angles { 0.0f, 0.0f, 0.0f };
-    std::array<float, 2>     parallaxDepth { 0.0f, 0.0f };
+    // Wallpaper Engine's default for an object that leaves the key out.
+    std::array<float, 2>     parallaxDepth { 1.0f, 1.0f };
     bool                     visible { true };
     bool                     dynamic_origin { false };
-    bool                     dynamic_scale { false };
-    bool                     dynamic_angles { false };
     bool                     dynamic_visible { false };
     nlohmann::json           origin_setting;
     nlohmann::json           scale_setting;

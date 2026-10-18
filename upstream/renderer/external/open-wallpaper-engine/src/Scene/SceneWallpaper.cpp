@@ -810,7 +810,10 @@ public:
         // scale applied to targets that already exist — belongs to
         // `rebuildRenderGraph`, which every creation path runs straight after
         // this.
-        if (m_scene != nullptr) m_scene->render_scale = m_render_scale;
+        if (m_scene != nullptr) {
+            m_scene->render_scale = m_render_scale;
+            m_scene->resolution   = CurrentSceneResolution();
+        }
     }
 
     /// Asks for one frame because something outside the clock changed.
@@ -1024,14 +1027,19 @@ private:
     bool rebuildRenderGraph() {
         if (m_scene == nullptr) return true;
 
-        if (m_rg && ! m_render->clearLastRenderGraph()) {
+        // The same scene's graph again: its videos stay open for the compile below
+        // instead of starting over at the head of their clips.
+        if (m_rg && ! m_render->clearLastRenderGraphForRebuild()) {
             suspendAfterGraphFailure();
             return false;
         }
         // Seed the scale before the graph is compiled so render targets are
         // allocated at the requested size once, instead of at full size and
-        // then immediately resized.
+        // then immediately resized. The resolution is seeded with it for the
+        // same reason, and this is also where a scene that was just opened
+        // takes the process-wide choice.
         m_scene->render_scale = m_render_scale;
+        m_scene->resolution   = CurrentSceneResolution();
         m_rg = sceneToRenderGraph(*m_scene);
 
         if (main_handler.isGenGraphviz()) m_rg->ToGraphviz("graph.dot");
@@ -1175,6 +1183,10 @@ private:
                 }
                 m_scene->pointerPosition = pos;
                 m_scene->shaderValueUpdater->MouseInput(pos[0], pos[1]);
+                const MouseButtonSnapshot buttons = consumeMouseButtonSnapshot();
+                // A click released before this frame ran still held the button
+                // for it, so shaders see the press at least once.
+                m_scene->shaderValueUpdater->MouseButtonsInput(buttons.down | buttons.pressed);
                 if (m_scene->runtime != nullptr) {
                     const auto mapping = m_render->CursorMapping(*m_scene);
                     if (mapping.valid) {
@@ -1193,7 +1205,6 @@ private:
                     }
                     m_scene->runtime->SetCursorInput(pos[0], pos[1]);
                     m_scene->runtime->SetCursorEnter(m_cursor_in_window.load());
-                    const MouseButtonSnapshot buttons = consumeMouseButtonSnapshot();
                     m_scene->runtime->SetCursorButtons(
                         buttons.down, buttons.pressed, buttons.released);
                     m_cursor_was_in_window =
@@ -1349,8 +1360,13 @@ private:
         float value { 1.0f };
         if (msg->findFloat("value", &value)) {
             m_render_scale = value;
+            // The 2D scene resolution is a process-wide choice with no message
+            // of its own: the host re-pushes the render scale to every open
+            // scene when the choice changes, and this is where a running scene
+            // takes it, resizing in place exactly as it does for a new scale.
+            const auto resolution = CurrentSceneResolution();
             if (renderInited() && m_scene != nullptr && m_rg) {
-                if (! m_render->ApplyRenderScale(*m_scene, *m_rg, m_render_scale)) {
+                if (! m_render->ApplyRenderScale(*m_scene, *m_rg, m_render_scale, resolution)) {
                     // A failed resize leaves the passes unprepared, so fall back
                     // to the full graph rebuild rather than presenting nothing.
                     LOG_ERROR("render scale change failed, rebuilding render graph");
@@ -1358,6 +1374,7 @@ private:
                 }
             } else if (m_scene != nullptr) {
                 m_scene->render_scale = value;
+                m_scene->resolution   = resolution;
             }
         }
     }

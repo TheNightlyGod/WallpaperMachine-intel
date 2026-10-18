@@ -121,6 +121,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         AppLog.info("startup: didFinishLaunching start")
         BridgeEnvironment.configureVulkanICDIfNeeded()
         AppLog.info("startup: vulkan icd configured")
+        // Automatic sun times follow the Mac's position across launches, not only after the
+        // source is picked again.
+        SolarLocationTracker.shared.start()
         do {
             try ClientPaths.prepare()
             let created = try BridgeStore()
@@ -160,6 +163,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             playbackSnapshotCurrent = false
         }
         pixivStore.restoreSession()
+        workshopStore.restoreSteamWebSession()
         // A crash during a download leaves its staging behind, holding the whole downloaded item.
         let stagingRoot = ClientPaths.supportURL
         let pixivStagingRoot = PixivWallpaperPackager.stagingRoot(forLibrary: ClientPaths.libraryURL)
@@ -172,6 +176,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
         NSApp.setActivationPolicy(.accessory)
         AppLog.info("startup: activation policy set to accessory")
+        WebSignInWindowController.onClosed = { [weak self] in self?.leaveDockUnlessAWindowIsOpen() }
         installStatusItem()
         synchronizeStatusItem()
         installDisplayChangeObserver()
@@ -333,7 +338,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             let preferences = PlaybackPreferences.shared
             let appRules = AppRuleMonitor(preferences: preferences)
             let otherAudio = OtherAudioMonitor(preferences: preferences)
-            let conditions = SystemConditionMonitor(preferences: preferences, focus: .shared)
+            let conditions = SystemConditionMonitor(preferences: preferences, focus: .shared, state: .shared)
             let activeDisplay = ActiveDisplayTracker()
             appRuleMonitor = appRules
             otherAudioMonitor = otherAudio
@@ -610,7 +615,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         pendingOpenedFiles = []
         let opensPanel = ControlPanelLaunch.opensPanel(
             launchEvent: launchEvent,
-            welcomeSeen: ClientPreferences.defaults.bool(forKey: WebPanelController.welcomeSeenKey),
+            welcomeSeen: PanelPreferences.welcomeSeen(),
             startupFailed: store == nil)
         if !opensPanel { AppLog.info("startup: launched at login; control panel stays closed") }
         DispatchQueue.main.async { [weak self] in
@@ -735,9 +740,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     /// The panel's favorites, which a playlist can rotate through.
     private static func favoriteWallpaperIDs() -> Set<String> {
-        guard let data = ClientPreferences.defaults.data(forKey: WebPanelController.favoriteKey),
-              let ids = try? JSONDecoder().decode([String].self, from: data) else { return [] }
-        return Set(ids)
+        PanelPreferences.favorites()
     }
 
     /// Rates each wallpaper's energy use from background samples while it plays alone.
@@ -990,7 +993,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         let wallpaperRestorer = desktopWallpaperSync
         controlPanelWindow?.orderOut(nil)
         whatsNewWindow?.orderOut(nil)
-        NSApp.setActivationPolicy(.accessory)
+        leaveDockUnlessAWindowIsOpen()
 
         Task {
             var supervisor = QuitSupervisor(mode: mode)
@@ -1313,16 +1316,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         return ControlPanelWindow.clampedFrameSize(frameSize, for: sender)
     }
 
-    func windowDidEnterFullScreen(_ notification: Notification) {
-        guard let window = notification.object as? NSWindow, window === controlPanelWindow else { return }
-        ControlPanelWindow.setFullScreenLayout(true, for: window)
-    }
-
-    func windowDidExitFullScreen(_ notification: Notification) {
-        guard let window = notification.object as? NSWindow, window === controlPanelWindow else { return }
-        ControlPanelWindow.setFullScreenLayout(false, for: window)
-    }
-
     func windowDidBecomeKey(_ notification: Notification) {
         guard let window = notification.object as? NSWindow, window === controlPanelWindow else { return }
         retryHeldUpdatePrompt()
@@ -1333,18 +1326,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         if window === whatsNewWindow {
             whatsNewWindow = nil
             window.contentViewController = nil
-            if controlPanelWindow?.isVisible != true, previewWindow == nil { NSApp.setActivationPolicy(.accessory) }
+            leaveDockUnlessAWindowIsOpen()
             retryHeldUpdatePrompt()
             return
         }
         guard window === controlPanelWindow else { return }
 
         controlPanelWindow = nil
-        // Closing releases the page and its WebKit processes; reopening builds a
+        // Closing releases the panel's controller and its observations; reopening builds a
         // fresh view around the existing stores and navigation.
         window.contentViewController = nil
-        if whatsNewWindow == nil, previewWindow == nil { NSApp.setActivationPolicy(.accessory) }
+        leaveDockUnlessAWindowIsOpen()
         rebuildMenu()
+    }
+
+    /// Drops to `.accessory` once none of the app's ordinary windows is open
+    /// (`ActivationPolicyRule`). A window that is closing still reports itself visible, so
+    /// callers forget it first; whatever opens a window raises the policy itself.
+    private func leaveDockUnlessAWindowIsOpen() {
+        let windows = NSApp.windows.map { window in
+            ActivationPolicyRule.Window(
+                role: activationPolicyRole(of: window),
+                isVisible: window.isVisible, isMiniaturized: window.isMiniaturized)
+        }
+        guard !ActivationPolicyRule.keepsRegular(windows, quitting: shutdownInProgress) else { return }
+        NSApp.setActivationPolicy(.accessory)
+    }
+
+    private func activationPolicyRole(of window: NSWindow) -> ActivationPolicyRule.Window.Role? {
+        if window === controlPanelWindow { return .controlPanel }
+        if window === whatsNewWindow { return .whatsNew }
+        if window === previewWindow?.window { return .preview }
+        if WebSignInWindowController.isOpen(window) { return .signIn }
+        return nil
     }
 
     private func startDesktopWallpaperSync() throws {
@@ -1513,7 +1527,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             // Re-assert the activation policy to force AppKit to
             // re-register the accessory-mode status item with the
             // Window Server after the SwiftUI Scene phase has settled.
-            if self.controlPanelWindow == nil, self.whatsNewWindow == nil, self.previewWindow == nil { NSApp.setActivationPolicy(.accessory) }
+            self.leaveDockUnlessAWindowIsOpen()
             self.rebuildMenu()
         }
     }
@@ -1898,7 +1912,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         do {
             let history = try AppReleaseHistory()
             guard let announcement = whatsNewStore.announcement(
-                history: history, existingUser: ClientPreferences.defaults.bool(forKey: WebPanelController.welcomeSeenKey)
+                history: history, existingUser: PanelPreferences.welcomeSeen()
             ) else { return }
             let window = NSWindow(
                 contentRect: NSRect(origin: .zero, size: WhatsNewViewController.defaultContentSize),
@@ -1959,7 +1973,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
         // AppKit owns this resizable window's bounds; content must accept its proposal
         // instead of promoting a long label or a split pane's ideal width to a window minimum.
+        // The hosted view's `.toolbar` and `.navigationTitle` drive the window's own.
         controller.sizingOptions = []
+        controller.sceneBridgingOptions = [.toolbars, .title]
         let window = ControlPanelWindow.make(contentViewController: controller, delegate: self)
         let frameName = ControlPanelWindow.frameAutosaveName
         if !window.setFrameUsingName(frameName) { window.center() }
@@ -2032,9 +2048,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                 self.previewWindow = nil
                 self.wallpaperEnergy?.invalidate()
                 self.telemetry?.invalidateFrames()
-                if self.controlPanelWindow?.isVisible != true, self.whatsNewWindow == nil {
-                    NSApp.setActivationPolicy(.accessory)
-                }
+                self.leaveDockUnlessAWindowIsOpen()
             }
             previewWindow = controller
         }

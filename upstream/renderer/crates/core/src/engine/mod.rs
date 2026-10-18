@@ -251,7 +251,9 @@ impl WallpaperEngine {
         let model = DisplayStateModel::from_config(config)?;
         let actor_state = EngineState::with_display_model(model);
         let initial_snapshot = actor_state.snapshot();
-        let mouse_buttons = Arc::new(Mutex::new(MouseButtonTracker::new()));
+        let mouse_buttons = Arc::new(Mutex::new(MouseButtonTracker::with_press_test(Box::new(
+            crate::window::press_lands_on_desktop,
+        ))));
         let snapshots = Arc::new(EngineSnapshotPublisher::new(initial_snapshot, mouse_buttons.clone()));
         let actor = EngineActorHandle::spawn(
             backend,
@@ -864,6 +866,24 @@ impl WallpaperEngine {
         preference: crate::SceneRendererPreference,
     ) -> Result<(), EngineError> {
         self.backend.set_scene_renderer_preference(preference)
+    }
+
+    /// Chooses how many pixels a 2D scene is rasterized with: the canvas it
+    /// was authored at, or the size it is presented at on the display.
+    ///
+    /// Process-wide. A scene opened afterwards takes it when its graph is
+    /// built; one already running takes it when its render scale is next
+    /// applied (see [`Self::set_render_scale`]), which resizes its targets in
+    /// place without reparsing the project or reopening a video.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the renderer rejects the call.
+    pub fn set_scene_resolution(
+        &self,
+        resolution: crate::SceneResolution,
+    ) -> Result<(), EngineError> {
+        self.backend.set_scene_resolution(resolution)
     }
 
     /// Live update state and active backend for every open scene.

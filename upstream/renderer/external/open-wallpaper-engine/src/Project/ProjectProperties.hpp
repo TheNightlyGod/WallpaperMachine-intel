@@ -32,6 +32,10 @@ struct RuntimeScalarValue
 
 using ProjectProperties = std::unordered_map<std::string, RuntimeScalarValue>;
 
+// Whether a string property, a combo's choice among them, reads as a true flag:
+// `true` in any case, or `1`. Every other string is false.
+bool StringIsTrue(std::string_view value);
+
 bool ParseProjectProperties(
     const std::string& project_path,
     ProjectProperties* properties,

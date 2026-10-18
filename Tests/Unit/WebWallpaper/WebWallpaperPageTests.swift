@@ -266,6 +266,49 @@ final class WebWallpaperPageTests: XCTestCase {
     XCTAssertNil(page.webView.window, "This regression must not open a desktop window")
   }
 
+  /// A drag WebKit starts from forwarded events leaves the desktop page as a system drag, which
+  /// dropped a copy of a still image onto Finder's desktop. Every drag source, in the page or a
+  /// frame it embeds, is cancelled before the page's own handlers, which still see the event.
+  func testNoElementStartsADragEvenInASubframe() async throws {
+    try """
+      <!doctype html><html><body>
+      <img id="art" alt=""><a id="link" href="#x">link</a><div id="box" draggable="true">box</div>
+      <iframe id="frame" srcdoc="<!doctype html><html><body><img id='art' alt=''></body></html>"></iframe>
+      <script>
+      window.__received = { seen: 0 };
+      window.addEventListener("dragstart", () => window.__received.seen++);
+      </script></body></html>
+      """.write(to: project.appendingPathComponent("index.html"), atomically: true, encoding: .utf8)
+    let page = WebWallpaperPage(projectURL: project, entryFile: "index.html")
+    page.load()
+    _ = try await poll(page) { _ in true }
+
+    let deadline = Date().addingTimeInterval(10)
+    var result: [String: Any] = [:]
+    while Date() < deadline {
+      let value = try await page.webView.callAsyncJavaScript(
+          """
+          const frame = document.getElementById("frame").contentDocument;
+          if (frame.readyState !== "complete" || !frame.getElementById("art")) return { ready: false };
+          const drag = element => element.dispatchEvent(
+            new DragEvent("dragstart", { bubbles: true, cancelable: true }));
+          return {
+            ready: true,
+            started: ["art", "link", "box"].filter(id => drag(document.getElementById(id)))
+              .concat(drag(frame.getElementById("art")) ? ["frame art"] : []),
+            seen: window.__received.seen,
+          };
+          """, arguments: [:], in: nil, contentWorld: .page)
+      result = try XCTUnwrap(value as? [String: Any])
+      if result["ready"] as? Bool == true { break }
+      try await Task.sleep(for: .milliseconds(50))
+    }
+    XCTAssertEqual(result["ready"] as? Bool, true, "\(result)")
+    XCTAssertEqual(result["started"] as? [String], [], "these elements could still start a drag")
+    XCTAssertEqual(result["seen"] as? Int, 3, "the page's own dragstart handler must still run")
+    XCTAssertNil(page.webView.window, "This regression must not open a desktop window")
+  }
+
   func testPointerMoveIntervalFollowsTheFrameLimit() {
     let page = WebWallpaperPage(projectURL: project, entryFile: "index.html")
     XCTAssertEqual(page.pointerMoveInterval, 1.0 / 60, accuracy: 1e-12, "no rate committed yet")

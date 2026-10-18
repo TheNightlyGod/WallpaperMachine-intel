@@ -1,5 +1,6 @@
 #include "Runtime/DynamicValue.hpp"
 
+#include "Project/ProjectProperties.hpp"
 #include "Utils/Logging.h"
 
 #include <sstream>
@@ -224,6 +225,13 @@ void DynamicValue::update(const Eigen::Vector4i& new_value)
 
 void DynamicValue::update(const std::string& new_value)
 {
+    // A setting bound to a choice with a condition is a flag: whether the choice
+    // equals the condition. It is typed as one, so a script reads true or false
+    // rather than the choice itself, which is truthy whatever it is.
+    if (m_condition.has_value()) {
+        DynamicValue::update(m_condition->condition == new_value);
+        return;
+    }
     m_ivec4  = Eigen::Vector4i::Zero();
     m_ivec3  = Eigen::Vector3i::Zero();
     m_ivec2  = Eigen::Vector2i::Zero();
@@ -232,16 +240,19 @@ void DynamicValue::update(const std::string& new_value)
     m_vec4   = Eigen::Vector4f::Zero();
     m_float  = 0.0f;
     m_int    = 0;
-    m_bool   = false;
+    // A flag bound to a choice without a condition reads the choice as a flag.
+    m_bool   = StringIsTrue(new_value);
     m_string = new_value;
     m_type   = UnderlyingType::String;
-
-    if (m_condition.has_value()) m_bool = m_condition->condition == new_value;
     propagate();
 }
 
 void DynamicValue::update(const DynamicValue& other)
 {
+    if (m_condition.has_value() && other.getType() == UnderlyingType::String) {
+        DynamicValue::update(m_condition->condition == other.getString());
+        return;
+    }
     m_ivec4  = other.getIVec4();
     m_ivec3  = other.getIVec3();
     m_ivec2  = other.getIVec2();
@@ -253,10 +264,6 @@ void DynamicValue::update(const DynamicValue& other)
     m_bool   = other.getBool();
     m_string = other.getString();
     m_type   = other.getType();
-
-    if (m_condition.has_value() && other.getType() == UnderlyingType::String) {
-        m_bool = m_condition->condition == other.getString();
-    }
     propagate();
 }
 

@@ -15,10 +15,10 @@ struct ParticleRawGenSpec {
 };
 using ParticleRawGenSpecOp = std::function<void(const Particle&, const ParticleRawGenSpec&)>;
 
+/// Per-subsystem generator input. A particle's size is written as authored:
+/// the layer's model matrix scales the billboard, as Wallpaper Engine's
+/// particle shader builds it in the layer's own space.
 struct ParticleRenderScale {
-    float inverse_x { 1.0f };
-    float inverse_y { 1.0f };
-    float isotropic_inverse { 1.0f };
     /// How many straight pieces a rope renderer draws between two connected
     /// particles. One means a single piece per pair; a sprite renderer ignores
     /// it. Carried here because it is per-subsystem generator input exactly as

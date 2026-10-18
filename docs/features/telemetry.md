@@ -24,7 +24,7 @@ folder in the library) is sent as `null` with `source: "local"`, and
 | Part | Contents | Where it comes from |
 |---|---|---|
 | `install` | A random UUID made when sending is turned on and forgotten when it is turned off | `TelemetryPreferences` |
-| `app` | Version, build, and whether the copy is the Developer ID signed release or a build from source | the bundle and its code signature |
+| `app` | Version, build, and `source`: `false` only when the copy is signed with the project certificate releases use ([release signing](../build.md#release-signing)); an ad-hoc signature or any other certificate, even one with the same name, is a build from source | the bundle and its code signature (`TelemetryEnvironment.isSource`) |
 | `mac` | `hw.model`, CPU brand, core count, memory in GB, macOS version, Metal GPU name, and each display's pixel size, scale, maximum refresh rate and whether it is the main one | `TelemetryEnvironment` |
 | `sessions` | For each earlier run: start day, version, how it ended (`clean`, `quitStalled`, `unexpected`, `systemRestart`, `exception`), whether macOS left a crash report, minutes, memory-pressure warnings and critical events, peak footprint in MB | the [session ledger](diagnostics.md#how-the-previous-session-ended), the crash report lookup and this run's record |
 | `activations` | Day, `activation`/`reload`/`reapply`, wallpaper, kind, origin, outcome and milliseconds | the facts each [activation line](diagnostics.md#wallpaper-activations) states, handed over by `BridgeStore` |
@@ -136,8 +136,7 @@ and Cloudflare's request logs keep it for up to 7 days. The website's
   - counting is always turned off again.
 - `TelemetryClientTests`: the request is one POST with the app's user agent, and
   anything but a 2xx is a failure.
-- `SupportPromptStoreTests` and `WebPanelSupportPromptTests`: the one-time question,
-  end to end through the bundled page.
-- `WebPanelTelemetryTests`: the Settings switch round-trips, **Show in Finder** writes
-  the report it would send, and the guide answers the question only if its switch was
-  shown.
+- `SupportPromptStoreTests` and `PanelPerformanceDataTests`: the one-time question,
+  through the panel's presenter; the Settings switch round-trips, **Show in Finder**
+  writes the report it would send, and the guide answers the question only once its
+  switch was shown and commits the switch as a draft.

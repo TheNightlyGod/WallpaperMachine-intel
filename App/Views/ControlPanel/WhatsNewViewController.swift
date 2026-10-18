@@ -3,22 +3,37 @@ import AppKit
 /// A native, nonmodal reading window with a choice of release-note translation.
 @MainActor
 final class WhatsNewViewController: NSViewController {
-    static let defaultContentSize = NSSize(width: 760, height: 720)
+    static let defaultContentSize = NSSize(width: 760, height: 800)
     private let announcement: WhatsNewStore.Announcement
     private let preferences: WhatsNewStore
     private let close: () -> Void
     private let initialLanguage: AppLanguage
+    private let bannerImage: (AppReleaseHistory.Banner) -> NSImage?
     private(set) var suppressionCheckbox: NSButton!
     private(set) var notesView: NSTextView!
     private(set) var languageControl: NSSegmentedControl!
+    /// The current release's banner, when it has one the bundle can show.
+    private(set) var bannerView: NSImageView?
+    /// Each translation's banner and its picture; keyed by whether it is the Chinese one.
+    private var banners: [Bool: (banner: AppReleaseHistory.Banner, image: NSImage)] = [:]
+    private var bannerAspect: NSLayoutConstraint?
 
     init(announcement: WhatsNewStore.Announcement, preferences: WhatsNewStore,
-         initialLanguage: AppLanguage, close: @escaping () -> Void) {
+         initialLanguage: AppLanguage,
+         bannerImage: @escaping (AppReleaseHistory.Banner) -> NSImage? = WhatsNewViewController.bundledBanner,
+         close: @escaping () -> Void) {
         self.announcement = announcement
         self.preferences = preferences
         self.close = close
         self.initialLanguage = initialLanguage
+        self.bannerImage = bannerImage
         super.init(nibName: nil, bundle: nil)
+    }
+
+    static func bundledBanner(_ banner: AppReleaseHistory.Banner) -> NSImage? {
+        Bundle.main.url(forResource: banner.fileName, withExtension: nil,
+                        subdirectory: AppReleaseHistory.Banner.directory)
+            .flatMap(NSImage.init(contentsOf:))
     }
 
     required init?(coder: NSCoder) { nil }
@@ -81,8 +96,46 @@ final class WhatsNewViewController: NSViewController {
             child.translatesAutoresizingMaskIntoConstraints = false
             view.addSubview(child)
         }
+        // Only the version being announced shows its banner: older ones are history.
+        if let current = announcement.releases.first {
+            var loaded: [String: NSImage] = [:]
+            for chinese in [false, true] {
+                guard let banner = current.banner(chinese: chinese) else { continue }
+                if loaded[banner.fileName] == nil { loaded[banner.fileName] = bannerImage(banner) }
+                if let image = loaded[banner.fileName], image.size.width > 0, image.size.height > 0 {
+                    banners[chinese] = (banner, image)
+                }
+            }
+        }
+        if !banners.isEmpty {
+            let bannerView = NSImageView()
+            bannerView.imageScaling = .scaleProportionallyUpOrDown
+            bannerView.wantsLayer = true
+            bannerView.layer?.cornerRadius = 10
+            bannerView.layer?.masksToBounds = true
+            // The picture's pixel size is not a size the window must make room for.
+            for axis in [NSLayoutConstraint.Orientation.horizontal, .vertical] {
+                bannerView.setContentCompressionResistancePriority(.defaultLow, for: axis)
+                bannerView.setContentHuggingPriority(.defaultLow, for: axis)
+            }
+            bannerView.translatesAutoresizingMaskIntoConstraints = false
+            view.addSubview(bannerView)
+            let fill = bannerView.trailingAnchor.constraint(equalTo: header.trailingAnchor)
+            fill.priority = .defaultHigh
+            NSLayoutConstraint.activate([
+                fill,
+                bannerView.topAnchor.constraint(equalTo: view.topAnchor, constant: 24),
+                bannerView.leadingAnchor.constraint(equalTo: header.leadingAnchor),
+                // A wide window must not grow the banner until it crowds out the notes.
+                bannerView.widthAnchor.constraint(lessThanOrEqualToConstant: Self.defaultContentSize.width - 48),
+                header.topAnchor.constraint(equalTo: bannerView.bottomAnchor, constant: 20),
+            ])
+            self.bannerView = bannerView
+            updateBanner()
+        } else {
+            header.topAnchor.constraint(equalTo: view.topAnchor, constant: 24).isActive = true
+        }
         NSLayoutConstraint.activate([
-            header.topAnchor.constraint(equalTo: view.topAnchor, constant: 24),
             header.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 24),
             header.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -24),
             languageControl.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 16),
@@ -104,11 +157,25 @@ final class WhatsNewViewController: NSViewController {
 
     @objc private func changeLanguage() {
         updateNotes()
+        updateBanner()
         notesView.scrollRangeToVisible(NSRange(location: 0, length: 0))
     }
 
     private func updateNotes() {
         notesView.textStorage?.setAttributedString(Self.notesText(announcement, chinese: languageControl.selectedSegment == 1))
+    }
+
+    /// The selected translation's banner; one without its own shows the other's.
+    private func updateBanner() {
+        let chinese = languageControl.selectedSegment == 1
+        guard let bannerView, let shown = banners[chinese] ?? banners[!chinese] else { return }
+        bannerView.image = shown.image
+        bannerView.setAccessibilityLabel(shown.banner.description)
+        let ratio = shown.image.size.height / shown.image.size.width
+        guard bannerAspect?.multiplier != ratio else { return }
+        bannerAspect?.isActive = false
+        bannerAspect = bannerView.heightAnchor.constraint(equalTo: bannerView.widthAnchor, multiplier: ratio)
+        bannerAspect?.isActive = true
     }
 
     @objc private func changeSuppression() {
@@ -119,24 +186,51 @@ final class WhatsNewViewController: NSViewController {
 
     private static func notesText(_ announcement: WhatsNewStore.Announcement, chinese: Bool) -> NSAttributedString {
         let text = NSMutableAttributedString(string: "")
+        func paragraph(before: CGFloat, after: CGFloat, indent: CGFloat = 0) -> NSParagraphStyle {
+            let style = NSMutableParagraphStyle()
+            style.paragraphSpacingBefore = before
+            style.paragraphSpacing = after
+            style.lineSpacing = 3
+            if indent > 0 {
+                // A hanging indent: wrapped lines start under the text, not under the bullet.
+                style.tabStops = [NSTextTab(textAlignment: .natural, location: indent)]
+                style.defaultTabInterval = indent
+                style.headIndent = indent
+            }
+            return style
+        }
         func append(_ value: String, size: CGFloat = 14, weight: NSFont.Weight = .regular,
-                    before: CGFloat = 0, after: CGFloat = 6) {
-            let paragraph = NSMutableParagraphStyle()
-            paragraph.paragraphSpacingBefore = before
-            paragraph.paragraphSpacing = after
-            paragraph.lineSpacing = 3
+                    color: NSColor = .labelColor, before: CGFloat = 0, after: CGFloat = 6) {
             text.append(NSAttributedString(string: value + "\n", attributes: [
                 .font: NSFont.systemFont(ofSize: size, weight: weight),
-                .foregroundColor: NSColor.labelColor,
-                .paragraphStyle: paragraph,
+                .foregroundColor: color,
+                .paragraphStyle: paragraph(before: before, after: after),
+            ]))
+        }
+        func bullet(_ value: String, highlighted: Bool) {
+            let style = paragraph(before: 0, after: highlighted ? 8 : 6, indent: 18)
+            let font = NSFont.systemFont(ofSize: highlighted ? 15 : 14, weight: highlighted ? .medium : .regular)
+            text.append(NSAttributedString(string: highlighted ? "\u{2726}\t" : "\u{2022}\t", attributes: [
+                .font: font,
+                .foregroundColor: highlighted ? NSColor.controlAccentColor : NSColor.secondaryLabelColor,
+                .paragraphStyle: style,
+            ]))
+            text.append(NSAttributedString(string: value + "\n", attributes: [
+                .font: font, .foregroundColor: NSColor.labelColor, .paragraphStyle: style,
             ]))
         }
         for release in announcement.releases {
             append(release.version.display, size: 20, weight: .semibold, before: text.length == 0 ? 0 : 24)
             let notes = chinese ? release.chinese : release.english
             for section in notes.sections {
-                if !section.title.isEmpty { append(section.title, weight: .semibold, before: 12) }
-                for item in section.items { append(item) }
+                let highlighted = section.isHighlights
+                if !section.title.isEmpty {
+                    append(section.title, size: highlighted ? 15 : 14, weight: .semibold,
+                           color: highlighted ? .controlAccentColor : .labelColor, before: 12)
+                }
+                for item in section.items {
+                    if section.isList { bullet(item, highlighted: highlighted) } else { append(item) }
+                }
             }
         }
         return text

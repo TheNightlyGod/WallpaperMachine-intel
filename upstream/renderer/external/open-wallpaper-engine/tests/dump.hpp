@@ -1,4 +1,4 @@
-// Workshop fixture dumper.
+// Workshop dumper.
 //
 // DumpWorkshop opens <workshop_dir>/scene.pkg, walks the package + the
 // loose files in workshop_dir, and produces a deterministic JSON snapshot
@@ -13,8 +13,7 @@
 //     MDLV/MDLS/MDLA version stamps and bone/anim counts
 //
 // The same library backs both `wpdump` (CLI that writes the snapshot to
-// stdout for fixture seeding) and `verify_dump` (CTest binary that
-// regenerates the snapshot and compares it against a checked-in fixture).
+// stdout for inspection) and the version_tests corpus index (corpus.hpp).
 
 #pragma once
 

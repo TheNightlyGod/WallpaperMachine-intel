@@ -7,21 +7,43 @@ playback and display settings are untouched.
 
 | Setting | Values | Notes |
 | --- | --- | --- |
-| Appearance | **System (Auto)**, **Light**, **Dark** | System follows the macOS light/dark setting without reloading the panel; a manual choice also sets the native app appearance |
-| Accent color | Color picker | Colors buttons, links and focus rings |
-| Surface tone | **Neutral**, **Warm**, **Cool** | Warms or cools the window background |
+| Appearance | **System (Auto)**, **Light**, **Dark**, each shown as a picture of a window | System follows the macOS light/dark setting as it changes; the choice sets the app's appearance (`NSApp.appearance`), which the panel and every native window follow |
+| Accent color | Nine macOS-style swatches and a color well, with the chosen hex value beside them | The well takes any color the swatches lack and saves once the color has settled for a moment. Colors buttons, links, selection and focus rings |
+| Surface tone | **Neutral**, **Warm**, **Cool**, each shown as a picture of a window | Warms or cools the window background |
 | App icon | **Minimal**, **Day**, **Night** | Changes the running Dock icon immediately and restores the choice at launch; Finder and the menu bar stay unchanged |
 
 Accent shades adapt so text, buttons and focus rings stay readable against the
-resolved background. The theme runtime (`WebUI/theme.js`) resolves appearance, tone
-and accent tokens before first paint, so the panel does not flash an unstyled or
-wrong-appearance frame.
+resolved background. `PanelTheme` (`App/Views/ControlPanel/Theme/`) derives them for
+the resolved light or dark appearance: `AccentPalette` fits the accent's fills, links,
+rings and label colour for contrast, and `SurfacePalette` gives the tone's backgrounds,
+text and semantic colours. The panel's root applies them to every view below it and
+sets the accent as the tint, re-rendering when the stored accent or tone changes, when
+the resolved appearance flips and when the language does. It reads the appearance
+macOS resolved and never sets one itself; `AppDelegate` is the only writer of
+`NSApp.appearance`.
+
+## Window material
+
+The window's materials are the system's own. The window has a full-size content view
+and the toolbar is the window's own. macOS 26 draws a band under the see-through title
+bar for each column of a window, and draws it by what the column holds: opaque grey over
+a column that does not start with a scroll view, a light wash over one that does, its own
+dark band over the system inspector column. So the window has one column: the page and
+the inspector beside it sit in one full-width scroll view that never scrolls
+(`PageScrollHost` in `PanelDetail.swift`), and the bar is the page's colour under one wash
+from the traffic lights to the window's edge. The inspector is a column of the page
+(`InspectorColumn`), not `.inspector`. Laying a colour over the band from SwiftUI does not
+reach it, and `NSWindow.titlebarAppearsTransparent` sends a narrow window whose scroll
+bars take room into an endless constraint pass. The page column paints the
+tone's background (`SurfacePalette`), so the material never shows through content. The
+panel adds no visual-effect view, backdrop or toolbar of its own. macOS decides how the
+materials look: opaque under **Reduce Transparency**, dimmed in an inactive window.
 
 ## Persistence and reset
 
-Choices are stored natively (`AppThemeStore`, the `WallpaperMachine.appTheme` default),
-so they survive the panel's ephemeral WebKit data store and web-content recovery and
-stay usable even when renderer settings are unavailable. Changes apply immediately and
+Choices are stored in the app's defaults (`AppThemeStore`, the
+`WallpaperMachine.appTheme` default) and stay usable before the renderer's settings
+arrive. Changes apply immediately and
 are remembered for the next launch. An invalid accent (anything but `#rrggbb`) is
 rejected without overwriting the saved value. **Reset appearance** restores System, the
 default accent, the Neutral tone and the Day icon; it does not touch wallpapers,
@@ -34,12 +56,13 @@ are the white-background and black-background variants of the bundled icon, whic
 macOS also selects for Finder through its *Appearance → Icon & widget style* setting;
 neither the panel theme nor the Dock icon preference overrides that. **Minimal** uses
 the same frame-and-gear mark in blue on white, without the gradient wallpaper fill. The
-selection is applied with `NSApplication.applicationIconImage` from
-`WebUI/app-icons/{minimal,day,night}.png`, without changing the app bundle or resetting
-system icon caches. Day is the default. The selected icon applies while the app is
-running; a pinned Dock entry can show the bundled icon after the app quits. The menu
-bar uses a monochrome template (`TrayIcon`), and the panel shows the mark in its title
-bar, first welcome page and Settings → About.
+selection is applied with `NSApplication.applicationIconImage` from the
+`AppIcon{Minimal,Day,Night}` image sets of `App/Resources/Assets.xcassets`, without
+changing the app bundle or resetting system icon caches. Day is the default. The
+selected icon applies while the app is running; a pinned Dock entry can show the
+bundled icon after the app quits. The menu bar uses a monochrome template (`TrayIcon`),
+and the panel shows the chosen icon's image on the first welcome page and at the top of
+Settings → About.
 
 ## Brand assets
 
@@ -51,7 +74,6 @@ assets on macOS (it uses Quick Look, `sips`, and Xcode's Icon Composer and Swift
 ```sh
 python3 scripts/brand.py                           # app icon, Dock choices, tray icon, DMG background
 python3 scripts/brand.py --website <site-checkout> # plus logo, favicons and manifest there
-python3 scripts/brand.py --panel-glyph             # print the glyph used by the panel
 ```
 
 - The app icon is generated as `App/Resources/AppIcon.icon`, an Icon Composer document
@@ -61,27 +83,27 @@ python3 scripts/brand.py --panel-glyph             # print the glyph used by the
   recoloring fills an open stroked path despite `fill="none"`), and the panel meets the
   frame through an explicit curved cutout rather than an SVG mask so Icon Composer
   preserves the separation.
-- The Dock exports `WebUI/app-icons/{minimal,day,night}.png` are fixed-appearance
-  1024 px renders through Icon Composer with `--design-generation 26` (the deployment
-  target's generation, not the newer preview default), keep a 100 px transparent outer
-  margin and load as 512-point Retina images. The root README displays `day.png`;
-  update its path there if the export is renamed.
-- The glyph printed by `--panel-glyph` is `brands.wallpaperMachine` in `WebUI/panel.js`;
-  update it when changing the mark's geometry. The small-size glyph is heavier and stays
-  reserved for the panel and menu bar.
+- The Dock exports, `{minimal,day,night}.png` inside the `AppIcon{Minimal,Day,Night}.imageset`
+  folders of `App/Resources/Assets.xcassets`, are fixed-appearance 1024 px renders through
+  Icon Composer with `--design-generation 26` (the deployment target's generation, not the
+  newer preview default), keep a 100 px transparent outer margin and load as 512-point
+  Retina images. The root README displays `day.png`; update its path there if the export
+  is renamed.
+- The small-size mark is heavier and stays reserved for the menu bar; the panel shows the
+  Dock icon images instead.
 - Website export writes `brand/logo.svg` (light backgrounds), `brand/logo-dark.svg`,
   `brand/mark.svg`, `brand/app-icon-{minimal,day,night}.{svg,png}` (the unqualified
   `app-icon.*` is Day) and favicons, touch and manifest icons. Its PNGs are copied from
-  `WebUI/app-icons/` to keep the native rendering; SVGs share the geometry and colors
+  those image sets to keep the native rendering; SVGs share the geometry and colors
   without Icon Composer's lighting. To refresh only the website from the current Dock
   PNGs, add `--skip-app`; after changing native icon geometry, run the regular
   `--website` command so both sets regenerate together.
 
 ## Verification
 
-Appearance preferences, invalid-change rejection, reset isolation and the offscreen
-panel regression (real Appearance controls committed through the native bridge, live
-native appearance changes, explicit Light winning over Dark, recovery through the
-WebContent reload path) are inventoried under *Appearance* in
-[coverage](../testing/coverage.md). The rendering of the icon variants in Finder and the
-Dock needs a manual look.
+Appearance preferences, invalid-change rejection, reset isolation, the Settings
+controls' saved format and the palettes derived from the preferences and the resolved
+appearance are inventoried under *Appearance* and *Panel* in
+[coverage](../testing/coverage.md). The materials, the rendering of the icon variants in
+Finder and the Dock, and Reduce Transparency need a manual look
+([manual smoke](../testing/manual-smoke.md#appearance)).

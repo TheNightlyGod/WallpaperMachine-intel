@@ -13,7 +13,6 @@ ROOT = Path(__file__).resolve().parents[2]
 APP = ROOT / "App"
 EXTENSION = ROOT / "Extension"
 SHARED = ROOT / "Shared"
-WEB_UI = ROOT / "WebUI"
 TESTS = ROOT / "Tests"
 
 # Swift bindings written by `uniffi-bindgen` during `scripts/build.py`.
@@ -38,3 +37,12 @@ RENDERER_ARTIFACTS = ARTIFACTS / "renderer"
 def app_bundle(configuration="Debug"):
     """Path of the built application for a build configuration."""
     return PRODUCTS / configuration / "WallpaperMachine.app"
+
+
+def main_checkout(root=ROOT):
+    """The main checkout a tree belongs to: itself, or the one a worktree was made from."""
+    import subprocess
+
+    result = subprocess.run(["git", "-C", str(root), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                            capture_output=True, text=True)
+    return Path(result.stdout.strip()).parent if result.returncode == 0 else Path(root)

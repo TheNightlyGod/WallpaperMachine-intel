@@ -6,6 +6,7 @@ use crate::{
     BindingIndex, BindingSet, LocationIndex, ShaderDescriptorBinding, ShaderDescriptorKind,
     ShaderError, ShaderReflection, ShaderReflector, ShaderResult, ShaderStageKind, ShaderStageMask,
     ShaderUniformBlock, ShaderUniformMember, ShaderVertexInput, TextureSlot, VertexFormat,
+    codegen::declarations::interface::StageInterface,
 };
 
 /// Reflects renderer-neutral shader metadata from Naga IR.
@@ -433,8 +434,10 @@ impl VertexArgument<'_> {
             return None;
         };
         Some(LocationIndex::new(location).and_then(|location| {
+            // The mesh provides the attribute under its source name, also when
+            // the legalizer routed it through a local copy.
             ShaderVertexInput::new(
-                self.argument.name.as_deref().unwrap_or_default(),
+                StageInterface::source_name(self.argument.name.as_deref().unwrap_or_default()),
                 location,
                 self.vertex_format()?,
             )

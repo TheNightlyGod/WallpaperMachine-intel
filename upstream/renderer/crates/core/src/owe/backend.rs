@@ -309,6 +309,24 @@ impl OweBackend {
         }
     }
 
+    /// Chooses how many pixels a 2D scene is rasterized with, process-wide.
+    ///
+    /// New scenes take it when they are built; a running scene takes it the
+    /// next time its render scale is applied.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError`] if the call unwinds.
+    pub fn set_scene_resolution(
+        &self,
+        resolution: crate::SceneResolution,
+    ) -> Result<(), EngineError> {
+        unsafe {
+            UnwindSafeFFI::new("owe_set_scene_resolution")
+                .call(|| sys::owe_set_scene_resolution(resolution.as_raw()))
+        }
+    }
+
     /// Latest system-audio spectrum, or `None` when no analysis has run yet.
     ///
     /// # Errors

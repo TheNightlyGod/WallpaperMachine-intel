@@ -545,8 +545,8 @@ Advanced), then pick the page from the **Develop** menu's submenu for this Mac.
   `WebWallpaperInspectionTests` (an explicit choice wins over the build default and
   announces itself; a page is attachable only when its owner says so), and the
   running, new and preview page cases in `WebWallpaperHostLifecycleTests` and
-  `WebWallpaperPreviewSurfaceTests`; `WebPanelGeneralSettingsTests` for the setting
-  and its snapshot value.
+  `WebWallpaperPreviewSurfaceTests`; `PanelGeneralSettingsTests` for the setting,
+  stored, reported and kept across a relaunch.
 - Not established by tests:
   - that Safari's Develop menu lists a desktop wallpaper page and attaches in a
     release build;

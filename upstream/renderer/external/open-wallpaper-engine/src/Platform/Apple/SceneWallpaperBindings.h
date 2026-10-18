@@ -340,6 +340,33 @@ void owe_set_scene_on_demand_enabled(bool enabled);
 bool owe_scene_on_demand_enabled(void);
 
 /*
+ * How many pixels a 2D scene is rasterized with, process-wide. Canvas by
+ * default; the app pushes its setting before any scene opens.
+ *
+ * A 2D scene has an authored canvas that the presentation stretches over the
+ * display. CANVAS rasterizes at the canvas size, which is the cheapest and, on
+ * a display with more pixels than the canvas, the softest. DISPLAY rasterizes at
+ * the size the canvas is presented at (the fill layout's scale times the display
+ * scale factor, capped at the device's largest texture), which is what Wallpaper
+ * Engine does. Either way the canvas stays the source of layout, cursor mapping,
+ * scripts and camera; only the render targets' pixel sizes differ. The internal
+ * render scale divides whichever raster is chosen.
+ *
+ * Perspective scenes already rasterize at the output size and videos keep their
+ * frame's size, so neither reads it. A scene picks a new value up when its render
+ * scale is next applied (the host re-sends it to every open scene) or its graph
+ * is next built; nothing is reparsed and no video is reopened. An unrecognised
+ * value selects CANVAS.
+ */
+typedef enum owe_scene_resolution {
+    OWE_SCENE_RESOLUTION_CANVAS = 0,
+    OWE_SCENE_RESOLUTION_DISPLAY = 1
+} owe_scene_resolution;
+
+void owe_set_scene_resolution(int resolution);
+int  owe_current_scene_resolution(void);
+
+/*
  * How one scene is currently being updated, and why.
  *
  * Pull-only and unaffected by whether renderer counting is enabled: this is

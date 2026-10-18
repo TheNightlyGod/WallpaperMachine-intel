@@ -2,7 +2,7 @@ import Foundation
 
 /// A localization the app ships, as the Settings language picker offers it.
 struct AppLanguage: Equatable, Sendable {
-  /// BCP 47 tag; the same tag names the `.xcstrings` locale and the WebUI catalog file.
+  /// BCP 47 tag; the same tag names the `.xcstrings` locale and the compiled `.lproj` folder.
   let tag: String
   /// The language's own name. It is deliberately not translated so a user can find
   /// their language whatever the interface currently shows.
@@ -14,7 +14,7 @@ struct AppLanguage: Equatable, Sendable {
   static let english = AppLanguage(tag: "en", name: "English", wallpaperEngineLocale: "en-us")
 
   /// Every language the app ships, in picker order. Adding one means shipping its
-  /// native and WebUI catalogs first; the steps are in docs/localization.md.
+  /// native catalogs first; the steps are in docs/localization.md.
   static let supported: [AppLanguage] = [
     english,
     AppLanguage(tag: "zh-Hans", name: "简体中文", wallpaperEngineLocale: "zh-chs"),
@@ -91,7 +91,7 @@ final class AppLanguageStore: ObservableObject {
     } else if let language = AppLanguage.named(value) {
       next = language.tag
     } else {
-      throw WebPanelRequest.invalid
+      throw InvalidControlValue()
     }
     guard next != preference else { return }
     if next == Self.systemChoice {

@@ -41,13 +41,15 @@ clock times, so a daylight-saving day still switches at the time on the clock.
 **Change now** moves a rotating display along at once and starts a fresh
 interval; the row's note says roughly when the next change is due, or, for a rotation that
 waits for the unlock, that it changes then. The menu bar's
-**Next Wallpaper**, on the display it is shown for, and a link, Shortcuts action or
+**Next Wallpaper**, on the display it is shown for, the **Next wallpaper** button on the
+panel's Now Playing bar (for the target display), and a link, Shortcuts action or
 shortcut key asking for the next wallpaper, on the panel's target display unless one is
 named, do the same for a display that rotates, and otherwise take the next wallpaper
 in library order. All of them are asked for, so they also change a display that is
 paused or covered; only the timer's own changes wait (see below). When the playlist has
-nothing else to change to (its only wallpaper is already on screen), Change now and a
-link, keyboard shortcut or Shortcuts action asking for the next wallpaper say so
+nothing else to change to (its only wallpaper is already on screen), Change now, the
+Now Playing button and a link, keyboard shortcut or Shortcuts action asking for the next
+wallpaper say so
 instead of succeeding without a change.
 
 This display's list is edited from Installed: the list button in a wallpaper's
@@ -255,9 +257,9 @@ left out of a backup too.
 | Candidates, next pick, day and night | `App/Services/Playlist/PlaylistPlanner.swift` |
 | Persistence and dates | `App/Services/Playlist/PlaylistStore.swift` |
 | Timer and switching | `App/Services/Playlist/PlaylistScheduler.swift`, wired in `AppDelegate.startPlaylistScheduler` |
-| Panel actions | `playlistSetting`, `playlistAdd`, `playlistRemove`, `playlistReorder`, `playlistClearFailures`, `playlistSkip`, `playlistResume` in `WebPanelActions.swift` |
-| Panel | Settings → Displays in `WebUI/settings.js`, with drag/button ordering in `WebUI/playlist-order.js`; the list button and selection action in `WebUI/panel.js` |
-| Collections and saved-plan actions | `WallpaperCollectionStore.swift`, `WebPanelLibraryOrganization.swift`, `WebUI/collections.js`, `WebUI/plans.js` |
+| Panel actions | `editPlaylist`, `addToPlaylist`, `removeFromPlaylist`, `reorderPlaylist`, `clearPlaylistFailures`, `skipPlaylist`, `resumePlaylist` in `App/Views/ControlPanel/Model/PanelController+Playlists.swift`; the menus' rules in `Model/PlaylistEdit.swift` |
+| Panel | Settings → Displays in `App/Views/ControlPanel/Settings/Sections/DisplaysPlaylistRows.swift`, with drag and button ordering in `DisplaysOrderEditor.swift` and the page state in `Settings/DisplaysSettingsModel.swift`; the inspector's playlist item and Installed's **Add to playlist** in `Inspector/` and `Library/` |
+| Collections and saved-plan actions | `WallpaperCollectionStore.swift`; `createCollection` … `removeFromCollection` in `Model/PanelController+Collections.swift` and `savePlaylistPlan` … `applyPlaylistPlan` in `Model/PanelController+Playlists.swift`; the sidebar's `Shell/CollectionsSidebarSection.swift` and the Saved playlists group in `Settings/Sections/DisplaysGroups.swift` |
 
 ## Verification
 
@@ -281,8 +283,8 @@ the shuffle round it was in without repeating a wallpaper, an unlock changing an
 rotation once and ignoring a double report, waiting for a display that cannot play yet but
 only for the 30-second window, leaving timed rotations, cleared displays and a hand-chosen
 wallpaper alone, and never dating a display) and
-`WebPanelPlaylistTests` (the actions' validation, the trigger and the paused state in the
-snapshot). `WallpaperPresentationPolicyTests` checks the unlock edge: once per unlock, also
+`PanelPlaylistActionsTests` and `PanelPlanActionsTests` (the actions' validation, the trigger
+and the held state) with `PanelLibraryActionsTests` (Now Playing's Next wallpaper). `WallpaperPresentationPolicyTests` checks the unlock edge: once per unlock, also
 when the notification was missed, after a wake or a user switch, and never at start or
 stop. `WallpaperBackupTests` checks that a backup carries the trigger and rejects an
 unknown one.
@@ -292,8 +294,9 @@ and pool, separate from the playlist round, kept without a playlist, pruned and 
 when unreadable or filed under an unknown pool. `WallpaperDisplayTransferIntegrationTests` checks
 that only the user's removal reports
 one, not a delete or a reload, and that the menu bar's removal clears only the named
-display, waits behind a switch asked for first and refuses a mirrored or disabled display. `ControlPanelPlaybackToolsTests` drives reorder buttons
-and drag/drop in an offscreen panel, including an edit made while a drag is in
-progress, the Resume row in English and Chinese, and the How often menu offering the
-unlock choice and storing it. Real switching on a desktop, and the order of the
+display, waits behind a switch asked for first and refuses a mirrored or disabled display.
+`DisplaysSettingsModelTests` drives the reorder buttons and drag and drop, including a stale
+drag refused without overwriting the newer list, the Resume row, and the How often menu's
+Custom field and unlock choice; `PlaylistEditTests` covers the menus' rules and
+`SettingsBRenderTests` draws every row in every language. Real switching on a desktop, and the order of the
 operating system's unlock events against a display waking, are not covered by these tests.

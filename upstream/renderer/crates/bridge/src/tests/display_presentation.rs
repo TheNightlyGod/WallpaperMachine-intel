@@ -6,10 +6,13 @@
 
 use std::time::{Duration, Instant};
 
-use wallpaper_core::{DisplayDesc, DisplayIdentity, DisplaySnapshotEntry, project::SceneHandle};
+use wallpaper_core::{
+    DisplayDesc, DisplayIdentity, DisplaySnapshotEntry, WallpaperAssignment,
+    project::{SceneHandle, SceneTemplate},
+};
 
 use crate::{
-    BridgePlaybackState, api::BridgeBuilder, engine::FakeEngineFacade,
+    BridgePlaybackState, api::BridgeBuilder, engine::{EngineFacade as _, FakeEngineFacade},
 };
 
 fn display_snapshot(display_id: u32) -> DisplaySnapshotEntry {
@@ -107,6 +110,96 @@ fn paused_by_display(engine: &FakeEngineFacade) -> Vec<(u32, bool)> {
         .collect();
     scenes.sort_unstable();
     scenes
+}
+
+fn live_pause_by_display(engine: &FakeEngineFacade) -> Vec<(u32, bool)> {
+    let mut displays: Vec<_> = engine.display_snapshot().iter()
+        .filter(|display| display.handle.is_some())
+        .map(|display| (display.desc.display_id, display.paused))
+        .collect();
+    displays.sort_unstable();
+    displays
+}
+
+#[tokio::test]
+async fn reconcile_releases_a_retained_pause_only_on_the_display_that_should_play() {
+    let engine = FakeEngineFacade::default();
+    let _release = super::engine_release::EngineRelease::of(&engine);
+    let bridge = two_display_bridge(&engine).await;
+    bridge.set_display_presentation_suspended("7".into(), true).await.unwrap();
+    let rendered = engine.rendered_scenes();
+    let mut snapshot = engine.display_snapshot();
+    for display in &mut snapshot {
+        let scene = rendered.iter().find(|scene| scene.display.display_id == display.desc.display_id).unwrap();
+        display.assignment = Some(WallpaperAssignment::Direct(SceneTemplate::from_scene_desc(scene)));
+    }
+    engine.set_snapshot(snapshot);
+
+    // A renderer can retain the pause of the window it replaced. The bridge
+    // already considers display 9 visible, so no visibility edge will resend
+    // its resume. A descriptor's initial pause alone does not replace the
+    // core's retained runtime pause; its live snapshot is authoritative.
+    engine.set_display_paused(9, true).await.unwrap();
+    assert_eq!(live_pause_by_display(&engine), vec![(7, true), (9, true)]);
+    let reconciles = engine.calls().len();
+    bridge.refresh_displays().await.unwrap();
+
+    assert_eq!(live_pause_by_display(&engine), vec![(7, true), (9, false)]);
+    assert_eq!(paused_by_display(&engine), vec![(7, true), (9, false)]);
+    assert_eq!(engine.calls().len(), reconciles, "correcting a live pause must not reopen the scenes");
+
+    // An unchanged Apply also reasserts presentation without rebuilding.
+    engine.set_display_paused(9, true).await.unwrap();
+    bridge.apply_wallpaper_options("200".into(), true).await.unwrap();
+    assert_eq!(live_pause_by_display(&engine), vec![(7, true), (9, false)]);
+    assert_eq!(engine.calls().len(), reconciles);
+
+    // A different scene follows the delegated reconcile path and can inherit
+    // the old renderer's runtime pause too.
+    bridge.inject_scene_wallpaper_config_for_test("300", "Replacement").await;
+    bridge.set_display_config_enabled("300".into(), "9".into(), true).await.unwrap();
+    engine.set_display_paused(9, true).await.unwrap();
+    bridge.apply_wallpaper_options("300".into(), true).await.unwrap();
+    assert_eq!(live_pause_by_display(&engine), vec![(7, true), (9, false)]);
+
+    // A later global user pause remains authoritative over both displays.
+    bridge.pause_all().await.unwrap();
+    engine.set_display_paused(9, false).await.unwrap();
+    bridge.refresh_displays().await.unwrap();
+    assert_eq!(live_pause_by_display(&engine), vec![(7, true), (9, true)]);
+}
+
+#[tokio::test]
+async fn a_presentation_change_during_reconcile_wins_over_its_older_display_pause() {
+    let engine = FakeEngineFacade::default();
+    let _release = super::engine_release::EngineRelease::of(&engine);
+    let bridge = std::sync::Arc::new(two_display_bridge(&engine).await);
+    for display in ["7", "9"] {
+        bridge.set_display_presentation_suspended(display.into(), true).await.unwrap();
+    }
+    for (wallpaper, paused) in [("300", false), ("400", true)] {
+        bridge.inject_scene_wallpaper_config_for_test(wallpaper, "Replacement").await;
+        bridge.set_display_config_enabled(wallpaper.into(), "9".into(), true).await.unwrap();
+        let gate = engine.block_next_reconcile();
+        let applying = bridge.clone();
+        let job = std::thread::spawn(move || {
+            tokio::runtime::Runtime::new().unwrap()
+                .block_on(applying.apply_wallpaper_options(wallpaper.into(), true))
+        });
+        assert!(gate.wait_until_blocked(Duration::from_secs(2)));
+        bridge.set_display_presentation_suspended("9".into(), paused).await.unwrap();
+        let delivered = engine.display_paused_calls().len();
+        gate.release();
+        job.join().unwrap().unwrap();
+
+        eventually("the latest per-display pause to replace the stale reconcile", || {
+            live_pause_by_display(&engine) == vec![(7, true), (9, paused)]
+                && paused_by_display(&engine) == vec![(7, true), (9, paused)]
+        }).await;
+        assert!(engine.display_paused_calls()[delivered..].iter()
+            .all(|(display, value)| *display != 9 || *value == paused),
+            "the worker's older policy must not undo the newer presentation choice");
+    }
 }
 
 #[tokio::test]

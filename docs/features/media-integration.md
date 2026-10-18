@@ -84,10 +84,31 @@ is on. `SceneMediaSink` forwards SceneScript `mediaStatusChanged`,
 `mediaPropertiesChanged`, `mediaPlaybackChanged`, `mediaTimelineChanged` and
 `mediaThumbnailChanged`. JSON is forwarded verbatim so `subTitle`, `albumArtist`,
 `genres` and `contentType` are not dropped.
-`MediaPlaybackEvent.PLAYBACK_PLAYING` / `PAUSED` / `STOPPED` are 0 / 1 / 2. Color
-arrays are exposed as `Vec3` (`.x` / `.y` / `.z`). Artwork is uploaded as RGBA
+`MediaPlaybackEvent.PLAYBACK_STOPPED` / `PLAYING` / `PAUSED` are 0 / 1 / 2, as in
+Wallpaper Engine, and `event.state` carries the same numbers: scripts compare it
+with those literals as often as with the names, so a host that sends another
+numbering makes a paused player look like a playing one. The Swift codec
+(`SystemMediaEventCodec.sceneScriptPlaybackState`) and the Rust bridge's typed
+path (`MediaPlaybackState`, which serializes those numbers) both send them; the
+bridge's own input, `BridgeMediaSnapshot.playback_state`, keeps the host's
+numbering (playing 0, paused 1, stopped 2) and is mapped to the states by name.
+Color arrays are exposed as `Vec3` (`.x` / `.y` / `.z`). Artwork is uploaded as RGBA
 before `mediaThumbnailChanged` so `$mediaThumbnail` is valid when the script reads
 it.
+
+**Idle state.** Every scene starts as a desktop with no player, with or without the
+setting. On its first tick, after its scripts have started and before the first frame,
+the runtime tells them `mediaPropertiesChanged` with an empty track (the same object
+the app sends with the setting on and nothing playing) and `mediaPlaybackChanged` with
+`PLAYBACK_STOPPED`. Wallpaper Engine's media widgets are authored visible and hide on
+`PLAYBACK_STOPPED`, so without this every user with the setting off (the default) saw
+their covers and mascots on screen all the time. The idle state reveals nothing about
+what is playing, so it does not wait for consent: what a player really reports is
+still dropped while the setting is off. It is said once, and only for an event type no
+real event had said before that tick (the replay of the current state to a scene that
+has just attached, with the setting on, wins); a real event afterwards replaces it
+like any other. No timeline or thumbnail event is sent, as for a web page with no
+player.
 
 **Covers.** A new cover is pixels, not a new scene: `PublishSystemMediaArtwork`
 replaces the image behind `$mediaThumbnail` and moves the outgoing one to
@@ -96,10 +117,14 @@ renderer notices the version move and swaps the texture on its next frame (Vulka
 from the pass's per-frame update, Metal from `refreshRuntimeImages`) without
 rebuilding the render graph, so a track change does not idle the GPU or reopen
 videos. Both names are 1×1 transparent before any track, so a layer that binds
-either always has an image. Publishing a cover byte-identical to the one showing
-does nothing, not even a frame request, which makes replays to new scenes free and
-stops a wallpaper cross-fading a cover into itself. A recreated renderer receives
-the current snapshot again.
+either always has an image. A slot whose author also left a texture in it (a cover
+layer's default art) shows that texture instead of the transparent texel until a
+cover is published, and again after the explicit clear, as Wallpaper Engine does;
+a slot with nothing authored in it stays transparent
+([scene rendering](scene-rendering.md)). Publishing a cover byte-identical to the
+one showing does nothing, not even a frame request, which makes replays to new
+scenes free and stops a wallpaper cross-fading a cover into itself. A recreated
+renderer receives the current snapshot again.
 
 The native artwork protocol represents absence as width 0, height 0 and an empty
 byte payload. This explicit clear survives bridge validation, pending scene creation

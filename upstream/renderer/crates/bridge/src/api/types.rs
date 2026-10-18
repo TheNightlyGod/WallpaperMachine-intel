@@ -4,6 +4,9 @@ pub struct BridgeMediaSnapshot {
     pub title: String,
     pub artist: String,
     pub album: String,
+    // The host's numbering: 0 playing, 1 paused, 2 stopped. Mapped to the
+    // scene's own (stopped 0, playing 1, paused 2) by name in `into_state`.
+    // A plain comment: a doc comment would change the generated bindings.
     pub playback_state: u8,
     pub position: f64,
     pub duration: f64,
@@ -568,6 +571,11 @@ pub struct BridgeSettingsSnapshot {
     /// which for a given scene may or may not be what `scene_renderers`
     /// reports. A saved preference, not a read-back.
     pub scene_renderer: String,
+    /// `"display"` or `"canvas"`: how many pixels a 2D scene is rasterized
+    /// with before the render scale divides them. The saved preference, which
+    /// every running 2D scene follows; perspective scenes and plain videos
+    /// ignore it.
+    pub scene_resolution: String,
     /// Live per-scene state read back from the renderer on this rebuild. One
     /// row per running scene wallpaper; an empty vector means no scene
     /// wallpaper is running, and a row reading `unknown` means one is running

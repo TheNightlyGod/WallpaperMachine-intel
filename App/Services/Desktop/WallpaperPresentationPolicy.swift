@@ -36,8 +36,9 @@ enum GlobalPresentation: Comparable, Sendable {
 /// Suspends wallpaper presentation per display while no pixel from that display
 /// can reach the user, or, unless the user chose to keep it running, while
 /// other windows cover that display's working area, or, if the user chose to
-/// play only where they are working, while the pointer is on another display;
-/// and globally only for conditions that really do cover every screen.
+/// play only where they are working, while the pointer is on another display
+/// that still shows its wallpaper; and globally only for conditions that really
+/// do cover every screen.
 /// Suspension never changes the user's Play/Pause choice: the bridge composes
 /// this signal with the playback state and restores playback when it clears.
 ///
@@ -361,9 +362,8 @@ final class WallpaperPresentationPolicy {
     /// when they chose to play only on the one they are.
     private func currentSurfaces() -> [WallpaperSurfaceVisibility] {
         let current = surfaces()
-        var hiddenByPolicy: Set<UInt32> = []
-        if desktopCoveredAction() == .pause { hiddenByPolicy = coveredDisplays() }
-        hiddenByPolicy.formUnion(unusedDisplays(known: Set(current.map(\.displayID))))
+        let hidden = hiddenFromView(current)
+        let hiddenByPolicy = hidden.union(unusedDisplays(in: current, hidden: hidden))
         guard !hiddenByPolicy.isEmpty else { return current }
         return current.map { surface in
             hiddenByPolicy.contains(surface.displayID)
@@ -372,11 +372,23 @@ final class WallpaperPresentationPolicy {
         }
     }
 
-    /// The displays among `known` the user is not using, when they chose to play only where they
-    /// are. Never the only reason every display is dark: a mistaken answer cannot freeze the desktop.
-    private func unusedDisplays(known: Set<UInt32>) -> Set<UInt32> {
+    /// The displays whose wallpaper the user cannot see, whichever display they are using: no
+    /// pixel of it on screen (a full-screen app, another Space) or, when a covered working area
+    /// pauses, other windows over that area.
+    private func hiddenFromView(_ current: [WallpaperSurfaceVisibility]) -> Set<UInt32> {
+        var hidden = Set(current.filter { !$0.isVisible }.map(\.displayID))
+        if desktopCoveredAction() == .pause { hidden.formUnion(coveredDisplays()) }
+        return hidden
+    }
+
+    /// The displays in `current` the user is not using, when they chose to play only where they
+    /// are. Only while a display in use shows its wallpaper: hiding that display pauses it alone
+    /// and leaves the others playing, and an answer that names every display, a mistake, cannot
+    /// freeze the desktop.
+    private func unusedDisplays(in current: [WallpaperSurfaceVisibility], hidden: Set<UInt32>) -> Set<UInt32> {
+        let known = Set(current.map(\.displayID))
         let inactive = inactiveDisplays(known).intersection(known)
-        return inactive == known ? [] : inactive
+        return known.subtracting(inactive).isSubset(of: hidden) ? [] : inactive
     }
 
     /// The displays the user is not using whose wallpaper nothing else hides: on screen, not
@@ -384,10 +396,8 @@ final class WallpaperPresentationPolicy {
     /// Only for these is not being used the one reason to stop. A display that is idle and also
     /// hidden is not here, because its wallpaper would be stopped for the hiding alone.
     private func idleInPlainSight(_ current: [WallpaperSurfaceVisibility]) -> Set<UInt32> {
-        var idle = unusedDisplays(known: Set(current.map(\.displayID)))
-        idle.subtract(current.filter { !$0.isVisible }.map(\.displayID))
-        if desktopCoveredAction() == .pause { idle.subtract(coveredDisplays()) }
-        return idle
+        let hidden = hiddenFromView(current)
+        return unusedDisplays(in: current, hidden: hidden).subtracting(hidden)
     }
 
     /// Probes exist only while a covered desktop pauses, so keeping the
@@ -442,16 +452,17 @@ final class WallpaperPresentationPolicy {
             }
         }
 
+        // A wake or unlock may also reveal a display that was suspended on its own.
+        // Adopt both decisions in this evaluation: no later window event is guaranteed.
         if presentation != globalPresentation {
-            commitPlayback(presentation: presentation, audio: audio, quality: quality)
-            return
+            globalPresentation = presentation
+            AppLog.info("presentation \(presentation.logLabel)")
         }
-        let audioChanged = audio != isAudioSuppressed
-        if audioChanged {
+        if audio != isAudioSuppressed {
             isAudioSuppressed = audio
             AppLog.info("wallpaper audio \(audio ? "suppressed" : "restored")")
         }
-        let qualityChanged = adopt(quality: quality)
+        adopt(quality: quality)
         // Resume instantly; delay only occlusion-driven suspension so a Space
         // switch or a Mission Control pass does not freeze a visible wallpaper.
         let revealed = suspendedDisplayIDs.subtracting(hidden)
@@ -460,8 +471,6 @@ final class WallpaperPresentationPolicy {
             suspendedDisplayIDs.subtract(revealed)
             pendingDisplays.formUnion(revealed)
             AppLog.info("presentation resumed for displays \(revealed.sorted())")
-            deliverPending()
-            if newlyHidden.isEmpty { return }
         }
         guard !newlyHidden.isEmpty else {
             deliverPending()
@@ -478,7 +487,7 @@ final class WallpaperPresentationPolicy {
             let stillHidden = Set(self.currentSurfaces().filter { !$0.isVisible }.map(\.displayID))
             self.commitHidden(newlyHidden.intersection(stillHidden))
         }
-        if audioChanged || qualityChanged { deliverPending() }
+        deliverPending()
     }
 
     private func resolvedPresentation() -> GlobalPresentation {
@@ -507,19 +516,6 @@ final class WallpaperPresentationPolicy {
         if userMuted() { return true }
         if appRuleActions().contains(.mute) { return true }
         return otherAudioActive() && otherAudioAction() == .mute
-    }
-
-    private func commitPlayback(presentation: GlobalPresentation, audio: Bool, quality: Set<QualityReduction>) {
-        if presentation != globalPresentation {
-            globalPresentation = presentation
-            AppLog.info("presentation \(presentation.logLabel)")
-        }
-        if audio != isAudioSuppressed {
-            isAudioSuppressed = audio
-            AppLog.info("wallpaper audio \(audio ? "suppressed" : "restored")")
-        }
-        adopt(quality: quality)
-        deliverPending()
     }
 
     /// Takes the conditions' current request as the decision, and says whether it changed.

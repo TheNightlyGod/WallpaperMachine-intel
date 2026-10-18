@@ -378,7 +378,10 @@ export function cursorLeave() {
     EXPECT_EQ(runtime->scriptErrorCount(), 0u);
 }
 
-TEST(SceneScriptSoundLayerSmoke, LayerScriptDoesNotReceiveCursorUpAfterLeavingWindow) {
+// A layer that took a press hears its release wherever the cursor has gone,
+// even out of the window, or a script that clears its held state on the way
+// up stays latched for good.
+TEST(SceneScriptSoundLayerSmoke, LayerScriptReceivesCursorUpForItsPressAfterLeavingWindow) {
     auto runtime = CreateSceneRuntimeContext(SceneRuntimeBootstrap {
         .canvas_width  = 400,
         .canvas_height = 300,
@@ -395,6 +398,7 @@ TEST(SceneScriptSoundLayerSmoke, LayerScriptDoesNotReceiveCursorUpAfterLeavingWi
         R"JS(
 var entered = 0;
 var left = 0;
+var down = 0;
 var up = 0;
 function cursorEnter() {
   entered++;
@@ -402,11 +406,14 @@ function cursorEnter() {
 function cursorLeave() {
   left++;
 }
+function cursorDown() {
+  down++;
+}
 function cursorUp() {
   up++;
 }
 function update() {
-  scene.getObject('buttonLayer').visible = entered === 1 && left === 1 && up === 0;
+  scene.getObject('buttonLayer').visible = entered === 1 && left === 1 && down === 1 && up === 1;
 }
 )JS",
         "buttonLayer");
@@ -415,6 +422,66 @@ function update() {
     runtime->SetCursorEnter(true);
     runtime->SetCursorButtons(1u, 1u, 0u);
     bool cursor_was_in_window = runtime->DispatchCursorFrameEvents(false);
+    runtime->Tick(1.0 / 60.0);
+
+    runtime->SetCursorEnter(false);
+    runtime->SetCursorButtons(0u, 0u, 1u);
+    cursor_was_in_window = runtime->DispatchCursorFrameEvents(cursor_was_in_window);
+    runtime->Tick(1.0 / 60.0);
+
+    EXPECT_FALSE(cursor_was_in_window);
+    EXPECT_TRUE(runtime->NodeVisible("buttonLayer"));
+    EXPECT_EQ(runtime->scriptErrorCount(), 0u);
+}
+
+// A press that landed elsewhere is not the layer's, so once the cursor is out
+// of the window the layer hears nothing of its release.
+TEST(SceneScriptSoundLayerSmoke, LayerScriptDoesNotReceiveCursorUpForAnotherPressAfterLeavingWindow) {
+    auto runtime = CreateSceneRuntimeContext(SceneRuntimeBootstrap {
+        .canvas_width  = 400,
+        .canvas_height = 300,
+    });
+    ASSERT_NE(runtime, nullptr);
+
+    auto owner = std::make_shared<SceneNode>();
+    owner->SetVisible(false);
+    owner->SetTranslate(Eigen::Vector3f(200.0f, 270.0f, 0.0f));
+    runtime->RegisterNode("buttonLayer", owner.get());
+    runtime->RegisterNodeSize("buttonLayer", Eigen::Vector2f(100.0f, 40.0f));
+
+    runtime->RegisterSceneScript(
+        R"JS(
+var entered = 0;
+var left = 0;
+var down = 0;
+var up = 0;
+function cursorEnter() {
+  entered++;
+}
+function cursorLeave() {
+  left++;
+}
+function cursorDown() {
+  down++;
+}
+function cursorUp() {
+  up++;
+}
+function update() {
+  scene.getObject('buttonLayer').visible = entered === 1 && left === 1 && down === 0 && up === 0;
+}
+)JS",
+        "buttonLayer");
+
+    runtime->SetCursorInput(0.5f, 0.5f);
+    runtime->SetCursorEnter(true);
+    runtime->SetCursorButtons(1u, 1u, 0u);
+    bool cursor_was_in_window = runtime->DispatchCursorFrameEvents(false);
+    runtime->Tick(1.0 / 60.0);
+
+    runtime->SetCursorInput(0.5f, 0.1f);
+    runtime->SetCursorButtons(1u, 0u, 0u);
+    cursor_was_in_window = runtime->DispatchCursorFrameEvents(cursor_was_in_window);
     runtime->Tick(1.0 / 60.0);
 
     runtime->SetCursorEnter(false);

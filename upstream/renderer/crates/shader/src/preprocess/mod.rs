@@ -3,6 +3,7 @@
 mod conditionals;
 mod context;
 mod directives;
+mod lighting;
 mod macros;
 mod program;
 mod stage;

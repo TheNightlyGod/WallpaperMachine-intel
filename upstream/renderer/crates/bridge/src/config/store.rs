@@ -226,7 +226,10 @@ impl From<std::io::Error> for BridgeError {
 #[cfg(test)]
 mod tests {
     use super::ConfigStore;
-    use crate::config::{AppConfig, MonitorSettingsCfg, SceneRendererModeCfg, VideoBackendModeCfg};
+    use crate::config::{
+        AppConfig, MonitorSettingsCfg, SceneRendererModeCfg, SceneResolutionCfg,
+        VideoBackendModeCfg,
+    };
 
     fn load_config(contents: &str) -> crate::config::AppConfig {
         let root = tempfile::tempdir().unwrap();
@@ -299,6 +302,36 @@ mod tests {
             SceneRendererModeCfg::NativeMetalPreferred
         );
         assert!(reloaded.quality.scene_on_demand_enabled);
+    }
+
+    /// A config written before the choice existed has no key for it, and the
+    /// shipped default applies: a 2D scene is rasterized for the display.
+    #[test]
+    fn a_config_that_never_heard_of_the_scene_resolution_reads_the_display() {
+        let config = load_config("[quality]\nrender_scale = 0.75\n");
+
+        assert_eq!(config.quality.scene_resolution, SceneResolutionCfg::Display);
+        assert_eq!(config.quality.render_scale, 0.75, "the neighbouring setting is untouched");
+    }
+
+    #[test]
+    fn the_scene_resolution_survives_a_save_and_reload_under_its_own_key() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.toml");
+        let store = ConfigStore::open(root.path().to_path_buf());
+        let mut config = AppConfig::default();
+        config.quality.scene_resolution = SceneResolutionCfg::Canvas;
+
+        store.save_app_config(&config).expect("config save");
+
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.contains("scene_resolution = \"canvas\""), "{written}");
+        let reloaded = store.load().expect("config load").config;
+        assert_eq!(
+            reloaded.quality.scene_resolution,
+            SceneResolutionCfg::Canvas,
+            "a return to the canvas is not moved back to the default"
+        );
     }
 
     /// The scene renderer is decided by its own key and the one-time move to

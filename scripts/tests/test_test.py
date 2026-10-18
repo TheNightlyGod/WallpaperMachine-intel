@@ -107,6 +107,11 @@ class OptInVariables(unittest.TestCase):
             {"WALLPAPER_MACHINE_MEDIA_TESTS", "WALLPAPER_MACHINE_NETWORK_TESTS"},
         )
 
+    def test_a_set_layer_reaches_the_test_host_and_an_unset_one_does_not(self):
+        env = runner.test_host_environment({"WALLPAPER_MACHINE_MEDIA_TESTS": "1"})
+        self.assertEqual(env["TEST_RUNNER_WALLPAPER_MACHINE_MEDIA_TESTS"], "1")
+        self.assertNotIn("TEST_RUNNER_WALLPAPER_MACHINE_NETWORK_TESTS", env)
+
 
 if __name__ == "__main__":
     unittest.main()

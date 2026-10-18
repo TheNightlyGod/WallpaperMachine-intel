@@ -11,8 +11,9 @@
 //! could not be read is not evidence that anything is ticking.
 
 use wallpaper_core::{
-    SceneBackend, SceneDemandReasons, SceneRendererPreference, SceneRuntimeReport,
-    SceneUpdateMode, SceneVideoPath, SurfaceHealth, SurfaceStopReason,
+    DisplayDesc, DisplayIdentity, DisplaySnapshotEntry, SceneBackend, SceneDemandReasons,
+    SceneRendererPreference, SceneResolution, SceneRuntimeReport, SceneUpdateMode, SceneVideoPath,
+    SurfaceHealth, SurfaceStopReason, project::SceneHandle,
 };
 
 use crate::{
@@ -175,6 +176,130 @@ async fn an_unknown_scene_renderer_name_is_refused_and_changes_nothing() {
         bridge.settings_snapshot().await.unwrap().scene_renderer,
         "native_metal_preferred",
         "the saved preference must be untouched by a rejected call"
+    );
+}
+
+fn display_with_scene(display_id: u32, handle: u64) -> DisplaySnapshotEntry {
+    let desc =
+        DisplayDesc::with_identity(display_id, DisplayIdentity::default(), 0, 0, 1920, 1080, 1.0)
+            .with_refresh_rate(60);
+    DisplaySnapshotEntry {
+        identity: DisplayIdentity::default(),
+        desc,
+        handle: Some(SceneHandle::new(handle)),
+        accepts_pointer_input: false,
+        paused: false,
+        window_active: true,
+        assignment: None,
+    }
+}
+
+#[tokio::test]
+async fn scene_resolution_defaults_to_the_display_and_reaches_both_facade_halves() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ConfigStore::open(temp.path().to_path_buf());
+    let engine = FakeEngineFacade::default();
+    let bridge = BridgeBuilder::new(engine.clone())
+        .with_config_store(store.clone())
+        .build()
+        .unwrap();
+
+    assert_eq!(
+        bridge.settings_snapshot().await.unwrap().scene_resolution,
+        "display"
+    );
+    bridge.bootstrap().await.unwrap();
+    assert_eq!(
+        engine.scene_resolution_calls().last().copied(),
+        Some(SceneResolution::Display),
+        "the engine's own default is the canvas, so the shipped default has to be pushed in too"
+    );
+
+    let snapshot = bridge
+        .set_scene_resolution("canvas".into())
+        .await
+        .unwrap()
+        .settings;
+    assert_eq!(snapshot.scene_resolution, "canvas");
+    // The bridge holds an `ArcEngineFacade`, so a log that still ends at the
+    // default means the call stopped at a default trait method.
+    assert_eq!(
+        engine.scene_resolution_calls().last().copied(),
+        Some(SceneResolution::Canvas),
+        "a delegation missing from ArcEngineFacade would leave this log unchanged"
+    );
+
+    drop(bridge);
+    let restarted_engine = FakeEngineFacade::default();
+    let restarted = BridgeBuilder::new(restarted_engine.clone())
+        .with_config_store(store)
+        .build()
+        .unwrap();
+    assert_eq!(
+        restarted.settings_snapshot().await.unwrap().scene_resolution,
+        "canvas"
+    );
+    restarted.bootstrap().await.unwrap();
+    assert_eq!(
+        restarted_engine.scene_resolution_calls().last().copied(),
+        Some(SceneResolution::Canvas),
+        "a process-wide renderer switch lives in C, so the saved choice has to be pushed back in \
+         and a return to the canvas is not moved to the default again"
+    );
+}
+
+#[tokio::test]
+async fn a_scene_resolution_change_reaches_open_scenes_through_their_render_scale() {
+    let engine = FakeEngineFacade::default();
+    engine.set_snapshot(vec![display_with_scene(7, 1), display_with_scene(9, 2)]);
+    let bridge = bridge(&engine);
+    bridge.set_render_scale(0.5).await.unwrap();
+    let reconciles = engine.calls().len();
+    let renders = engine.render_scale_calls().len();
+
+    bridge.set_scene_resolution("canvas".into()).await.unwrap();
+
+    // A running scene reads the process switch when its render scale is
+    // applied, so every open scene is handed the scale it already has: the one
+    // in force, not a constant.
+    assert_eq!(
+        engine.render_scale_calls()[renders..],
+        [(SceneHandle::new(1), 0.5), (SceneHandle::new(2), 0.5)],
+        "an open scene never learns of the choice if its render scale is not re-sent"
+    );
+    assert_eq!(
+        engine.calls().len(),
+        reconciles,
+        "a quality choice must not reparse a project or reopen a video"
+    );
+    assert!(engine.rendered_scenes().is_empty());
+
+    // Choosing what is already chosen is no event at all.
+    bridge.set_scene_resolution("canvas".into()).await.unwrap();
+    assert_eq!(engine.render_scale_calls().len(), renders + 2);
+    assert_eq!(
+        engine.scene_resolution_calls(),
+        vec![SceneResolution::Canvas],
+        "the renderer is told once"
+    );
+}
+
+#[tokio::test]
+async fn an_unknown_scene_resolution_is_refused_and_changes_nothing() {
+    let engine = FakeEngineFacade::default();
+    let bridge = bridge(&engine);
+
+    let error = bridge
+        .set_scene_resolution("native".into())
+        .await
+        .expect_err("only the two declared names exist");
+
+    assert_eq!(error.kind(), crate::BridgeErrorKind::InvalidInput);
+    assert!(engine.scene_resolution_calls().is_empty());
+    assert_eq!(
+        bridge.settings_snapshot().await.unwrap().scene_resolution,
+        "display",
+        "the saved choice must be untouched by a rejected call"
     );
 }
 

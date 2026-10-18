@@ -170,14 +170,19 @@ struct VulkanRender::Impl {
     bool CreateRenderingResource(RenderingResources&);
     void DestroyRenderingResource(RenderingResources&);
 
-    bool clearLastRenderGraph();
+    /// `hold_videos`: the live video textures are set aside for the compile that
+    /// follows instead of closed (`TextureCache::ClearForRebuild`).
+    bool clearLastRenderGraph(bool hold_videos = false);
     bool compileRenderGraph(Scene&, rg::RenderGraph&);
     /// Resizes the scene's render targets to a new internal render scale and
     /// re-prepares the existing passes in place. Deliberately narrower than
     /// `compileRenderGraph`: the render graph, the parsed scene, uploaded
     /// images and live video decoders all survive, so changing quality does not
     /// restart the wallpaper.
-    bool applyRenderScale(Scene&, rg::RenderGraph&, double scale);
+    bool applyRenderScale(Scene&, rg::RenderGraph&, double scale, SceneResolution resolution);
+    /// What the output means for a 2D scene's raster: the display's backing
+    /// scale, and the largest image this device can create.
+    SceneRasterSurface rasterSurface() const;
     bool preparePasses(Scene&);
     /// Decides copy elimination and which targets may retain their pixels.
     /// Runs once per compiled graph, never per frame.
@@ -325,14 +330,21 @@ bool VulkanRender::drawFrame(Scene& scene, bool* presented) {
 }
 void VulkanRender::InvalidatePresentedFrame() { pImpl->m_present_gate.Invalidate(); }
 bool VulkanRender::clearLastRenderGraph() { return pImpl->clearLastRenderGraph(); }
+bool VulkanRender::clearLastRenderGraphForRebuild() {
+    if (pImpl->clearLastRenderGraph(true)) return true;
+    // A clear that failed has no compile after it to close what it set aside.
+    if (pImpl->m_device) pImpl->m_device->tex_cache().CloseHeldVideos();
+    return false;
+}
 bool VulkanRender::compileRenderGraph(Scene& scene, rg::RenderGraph& rg) {
     return pImpl->compileRenderGraph(scene, rg);
 }
 bool VulkanRender::ApplySceneOptimization(Scene& scene, rg::RenderGraph& rg) {
     return pImpl->applySceneOptimization(scene, rg);
 }
-bool VulkanRender::ApplyRenderScale(Scene& scene, rg::RenderGraph& rg, double scale) {
-    return pImpl->applyRenderScale(scene, rg, scale);
+bool VulkanRender::ApplyRenderScale(Scene& scene, rg::RenderGraph& rg, double scale,
+                                    SceneResolution resolution) {
+    return pImpl->applyRenderScale(scene, rg, scale, resolution);
 }
 void VulkanRender::UpdateCameraFillMode(Scene& scene, wallpaper::FillMode fill) {
     pImpl->UpdateCameraFillMode(scene, fill);
@@ -1127,9 +1139,16 @@ bool VulkanRender::Impl::drawFrameOffscreen() {
     return true;
 }
 
+SceneRasterSurface VulkanRender::Impl::rasterSurface() const {
+    return SceneRasterSurface {
+        .display_scale_factor = NormalizeScaleFactor(m_display_scale_factor),
+        .max_dimension        = m_device != nullptr ? m_device->limits().maxImageDimension2D : 0u,
+    };
+}
+
 void VulkanRender::Impl::setRenderTargetSize(Scene& scene, rg::RenderGraph& rg) {
     auto&      ext     = m_device->out_extent();
-    const auto extents = ResolveScreenBoundRenderTargetSizes(scene, ext);
+    const auto extents = ResolveScreenBoundRenderTargetSizes(scene, ext, rasterSurface());
     const auto render_scale = ResolveSceneRenderScale(scene);
     for (auto& item : scene.renderTargets) {
         auto& rt = item.second;
@@ -1250,7 +1269,7 @@ void VulkanRender::Impl::SetWallpaperHorizontalFlip(bool enabled) {
     LOG_INFO("wallpaper horizontal flip: %s", m_horizontal_flip ? "enabled" : "disabled");
 }
 
-bool VulkanRender::Impl::clearLastRenderGraph() {
+bool VulkanRender::Impl::clearLastRenderGraph(bool hold_videos) {
     if (quiesceFrame() != VK_SUCCESS) return false;
     m_direct_present_pass = nullptr;
     m_present_gate.Invalidate();
@@ -1275,7 +1294,8 @@ bool VulkanRender::Impl::clearLastRenderGraph() {
     m_pass_scratch.candidates.clear();
     m_pass_scratch.plan.entries.clear();
     m_pass_loaded = false;
-    if (! m_device->tex_cache().Clear(&error)) {
+    if (! (hold_videos ? m_device->tex_cache().ClearForRebuild(&error)
+                       : m_device->tex_cache().Clear(&error))) {
         LOG_ERROR("cannot clear render graph cache: %s", error.c_str());
         return failFrame(VK_ERROR_UNKNOWN);
     }
@@ -1288,6 +1308,12 @@ bool VulkanRender::Impl::clearLastRenderGraph() {
 }
 
 bool VulkanRender::Impl::compileRenderGraph(Scene& scene, rg::RenderGraph& rg) {
+    // The videos a rebuild set aside and this graph does not take back are the ones
+    // it no longer uses: closed with the compile, however it ends, a compile that
+    // is refused as well.
+    AUTO_DELETER(held_videos, [this]() {
+        if (m_device) m_device->tex_cache().CloseHeldVideos();
+    });
     if (! m_inited || m_device_lost || m_frame_faulted) return false;
     if (! m_passes.empty() && ! clearLastRenderGraph()) return false;
     m_direct_present_pass = nullptr;
@@ -1723,6 +1749,7 @@ bool VulkanRender::Impl::frameRepeatsLastPresent(const Scene& scene) {
     m_present_key.AddFloat(scene.clearColor[2]);
     m_present_key.Add(scene.clearEnabled ? 1u : 0u);
     m_present_key.AddDouble(scene.render_scale);
+    m_present_key.Add(static_cast<uint64_t>(scene.resolution));
     m_present_key.AddPointer(m_direct_present_pass);
 
     m_present_videos.clear();
@@ -1812,19 +1839,23 @@ bool VulkanRender::Impl::preparePasses(Scene& scene) {
     return true;
 }
 
-bool VulkanRender::Impl::applyRenderScale(Scene& scene, rg::RenderGraph& rg, double scale) {
+bool VulkanRender::Impl::applyRenderScale(Scene& scene, rg::RenderGraph& rg, double scale,
+                                          SceneResolution resolution) {
     if (! std::isfinite(scale) || scale <= 0.0) return true;
     const double clamped = std::min(1.0, std::max(kMinRenderScale, scale));
-    if (scene.render_scale == clamped) return true;
+    if (scene.render_scale == clamped && scene.resolution == resolution) return true;
 
     // A plain-video scene keeps its media-sized target whatever the user
     // selects, so record the preference but do no work: the higher layer
-    // reports the control as not applicable for those wallpapers.
-    if (scene.single_video_source) {
-        scene.render_scale = clamped;
-        return true;
-    }
+    // reports the control as not applicable for those wallpapers. The same
+    // holds for the resolution of any scene that has no canvas to rasterize,
+    // which keeps a change of it from rebuilding every perspective scene.
+    const bool resizes =
+        scene.render_scale != clamped ||
+        (scene.resolution != resolution && SceneResolutionAffectsRaster(scene));
     scene.render_scale = clamped;
+    scene.resolution   = resolution;
+    if (scene.single_video_source || ! resizes) return true;
 
     // Nothing is prepared yet, so the next compile reads the new scale anyway.
     if (! m_inited || m_device_lost || m_frame_faulted || ! m_pass_loaded) return true;
@@ -1857,6 +1888,8 @@ bool VulkanRender::Impl::applyRenderScale(Scene& scene, rg::RenderGraph& rg, dou
         LOG_ERROR("failed to re-prepare passes at render scale %.3f", clamped);
         return false;
     }
-    LOG_INFO("render scale applied: %.3f", clamped);
+    LOG_INFO("render scale applied: %.3f, %s resolution",
+             clamped,
+             resolution == SceneResolution::Display ? "display" : "canvas");
     return true;
 }

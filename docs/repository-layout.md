@@ -62,18 +62,27 @@ App/                               WallpaperMachine application target sources o
     WebWallpaper/                  WKWebView host windows and page protocol for web wallpapers
     Workshop/                      Workshop query model and sources, browse store, downloader and queue
   ViewModels/                      BridgeStore and editor draft state; observable, no view code
-  Views/ControlPanel/              SwiftUI container, WKWebView host, snapshot builder, action handlers,
-                                   sign-in, preview and what's-new windows
-  Resources/                       Info.plist, string catalogs, Assets.xcassets, AppIcon.icon; app resources only
+  Views/ControlPanel/              the SwiftUI control panel: root view, navigation types, window factory and
+                                   reopen state, and the AppKit sign-in, preview and what's-new windows
+    Model/                         PanelController, its typed actions and derived state (PanelController+<Group>.swift),
+                                   presentation, store revisions, error banner, action coordinator, dialogs, links
+    Shell/                         root view, tabs, detail column (router, toolbar, banners, Filters sidebar, inspector), Now Playing bar
+    Library/ Inspector/            the Installed page and the installed wallpaper's inspector
+    Discover/ Downloads/           the Steam Workshop page and its inspector; the downloads button, list and dialog
+    Pixiv/                         the pixiv page, its inspector and toolbar pill
+    Settings/                      Settings infrastructure (rows, groups, search) and the eleven sections
+    Welcome/                       the first-run guide and the support prompt
+    Components/ Theme/             shared views; accent and surface palettes
+    Localization/ Images/          PanelLocale and L(); the image pipeline and animated preview
+  Resources/                       Info.plist, string catalogs, Assets.xcassets (tray icon, Dock icon image sets),
+                                   AppIcon.icon; app resources only
 Extension/                         WallpaperMachineExtension sources, Info.plist, entitlements, bridging header,
                                    its own string catalog (Localizable.xcstrings), third-party notice
 Shared/                            contracts compiled into both targets: lock-screen configuration, status and surface
                                    lifecycle, web-wallpaper protocol and screen-saver surface, RuntimeCounters,
                                    WallpaperPresentationAuthority, display power and its re-check burst
-WebUI/                             HTML/CSS/JS control panel; bundled verbatim as the app resource folder WebUI
-  app-icons/                       Dock icon variants (the Settings icon picker and the Dock icon)
-  locales/                         one panel catalog module per shipped language (zh-Hans.js, zh-Hant.js, ja.js), registered in i18n.js
 Resources/StarterWallpaper/        bundled sample wallpaper (Aurora.mp4, preview.jpg, project.json)
+Resources/ReleaseBanners/          bundled release banners, x.y.z.jpg and x.y.z.zh-Hans.jpg (or .png), shown by What's New and the release page
 Tests/Unit/<Domain>/               WallpaperMachineTests, one folder per App/Services domain plus Panel for
                                    Views/ControlPanel; hosted in the app binary
 Tests/UI/                          WallpaperMachineUITests; desktop-driving XCUITest suite
@@ -107,7 +116,7 @@ build/                             Git-ignored: Xcode derived data and built pro
 
 Git-ignored and machine-local, never committed: `artifacts/`, `build/`, the agent tool
 directories and `CLAUDE.local.md` named in `AGENTS.md`, and the root `node_modules/`,
-`package.json` and `package-lock.json` (`WebUI/` has no npm build).
+`package.json` and `package-lock.json` (local agent tooling; the repository has no npm build).
 
 Things that must not appear:
 
@@ -123,10 +132,9 @@ Things that must not appear:
 | You are adding | Put it in | Notes |
 |---|---|---|
 | App service or domain logic | `App/Services/<Domain>/` | Reuse an existing domain folder before creating one; a new domain needs a new folder plus a matching `Tests/Unit/<Domain>/` |
-| View or panel-hosting feature | `App/Views/ControlPanel/` | Page state belongs in the snapshot builder, actions in the action handlers |
+| Control-panel view or feature | `App/Views/ControlPanel/<Area>/` | Views and the area's view model in the area folder; a typed action or derived state in `Model/PanelController+<Group>.swift`; a view several areas use in `Components/`. Rules in [conventions](conventions.md#swiftui-control-panel) |
 | Observable app state | `App/ViewModels/` | Keep renderer calls behind `BridgeStore`; no views here |
-| Web-panel UI | `WebUI/` | Extend the matching module (`panel.js`, `settings.js`, `welcome.js` or a per-feature module) plus its CSS; new files must be added to the served allow list in `WebPanelAssets` and, if they call `t()`, to the file list in `scripts/tests/test_panel_localization.py`. Icons come from the vendored Lucide set in `icons.js`, never hand-drawn SVG |
-| A language | `WebUI/locales/<tag>.js`, `WebUI/i18n.js`, `App/Services/Localization/AppLanguage.swift`, all three `.xcstrings` | Follow [localization.md](localization.md); the allow list and Settings picker derive from `AppLanguage.supported` |
+| A language | `App/Services/Localization/AppLanguage.swift`, all three `.xcstrings` | Follow [localization.md](localization.md); the Settings and first-run pickers derive from `AppLanguage.supported` |
 | Code shared with the extension | `Shared/` | Only if both targets genuinely need it, and it must build extension-API-only |
 | Lock-screen extension behaviour | `Extension/` | Nothing here may depend on app-only APIs or app-private files |
 | Unit test | `Tests/Unit/<Domain>/` | Same domain folder name as the code under test |
@@ -159,7 +167,7 @@ Things that must not appear:
 | Swift tests | `<Subject>Tests.swift`, in the domain folder of the code under test |
 | Python scripts and helpers | `snake_case.py` (`build.py`, `check_renderer.py`, `bump_version.py`, `release_notes.py`, `publish_release.py`, `lib/xcode.py`, `lib/dmg.py`) |
 | Python tests | `test_<module>.py` under `scripts/tests/` |
-| Web panel files | lowercase, one concern per file (`panel.js`, `settings.css`, `theme.js`) |
+| Control-panel tests | flat in `Tests/Unit/Panel/`, named after the type or area they cover (`PanelErrorStateTests.swift`, `InstalledBrowserModelTests.swift`, `ShellRenderTests.swift`) |
 | Markdown under `docs/` | lowercase-hyphenated (`repository-layout.md`, `development-tools.md`); `README.md` is the only uppercase name |
 | Root Markdown | uppercase (`README.md`, `AGENTS.md`, `CHANGELOG.md`, `CONTRIBUTING.md`, `LICENSING.md`); the license text is the extensionless `LICENSE` |
 | Bundle identifiers | `app.wallpapermachine` and `app.wallpapermachine.wallpaper-extension` (plus `.MediaRemoteAdapter`, `.tests` and `.uitests` for the other targets) |

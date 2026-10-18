@@ -79,6 +79,9 @@ final class PowerSourceResamplerTests: XCTestCase {
 
         rig.center.post(name: NSWorkspace.didWakeNotification, object: nil)
         try await rig.waitUntil { rig.reads == 1 }
+        // The follow-up's sleep begins off the main queue, so flushing that queue is no sign it
+        // has started.
+        try await rig.waitUntil { rig.sleeper.started >= 1 }
         await rig.flushMainQueue()
 
         XCTAssertEqual(rig.reads, 1)

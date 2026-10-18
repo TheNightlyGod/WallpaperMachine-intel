@@ -1,13 +1,17 @@
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <limits>
 #include <map>
 #include <memory>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 #include <cstring>
@@ -21,6 +25,7 @@
 #include "Fs/VFS.h"
 #include "Audio/SoundManager.h"
 #include "Project/ProjectProperties.hpp"
+#include "Particle/ParticleSystem.h"
 #include "Runtime/DynamicValue.hpp"
 #include "Runtime/SceneRuntimeContext.hpp"
 #include "Runtime/SceneSettingResolver.hpp"
@@ -531,7 +536,7 @@ std::string BasicImageSceneJson() {
       "camera": {"center":[0,0,0], "eye":[0,0,1], "up":[0,1,0]},
       "general": {
         "ambientcolor":[0.2,0.2,0.2], "skylightcolor":[0.3,0.3,0.3],
-        "clearcolor":[0,0,0], "cameraparallax":false,
+        "clearcolor":[0,0,0], "bloom":false, "cameraparallax":false,
         "cameraparallaxamount":0, "cameraparallaxdelay":0,
         "cameraparallaxmouseinfluence":0,
         "orthogonalprojection":{"width":640,"height":360}
@@ -814,6 +819,30 @@ void main() {
     EXPECT_TRUE(vfs.Mount("/assets", std::make_unique<MemoryFs>(std::move(files))));
 }
 
+// Stand-ins for Wallpaper Engine's HDR bloom materials, each with a shader of
+// its own name so a test can tell the passes apart.
+void AddHdrBloomFixtureFiles(std::map<std::string, std::string>& files) {
+    const std::string vert = "attribute vec3 a_Position;\nattribute vec2 a_TexCoord;\n"
+                             "varying vec2 v_TexCoord;\nvoid main() {\n"
+                             "  gl_Position = vec4(a_Position, 1.0);\n  v_TexCoord = a_TexCoord;\n}\n";
+    const std::string frag =
+        "uniform sampler2D g_Texture0;\nuniform vec4 g_RenderVar0;\n"
+        "uniform float g_BloomStrength;\nuniform vec4 g_BloomBlendParams;\nuniform vec3 g_BloomTint;\n"
+        "uniform float g_BloomScatter;\nvarying vec2 v_TexCoord;\n"
+        "void main() {\n  gl_FragColor = texture(g_Texture0, v_TexCoord + g_RenderVar0.xy) *\n"
+        "      g_BloomStrength * g_BloomScatter * g_BloomBlendParams.x * g_BloomTint.x;\n}\n";
+    for (const auto& [material, shader] : std::array<std::pair<const char*, const char*>, 5> {
+             std::pair { "hdr_downsample_bloom", "hdr_extract" }, { "hdr_downsample", "hdr_down" },
+             { "hdr_upsample", "hdr_up" }, { "hdr_upsample_cubic", "hdr_cubic" },
+             { "combine_hdr_upsample_linear", "hdr_combine" } }) {
+        files[std::string("/materials/util/") + material + ".json"] =
+            std::string(R"({"passes":[{"blending":"normal","cullmode":"nocull","depthtest":"disabled",)"
+                        R"("depthwrite":"disabled","shader":")") + shader + R"("}]})";
+        files[std::string("/shaders/") + shader + ".vert"] = vert;
+        files[std::string("/shaders/") + shader + ".frag"] = frag;
+    }
+}
+
 std::string BloomSceneJson(bool hdr) {
     return std::string(R"({
       "camera": {"center":[0,0,0], "eye":[0,0,1], "up":[0,1,0]},
@@ -1016,8 +1045,9 @@ TEST(SceneSchema, ImageAbsorbsDependenciesInstanceAnimationLayersAndBindings) {
 
 // The layer colour of a solid instance layer paints the placeholder its shared
 // model material ships. Whether it survives depends on whether that placeholder
-// is actually replaced: a runtime image is substituted into the slot, a project
-// property is not.
+// is actually replaced: the layer itself can tell for a runtime image, but not
+// for a project property, whose value only the parse reads
+// (PlaceholderPicture.* in project_property_preview_test).
 TEST(SceneSchema, InstanceColourSurvivesUnlessARuntimeImageTakesTheSlot) {
     fs::VFS vfs;
     MountSceneFiles(vfs);
@@ -1033,8 +1063,8 @@ TEST(SceneSchema, InstanceColourSurvivesUnlessARuntimeImageTakesTheSlot) {
 
     EXPECT_EQ(layer(R"({"name":"$mediaThumbnail","type":"system"})"),
               (std::array<float, 3> { 1.0f, 1.0f, 1.0f }));
-    // A `scenetexture` project property keeps `util/white` in the slot, so the
-    // layer is still a solid colour and dropping its tint would repaint it.
+    // A `scenetexture` project property may still be unset, which keeps
+    // `util/white` in the slot: the layer keeps its tint until the parse knows.
     EXPECT_EQ(layer(R"("backgroundimage")"),
               (std::array<float, 3> { 0.11765f, 0.11765f, 0.11765f }));
 
@@ -1320,6 +1350,49 @@ TEST(SceneSchema, ParserInstantiatesLeafModel) {
     EXPECT_TRUE(default_rt->withDepth);
 }
 
+TEST(SceneSchema, ParserRegistersWhatTheCursorMakesOfAModelLayer) {
+    // A model is one of the three kinds the cursor is tested against, solid
+    // unless the scene says otherwise, and a model can stop the walk too.
+    auto files = std::map<std::string, std::string> {};
+    AddLeafModelSceneFiles(files);
+    fs::VFS vfs;
+    EXPECT_TRUE(vfs.Mount("/assets", std::make_unique<MemoryFs>(std::move(files))));
+    audio::SoundManager sound_manager { audio::SoundManager::OutputBackend::Null };
+    WPSceneParser       parser;
+    ProjectProperties   properties;
+    auto parsed = parser.Parse(
+        SceneParseRequest { .scene_id = "model-cursor-target", .project_properties = &properties },
+        R"({
+      "camera": {"center":[0,0,0], "eye":[0,0,1], "up":[0,1,0]},
+      "general": {
+        "ambientcolor":[0.2,0.2,0.2], "skylightcolor":[0.3,0.3,0.3],
+        "clearcolor":[0,0,0], "cameraparallax":false,
+        "cameraparallaxamount":0, "cameraparallaxdelay":0,
+        "cameraparallaxmouseinfluence":0,
+        "orthogonalprojection":{"width":640,"height":360}
+      },
+      "objects": [
+        {"id":1,"name":"plain","model":"planet.mdl","visible":true},
+        {"id":2,"name":"ghost","model":"planet.mdl","solid":false,"visible":true},
+        {"id":3,"name":"blocker","model":"planet.mdl","disablepropagation":true,"visible":true}
+      ]
+    })",
+        vfs, sound_manager);
+    ASSERT_NE(parsed, nullptr);
+    ASSERT_NE(parsed->runtime, nullptr);
+    const auto plain = parsed->runtime->NodeCursorTargetOf("plain");
+    ASSERT_TRUE(plain.has_value());
+    EXPECT_TRUE(plain->hittable);
+    EXPECT_TRUE(plain->solid);
+    EXPECT_FALSE(plain->blocks);
+    const auto ghost = parsed->runtime->NodeCursorTargetOf("ghost");
+    ASSERT_TRUE(ghost.has_value());
+    EXPECT_FALSE(ghost->solid);
+    const auto blocker = parsed->runtime->NodeCursorTargetOf("blocker");
+    ASSERT_TRUE(blocker.has_value());
+    EXPECT_TRUE(blocker->blocks);
+}
+
 TEST(SceneSchema, OrthogonalprojectionNullActivatesPerspective) {
     fs::VFS vfs;
     MountSceneFiles(vfs);
@@ -1374,6 +1447,39 @@ TEST(SceneSchema, ModelMaterialDefaultsAreOpaqueDepthTestedAndExplicitStateWins)
     EXPECT_FALSE(explicit_state.depth_write);
     EXPECT_EQ(explicit_state.cull_mode, CullMode::None);
     EXPECT_EQ(explicit_state.blenmode, BlendMode::Translucent);
+}
+
+TEST(SceneSchema, PassStateValuesOutsideWallpaperEnginesListsReadAsTheirFirstEntry) {
+    // Wallpaper Engine knows only "disabled"/"enabled" for depthtest and
+    // depthwrite and "normal"/"nocull" for cullmode; any other word takes the
+    // list's first entry. A depth "compare" is never chosen per material.
+    std::map<std::string, std::string> files;
+    AddLeafModelSceneFiles(files);
+    files["/mat/head.json"] = R"({"passes":[{"shader":"genericimage","textures":["a.tex"],
+      "blending":"normal","cullmode":"inverted","depthtest":"greater","depthwrite":"always"}]})";
+    files["/mat/eyes.json"] = R"({"passes":[{"shader":"genericimage","textures":["a.tex"],
+      "blending":"normal","cullmode":"nocull","depthtest":"less","depthwrite":"enabled"}]})";
+    fs::VFS vfs;
+    ASSERT_TRUE(vfs.Mount("/assets", std::make_unique<MemoryFs>(std::move(files))));
+    audio::SoundManager sound_manager;
+    WPSceneParser parser;
+    auto scene = parser.Parse("model-pass-state", PerspectiveSceneJson(R"([
+      {"id":1,"name":"model","model":"planet.mdl"}
+    ])"), vfs, sound_manager);
+    ASSERT_NE(scene, nullptr);
+    auto node = FindRootChildByName(*scene, "model");
+    ASSERT_NE(node, nullptr);
+    ASSERT_EQ(node->Mesh()->MaterialSlots().size(), 2u);
+    const auto& unknown = *node->Mesh()->MaterialSlotPtr(0);
+    EXPECT_FALSE(unknown.depth_test);
+    EXPECT_FALSE(unknown.depth_write);
+    EXPECT_EQ(unknown.cull_mode, CullMode::Back);
+    const auto& less = *node->Mesh()->MaterialSlotPtr(1);
+    EXPECT_FALSE(less.depth_test);
+    EXPECT_TRUE(less.depth_write);
+    EXPECT_EQ(less.cull_mode, CullMode::None);
+    // Drawn as it reads: no depth test means no depth write either.
+    EXPECT_FALSE(ResolveSceneDepthState(less, true).write);
 }
 
 TEST(SceneSchema, ModelBonesReachEveryMaterialIncludingTheBindPose) {
@@ -1444,21 +1550,27 @@ TEST(SceneSchema, PerspectiveCameraSelectionFollowsVisibilityWithoutHiddenOverri
     EXPECT_EQ(scene->runtime->DescribeTimeAdvancingWork() & SceneDemandReason::Animation, 0u);
 }
 
+// A shot without a field of view of its own takes the scene's `fov`.
+// `perspectiveoverridefov` is the field of view of a 2D scene's perspective
+// layers (Wallpaper Engine reads `fov` when the scene is not orthographic), so
+// a perspective scene that carries the key, from a package of any version,
+// ignores it.
 TEST(SceneSchema, PerspectiveShotsInheritSceneFovUnlessExplicitlyOverridden) {
     for (bool runtime_enabled : {false, true}) {
         for (const auto* camera_name : {"named shot camera", "default"}) {
-            for (float scene_override : {0.0f, 75.0f}) {
+            for (float ignored_override : {0.0f, 75.0f}) {
                 for (const auto& object_fov : std::vector<nlohmann::json> {nullptr, 0, -1, 80}) {
-                    SCOPED_TRACE(object_fov.dump() + " " + camera_name +
+                    SCOPED_TRACE(object_fov.dump() + " " + camera_name + " override " +
+                                 std::to_string(ignored_override) +
                                  (runtime_enabled ? " runtime" : " static"));
                     auto source = nlohmann::json::parse(PerspectiveSceneJson(R"([
                       {"id":1,"name":"earlier","camera":"default","origin":[0,0,12],"fov":45},
                       {"id":2,"name":"target","camera":"default","origin":[6,0,8]}
                     ])"));
-                    source["general"]["perspectiveoverridefov"] = scene_override;
+                    source["general"]["perspectiveoverridefov"] = ignored_override;
                     source["objects"][1]["camera"] = camera_name;
                     if (!object_fov.is_null()) source["objects"][1]["fov"] = object_fov;
-                    const double scene_fov = scene_override > 0 ? scene_override : 60.0;
+                    const double scene_fov = 60.0;
                     const double expected = !object_fov.is_null() && object_fov.get<double>() > 0
                                                 ? object_fov.get<double>() : scene_fov;
                     fs::VFS vfs;
@@ -2014,6 +2126,328 @@ TEST(SceneSchema, ParserKeepsSceneLightsAndUpdatesViewUniforms) {
     EXPECT_NEAR(captured["g_LightsPosition"][2], 33.0f, 1e-3f);
 }
 
+std::string LitPerspectiveSceneJson(std::string_view objects, std::string_view lightconfig) {
+    return std::string(R"({
+      "camera": {"center":[0,0,0], "eye":[0,10,20], "up":[0,1,0]},
+      "general": {
+        "ambientcolor":[0.2,0.2,0.2], "skylightcolor":[0.3,0.3,0.3],
+        "clearcolor":[0,0,0], "cameraparallax":false,
+        "cameraparallaxamount":0, "cameraparallaxdelay":0,
+        "cameraparallaxmouseinfluence":0,
+        "orthogonalprojection":null, "fov":60, "nearz":0.1, "farz":5000,
+        "lightconfig": )") +
+           std::string(lightconfig) + R"(},
+      "objects": )" + std::string(objects) + "}";
+}
+
+using CapturedUniforms = std::unordered_map<std::string, std::vector<float>>;
+
+CapturedUniforms CaptureLightUniforms(Scene& scene, SceneNode& node) {
+    static constexpr std::array kNames {
+        "g_LPoint_Color", "g_LPoint_Origin", "g_LSpot_Color", "g_LSpot_Origin",
+        "g_LSpot_Direction", "g_LSpot_Exponent", "g_LTube_Color", "g_LTube_OriginA",
+        "g_LTube_OriginB", "g_LDirectional_Color", "g_LDirectional_Direction",
+        "g_LightsPosition", "g_LightsColorPremultiplied", "g_NormalModelMatrix",
+    };
+    auto* updater = dynamic_cast<WPShaderValueUpdater*>(scene.shaderValueUpdater.get());
+    EXPECT_NE(updater, nullptr);
+    CapturedUniforms captured;
+    if (updater == nullptr) return captured;
+    updater->InitUniforms(&node, 0, [](std::string_view name) {
+        return std::find(kNames.begin(), kNames.end(), name) != kNames.end();
+    });
+    sprite_map_t sprites;
+    updater->UpdateUniforms(&node, sprites, [&](std::string_view name, const ShaderValue& value) {
+        captured[std::string(name)] = std::vector<float>(value.data(), value.data() + value.size());
+    });
+    return captured;
+}
+
+void ExpectSlot(const CapturedUniforms& captured, const std::string& name, std::size_t slot,
+                std::array<float, 4> expected) {
+    SCOPED_TRACE(name + "[" + std::to_string(slot) + "]");
+    const auto found = captured.find(name);
+    ASSERT_NE(found, captured.end());
+    ASSERT_GE(found->second.size(), slot * 4 + 4);
+    for (std::size_t lane = 0; lane < 4; ++lane) {
+        EXPECT_NEAR(found->second[slot * 4 + lane], expected[lane], 1e-4f) << "lane " << lane;
+    }
+}
+
+Eigen::Vector3d WorldAxisX(SceneNode& node) {
+    node.UpdateTrans();
+    return node.ModelTrans().block<3, 1>(0, 0);
+}
+
+TEST(SceneSchema, LightsOfEachKindFillWallpaperEnginesLightingArrays) {
+    std::map<std::string, std::string> files;
+    AddLeafModelSceneFiles(files);
+    fs::VFS vfs;
+    ASSERT_TRUE(vfs.Mount("/assets", std::make_unique<MemoryFs>(std::move(files))));
+    audio::SoundManager sound_manager;
+    WPSceneParser       parser;
+    auto scene = parser.Parse("lights", LitPerspectiveSceneJson(R"([
+      {"id":1,"name":"planet","model":"planet.mdl"},
+      {"id":10,"name":"bulb","light":"lpoint","origin":"1 2 3","color":"1 0.5 0.25",
+       "intensity":2,"radius":50,"exponent":3},
+      {"id":11,"name":"off","light":"lpoint","origin":"9 9 9","color":"1 1 1",
+       "intensity":5,"radius":50,"visible":false},
+      {"id":12,"name":"torch","light":"lspot","origin":"0 0 0","angles":"0 0 1.5707963",
+       "color":"0 1 0","intensity":4,"radius":80,"exponent":1.5,"innercone":20,"outercone":30},
+      {"id":13,"name":"bar","light":"ltube","origin":"10 0 0","scale":"2 2 2",
+       "controlpoint":"5 0 0","color":"1 0 0","intensity":1,"radius":30},
+      {"id":20,"name":"rig","origin":"100 0 0","angles":"0 0 0.5"},
+      {"id":14,"name":"sun","light":"ldirectional","parent":20,"origin":"1 0 0",
+       "color":"1 1 1","intensity":0.5,"radius":200},
+      {"id":15,"name":"lamp","light":"point","origin":"7 8 9","color":"1 1 1",
+       "intensity":1,"radius":2}
+    ])", R"({"point":2,"spot":1,"tube":1,"directional":1})"), vfs, sound_manager);
+    ASSERT_NE(scene, nullptr);
+    EXPECT_EQ(scene->light_config.point, 2u);
+    EXPECT_EQ(scene->light_config.directional, 1u);
+    // A light hidden for good is not parsed at all, like any other object.
+    ASSERT_EQ(scene->lights.size(), 5u);
+
+    auto planet = FindRootChildByName(*scene, "planet");
+    ASSERT_NE(planet, nullptr);
+    const auto captured = CaptureLightUniforms(*scene, *planet);
+
+    // A point light: colour times intensity with its radius, origin with its
+    // exponent. The unused slot stays zero.
+    ExpectSlot(captured, "g_LPoint_Color", 0, { 2.0f, 1.0f, 0.5f, 50.0f });
+    ExpectSlot(captured, "g_LPoint_Origin", 0, { 1.0f, 2.0f, 3.0f, 3.0f });
+    ExpectSlot(captured, "g_LPoint_Color", 1, { 0.0f, 0.0f, 0.0f, 0.0f });
+
+    // A spot shines along its own x axis, rotated with it; the cone cosines
+    // ride in the w lanes.
+    const auto* torch = scene->lights[1]->node();
+    ASSERT_NE(torch, nullptr);
+    const auto  spot_axis = WorldAxisX(*const_cast<SceneNode*>(torch));
+    EXPECT_GT(std::abs(spot_axis.y()), 0.99);
+    ExpectSlot(captured, "g_LSpot_Color", 0, { 0.0f, 4.0f, 0.0f, 80.0f });
+    ExpectSlot(captured, "g_LSpot_Origin", 0, { 0.0f, 0.0f, 0.0f, std::cos(20.0f * 3.14159265f / 180.0f) });
+    ExpectSlot(captured, "g_LSpot_Direction", 0,
+               { float(spot_axis.x()), float(spot_axis.y()), float(spot_axis.z()),
+                 std::cos(30.0f * 3.14159265f / 180.0f) });
+    ExpectSlot(captured, "g_LSpot_Exponent", 0, { 1.5f, 0.0f, 0.0f, 0.0f });
+
+    // A tube runs from its origin to its control point carried by its own
+    // transform (scaled by two here), with the default exponent.
+    ExpectSlot(captured, "g_LTube_OriginA", 0, { 10.0f, 0.0f, 0.0f, 2.0f });
+    ExpectSlot(captured, "g_LTube_OriginB", 0, { 20.0f, 0.0f, 0.0f, 0.0f });
+
+    // A directional light follows its parent; its direction points back
+    // towards it, against its world x axis.
+    auto* sun = scene->lights[3]->node();
+    ASSERT_NE(sun, nullptr);
+    const auto sun_axis = WorldAxisX(*sun);
+    EXPECT_GT(std::abs(sun_axis.y()), 0.4);
+    ExpectSlot(captured, "g_LDirectional_Color", 0, { 0.5f, 0.5f, 0.5f, 1.0f });
+    ExpectSlot(captured, "g_LDirectional_Direction", 0,
+               { float(-sun_axis.x()), float(-sun_axis.y()), float(-sun_axis.z()), 0.0f });
+
+    // Only the older `point` light feeds the four packed legacy lights.
+    ExpectSlot(captured, "g_LightsPosition", 0, { 7.0f, 8.0f, 9.0f, 0.0f });
+    ExpectSlot(captured, "g_LightsPosition", 1, { 0.0f, 0.0f, 0.0f, 0.0f });
+}
+
+TEST(SceneSchema, LightsFollowTheirUserPropertyScriptAndIntensityTimeline) {
+    std::map<std::string, std::string> files;
+    AddLeafModelSceneFiles(files);
+    fs::VFS vfs;
+    ASSERT_TRUE(vfs.Mount("/assets", std::make_unique<MemoryFs>(std::move(files))));
+    audio::SoundManager sound_manager;
+    WPSceneParser       parser;
+    ProjectProperties   properties {
+        { "daynight", RuntimeScalarValue::Bool(true) },
+    };
+    auto scene = parser.Parse(
+        SceneParseRequest { .scene_id = "light-bindings", .project_properties = &properties },
+        LitPerspectiveSceneJson(R"([
+          {"id":1,"name":"planet","model":"planet.mdl"},
+          {"id":10,"name":"day","light":"lpoint","origin":"0 0 0","color":"1 1 1","radius":10,
+           "intensity":{"value":1,"animation":{"c0":[{"frame":0,"value":1},{"frame":10,"value":3}],
+             "options":{"fps":10,"length":10,"mode":"single"}}},
+           "visible":{"user":"daynight","value":true}},
+          {"id":11,"name":"moving","light":"lpoint","color":"1 1 1","radius":10,"intensity":1,
+           "origin":{"value":"0 0 0","script":"export function update() { return new Vec3(4, 5, 6); }"}}
+        ])", R"({"point":2})"),
+        vfs,
+        sound_manager);
+    ASSERT_NE(scene, nullptr);
+    ASSERT_NE(scene->runtime, nullptr);
+    auto planet = FindRootChildByName(*scene, "planet");
+    ASSERT_NE(planet, nullptr);
+
+    scene->runtime->Tick(0.5);
+    auto captured = CaptureLightUniforms(*scene, *planet);
+    // Halfway along its intensity timeline, and the script has moved the other.
+    ExpectSlot(captured, "g_LPoint_Color", 0, { 2.0f, 2.0f, 2.0f, 10.0f });
+    ExpectSlot(captured, "g_LPoint_Origin", 1, { 4.0f, 5.0f, 6.0f, 2.0f });
+    const auto lit_hash = scene->shaderValueUpdater->LightStateHash(planet.get(), 0);
+    EXPECT_NE(lit_hash, 0u);
+
+    // Switching the property off takes the light out; the moved one now
+    // fills the first slot, and a lit pass sees a different light state.
+    scene->runtime->ApplyProjectPropertyOverride({ { "daynight", RuntimeScalarValue::Bool(false) } });
+    scene->runtime->Tick(0.01);
+    captured = CaptureLightUniforms(*scene, *planet);
+    ExpectSlot(captured, "g_LPoint_Origin", 0, { 4.0f, 5.0f, 6.0f, 2.0f });
+    ExpectSlot(captured, "g_LPoint_Color", 1, { 0.0f, 0.0f, 0.0f, 0.0f });
+    EXPECT_NE(scene->shaderValueUpdater->LightStateHash(planet.get(), 0), lit_hash);
+}
+
+TEST(SceneSchema, FogIsCompiledIntoPassesWhoseFogComboIsOnWithWallpaperEnginesParameters) {
+    std::map<std::string, std::string> files;
+    AddLeafModelSceneFiles(files);
+    files["/shaders/foggy.vert"] = R"(
+attribute vec3 a_Position;
+void main() { gl_Position = vec4(a_Position, 1.0); }
+)";
+    files["/shaders/foggy.frag"] = R"(// [COMBO] {"material":"fog","combo":"FOG","default":1}
+#if FOG_DIST
+uniform vec4 g_FogDistanceParams;
+#endif
+void main() {
+  vec4 color = vec4(1.0);
+#if FOG_COMPUTED && FOG_DIST
+  color.rgb *= g_FogDistanceParams.xyz;
+#endif
+  gl_FragColor = color;
+}
+)";
+    files["/mat/head.json"] = R"({"passes":[{"shader":"foggy","textures":["a.tex"]}]})";
+    files["/mat/eyes.json"] = R"({"passes":[{"shader":"foggy","textures":["a.tex"],"combos":{"FOG":0}}]})";
+    fs::VFS vfs;
+    ASSERT_TRUE(vfs.Mount("/assets", std::make_unique<MemoryFs>(std::move(files))));
+    audio::SoundManager sound_manager;
+    WPSceneParser       parser;
+    std::string json = PerspectiveSceneJson(R"([{"id":1,"name":"planet","model":"planet.mdl"}])");
+    const auto general = json.find("\"general\": {") + std::string("\"general\": {").size();
+    json.insert(general, R"("fogdistance":true,"fogdistancestart":2,"fogdistanceend":10,)"
+                         R"("fogdistancecolor":[0.5,0.5,0.5],)");
+    auto scene = parser.Parse("fog", json, vfs, sound_manager);
+    ASSERT_NE(scene, nullptr);
+    EXPECT_TRUE(scene->fog_distance);
+    EXPECT_FALSE(scene->fog_height);
+    auto node = FindRootChildByName(*scene, "planet");
+    ASSERT_NE(node, nullptr);
+    ASSERT_EQ(node->Mesh()->MaterialSlots().size(), 2u);
+
+    const auto& fogged = *node->Mesh()->MaterialSlotPtr(0);
+    ASSERT_NE(fogged.customShader.shader, nullptr);
+    ASSERT_TRUE(fogged.customShader.shader->rust_reflection_json.has_value());
+    EXPECT_NE(fogged.customShader.shader->rust_reflection_json->find("g_FogDistanceParams"),
+              std::string::npos)
+        << "a pass whose FOG combo is on was not compiled with distance fog";
+    // (start, end - start, start density, end density - start density), with
+    // Wallpaper Engine's default densities 0 and 1.
+    const auto& params = fogged.customShader.constValues.at("g_FogDistanceParams");
+    ASSERT_EQ(params.size(), 4u);
+    EXPECT_FLOAT_EQ(params[0], 2.0f);
+    EXPECT_FLOAT_EQ(params[1], 8.0f);
+    EXPECT_FLOAT_EQ(params[2], 0.0f);
+    EXPECT_FLOAT_EQ(params[3], 1.0f);
+
+    const auto& clear = *node->Mesh()->MaterialSlotPtr(1);
+    ASSERT_NE(clear.customShader.shader, nullptr);
+    ASSERT_TRUE(clear.customShader.shader->rust_reflection_json.has_value());
+    EXPECT_EQ(clear.customShader.shader->rust_reflection_json->find("g_FogDistanceParams"),
+              std::string::npos)
+        << "a pass that turns FOG off was compiled with fog";
+}
+
+TEST(SceneSchema, ATextureSlotsTexelIsTheStepOfTheTextureItSamples) {
+    std::map<std::string, std::string> files;
+    AddLeafModelSceneFiles(files);
+    files["/mat/head.json"] =
+        R"({"passes":[{"shader":"genericimage","textures":["_rt_4FrameBuffer"]}]})";
+    fs::VFS vfs;
+    ASSERT_TRUE(vfs.Mount("/assets", std::make_unique<MemoryFs>(std::move(files))));
+    audio::SoundManager sound_manager;
+    WPSceneParser       parser;
+    auto scene = parser.Parse("texel", PerspectiveSceneJson(R"([
+      {"id":1,"name":"planet","model":"planet.mdl"}
+    ])"), vfs, sound_manager);
+    ASSERT_NE(scene, nullptr);
+    auto node = FindRootChildByName(*scene, "planet");
+    ASSERT_NE(node, nullptr);
+    const auto* target = scene->FindRenderTarget("_rt_4FrameBuffer");
+    ASSERT_NE(target, nullptr);
+    ASSERT_GT(target->width, 0);
+    const auto& values = node->Mesh()->MaterialSlotPtr(0)->customShader.constValues;
+    ASSERT_TRUE(values.contains("g_Texture0Texel"));
+    const auto& texel = values.at("g_Texture0Texel");
+    ASSERT_EQ(texel.size(), 4u);
+    EXPECT_FLOAT_EQ(texel[0], 1.0f / float(target->width));
+    EXPECT_FLOAT_EQ(texel[1], 1.0f / float(target->height));
+    EXPECT_FLOAT_EQ(texel[2], float(target->width));
+    EXPECT_FLOAT_EQ(texel[3], float(target->height));
+}
+
+TEST(SceneSchema, TheSceneCameraShakesAsWallpaperEngineWhileItsPropertyIsOn) {
+    fs::VFS vfs;
+    MountSceneFiles(vfs);
+    audio::SoundManager sound_manager;
+    WPSceneParser       parser;
+    ProjectProperties   properties {
+        { "shake", RuntimeScalarValue::Bool(true) },
+    };
+    std::string json = BasicImageSceneJson();
+    const auto general = json.find("\"general\": {") + std::string("\"general\": {").size();
+    json.insert(general, R"("camerashake":{"user":"shake","value":true},"camerashakeamplitude":1.0,)"
+                         R"("camerashakespeed":2.0,"camerashakeroughness":1.0,)");
+    auto scene = parser.Parse(
+        SceneParseRequest { .scene_id = "camera-shake", .project_properties = &properties }, json,
+        vfs, sound_manager);
+    ASSERT_NE(scene, nullptr);
+    ASSERT_NE(scene->runtime, nullptr);
+    ASSERT_NE(scene->activeCamera, nullptr);
+    const Eigen::Matrix4d still = scene->activeCamera->GetViewProjectionMatrix();
+
+    scene->runtime->Tick(0.25);
+    // t = speed^2 * time = 1; amplitude / 10 times a tenth of the canvas height;
+    // a 2D scene shakes in its plane only.
+    const double amplitude = 1.0 * 0.1 * 360.0 * 0.1;
+    const Eigen::Vector3d expected(std::cos(1.0) * amplitude, std::sin(1.333) * amplitude, 0.0);
+    EXPECT_TRUE(scene->activeCamera->ShakeOffset().isApprox(expected, 1e-6));
+    EXPECT_FALSE(scene->activeCamera->GetViewProjectionMatrix().isApprox(still, 1e-9))
+        << "the shake did not move the view";
+    EXPECT_NE(scene->runtime->DescribeTimeAdvancingWork() & SceneDemandReason::Animation, 0u);
+
+    scene->runtime->ApplyProjectPropertyOverride({ { "shake", RuntimeScalarValue::Bool(false) } });
+    scene->runtime->Tick(0.25);
+    EXPECT_TRUE(scene->activeCamera->ShakeOffset().isZero());
+    EXPECT_TRUE(scene->activeCamera->GetViewProjectionMatrix().isApprox(still, 1e-9));
+    EXPECT_EQ(scene->runtime->DescribeTimeAdvancingWork() & SceneDemandReason::Animation, 0u);
+}
+
+TEST(SceneSchema, TheNormalMatrixIsTheDrawsRotationWithoutItsScale) {
+    std::map<std::string, std::string> files;
+    AddLeafModelSceneFiles(files);
+    fs::VFS vfs;
+    ASSERT_TRUE(vfs.Mount("/assets", std::make_unique<MemoryFs>(std::move(files))));
+    audio::SoundManager sound_manager;
+    WPSceneParser       parser;
+    auto scene = parser.Parse("normal-matrix", PerspectiveSceneJson(R"([
+      {"id":1,"name":"planet","model":"planet.mdl","scale":"3 3 3","angles":"0 0 1.5707963"}
+    ])"), vfs, sound_manager);
+    ASSERT_NE(scene, nullptr);
+    auto planet = FindRootChildByName(*scene, "planet");
+    ASSERT_NE(planet, nullptr);
+    const auto captured = CaptureLightUniforms(*scene, *planet);
+    const auto axis     = WorldAxisX(*planet).normalized();
+    // Three std140 columns, each a unit axis of the layer.
+    ExpectSlot(captured, "g_NormalModelMatrix", 0,
+               { float(axis.x()), float(axis.y()), float(axis.z()), 0.0f });
+    const auto& matrix = captured.at("g_NormalModelMatrix");
+    ASSERT_EQ(matrix.size(), 12u);
+    for (int column = 0; column < 3; ++column) {
+        const Eigen::Vector3f v(matrix[column * 4], matrix[column * 4 + 1], matrix[column * 4 + 2]);
+        EXPECT_NEAR(v.norm(), 1.0f, 1e-4f);
+    }
+}
+
 TEST(SceneSchema, ParserKeepsInvisibleImageDependencySources) {
     fs::VFS vfs;
     MountSceneFiles(vfs);
@@ -2423,12 +2857,52 @@ void main() {
     EXPECT_NEAR(final_node.RenderTrans()(0, 3), 46.0, 1.0e-5);
 }
 
-// A layer colour bound to a user property is the property's value: a preset
-// or a saved choice replaces the scene file's default. It has to reach the
-// layer's own material and every effect pass, keep the layer's alpha, and
-// follow the property when it changes. A scripted colour is not a property.
-TEST(SceneSchema, UserBoundImageColourTintsEveryLayerMaterialAndFollowsTheProperty) {
-    fs::VFS vfs;
+// A node's draw offset is a translation in world space added to where the node is drawn
+// and to nothing else: what hangs from the node, a camera on it and a hit test of its
+// world matrix keep the matrix the node has, and a node drawn through an override draws
+// where the override says.
+TEST(SceneSchema, ANodesDrawOffsetMovesItsDrawAndNothingParentedToIt) {
+    SceneNode parent(Eigen::Vector3f(10, 20, 0), Eigen::Vector3f(2, 3, 1), Eigen::Vector3f(0, 0, 0.5f),
+                     "parent");
+    auto child = std::make_shared<SceneNode>(Eigen::Vector3f(5, 7, 0), Eigen::Vector3f::Ones(),
+                                              Eigen::Vector3f::Zero(), "child");
+    parent.AppendChild(child);
+    parent.UpdateTrans();
+    child->UpdateTrans();
+    const Eigen::Matrix4d model       = parent.ModelTrans();
+    const Eigen::Matrix4d child_model = child->ModelTrans();
+    EXPECT_TRUE(parent.RenderTrans().isApprox(model, 0.0));
+    EXPECT_TRUE(parent.DrawOffset().isZero());
+
+    parent.SetDrawOffset(Eigen::Vector3f(-70, 4, 0));
+    parent.UpdateTrans();
+    child->UpdateTrans();
+    EXPECT_TRUE(parent.ModelTrans().isApprox(model, 0.0));
+    EXPECT_TRUE(child->ModelTrans().isApprox(child_model, 0.0));
+    // Drawn 70 left and 4 up in the scene, whatever the node's scale and turn: the offset
+    // is not scaled or turned with the node.
+    Eigen::Matrix4d moved = model;
+    moved(0, 3) -= 70.0;
+    moved(1, 3) += 4.0;
+    EXPECT_TRUE(parent.RenderTrans().isApprox(moved, 1.0e-12));
+    EXPECT_TRUE(Eigen::Matrix3d(parent.RenderTrans().block<3, 3>(0, 0))
+                    .isApprox(Eigen::Matrix3d(model.block<3, 3>(0, 0)), 0.0));
+
+    // A node drawn through an override draws where it says; the offset is not added to it.
+    parent.SetRenderTransformOverride(Eigen::Matrix4d::Identity());
+    EXPECT_TRUE(parent.RenderTrans().isApprox(Eigen::Matrix4d::Identity(), 0.0));
+    parent.ClearRenderTransformOverride();
+    EXPECT_TRUE(parent.RenderTrans().isApprox(moved, 1.0e-12));
+    parent.SetDrawOffset(Eigen::Vector3f::Zero());
+    EXPECT_TRUE(parent.RenderTrans().isApprox(model, 0.0));
+}
+
+namespace {
+
+// A 64x32 image layer, a copy effect to draw one through, and the 640x360
+// canvas the layer transform tests below place their layers on.
+std::shared_ptr<Scene> ParseLayerPlacementScene(fs::VFS& vfs, audio::SoundManager& sound_manager,
+                                                const std::string& objects) {
     auto files = std::map<std::string, std::string> {
         { "/image.json", R"({"width":64,"height":32,"material":"mat.json"})" },
         { "/mat.json",
@@ -2448,6 +2922,179 @@ void main() {
 )" },
         { "/shaders/genericimage.frag",
           R"(uniform sampler2D g_Texture0;
+varying vec2 v_TexCoord;
+void main() {
+  gl_FragColor = texture(g_Texture0, v_TexCoord);
+}
+)" },
+        { "/materials/a.tex.tex", "" },
+    };
+    EXPECT_TRUE(vfs.Mount("/assets", std::make_unique<MemoryFs>(std::move(files))));
+    // Parsed with project properties, as the app always does, so the scene has
+    // the runtime its scripts run on.
+    ProjectProperties properties;
+    return WPSceneParser().Parse(SceneParseRequest {
+                                     .scene_id           = "layer-placement",
+                                     .project_properties = &properties,
+                                 },
+                                 R"({
+      "camera": {"center":[0,0,0], "eye":[0,0,1], "up":[0,1,0]},
+      "general": {
+        "ambientcolor":[0.2,0.2,0.2], "skylightcolor":[0.3,0.3,0.3],
+        "clearcolor":[0,0,0], "cameraparallax":false,
+        "cameraparallaxamount":0, "cameraparallaxdelay":0,
+        "cameraparallaxmouseinfluence":0,
+        "orthogonalprojection":{"width":640,"height":360}
+      },
+      "objects": [)" + objects + "]}",
+                                 vfs, sound_manager);
+}
+
+// A plain layer whose origin is whatever `body` returns when it runs, so the
+// layer's origin reports what a script saw.
+std::string ScriptedReaderLayer(int id, const std::string& name, const std::string& body) {
+    return nlohmann::json {
+        { "id", id }, { "name", name },
+        { "origin", { { "value", "0 0 0" },
+                      { "script", "export function update() { " + body + " }" } } }
+    }.dump();
+}
+
+// `layer.getTransformMatrix()` x and y (m[12], m[13]) of a layer by name.
+std::string StandsAt(const std::string& layer) {
+    return "const m = thisScene.getLayer('" + layer + "').getTransformMatrix().m; "
+           "return new Vec3(m[12], m[13], 0);";
+}
+
+} // namespace
+
+// The matrix a script reads has to be the world transform of the layer the
+// parser built: what its parents put it at, and not the identity a layer drawn
+// through effects renders from (that one is in the node's render transform, not
+// in the placement). A group at (100, 200) scaled by two puts a child at local
+// (10, 20) at (120, 240), with or without an effect on it.
+TEST(SceneSchema, LayerTransformMatrixOfParsedLayersIsWhereTheirParentsPutThem) {
+    fs::VFS             vfs;
+    audio::SoundManager sound_manager;
+    const std::string   objects =
+        R"({"id":1,"name":"group","origin":[100,200,0],"scale":[2,2,1],"visible":true},
+            {"id":2,"parent":1,"name":"plain","image":"image.json",
+             "origin":[10,20,0],"scale":[1,1,1],"angles":[0,0,0],"visible":true},
+            {"id":3,"parent":1,"name":"drawn","image":"image.json",
+             "origin":[30,0,0],"scale":[1,1,1],"angles":[0,0,0],"visible":true,
+             "effects":[{"file":"effects/copy/effect.json","id":4,"visible":true}]},)" +
+        ScriptedReaderLayer(10, "reads plain", StandsAt("plain")) + "," +
+        ScriptedReaderLayer(11, "reads drawn", StandsAt("drawn")) + "," +
+        ScriptedReaderLayer(12, "reads group", StandsAt("group"));
+    auto scene = ParseLayerPlacementScene(vfs, sound_manager, objects);
+    ASSERT_NE(scene, nullptr);
+    ASSERT_NE(scene->runtime, nullptr);
+    auto& runtime = *scene->runtime;
+
+    // The layer that is drawn through an effect really does render from an
+    // identity of its own, or this would not tell the two matrices apart.
+    auto group = FindRootChildByName(*scene, "group");
+    ASSERT_NE(group, nullptr);
+    auto* drawn = FindFirstChildByName(*group, "drawn");
+    ASSERT_NE(drawn, nullptr);
+    ASSERT_TRUE(drawn->HasRenderTransformOverride());
+
+    runtime.Tick(0.01);
+    EXPECT_TRUE(runtime.NodeTranslate("reads plain").isApprox(Eigen::Vector3f(120, 240, 0)))
+        << runtime.NodeTranslate("reads plain").transpose();
+    EXPECT_TRUE(runtime.NodeTranslate("reads drawn").isApprox(Eigen::Vector3f(160, 200, 0)))
+        << runtime.NodeTranslate("reads drawn").transpose();
+    EXPECT_TRUE(runtime.NodeTranslate("reads group").isApprox(Eigen::Vector3f(100, 200, 0)))
+        << runtime.NodeTranslate("reads group").transpose();
+    for (const auto& error : runtime.scriptErrors()) ADD_FAILURE() << error;
+}
+
+// A layer anchored to an edge is placed by its anchor (`origin`), while its
+// matrix is the centre of the quad the anchor puts it at: half the drawn width
+// to the right of a left anchor, the way Wallpaper Engine's layer matrix is the
+// quad's centre. The matrix keeps up with a script that moves the anchor.
+TEST(SceneSchema, LayerTransformMatrixOfAnAnchoredLayerIsTheCentreOfItsQuad) {
+    fs::VFS             vfs;
+    audio::SoundManager sound_manager;
+    const std::string   objects =
+        R"({"id":1,"name":"anchored","image":"image.json","alignment":"left",
+            "origin":[100,70,0],"scale":[2,1,1],"angles":[0,0,0],"visible":true},
+           {"id":2,"name":"moved","image":"image.json","alignment":"left",
+            "origin":[100,70,0],"scale":[2,1,1],"angles":[0,0,0],"visible":true},)" +
+        ScriptedReaderLayer(10, "reads matrix", StandsAt("anchored")) + "," +
+        ScriptedReaderLayer(11, "reads origin",
+                            "const o = thisScene.getLayer('anchored').origin; "
+                            "return new Vec3(o.x, o.y, 0);") + "," +
+        ScriptedReaderLayer(12, "moves anchor",
+                            "thisScene.getLayer('moved').origin = new Vec3(300, 70, 0); " +
+                                StandsAt("moved"));
+    auto scene = ParseLayerPlacementScene(vfs, sound_manager, objects);
+    ASSERT_NE(scene, nullptr);
+    ASSERT_NE(scene->runtime, nullptr);
+    auto& runtime = *scene->runtime;
+
+    // The left edge is at the anchor; the layer is drawn twice its width.
+    const float half_width = runtime.NodeSize("anchored").x() * 2.0f / 2.0f;
+    ASSERT_GT(half_width, 0.0f);
+
+    runtime.Tick(0.01);
+    EXPECT_TRUE(runtime.NodeTranslate("reads origin").isApprox(Eigen::Vector3f(100, 70, 0)))
+        << runtime.NodeTranslate("reads origin").transpose();
+    EXPECT_TRUE(runtime.NodeTranslate("reads matrix")
+                    .isApprox(Eigen::Vector3f(100 + half_width, 70, 0)))
+        << runtime.NodeTranslate("reads matrix").transpose();
+    EXPECT_TRUE(runtime.NodeTranslate("moves anchor")
+                    .isApprox(Eigen::Vector3f(300 + half_width, 70, 0)))
+        << runtime.NodeTranslate("moves anchor").transpose();
+    for (const auto& error : runtime.scriptErrors()) ADD_FAILURE() << error;
+}
+
+// An image with an effect that draws it through, both reading the layer colour
+// from `g_Color4`: what a layer colour has to reach.
+void MountTintableImageFiles(fs::VFS& vfs, bool hdr_bloom = false) {
+    auto files = std::map<std::string, std::string> {
+        { "/image.json", R"({"width":64,"height":32,"material":"mat.json"})" },
+        { "/mat.json",
+          R"({"passes":[{"blending":"translucent","cullmode":"nocull","depthtest":"disabled","depthwrite":"disabled","shader":"genericimage","textures":["a.tex"]}]})" },
+        { "/effects/copy/effect.json",
+          R"({"name":"copy","passes":[{"material":"effect_mat.json","bind":[{"name":"previous","index":0}]}]})" },
+        { "/effect_mat.json",
+          R"({"passes":[{"blending":"translucent","cullmode":"nocull","depthtest":"disabled","depthwrite":"disabled","shader":"genericimage","textures":[null]}]})" },
+        // Wallpaper Engine's Opacity effect: its `alpha` is the `g_UserAlpha` of its
+        // own shader, the effect's, and not the layer's.
+        { "/effects/opacity/effect.json",
+          R"({"name":"opacity","passes":[{"material":"opacity_mat.json","bind":[{"name":"previous","index":0}]}]})" },
+        { "/opacity_mat.json",
+          R"({"passes":[{"blending":"translucent","cullmode":"nocull","depthtest":"disabled","depthwrite":"disabled","shader":"opacity","textures":[null]}]})" },
+        { "/shaders/opacity.vert",
+          R"(attribute vec3 a_Position;
+attribute vec2 a_TexCoord;
+varying vec2 v_TexCoord;
+void main() {
+  gl_Position = vec4(a_Position, 1.0);
+  v_TexCoord = a_TexCoord;
+}
+)" },
+        { "/shaders/opacity.frag",
+          R"(uniform sampler2D g_Texture0;
+uniform float g_UserAlpha; // {"material":"alpha","default":1.0}
+varying vec2 v_TexCoord;
+void main() {
+  vec4 color = texture(g_Texture0, v_TexCoord);
+  gl_FragColor = vec4(color.rgb, color.a * g_UserAlpha);
+}
+)" },
+        { "/shaders/genericimage.vert",
+          R"(attribute vec3 a_Position;
+attribute vec2 a_TexCoord;
+varying vec2 v_TexCoord;
+void main() {
+  gl_Position = vec4(a_Position, 1.0);
+  v_TexCoord = a_TexCoord;
+}
+)" },
+        { "/shaders/genericimage.frag",
+          R"(uniform sampler2D g_Texture0;
 uniform vec4 g_Color4;
 varying vec2 v_TexCoord;
 void main() {
@@ -2456,7 +3103,37 @@ void main() {
 )" },
         { "/materials/a.tex.tex", "" },
     };
+    if (hdr_bloom) AddHdrBloomFixtureFiles(files);
     EXPECT_TRUE(vfs.Mount("/assets", std::make_unique<MemoryFs>(std::move(files))));
+}
+
+// The materials a layer draws with: its own and each effect pass's.
+std::vector<SceneMaterial*> LayerMaterials(const Scene& scene, std::string_view name) {
+    std::vector<SceneMaterial*> materials;
+    auto node = FindRootChildByName(scene, name);
+    if (node == nullptr || node->Mesh() == nullptr) return materials;
+    materials.push_back(node->Mesh()->Material());
+    if (const auto camera = scene.cameras.find(node->Camera());
+        camera != scene.cameras.end() && camera->second->HasImgEffect()) {
+        auto& layer = *camera->second->GetImgEffect();
+        for (std::size_t index = 0; index < layer.EffectCount(); ++index) {
+            for (auto& effect_node : layer.GetEffect(index)->nodes) {
+                materials.push_back(effect_node.sceneNode->Mesh()->Material());
+            }
+        }
+    }
+    return materials;
+}
+
+// A layer colour bound to a user property is the property's value: a preset
+// or a saved choice replaces the scene file's default. It has to reach the
+// layer's own material and every effect pass, keep the layer's alpha, and
+// follow the property when it changes. A scripted colour is the script's value
+// from its first tick on (`ScriptedImageColour*` below), whatever the scene
+// file's `value` says.
+TEST(SceneSchema, UserBoundImageColourTintsEveryLayerMaterialAndFollowsTheProperty) {
+    fs::VFS vfs;
+    MountTintableImageFiles(vfs);
     audio::SoundManager sound_manager(audio::SoundManager::OutputBackend::Null);
     ProjectProperties   properties { { "tint", RuntimeScalarValue::String("0 0 1") } };
     const std::string   scene = R"({
@@ -2493,6 +3170,125 @@ void main() {
     ASSERT_NE(parsed, nullptr);
     ASSERT_NE(parsed->runtime, nullptr);
 
+    const auto expect_colour = [&](std::string_view name, std::array<float, 3> rgb,
+                                   std::size_t expected_materials) {
+        SCOPED_TRACE(std::string(name));
+        const auto materials = LayerMaterials(*parsed, name);
+        ASSERT_EQ(materials.size(), expected_materials);
+        for (const auto* material : materials) {
+            const auto& values = material->customShader.constValues;
+            ASSERT_TRUE(values.contains("g_Color4"));
+            ASSERT_TRUE(values.contains("g_Color"));
+            for (std::size_t index = 0; index < 3; ++index) {
+                EXPECT_FLOAT_EQ(values.at("g_Color4")[index], rgb[index]);
+                EXPECT_FLOAT_EQ(values.at("g_Color")[index], rgb[index]);
+            }
+            EXPECT_FLOAT_EQ(values.at("g_Color4")[3], 0.5f);
+        }
+    };
+
+    expect_colour("plain", { 0.0f, 0.0f, 1.0f }, 1u);
+    expect_colour("with effect", { 0.0f, 0.0f, 1.0f }, 2u);
+    // Until its script has run, the scripted layer holds the scene file's value.
+    expect_colour("scripted", { 0.9f, 0.15f, 0.27f }, 1u);
+
+    parsed->runtime->ApplyProjectPropertyOverride(
+        { { "tint", RuntimeScalarValue::String("0.25 0.5 0.75") } });
+    parsed->runtime->Tick(1.0 / 60.0);
+    expect_colour("plain", { 0.25f, 0.5f, 0.75f }, 1u);
+    expect_colour("with effect", { 0.25f, 0.5f, 0.75f }, 2u);
+    // The script's value, not the scene file's, once it has run.
+    expect_colour("scripted", { 0.0f, 1.0f, 0.0f }, 1u);
+    EXPECT_EQ(parsed->runtime->scriptErrorCount(), 0u);
+}
+
+// Wallpaper Engine runs a colour script on an image layer like one on a text
+// layer: its `update()` is the layer's colour every frame, over the scene file's
+// `value`, on the layer's own material and on every effect pass. The media
+// widgets' colour script returns black until a cover's colour arrives. A script
+// that returns nothing leaves the colour as it is, and one that writes
+// `thisLayer.color` and returns nothing sets it.
+TEST(SceneSchema, ScriptedImageColourIsTheScriptsValueOnEveryLayerMaterial) {
+    fs::VFS vfs;
+    auto files = std::map<std::string, std::string> {
+        { "/image.json", R"({"width":64,"height":32,"material":"mat.json"})" },
+        { "/mat.json",
+          R"({"passes":[{"blending":"translucent","cullmode":"nocull","depthtest":"disabled","depthwrite":"disabled","shader":"genericimage","textures":["a.tex"]}]})" },
+        { "/effects/copy/effect.json",
+          R"({"name":"copy","passes":[{"material":"effect_mat.json","bind":[{"name":"previous","index":0}]}]})" },
+        { "/effect_mat.json",
+          R"({"passes":[{"blending":"translucent","cullmode":"nocull","depthtest":"disabled","depthwrite":"disabled","shader":"genericimage","textures":[null]}]})" },
+        { "/shaders/genericimage.vert",
+          R"(attribute vec3 a_Position;
+attribute vec2 a_TexCoord;
+varying vec2 v_TexCoord;
+void main() {
+  gl_Position = vec4(a_Position, 1.0);
+  v_TexCoord = a_TexCoord;
+}
+)" },
+        { "/shaders/genericimage.frag",
+          R"(uniform sampler2D g_Texture0;
+uniform vec4 g_Color4;
+varying vec2 v_TexCoord;
+void main() {
+  gl_FragColor = texture(g_Texture0, v_TexCoord) * g_Color4;
+}
+)" },
+        { "/materials/a.tex.tex", "" },
+    };
+    EXPECT_TRUE(vfs.Mount("/assets", std::make_unique<MemoryFs>(std::move(files))));
+    audio::SoundManager sound_manager(audio::SoundManager::OutputBackend::Null);
+    const std::string   scene = R"({
+      "camera": {"center":[0,0,0], "eye":[0,0,1], "up":[0,1,0]},
+      "general": {
+        "ambientcolor":[0.2,0.2,0.2], "skylightcolor":[0.3,0.3,0.3],
+        "clearcolor":[0,0,0], "cameraparallax":false,
+        "cameraparallaxamount":0, "cameraparallaxdelay":0,
+        "cameraparallaxmouseinfluence":0,
+        "orthogonalprojection":{"width":640,"height":360}
+      },
+      "objects": [
+        {"id":1,"name":"returns","image":"image.json","alpha":0.5,
+         "color":{"script":"export function update() { return new Vec3(1, 0, 0); }",
+                  "value":"0 1 0"},
+         "origin":[0,0,0],"scale":[1,1,1],"angles":[0,0,0],"visible":true,
+         "effects":[{"file":"effects/copy/effect.json","id":2,"visible":true}]},
+        {"id":3,"name":"returns nothing","image":"image.json","alpha":0.5,
+         "color":{"script":"export function update(value) { }","value":"0.9 0.15 0.27"},
+         "origin":[0,0,0],"scale":[1,1,1],"angles":[0,0,0],"visible":true},
+        {"id":4,"name":"writes","image":"image.json","alpha":0.5,
+         "color":{"script":"export function update() { thisLayer.color = new Vec3(0, 0, 1); }",
+                  "value":"1 0 0"},
+         "origin":[0,0,0],"scale":[1,1,1],"angles":[0,0,0],"visible":true,
+         "effects":[{"file":"effects/copy/effect.json","id":5,"visible":true}]},
+        {"id":6,"name":"cover","image":"image.json","alpha":0.5,
+         "color":{"script":"let newColor = new Vec3(0, 0, 0);\nexport function update() { return newColor; }\nexport function mediaThumbnailChanged(event) { newColor = event.primaryColor; }",
+                  "value":"0.33 0.64 0.74"},
+         "origin":[0,0,0],"scale":[1,1,1],"angles":[0,0,0],"visible":true},
+        {"id":7,"name":"handler","image":"image.json","alpha":0.5,
+         "color":{"script":"scene.on('mediaThumbnailChanged', function(event) { thisLayer.color = event.primaryColor; });",
+                  "value":"0 1 0"},
+         "origin":[0,0,0],"scale":[1,1,1],"angles":[0,0,0],"visible":true,
+         "effects":[{"file":"effects/copy/effect.json","id":8,"visible":true}]},
+        {"id":9,"name":"reads its write","image":"image.json","alpha":0.5,
+         "color":{"script":"let ticks = 0;\nexport function update(value) { ticks += 1; if (ticks == 1) { thisLayer.color = new Vec3(0, 0, 1); return; } return new Vec3(0.5, value.y, value.z); }",
+                  "value":"1 0 0"},
+         "origin":[0,0,0],"scale":[1,1,1],"angles":[0,0,0],"visible":true}
+      ]
+    })";
+
+    ProjectProperties properties;
+    auto              parsed = WPSceneParser().Parse(SceneParseRequest {
+                                                         .scene_id           = "scripted-image-colour",
+                                                         .project_properties = &properties,
+                                                     },
+                                                     scene,
+                                                     vfs,
+                                                     sound_manager);
+    ASSERT_NE(parsed, nullptr);
+    ASSERT_NE(parsed->runtime, nullptr);
+
     const auto materials_of = [&parsed](std::string_view name) {
         std::vector<SceneMaterial*> materials;
         auto node = FindRootChildByName(*parsed, name);
@@ -2526,16 +3322,765 @@ void main() {
         }
     };
 
-    expect_colour("plain", { 0.0f, 0.0f, 1.0f }, 1u);
-    expect_colour("with effect", { 0.0f, 0.0f, 1.0f }, 2u);
-    expect_colour("scripted", { 0.9f, 0.15f, 0.27f }, 1u);
+    // As the scene loads, before any script has run: the scene file's values.
+    expect_colour("returns", { 0.0f, 1.0f, 0.0f }, 2u);
+    expect_colour("returns nothing", { 0.9f, 0.15f, 0.27f }, 1u);
+    expect_colour("writes", { 1.0f, 0.0f, 0.0f }, 2u);
+    expect_colour("cover", { 0.33f, 0.64f, 0.74f }, 1u);
+    expect_colour("handler", { 0.0f, 1.0f, 0.0f }, 2u);
+    expect_colour("reads its write", { 1.0f, 0.0f, 0.0f }, 1u);
 
-    parsed->runtime->ApplyProjectPropertyOverride(
-        { { "tint", RuntimeScalarValue::String("0.25 0.5 0.75") } });
+    // Scripts that decide a colour are scripts: the scene keeps its clock, which
+    // is the cost of following them (an image colour script made none before).
+    EXPECT_NE(parsed->runtime->DescribeTimeAdvancingWork() & SceneDemandReason::Script, 0u);
+
+    // What the script wrote on the first tick is the value its second call is given
+    // (it would be the scene file's (1, 0, 0), and the result (0.5, 0, 0), if not).
     parsed->runtime->Tick(1.0 / 60.0);
-    expect_colour("plain", { 0.25f, 0.5f, 0.75f }, 1u);
-    expect_colour("with effect", { 0.25f, 0.5f, 0.75f }, 2u);
+    expect_colour("reads its write", { 0.0f, 0.0f, 1.0f }, 1u);
+    parsed->runtime->Tick(1.0 / 60.0);
+    expect_colour("reads its write", { 0.5f, 0.0f, 1.0f }, 1u);
+
+    // Every tick, not just the first: a colour that wore off would show here.
+    for (int tick = 0; tick < 3; ++tick) {
+        parsed->runtime->Tick(1.0 / 60.0);
+        SCOPED_TRACE(tick);
+        expect_colour("returns", { 1.0f, 0.0f, 0.0f }, 2u);
+        // `update()` returned nothing, so the colour stays what it was.
+        expect_colour("returns nothing", { 0.9f, 0.15f, 0.27f }, 1u);
+        // It wrote the colour itself; the tick must not put the scene file's back.
+        expect_colour("writes", { 0.0f, 0.0f, 1.0f }, 2u);
+        // The media widgets' template: black until a cover's colour arrives.
+        expect_colour("cover", { 0.0f, 0.0f, 0.0f }, 1u);
+        // Written only by a handler, which has not been called yet.
+        expect_colour("handler", { 0.0f, 1.0f, 0.0f }, 2u);
+    }
+
+    parsed->runtime->SetMediaIntegrationEnabled(true);
+    parsed->runtime->DispatchMediaEventJson(
+        R"({"type":"mediaThumbnailChanged","hasThumbnail":true,"primaryColor":[0.25,0.5,0.75],"secondaryColor":[0,0,0],"tertiaryColor":[0,0,0],"textColor":[1,1,1],"highContrastColor":[0,0,0]})");
+    parsed->runtime->Tick(1.0 / 60.0);
+    expect_colour("cover", { 0.25f, 0.5f, 0.75f }, 1u);
+    // A colour script made of event handlers writes the colour from its handler,
+    // and the write reaches the effect pass too.
+    expect_colour("handler", { 0.25f, 0.5f, 0.75f }, 2u);
+    parsed->runtime->Tick(1.0 / 60.0);
+    expect_colour("cover", { 0.25f, 0.5f, 0.75f }, 1u);
+    expect_colour("handler", { 0.25f, 0.5f, 0.75f }, 2u);
     EXPECT_EQ(parsed->runtime->scriptErrorCount(), 0u);
+}
+
+// A script writes a layer's opacity as `thisLayer.alpha`. The write has to reach
+// every material that takes the layer's alpha -- its own and the `g_Color4` of
+// each effect pass, as an authored alpha, a user property and a timeline do --
+// and not the one built last, and an alpha a property or a script owns is left
+// to its owner.
+TEST(SceneSchema, AScriptsAlphaWriteReachesEveryMaterialOfTheLayer) {
+    fs::VFS vfs;
+    MountTintableImageFiles(vfs);
+    audio::SoundManager sound_manager(audio::SoundManager::OutputBackend::Null);
+    const std::string   scene = R"({
+      "camera": {"center":[0,0,0], "eye":[0,0,1], "up":[0,1,0]},
+      "general": {
+        "ambientcolor":[0.2,0.2,0.2], "skylightcolor":[0.3,0.3,0.3],
+        "clearcolor":[0,0,0], "cameraparallax":false,
+        "cameraparallaxamount":0, "cameraparallaxdelay":0,
+        "cameraparallaxmouseinfluence":0,
+        "orthogonalprojection":{"width":640,"height":360}
+      },
+      "objects": [
+        {"id":1,"name":"plain","image":"image.json","alpha":0.5,
+         "origin":[0,0,0],"scale":[1,1,1],"angles":[0,0,0],"visible":true},
+        {"id":2,"name":"with effect","image":"image.json","alpha":0.5,
+         "origin":[0,0,0],"scale":[1,1,1],"angles":[0,0,0],"visible":true,
+         "effects":[{"file":"effects/copy/effect.json","id":3,"visible":true}]},
+        {"id":4,"name":"two effects","image":"image.json","alpha":0.5,
+         "origin":[0,0,0],"scale":[1,1,1],"angles":[0,0,0],"visible":true,
+         "effects":[{"file":"effects/copy/effect.json","id":5,"visible":true},
+                    {"file":"effects/copy/effect.json","id":6,"visible":{"value":false,
+                     "script":"export function update() { return false; }"}}]},
+        {"id":7,"name":"written by itself","image":"image.json","alpha":0.5,
+         "visible":{"value":true,"script":"export function update(value) { thisLayer.alpha = 0.25; return value; }"},
+         "origin":[0,0,0],"scale":[1,1,1],"angles":[0,0,0],
+         "effects":[{"file":"effects/copy/effect.json","id":8,"visible":true}]},
+        {"id":9,"name":"owned by a script","image":"image.json",
+         "alpha":{"value":0.5,"script":"export function update(value) { return value; }"},
+         "origin":[0,0,0],"scale":[1,1,1],"angles":[0,0,0],"visible":true,
+         "effects":[{"file":"effects/copy/effect.json","id":10,"visible":true}]}
+      ]
+    })";
+
+    ProjectProperties properties;
+    auto              parsed = WPSceneParser().Parse(SceneParseRequest {
+                                                         .scene_id           = "script-alpha-write",
+                                                         .project_properties = &properties,
+                                                     },
+                                                     scene,
+                                                     vfs,
+                                                     sound_manager);
+    ASSERT_NE(parsed, nullptr);
+    ASSERT_NE(parsed->runtime, nullptr);
+
+    const auto expect_alpha = [&](std::string_view name, float alpha, std::size_t expected_materials) {
+        SCOPED_TRACE(std::string(name));
+        const auto materials = LayerMaterials(*parsed, name);
+        ASSERT_EQ(materials.size(), expected_materials);
+        for (const auto* material : materials) {
+            const auto& values = material->customShader.constValues;
+            ASSERT_TRUE(values.contains("g_Color4"));
+            EXPECT_FLOAT_EQ(values.at("g_Color4")[3], alpha);
+        }
+    };
+
+    expect_alpha("plain", 0.5f, 1u);
+    expect_alpha("with effect", 0.5f, 2u);
+    // Only the effects that are built have a pass; a script-switched one is built.
+    expect_alpha("two effects", 0.5f, 3u);
+
+    for (const auto& [name, count] : { std::pair<const char*, std::size_t> { "plain", 1u },
+                                       { "with effect", 2u },
+                                       { "two effects", 3u } }) {
+        SCOPED_TRACE(name);
+        ASSERT_TRUE(parsed->runtime->SetNodeAlpha(name, 0.25f));
+        expect_alpha(name, 0.25f, count);
+        EXPECT_FLOAT_EQ(*parsed->runtime->NodeAlpha(name), 0.25f);
+        ASSERT_TRUE(parsed->runtime->SetNodeAlpha(name, 0.0f));
+        expect_alpha(name, 0.0f, count);
+        EXPECT_FLOAT_EQ(*parsed->runtime->NodeAlpha(name), 0.0f);
+    }
+
+    // The layer's own script writes it, and the effect pass follows.
+    expect_alpha("written by itself", 0.5f, 2u);
+    parsed->runtime->Tick(1.0 / 60.0);
+    expect_alpha("written by itself", 0.25f, 2u);
+    EXPECT_FLOAT_EQ(*parsed->runtime->NodeAlpha("written by itself"), 0.25f);
+
+    // An alpha a script owns is that script's: no second writer.
+    EXPECT_FALSE(parsed->runtime->SetNodeAlpha("owned by a script", 0.1f));
+    expect_alpha("owned by a script", 0.5f, 2u);
+    EXPECT_EQ(parsed->runtime->scriptErrorCount(), 0u);
+}
+
+// An effect with an alpha of its own, Wallpaper Engine's Opacity, keeps it. Its
+// `g_UserAlpha` is the effect's `alpha`, set in the effect, while the layer's is
+// the layer's own pass's; a layer's alpha, whether a script writes it, a user
+// property is bound to it or its own script owns it, is applied once, by the
+// layer, and the effect's multiplies it. The `g_Color4` and `g_Alpha` the layer
+// hands every pass follow, as an authored alpha leaves them.
+TEST(SceneSchema, AnEffectsOwnAlphaIsLeftAloneWhenTheLayersAlphaIsDriven) {
+    fs::VFS vfs;
+    MountTintableImageFiles(vfs);
+    audio::SoundManager sound_manager(audio::SoundManager::OutputBackend::Null);
+    const std::string   opacity = [](int id) {
+        return R"("effects":[{"file":"effects/opacity/effect.json","id":)" + std::to_string(id) +
+               R"(,"visible":true,"passes":[{"id":)" + std::to_string(id + 1) +
+               R"(,"constantshadervalues":{"alpha":0.8}}]}])";
+    }(10);
+    const std::string   second_opacity = [](int id) {
+        return R"({"file":"effects/opacity/effect.json","id":)" + std::to_string(id) +
+               R"(,"visible":true,"passes":[{"id":)" + std::to_string(id + 1) +
+               R"(,"constantshadervalues":{"alpha":0.8}}]})";
+    }(20);
+    const std::string   scene = R"({
+      "camera": {"center":[0,0,0], "eye":[0,0,1], "up":[0,1,0]},
+      "general": {
+        "ambientcolor":[0.2,0.2,0.2], "skylightcolor":[0.3,0.3,0.3],
+        "clearcolor":[0,0,0], "cameraparallax":false,
+        "cameraparallaxamount":0, "cameraparallaxdelay":0,
+        "cameraparallaxmouseinfluence":0,
+        "orthogonalprojection":{"width":640,"height":360}
+      },
+      "objects": [
+        {"id":1,"name":"authored","image":"image.json","alpha":0.5,
+         "origin":[0,0,0],"scale":[1,1,1],"angles":[0,0,0],"visible":true,)" + opacity + R"(},
+        {"id":2,"name":"written","image":"image.json","alpha":0.5,
+         "visible":{"value":true,"script":"export function update(value) { thisLayer.alpha = 0.25; return value; }"},
+         "origin":[0,0,0],"scale":[1,1,1],"angles":[0,0,0],)" + opacity + R"(},
+        {"id":3,"name":"bound","image":"image.json","alpha":{"user":"fade","value":1},
+         "origin":[0,0,0],"scale":[1,1,1],"angles":[0,0,0],"visible":true,)" + opacity + R"(},
+        {"id":4,"name":"owned by a script","image":"image.json",
+         "alpha":{"value":0.5,"script":"export function update(value) { return 0.3; }"},
+         "origin":[0,0,0],"scale":[1,1,1],"angles":[0,0,0],"visible":true,)" + opacity + R"(},
+        {"id":5,"name":"two effects","image":"image.json","alpha":0.5,
+         "origin":[0,0,0],"scale":[1,1,1],"angles":[0,0,0],"visible":true,
+         "effects":[{"file":"effects/opacity/effect.json","id":30,"visible":true,
+                     "passes":[{"id":31,"constantshadervalues":{"alpha":0.8}}]},)" + second_opacity + R"(]}
+      ]
+    })";
+
+    ProjectProperties properties { { "fade", RuntimeScalarValue::Float(0.4f) } };
+    auto              parsed = WPSceneParser().Parse(SceneParseRequest {
+                                                         .scene_id           = "effect-own-alpha",
+                                                         .project_properties = &properties,
+                                                     },
+                                                     scene,
+                                                     vfs,
+                                                     sound_manager);
+    ASSERT_NE(parsed, nullptr);
+    ASSERT_NE(parsed->runtime, nullptr);
+
+    // The layer's alpha is what its own pass, the first material, applies; every
+    // later one is an effect pass, which keeps the alpha it was authored with.
+    const auto expect_alpha = [&](std::string_view name, float alpha, std::size_t effect_passes) {
+        SCOPED_TRACE(std::string(name));
+        const auto materials = LayerMaterials(*parsed, name);
+        ASSERT_EQ(materials.size(), effect_passes + 1u);
+        for (std::size_t index = 0; index < materials.size(); ++index) {
+            SCOPED_TRACE(index);
+            const auto& values = materials[index]->customShader.constValues;
+            ASSERT_TRUE(values.contains("g_UserAlpha"));
+            ASSERT_TRUE(values.contains("g_Color4"));
+            ASSERT_TRUE(values.contains("g_Alpha"));
+            EXPECT_FLOAT_EQ(values.at("g_UserAlpha")[0], index == 0 ? alpha : 0.8f);
+            EXPECT_FLOAT_EQ(values.at("g_Color4")[3], alpha);
+            EXPECT_FLOAT_EQ(values.at("g_Alpha")[0], alpha);
+        }
+    };
+
+    expect_alpha("authored", 0.5f, 1u);
+    EXPECT_TRUE(parsed->runtime->SetNodeAlpha("authored", 0.1f));
+    expect_alpha("authored", 0.1f, 1u);
+
+    parsed->runtime->Tick(1.0 / 60.0);
+    expect_alpha("written", 0.25f, 1u);
+    expect_alpha("bound", 0.4f, 1u);
+    expect_alpha("owned by a script", 0.3f, 1u);
+
+    parsed->runtime->ApplyProjectPropertyOverride({ { "fade", RuntimeScalarValue::Float(0.7f) } });
+    parsed->runtime->Tick(1.0 / 60.0);
+    expect_alpha("bound", 0.7f, 1u);
+
+    expect_alpha("two effects", 0.5f, 2u);
+    EXPECT_TRUE(parsed->runtime->SetNodeAlpha("two effects", 0.2f));
+    expect_alpha("two effects", 0.2f, 2u);
+    EXPECT_EQ(parsed->runtime->scriptErrorCount(), 0u);
+}
+
+// Every pass of a layer is seeded with the layer's authored alpha, and only an
+// `alpha` the effect sets itself replaces it, so an effect that sets none (an
+// Opacity effect left at its defaults) starts from the layer's authored alpha. That
+// start is the effect's own like an alpha it authored: a write, a property or a
+// script that drives the layer's alpha afterwards leaves it where it was, and moves
+// the `g_Color4` and `g_Alpha` of the effect's pass with the layer's.
+TEST(SceneSchema, AnEffectThatSetsNoAlphaStartsFromTheLayersAuthoredAlphaAndKeepsIt) {
+    fs::VFS vfs;
+    MountTintableImageFiles(vfs);
+    audio::SoundManager sound_manager(audio::SoundManager::OutputBackend::Null);
+    const std::string   scene = R"({
+      "camera": {"center":[0,0,0], "eye":[0,0,1], "up":[0,1,0]},
+      "general": {
+        "ambientcolor":[0.2,0.2,0.2], "skylightcolor":[0.3,0.3,0.3],
+        "clearcolor":[0,0,0], "cameraparallax":false,
+        "cameraparallaxamount":0, "cameraparallaxdelay":0,
+        "cameraparallaxmouseinfluence":0,
+        "orthogonalprojection":{"width":640,"height":360}
+      },
+      "objects": [
+        {"id":1,"name":"authored","image":"image.json","alpha":0.5,
+         "origin":[0,0,0],"scale":[1,1,1],"angles":[0,0,0],"visible":true,
+         "effects":[{"file":"effects/opacity/effect.json","id":10,"visible":true}]},
+        {"id":2,"name":"written","image":"image.json","alpha":0.5,
+         "visible":{"value":true,"script":"export function update(value) { thisLayer.alpha = 0.25; return value; }"},
+         "origin":[0,0,0],"scale":[1,1,1],"angles":[0,0,0],
+         "effects":[{"file":"effects/opacity/effect.json","id":20,"visible":true}]}
+      ]
+    })";
+
+    ProjectProperties properties;
+    auto              parsed = WPSceneParser().Parse(SceneParseRequest {
+                                                         .scene_id           = "effect-no-alpha",
+                                                         .project_properties = &properties,
+                                                     },
+                                                     scene,
+                                                     vfs,
+                                                     sound_manager);
+    ASSERT_NE(parsed, nullptr);
+    ASSERT_NE(parsed->runtime, nullptr);
+
+    const auto expect_alpha = [&](std::string_view name, float layer_alpha, float effect_alpha) {
+        SCOPED_TRACE(std::string(name));
+        const auto materials = LayerMaterials(*parsed, name);
+        ASSERT_EQ(materials.size(), 2u);
+        for (std::size_t index = 0; index < materials.size(); ++index) {
+            SCOPED_TRACE(index);
+            const auto& values = materials[index]->customShader.constValues;
+            ASSERT_TRUE(values.contains("g_UserAlpha"));
+            EXPECT_FLOAT_EQ(values.at("g_UserAlpha")[0], index == 0 ? layer_alpha : effect_alpha);
+            EXPECT_FLOAT_EQ(values.at("g_Color4")[3], layer_alpha);
+        }
+    };
+
+    expect_alpha("authored", 0.5f, 0.5f);
+    EXPECT_TRUE(parsed->runtime->SetNodeAlpha("authored", 0.1f));
+    expect_alpha("authored", 0.1f, 0.5f);
+
+    expect_alpha("written", 0.5f, 0.5f);
+    parsed->runtime->Tick(1.0 / 60.0);
+    expect_alpha("written", 0.25f, 0.5f);
+    EXPECT_EQ(parsed->runtime->scriptErrorCount(), 0u);
+}
+
+// A puppet that has effects is drawn by its effect chain and then by a skinned
+// pass of the layer's own material, appended to the chain: that pass is the layer
+// on screen, so its `g_UserAlpha` is the layer's, while the effect before it keeps
+// its own. The layer's own material, the sheet the chain starts from, carries it
+// too, so this layer's alpha is applied by two passes whoever sets it (a known
+// limitation, docs/testing/renderer.md): a script's write puts every material where
+// an authored alpha of the same value puts it, and that is what is pinned here.
+TEST(SceneSchema, APuppetsSkinnedPassUnderEffectsTakesTheLayersAlpha) {
+    std::map<std::string, std::string> files;
+    AddPuppetImageSceneFiles(files);
+    files["/effects/opacity/effect.json"] =
+        R"({"name":"opacity","passes":[{"material":"opacity_mat.json","bind":[{"name":"previous","index":0}]}]})";
+    files["/opacity_mat.json"] =
+        R"({"passes":[{"blending":"translucent","cullmode":"nocull","depthtest":"disabled","depthwrite":"disabled","shader":"opacity","textures":[null]}]})";
+    files["/shaders/opacity.vert"] = files["/shaders/baseimage.vert"];
+    files["/shaders/opacity.frag"] = R"(
+uniform sampler2D g_Texture0;
+uniform float g_UserAlpha; // {"material":"alpha","default":1.0}
+varying vec2 v_TexCoord;
+void main() {
+  vec4 color = texture(g_Texture0, v_TexCoord);
+  gl_FragColor = vec4(color.rgb, color.a * g_UserAlpha);
+}
+)";
+    fs::VFS vfs;
+    ASSERT_TRUE(vfs.Mount("/assets", std::make_unique<MemoryFs>(std::move(files))));
+    audio::SoundManager sound_manager;
+    auto                json = nlohmann::json::parse(BasicPuppetSceneJson());
+    json["objects"][0]["effects"] = nlohmann::json::parse(
+        R"([{"file":"effects/opacity/effect.json","id":10,"visible":true,)"
+        R"("passes":[{"id":11,"constantshadervalues":{"alpha":0.8}}]}])");
+    ProjectProperties properties;
+    auto              parsed = WPSceneParser().Parse(SceneParseRequest {
+                                                         .scene_id           = "puppet-effects-alpha",
+                                                         .project_properties = &properties,
+                                                     },
+                                                     json.dump(),
+                                                     vfs,
+                                                     sound_manager);
+    ASSERT_NE(parsed, nullptr);
+    ASSERT_NE(parsed->runtime, nullptr);
+
+    // Its own material, the effect's pass, then the skinned pass.
+    ASSERT_EQ(LayerMaterials(*parsed, "puppet image").size(), 3u);
+    ASSERT_TRUE(parsed->runtime->SetNodeAlpha("puppet image", 0.25f));
+    const auto materials = LayerMaterials(*parsed, "puppet image");
+    ASSERT_EQ(materials.size(), 3u);
+    for (std::size_t index = 0; index < materials.size(); ++index) {
+        SCOPED_TRACE(index);
+        const auto& values = materials[index]->customShader.constValues;
+        ASSERT_TRUE(values.contains("g_UserAlpha"));
+        EXPECT_FLOAT_EQ(values.at("g_UserAlpha")[0], index == 1 ? 0.8f : 0.25f);
+        EXPECT_FLOAT_EQ(values.at("g_Color4")[3], 0.25f);
+        EXPECT_EQ(materials[index]->own_user_alpha, index == 1);
+    }
+
+    // The same layer authored at 0.25: its materials hold what the write left.
+    json["objects"][0]["alpha"] = 0.25;
+    auto authored = WPSceneParser().Parse(SceneParseRequest {
+                                              .scene_id           = "puppet-effects-alpha-authored",
+                                              .project_properties = &properties,
+                                          },
+                                          json.dump(),
+                                          vfs,
+                                          sound_manager);
+    ASSERT_NE(authored, nullptr);
+    const auto authored_materials = LayerMaterials(*authored, "puppet image");
+    ASSERT_EQ(authored_materials.size(), materials.size());
+    for (std::size_t index = 0; index < materials.size(); ++index) {
+        SCOPED_TRACE(index);
+        const auto& written_values  = materials[index]->customShader.constValues;
+        const auto& authored_values = authored_materials[index]->customShader.constValues;
+        for (const char* name : { "g_UserAlpha", "g_Alpha", "g_Color4" }) {
+            SCOPED_TRACE(name);
+            ASSERT_EQ(written_values.contains(name), authored_values.contains(name));
+            if (! written_values.contains(name)) continue;
+            const auto& written_value  = written_values.at(name);
+            const auto& authored_value = authored_values.at(name);
+            if (std::string_view(name) == "g_Color4") {
+                EXPECT_FLOAT_EQ(written_value[3], authored_value[3]);
+            } else {
+                // The effect's own alpha is its authored 0.8 in both.
+                EXPECT_FLOAT_EQ(written_value[0], authored_value[0]);
+            }
+        }
+        EXPECT_EQ(materials[index]->own_user_alpha, authored_materials[index]->own_user_alpha);
+    }
+}
+
+// Wallpaper Engine multiplies a layer's colour by its brightness into the
+// `g_Color4` of the layer's draw where it renders HDR -- the scene asks for HDR
+// and has bloom on -- and draws every other scene as if the brightness were 1.
+// The layer's own material and each effect pass take the product like they take
+// the colour, a colour a script returns or writes included, and the brightness is
+// not also handed to the shader as `g_Brightness`, which a shader that declares it
+// takes from its own material.
+// A brightness a user property or a script drives follows it, beside a colour
+// that does the same.
+TEST(SceneSchema, AnImageLayersBrightnessTintsItsMaterialsOnlyInAnHdrSceneAndFollowsItsBindings) {
+    struct Layer {
+        const char*          name;
+        std::size_t          materials;
+        std::array<float, 3> before;  // g_Color4.rgb as loaded, HDR scene
+        std::array<float, 3> after;   // after the property document below, HDR scene
+    };
+    // glow loads at 0.75 and is then set to 0.25; tint loads at "0 0 1" and
+    // is then set to "0.5 1 1".
+    const std::array<Layer, 8> layers { {
+        { "plain", 1u, { 0.25f, 0.5f, 0.5f }, { 0.25f, 0.5f, 0.5f } },
+        { "with effect", 2u, { 0.25f, 0.5f, 0.5f }, { 0.25f, 0.5f, 0.5f } },
+        { "bound", 1u, { 0.75f, 0.75f, 0.75f }, { 0.25f, 0.25f, 0.25f } },
+        { "bound with effect", 2u, { 0.75f, 0.75f, 0.75f }, { 0.25f, 0.25f, 0.25f } },
+        { "bound with colour", 1u, { 0.0f, 0.0f, 0.75f }, { 0.125f, 0.25f, 0.25f } },
+        { "scripted", 1u, { 0.5f, 0.5f, 0.5f }, { 0.5f, 0.5f, 0.5f } },
+        // A colour script's return value and its `thisLayer.color` write both
+        // reach the layer's materials through the product, not around it.
+        { "scripted colour", 2u, { 0.0f, 0.5f, 0.0f }, { 0.0f, 0.5f, 0.0f } },
+        { "scripted colour write", 1u, { 0.0f, 0.0f, 0.5f }, { 0.0f, 0.0f, 0.5f } },
+    } };
+    const std::array<const char*, 2> shaders { "genericimage", "genericimage2" };
+
+    for (const auto& [hdr, bloom] : std::array<std::pair<bool, bool>, 3> {
+             std::pair { true, true }, { true, false }, { false, false } }) {
+        // A scene renders HDR only with bloom on as well.
+        const bool renders_hdr = hdr && bloom;
+        for (const char* shader : shaders) {
+            SCOPED_TRACE(std::string(hdr ? "hdr" : "sdr") + (bloom ? " bloom " : " no bloom ") + shader);
+            fs::VFS vfs;
+            auto files = std::map<std::string, std::string> {
+                { "/image.json", R"({"width":64,"height":32,"material":"mat.json"})" },
+                { "/mat.json",
+                  std::string(R"({"passes":[{"blending":"translucent","cullmode":"nocull","depthtest":"disabled","depthwrite":"disabled","shader":")") +
+                      shader + R"(","textures":["a.tex"]}]})" },
+                { "/effects/copy/effect.json",
+                  R"({"name":"copy","passes":[{"material":"effect_mat.json","bind":[{"name":"previous","index":0}]}]})" },
+                { "/effect_mat.json",
+                  R"({"passes":[{"blending":"translucent","cullmode":"nocull","depthtest":"disabled","depthwrite":"disabled","shader":"genericimage","textures":[null]}]})" },
+                { "/shaders/genericimage.vert",
+                  R"(attribute vec3 a_Position;
+attribute vec2 a_TexCoord;
+varying vec2 v_TexCoord;
+void main() {
+  gl_Position = vec4(a_Position, 1.0);
+  v_TexCoord = a_TexCoord;
+}
+)" },
+                { "/shaders/genericimage.frag",
+                  R"(uniform sampler2D g_Texture0;
+uniform vec4 g_Color4;
+varying vec2 v_TexCoord;
+void main() {
+  gl_FragColor = texture(g_Texture0, v_TexCoord) * g_Color4;
+}
+)" },
+                { "/shaders/genericimage2.vert",
+                  R"(attribute vec3 a_Position;
+attribute vec2 a_TexCoord;
+varying vec2 v_TexCoord;
+void main() {
+  gl_Position = vec4(a_Position, 1.0);
+  v_TexCoord = a_TexCoord;
+}
+)" },
+                { "/shaders/genericimage2.frag",
+                  R"(uniform sampler2D g_Texture0;
+uniform vec4 g_Color4;
+uniform float g_Brightness; // {"material":"Brightness","default":1,"range":[0,2]}
+varying vec2 v_TexCoord;
+void main() {
+  vec4 color = texture(g_Texture0, v_TexCoord);
+  color.rgb *= g_Brightness;
+  gl_FragColor = color * g_Color4;
+}
+)" },
+                { "/materials/a.tex.tex", "" },
+            };
+            if (renders_hdr) AddHdrBloomFixtureFiles(files);
+            EXPECT_TRUE(vfs.Mount("/assets", std::make_unique<MemoryFs>(std::move(files))));
+            audio::SoundManager sound_manager(audio::SoundManager::OutputBackend::Null);
+            ProjectProperties   properties { { "glow", RuntimeScalarValue::Float(0.75f) },
+                                             { "tint", RuntimeScalarValue::String("0 0 1") } };
+            const std::string   scene = std::string(R"({
+      "camera": {"center":[0,0,0], "eye":[0,0,1], "up":[0,1,0]},
+      "general": {
+        "ambientcolor":[0.2,0.2,0.2], "skylightcolor":[0.3,0.3,0.3],
+        "clearcolor":[0,0,0], "cameraparallax":false,
+        "cameraparallaxamount":0, "cameraparallaxdelay":0,
+        "cameraparallaxmouseinfluence":0, "hdr":)") + (hdr ? "true" : "false") +
+                                        R"(, "bloom":)" + (bloom ? "true" : "false") + R"(,
+        "orthogonalprojection":{"width":640,"height":360}
+      },
+      "objects": [
+        {"id":1,"name":"plain","image":"image.json","color":"0.5 1 1","brightness":0.5,
+         "origin":[0,0,0],"scale":[1,1,1],"angles":[0,0,0],"visible":true},
+        {"id":2,"name":"with effect","image":"image.json","color":"0.5 1 1","brightness":0.5,
+         "origin":[0,0,0],"scale":[1,1,1],"angles":[0,0,0],"visible":true,
+         "effects":[{"file":"effects/copy/effect.json","id":3,"visible":true}]},
+        {"id":4,"name":"bound","image":"image.json",
+         "brightness":{"user":"glow","value":0.5},
+         "origin":[0,0,0],"scale":[1,1,1],"angles":[0,0,0],"visible":true},
+        {"id":5,"name":"bound with effect","image":"image.json",
+         "brightness":{"user":"glow","value":0.5},
+         "origin":[0,0,0],"scale":[1,1,1],"angles":[0,0,0],"visible":true,
+         "effects":[{"file":"effects/copy/effect.json","id":6,"visible":true}]},
+        {"id":7,"name":"bound with colour","image":"image.json",
+         "color":{"user":"tint","value":"1 1 1"},
+         "brightness":{"user":"glow","value":0.5},
+         "origin":[0,0,0],"scale":[1,1,1],"angles":[0,0,0],"visible":true},
+        {"id":8,"name":"scripted","image":"image.json",
+         "brightness":{"script":"export function update(value) { return 0.5; }","value":1},
+         "origin":[0,0,0],"scale":[1,1,1],"angles":[0,0,0],"visible":true},
+        {"id":9,"name":"scripted colour","image":"image.json","brightness":0.5,
+         "color":{"script":"export function update() { return new Vec3(0, 1, 0); }","value":"1 0 0"},
+         "origin":[0,0,0],"scale":[1,1,1],"angles":[0,0,0],"visible":true,
+         "effects":[{"file":"effects/copy/effect.json","id":10,"visible":true}]},
+        {"id":11,"name":"scripted colour write","image":"image.json","brightness":0.5,
+         "color":{"script":"export function update() { thisLayer.color = new Vec3(0, 0, 1); }","value":"1 0 0"},
+         "origin":[0,0,0],"scale":[1,1,1],"angles":[0,0,0],"visible":true}
+      ]
+    })";
+
+            auto parsed = WPSceneParser().Parse(SceneParseRequest {
+                                                    .scene_id           = "image-brightness",
+                                                    .project_properties = &properties,
+                                                },
+                                                scene,
+                                                vfs,
+                                                sound_manager);
+            ASSERT_NE(parsed, nullptr);
+            ASSERT_NE(parsed->runtime, nullptr);
+            EXPECT_EQ(parsed->hdr, renders_hdr);
+
+            const auto materials_of = [&parsed](std::string_view name) {
+                std::vector<SceneMaterial*> materials;
+                auto node = FindRootChildByName(*parsed, name);
+                if (node == nullptr || node->Mesh() == nullptr) return materials;
+                materials.push_back(node->Mesh()->Material());
+                if (const auto camera = parsed->cameras.find(node->Camera());
+                    camera != parsed->cameras.end() && camera->second->HasImgEffect()) {
+                    auto& layer = *camera->second->GetImgEffect();
+                    for (std::size_t index = 0; index < layer.EffectCount(); ++index) {
+                        for (auto& effect_node : layer.GetEffect(index)->nodes) {
+                            materials.push_back(effect_node.sceneNode->Mesh()->Material());
+                        }
+                    }
+                }
+                return materials;
+            };
+            // The colour a layer has without its brightness, as loaded and as set.
+            const auto plain_colour = [](const Layer& layer, bool after) {
+                const std::string name = layer.name;
+                if (name == "plain" || name == "with effect") return std::array { 0.5f, 1.0f, 1.0f };
+                if (name == "bound with colour") {
+                    return after ? std::array { 0.5f, 1.0f, 1.0f } : std::array { 0.0f, 0.0f, 1.0f };
+                }
+                if (name == "scripted colour") return std::array { 0.0f, 1.0f, 0.0f };
+                if (name == "scripted colour write") return std::array { 0.0f, 0.0f, 1.0f };
+                return std::array { 1.0f, 1.0f, 1.0f };
+            };
+            const auto expect_tint = [&](const Layer& layer, bool after) {
+                SCOPED_TRACE(std::string(layer.name) + (after ? " after" : " before"));
+                const auto materials = materials_of(layer.name);
+                ASSERT_EQ(materials.size(), layer.materials);
+                const auto expected = renders_hdr ? (after ? layer.after : layer.before)
+                                                  : plain_colour(layer, after);
+                for (std::size_t slot = 0; slot < materials.size(); ++slot) {
+                    SCOPED_TRACE(slot);
+                    const auto& values = materials[slot]->customShader.constValues;
+                    ASSERT_TRUE(values.contains("g_Color4"));
+                    for (std::size_t index = 0; index < 3; ++index) {
+                        EXPECT_FLOAT_EQ(values.at("g_Color4")[index], expected[index]);
+                    }
+                    EXPECT_FLOAT_EQ(values.at("g_Color4")[3], 1.0f);
+                    // The older shaders keep the brightness of their own material.
+                    if (slot == 0 && values.contains("g_Brightness")) {
+                        EXPECT_FLOAT_EQ(values.at("g_Brightness")[0], 1.0f);
+                    }
+                }
+            };
+
+            // A script has run once before anything is drawn.
+            parsed->runtime->Tick(1.0 / 60.0);
+            for (const auto& layer : layers) expect_tint(layer, false);
+
+            parsed->runtime->ApplyProjectPropertyOverride(
+                { { "glow", RuntimeScalarValue::Float(0.25f) },
+                  { "tint", RuntimeScalarValue::String("0.5 1 1") } });
+            parsed->runtime->Tick(1.0 / 60.0);
+            for (const auto& layer : layers) expect_tint(layer, true);
+            EXPECT_EQ(parsed->runtime->scriptErrorCount(), 0u);
+        }
+    }
+}
+
+// Wallpaper Engine reads a comma before a closing `]` or `}`, and its own
+// fluid simulation effect is written that way. An effect file or material
+// with one has to load like any other instead of dropping the effect.
+TEST(SceneSchema, EffectFilesWithTrailingCommasLoadTheirPasses) {
+    fs::VFS vfs;
+    auto files = std::map<std::string, std::string> {
+        { "/image.json", R"({"width":64,"height":32,"material":"mat.json"})" },
+        { "/mat.json",
+          R"({"passes":[{"blending":"translucent","cullmode":"nocull","depthtest":"disabled","depthwrite":"disabled","shader":"genericimage","textures":["a.tex"]}]})" },
+        { "/effects/copy/effect.json",
+          R"({"name":"copy ,] and ,} stay",
+              "passes":[{"material":"effect_mat.json","bind":[{"name":"previous","index":0},],},
+              ],
+            })" },
+        { "/effect_mat.json",
+          R"({"passes":[{"blending":"translucent","cullmode":"nocull","depthtest":"disabled","depthwrite":"disabled","shader":"genericimage","textures":[null,],},]})" },
+        { "/shaders/genericimage.vert",
+          R"(attribute vec3 a_Position;
+attribute vec2 a_TexCoord;
+varying vec2 v_TexCoord;
+void main() {
+  gl_Position = vec4(a_Position, 1.0);
+  v_TexCoord = a_TexCoord;
+}
+)" },
+        { "/shaders/genericimage.frag",
+          R"(uniform sampler2D g_Texture0;
+varying vec2 v_TexCoord;
+void main() {
+  gl_FragColor = texture(g_Texture0, v_TexCoord);
+}
+)" },
+        { "/materials/a.tex.tex", "" },
+    };
+    EXPECT_TRUE(vfs.Mount("/assets", std::make_unique<MemoryFs>(std::move(files))));
+    audio::SoundManager sound_manager(audio::SoundManager::OutputBackend::Null);
+    const std::string   scene = R"({
+      "camera": {"center":[0,0,0], "eye":[0,0,1], "up":[0,1,0]},
+      "general": {
+        "ambientcolor":[0.2,0.2,0.2], "skylightcolor":[0.3,0.3,0.3],
+        "clearcolor":[0,0,0], "cameraparallax":false,
+        "cameraparallaxamount":0, "cameraparallaxdelay":0,
+        "cameraparallaxmouseinfluence":0,
+        "orthogonalprojection":{"width":640,"height":360}
+      },
+      "objects": [
+        {"id":2,"name":"with effect","image":"image.json",
+         "origin":[0,0,0],"scale":[1,1,1],"angles":[0,0,0],"visible":true,
+         "effects":[{"file":"effects/copy/effect.json","id":3,"visible":true}]}
+      ]
+    })";
+
+    auto parsed = WPSceneParser().Parse(SceneParseRequest { .scene_id = "trailing-commas" },
+                                        scene, vfs, sound_manager);
+    ASSERT_NE(parsed, nullptr);
+    auto node = FindRootChildByName(*parsed, "with effect");
+    ASSERT_NE(node, nullptr);
+    const auto camera = parsed->cameras.find(node->Camera());
+    ASSERT_NE(camera, parsed->cameras.end());
+    ASSERT_TRUE(camera->second->HasImgEffect()) << "the effect was dropped";
+    auto& layer = *camera->second->GetImgEffect();
+    ASSERT_EQ(layer.EffectCount(), 1u);
+    EXPECT_EQ(layer.GetEffect(0)->nodes.size(), 1u);
+}
+
+TEST(SceneSchema, EffectBuffersTakeWallpaperEnginesSizesFormatsAndSwaps) {
+    fs::VFS vfs;
+    auto files = std::map<std::string, std::string> {
+        { "/image.json", R"({"width":640,"height":360,"material":"mat.json"})" },
+        { "/mat.json",
+          R"({"passes":[{"blending":"translucent","cullmode":"nocull","depthtest":"disabled","depthwrite":"disabled","shader":"genericimage","textures":["a.tex"]}]})" },
+        { "/effects/sim/effect.json",
+          R"({"name":"sim","fbos":[
+              {"name":"_rt_V1","fit":256,"format":"rg1616f"},
+              {"name":"_rt_V2","fit":256,"format":"rg1616f"},
+              {"name":"_rt_D1","scale":2,"format":"rgba8888"},
+              {"name":"_rt_D2","scale":2,"format":"rgba8888"},
+              {"name":"_rt_R1","width":100,"height":50,"format":"rgba_backbuffer"},
+              {"name":"_rt_R2","width":100,"height":50,"format":"rgba_backbuffer"}],
+            "passes":[
+              {"material":"effect_mat.json","target":"_rt_V2","bind":[{"name":"_rt_V1","index":0}]},
+              {"material":"effect_mat.json","target":"_rt_D2","bind":[{"name":"_rt_D1","index":0}]},
+              {"material":"effect_mat.json","bind":[{"name":"_rt_R2","index":0}]},
+              {"material":"effect_mat.json","target":"_rt_R2","bind":[{"name":"_rt_R1","index":0}]},
+              {"command":"swap","source":"_rt_V1","target":"_rt_V2"},
+              {"command":"swap","source":"_rt_D1","target":"_rt_D2"},
+              {"command":"swap","source":"_rt_R1","target":"_rt_R2"}]})" },
+        { "/effect_mat.json",
+          R"({"passes":[{"blending":"normal","cullmode":"nocull","depthtest":"disabled","depthwrite":"disabled","shader":"genericimage","textures":[null]}]})" },
+        { "/shaders/genericimage.vert",
+          R"(attribute vec3 a_Position;
+attribute vec2 a_TexCoord;
+varying vec2 v_TexCoord;
+void main() {
+  gl_Position = vec4(a_Position, 1.0);
+  v_TexCoord = a_TexCoord;
+}
+)" },
+        { "/shaders/genericimage.frag",
+          R"(uniform sampler2D g_Texture0;
+varying vec2 v_TexCoord;
+void main() {
+  gl_FragColor = texture(g_Texture0, v_TexCoord);
+}
+)" },
+        { "/materials/a.tex.tex", "" },
+    };
+    // An HDR scene renders in HDR only with its bloom on, so it needs bloom.
+    AddHdrBloomFixtureFiles(files);
+    EXPECT_TRUE(vfs.Mount("/assets", std::make_unique<MemoryFs>(std::move(files))));
+    audio::SoundManager sound_manager(audio::SoundManager::OutputBackend::Null);
+    const std::string   scene = R"({
+      "camera": {"center":[0,0,0], "eye":[0,0,1], "up":[0,1,0]},
+      "general": {
+        "ambientcolor":[0.2,0.2,0.2], "skylightcolor":[0.3,0.3,0.3],
+        "clearcolor":[0,0,0], "cameraparallax":false,
+        "cameraparallaxamount":0, "cameraparallaxdelay":0,
+        "cameraparallaxmouseinfluence":0, "hdr":true, "bloom":true,
+        "orthogonalprojection":{"width":640,"height":360}
+      },
+      "objects": [
+        {"id":2,"name":"simulated","image":"image.json",
+         "origin":[320,180,0],"scale":[1,1,1],"angles":[0,0,0],"visible":true,
+         "effects":[{"file":"effects/sim/effect.json","id":3,"visible":true}]}
+      ]
+    })";
+    auto parsed = WPSceneParser().Parse(SceneParseRequest { .scene_id = "effect-buffers" },
+                                        scene, vfs, sound_manager);
+    ASSERT_NE(parsed, nullptr);
+    const auto target = [&parsed](std::string_view prefix) -> const SceneRenderTarget* {
+        for (const auto& [name, rt] : parsed->renderTargets) {
+            if (name.starts_with(prefix) && ! name.ends_with("_swap")) return &rt;
+        }
+        return nullptr;
+    };
+    // `fit` shrinks the longer side to 256 with the aspect kept; a float format
+    // stays float; an explicit 8-bit format stays 8-bit in an HDR scene; an own
+    // size wins; the back buffer's format follows the scene.
+    const auto* velocity = target("_rt_V1_");
+    ASSERT_NE(velocity, nullptr);
+    EXPECT_EQ(velocity->width, 256);
+    EXPECT_EQ(velocity->height, 144);
+    EXPECT_EQ(velocity->format, TextureFormat::RGBA16F);
+    const auto* dye = target("_rt_D1_");
+    ASSERT_NE(dye, nullptr);
+    EXPECT_EQ(dye->format, TextureFormat::RGBA8);
+    const auto* sized = target("_rt_R1_");
+    ASSERT_NE(sized, nullptr);
+    EXPECT_EQ(sized->width, 100);
+    EXPECT_EQ(sized->height, 50);
+    EXPECT_EQ(sized->format, TextureFormat::RGBA16F);
+
+    auto node = FindRootChildByName(*parsed, "simulated");
+    ASSERT_NE(node, nullptr);
+    const auto camera = parsed->cameras.find(node->Camera());
+    ASSERT_NE(camera, parsed->cameras.end());
+    ASSERT_TRUE(camera->second->HasImgEffect());
+    const auto& commands = camera->second->GetImgEffect()->GetEffect(0)->commands;
+    // V2 and D2 are drawn before they are read again: one copy each. R2 is read
+    // first, so its old content goes through a temporary: three copies.
+    ASSERT_EQ(commands.size(), 5u);
+    EXPECT_TRUE(commands[0].dst.starts_with("_rt_V1_") && commands[0].src.starts_with("_rt_V2_"));
+    EXPECT_TRUE(commands[1].dst.starts_with("_rt_D1_") && commands[1].src.starts_with("_rt_D2_"));
+    EXPECT_TRUE(commands[2].dst.ends_with("_swap") && commands[2].src.starts_with("_rt_R1_"));
+    EXPECT_TRUE(commands[3].dst.starts_with("_rt_R1_") && commands[3].src.starts_with("_rt_R2_"));
+    EXPECT_TRUE(commands[4].dst.starts_with("_rt_R2_") && commands[4].src.ends_with("_swap"));
+    for (const auto& command : commands) EXPECT_EQ(command.afterpos, 4);
 }
 
 TEST(SceneSchema, PassthroughImageEffectBaseMeshUsesLayerLocalCardGeometry) {
@@ -3025,6 +4570,54 @@ TEST(SceneSchema, ParserUsesStableRuntimeNamesForDuplicateImageLayerNames) {
     EXPECT_EQ(scene->runtime->NodeSize("__we_layer_21"), Eigen::Vector2f(64.0f, 32.0f));
 }
 
+// A model can state a size of its own (the editor writes one for a sprite sheet:
+// a frame's size), and the scene saves the size the layer was given in the
+// editor. A layer resized there is drawn at the scene's size, as Wallpaper Engine
+// draws it; the model's size is only for a layer that saved none.
+TEST(SceneSchema, ALayerIsDrawnAtTheSizeItsSceneSavedRatherThanItsModels) {
+    fs::VFS vfs;
+    MountSceneFiles(vfs); // image.json states 64 x 32
+    audio::SoundManager sound_manager;
+    WPSceneParser       parser;
+    ProjectProperties   properties;
+    auto scene = parser.Parse(SceneParseRequest {
+        .scene_id = "resized-model-layer", .project_properties = &properties,
+    }, R"({
+      "camera": {"center":[0,0,0], "eye":[0,0,1], "up":[0,1,0]},
+      "general": {
+        "ambientcolor":[0,0,0], "skylightcolor":[0,0,0],
+        "clearcolor":[0,0,0], "cameraparallax":false,
+        "orthogonalprojection":{"width":400,"height":300}
+      },
+      "objects": [
+        {"id":30,"name":"resized","image":"image.json","origin":[100,150,0],
+         "size":"96.00000 72.00000","visible":true},
+        {"id":31,"name":"unsized","image":"image.json","origin":[300,150,0],"visible":true}
+      ]
+    })", vfs, sound_manager);
+    ASSERT_NE(scene, nullptr);
+    ASSERT_NE(scene->runtime, nullptr);
+
+    const auto drawn = [&](std::string_view name) {
+        Eigen::Vector2f extent { 0.0f, 0.0f };
+        const auto      node = FindRootChildByName(*scene, name);
+        if (node == nullptr || node->Mesh() == nullptr) {
+            ADD_FAILURE() << name << " has no card";
+            return extent;
+        }
+        const auto& vertices = node->Mesh()->GetVertexArray(0);
+        for (std::size_t index = 0; index < vertices.VertexCount(); ++index) {
+            const auto position = VertexPosition(vertices, index);
+            extent = extent.cwiseMax(Eigen::Vector2f(std::abs(position[0]), std::abs(position[1])));
+        }
+        return Eigen::Vector2f(extent * 2.0f);
+    };
+    EXPECT_EQ(scene->runtime->NodeSize("resized"), Eigen::Vector2f(96.0f, 72.0f));
+    EXPECT_EQ(drawn("resized"), Eigen::Vector2f(96.0f, 72.0f));
+    EXPECT_EQ(scene->runtime->NodeSize("unsized"), Eigen::Vector2f(64.0f, 32.0f));
+    EXPECT_EQ(drawn("unsized"), Eigen::Vector2f(64.0f, 32.0f));
+}
+
 TEST(SceneSchema, DuplicateNamesResolveInAuthoredOrderWithoutSharingThisLayerBindings) {
     fs::VFS vfs;
     MountSceneFiles(vfs);
@@ -3381,6 +4974,636 @@ TEST(SceneSchema, OriginTimelineDoesNotOverrideAScriptOrUserProperty) {
     }
 }
 
+// A layer's scale and angles are keyed on a timeline like its origin: the
+// editor writes `{value, animation:{c0..c2, options, relative}}` for each. The
+// pose they describe at frame 0 is the layer's pose from the first frame, a
+// single play ends where its last key leaves it, a timeline named in the scene
+// can be played again by a script, and a relative curve is an offset from the
+// authored value.
+TEST(SceneSchema, ScaleAndAnglesTimelinesPlayLikeOriginTimelines) {
+    struct Property {
+        const char*          key;
+        std::array<float, 3> base;
+    };
+    for (const auto& [key, base] : { Property { "scale", { 2, 3, 4 } },
+                                     Property { "angles", { 10, 20, 30 } } }) {
+        for (bool relative : { false, true }) {
+            SCOPED_TRACE(std::string(key) + (relative ? " relative" : " absolute"));
+            fs::VFS vfs;
+            MountSceneFiles(vfs);
+            audio::SoundManager sound;
+            nlohmann::json object = {
+                { "id", 21 }, { "name", "keyed card" }, { "image", "image.json" },
+                { key, {
+                    { "value", base },
+                    { "animation", {
+                        { "relative", relative },
+                        { "options", { { "fps", 20 }, { "length", 20 },
+                                         { "mode", "single" }, { "name", "pose" } } },
+                        { "c0", nlohmann::json::array({
+                            { { "frame", 0 }, { "value", 0 } },
+                            { { "frame", 20 }, { "value", 1 } } }) }
+                    } }
+                } }
+            };
+            auto scene = ParseOrthoShotScene(vfs, sound, object.dump());
+            ASSERT_NE(scene, nullptr);
+            auto& runtime = *scene->runtime;
+            auto node = FindRootChildByName(*scene, "keyed card");
+            ASSERT_NE(node, nullptr);
+            const auto pose = [&] {
+                return std::string_view(key) == "scale" ? node->Scale() : node->Rotation();
+            };
+            // The curve describes x; y and z, which it does not key, keep the
+            // authored value.
+            const float start = relative ? base[0] : 0.0f;
+            const auto  expect_pose = [&](float x) {
+                EXPECT_FLOAT_EQ(pose().x(), x);
+                EXPECT_FLOAT_EQ(pose().y(), base[1]);
+                EXPECT_FLOAT_EQ(pose().z(), base[2]);
+            };
+            expect_pose(start);
+            EXPECT_NE(runtime.DescribeTimeAdvancingWork() & SceneDemandReason::Animation, 0u);
+            runtime.Tick(0.5);
+            expect_pose(start + 0.5f);
+            runtime.Tick(0.5);
+            expect_pose(start + 1.0f);
+            EXPECT_EQ(runtime.DescribeTimeAdvancingWork() & SceneDemandReason::Animation, 0u);
+            runtime.Tick(10.0);
+            expect_pose(start + 1.0f); // no accumulated relative displacement
+            auto* clock = runtime.FindScalarAnimation("keyed card", "pose");
+            ASSERT_NE(clock, nullptr);
+            clock->Play();
+            runtime.Tick(0.25);
+            expect_pose(start + 0.25f);
+            EXPECT_EQ(runtime.scriptErrorCount(), 0u);
+        }
+    }
+}
+
+// A timeline that starts paused is held at its first pose, not at the authored
+// value, until something plays it: an intro keyed to start off the layer's
+// resting place shows there from the first frame. A script finds it by name.
+TEST(SceneSchema, ScaleAndAnglesTimelinesStartingPausedHoldTheirFirstPoseUntilPlayed) {
+    for (const auto* key : { "scale", "angles" }) {
+        SCOPED_TRACE(key);
+        fs::VFS vfs;
+        MountSceneFiles(vfs);
+        audio::SoundManager sound;
+        nlohmann::json object = {
+            { "id", 21 }, { "name", "intro card" }, { "image", "image.json" },
+            { key, {
+                { "value", { 1, 1, 1 } },
+                { "animation", {
+                    { "relative", true },
+                    { "options", { { "fps", 10 }, { "length", 10 }, { "mode", "single" },
+                                     { "name", "intro" }, { "startpaused", true } } },
+                    { "c1", nlohmann::json::array({
+                        { { "frame", 0 }, { "value", -0.5 } },
+                        { { "frame", 10 }, { "value", 0.5 } } }) }
+                } }
+            } }
+        };
+        auto scene = ParseOrthoShotScene(vfs, sound, object.dump());
+        ASSERT_NE(scene, nullptr);
+        auto& runtime = *scene->runtime;
+        auto node = FindRootChildByName(*scene, "intro card");
+        ASSERT_NE(node, nullptr);
+        const auto pose_y = [&] {
+            return std::string_view(key) == "scale" ? node->Scale().y() : node->Rotation().y();
+        };
+        EXPECT_FLOAT_EQ(pose_y(), 0.5f);
+        EXPECT_EQ(runtime.DescribeTimeAdvancingWork() & SceneDemandReason::Animation, 0u)
+            << "a paused timeline needs no frames";
+        runtime.Tick(5.0);
+        EXPECT_FLOAT_EQ(pose_y(), 0.5f);
+        auto* clock = runtime.FindAnimationByName("intro");
+        ASSERT_NE(clock, nullptr);
+        clock->Play();
+        runtime.Tick(0.5);
+        EXPECT_FLOAT_EQ(pose_y(), 1.0f);
+        runtime.Tick(0.5);
+        EXPECT_FLOAT_EQ(pose_y(), 1.5f);
+    }
+}
+
+// A loop wraps the shared clock, and short component curves hold their last key
+// until it does, as origin components do.
+TEST(SceneSchema, ScaleTimelineLoopsOnOneClockAndKeepsUnkeyedAxes) {
+    fs::VFS vfs;
+    MountSceneFiles(vfs);
+    audio::SoundManager sound;
+    auto scene = ParseOrthoShotScene(vfs, sound, R"({
+        "id":21,"name":"pulsing card","image":"image.json",
+        "scale":{"value":[1,2,3],"animation":{
+            "relative":true,
+            "options":{"fps":10,"mode":"loop","name":"pulse"},
+            "c0":[{"frame":0,"value":0},{"frame":5,"value":1}],
+            "c1":[{"frame":0,"value":0},{"frame":10,"value":4}]
+        }}
+    })");
+    ASSERT_NE(scene, nullptr);
+    auto& runtime = *scene->runtime;
+    const auto expect_scale = [&](float x, float y) {
+        const auto scale = runtime.NodeScale("pulsing card");
+        EXPECT_NEAR(scale.x(), x, 1e-5);
+        EXPECT_NEAR(scale.y(), y, 1e-5);
+        EXPECT_FLOAT_EQ(scale.z(), 3.0f);
+    };
+    expect_scale(1, 2);
+    runtime.Tick(0.5);
+    expect_scale(2, 4);
+    runtime.Tick(0.3);
+    expect_scale(2, 5.2f); // the short x curve holds its last key
+    runtime.Tick(0.4);
+    expect_scale(1.4f, 2.8f); // the longest curve sets the clock's length: 12 frames is 2
+    EXPECT_NE(runtime.DescribeTimeAdvancingWork() & SceneDemandReason::Animation, 0u);
+    EXPECT_EQ(runtime.scriptErrorCount(), 0u);
+}
+
+// The editor links the properties it keys on one timeline: the first is the
+// parent, the others name it in `options.parent` and carry none of the play
+// state of their own. They are one animation, so a script that holds or plays
+// the parent holds or plays them all.
+TEST(SceneSchema, LinkedOriginScaleAndAnglesTimelinesShareTheirParentsClock) {
+    fs::VFS vfs;
+    MountSceneFiles(vfs);
+    audio::SoundManager sound;
+    auto scene = ParseOrthoShotScene(vfs, sound, R"({
+        "id":21,"name":"linked card","image":"image.json",
+        "origin":{"value":[10,20,0],"animation":{
+            "relative":true,
+            "options":{"fps":10,"length":10,"mode":"single","name":"rise","startpaused":true,
+                       "children":[{"key":"angles"}]},
+            "c0":[{"frame":0,"value":0},{"frame":10,"value":40}]
+        }},
+        "angles":{"value":[0,0,0],"animation":{
+            "relative":true,
+            "options":{"fps":10,"length":10,"mode":"single","parent":{"key":"origin"},
+                       "children":[{"key":"scale"}]},
+            "c2":[{"frame":0,"value":0},{"frame":10,"value":90}]
+        }},
+        "scale":{"value":[1,1,1],"animation":{
+            "relative":true,
+            "options":{"fps":10,"length":10,"mode":"single","parent":{"key":"angles"}},
+            "c0":[{"frame":0,"value":0},{"frame":10,"value":1}]
+        }}
+    })");
+    ASSERT_NE(scene, nullptr);
+    auto& runtime = *scene->runtime;
+    const auto expect_pose = [&](float x, float turn, float width) {
+        EXPECT_FLOAT_EQ(runtime.NodeTranslate("linked card").x(), x);
+        EXPECT_FLOAT_EQ(runtime.NodeRotation("linked card").z(), turn);
+        EXPECT_FLOAT_EQ(runtime.NodeScale("linked card").x(), width);
+    };
+    expect_pose(10, 0, 1);
+    runtime.Tick(5.0);
+    expect_pose(10, 0, 1); // the parent is paused, so are the properties linked to it
+    EXPECT_EQ(runtime.DescribeTimeAdvancingWork() & SceneDemandReason::Animation, 0u);
+    auto* clock = runtime.FindScalarAnimation("linked card", "rise");
+    ASSERT_NE(clock, nullptr);
+    clock->Play();
+    runtime.Tick(0.5);
+    expect_pose(30, 45, 1.5f);
+    runtime.Tick(0.5);
+    expect_pose(50, 90, 2);
+    EXPECT_EQ(runtime.DescribeTimeAdvancingWork() & SceneDemandReason::Animation, 0u);
+    EXPECT_EQ(runtime.scriptErrorCount(), 0u);
+}
+
+// A scale or angles a script or a wallpaper property writes has one writer: its
+// authored timeline does not become a second one, and registers no clock.
+TEST(SceneSchema, ScaleAndAnglesTimelinesDoNotOverrideAScriptOrUserProperty) {
+    for (const auto* key : { "scale", "angles" }) {
+        for (bool scripted : { false, true }) {
+            // A script returns an angle in its own units, which is not what this checks.
+            if (scripted && std::string_view(key) == "angles") continue;
+            SCOPED_TRACE(std::string(key) + (scripted ? " scripted" : " user property"));
+            fs::VFS vfs;
+            MountSceneFiles(vfs);
+            audio::SoundManager sound;
+            nlohmann::json object = nlohmann::json::parse(R"({
+                "id":21,"name":"bound card","image":"image.json"
+            })");
+            object[key] = nlohmann::json::parse(R"({"value":[1,2,3],"animation":{
+                "options":{"fps":10,"length":10,"mode":"single","name":"unused"},
+                "c0":[{"frame":0,"value":999}]
+            }})");
+            if (scripted) object[key]["script"] =
+                "export function update() { return new Vec3(7, 8, 9); }";
+            else object[key]["user"] = "pose";
+            auto scene = ParseOrthoShotScene(vfs, sound, object.dump(), {
+                { "pose", RuntimeScalarValue::String("7 8 9") }
+            });
+            ASSERT_NE(scene, nullptr);
+            auto& runtime = *scene->runtime;
+            runtime.Tick(1.0);
+            const auto pose = std::string_view(key) == "scale" ? runtime.NodeScale("bound card")
+                                                              : runtime.NodeRotation("bound card");
+            EXPECT_EQ(pose, Eigen::Vector3f(7, 8, 9));
+            EXPECT_EQ(runtime.FindScalarAnimation("bound card", "unused"), nullptr);
+            EXPECT_EQ(runtime.scriptErrorCount(), 0u);
+        }
+    }
+}
+
+// Every kind of object that sits in the scene takes its scale and angles
+// from the one registration helper: text, a particle system, a light and a
+// model, not only the image layer and the group the tests above use. A timeline
+// the editor keyed on one plays there like it does on a card.
+TEST(SceneSchema, ScaleAndAnglesTimelinesPlayOnTextParticleLightAndModelObjects) {
+    const auto keyed = [](const char* key, std::array<float, 3> base) {
+        return nlohmann::json {
+            { "value", base },
+            { "animation", {
+                { "relative", true },
+                { "options", { { "fps", 10 }, { "length", 10 }, { "mode", "single" } } },
+                { "c0", nlohmann::json::array({
+                    { { "frame", 0 }, { "value", 0 } }, { { "frame", 10 }, { "value", 1 } } }) }
+            } }
+        };
+    };
+    nlohmann::json animated_pose = {
+        { "scale", keyed("scale", { 1, 2, 3 }) }, { "angles", keyed("angles", { 0.25f, 0.5f, 0.75f }) } };
+    const auto expect_pose = [](const SceneNode& node, float shift, const char* label) {
+        SCOPED_TRACE(label);
+        EXPECT_NEAR(node.Scale().x(), 1.0f + shift, 1e-5);
+        EXPECT_NEAR(node.Scale().y(), 2.0f, 1e-5);
+        EXPECT_NEAR(node.Scale().z(), 3.0f, 1e-5);
+        EXPECT_NEAR(node.Rotation().x(), 0.25f + shift, 1e-5);
+        EXPECT_NEAR(node.Rotation().y(), 0.5f, 1e-5);
+    };
+    const auto object = [&](nlohmann::json base) {
+        for (auto& [key, value] : animated_pose.items()) base[key] = value;
+        return base.dump();
+    };
+
+    {
+        fs::VFS vfs;
+        MountSceneFiles(vfs);
+        audio::SoundManager sound;
+        auto scene = ParseOrthoShotScene(
+            vfs, sound,
+            object({ { "id", 21 }, { "name", "label" }, { "text", "hello" }, { "font", "Arial" },
+                     { "visible", true } }) + "," +
+            object({ { "id", 22 }, { "name", "sparks" }, { "particle", "particle.json" },
+                     { "visible", true } }) + "," +
+            object({ { "id", 23 }, { "name", "bulb" }, { "light", "point" }, { "radius", 100 },
+                     { "intensity", 1 }, { "color", { 1, 1, 1 } }, { "visible", true } }));
+        ASSERT_NE(scene, nullptr);
+        auto& runtime = *scene->runtime;
+        const auto text = FindRootChildByName(*scene, "label");
+        ASSERT_NE(text, nullptr);
+        const auto particles = FindRootChildByName(*scene, "sparks");
+        ASSERT_NE(particles, nullptr);
+        ASSERT_EQ(scene->lights.size(), 1u);
+        ASSERT_NE(scene->lights[0]->node(), nullptr);
+        const SceneNode* light = scene->lights[0]->node();
+        expect_pose(*text, 0.0f, "text start");
+        expect_pose(*particles, 0.0f, "particles start");
+        expect_pose(*light, 0.0f, "light start");
+        runtime.Tick(0.5);
+        expect_pose(*text, 0.5f, "text mid");
+        expect_pose(*particles, 0.5f, "particles mid");
+        expect_pose(*light, 0.5f, "light mid");
+        runtime.Tick(0.5);
+        expect_pose(*text, 1.0f, "text end");
+        expect_pose(*particles, 1.0f, "particles end");
+        expect_pose(*light, 1.0f, "light end");
+    }
+
+    // A text or model object with children is first met as a group the
+    // children hang from, then built as itself: its timeline plays once, on the
+    // node the children stay under.
+    {
+        fs::VFS vfs;
+        MountSceneFiles(vfs);
+        audio::SoundManager sound;
+        auto scene = ParseOrthoShotScene(
+            vfs, sound,
+            R"({"id":31,"name":"caption","text":"hello","font":"Arial","visible":true,
+                "scale":{"value":[1,1,1],"animation":{"relative":true,
+                  "options":{"fps":10,"length":10,"mode":"single"},
+                  "c0":[{"frame":0,"value":0},{"frame":10,"value":1}]}}},
+               {"id":32,"name":"underline","image":"image.json","parent":31,"origin":[5,6,0]})");
+        ASSERT_NE(scene, nullptr);
+        const auto caption = FindRootChildByName(*scene, "caption");
+        ASSERT_NE(caption, nullptr);
+        ASSERT_FALSE(caption->GetChildren().empty());
+        auto* underline = caption->GetChildren().front().get();
+        scene->runtime->Tick(0.5);
+        EXPECT_NEAR(caption->Scale().x(), 1.5f, 1e-5);
+        underline->UpdateTrans();
+        EXPECT_NEAR(underline->ModelTrans()(0, 3) - caption->Translate().x(), 5.0f * 1.5f, 1e-4);
+    }
+
+    {
+        auto files = std::map<std::string, std::string> {};
+        AddLeafModelSceneFiles(files);
+        fs::VFS vfs;
+        EXPECT_TRUE(vfs.Mount("/assets", std::make_unique<MemoryFs>(std::move(files))));
+        audio::SoundManager sound;
+        ProjectProperties   properties;
+        auto scene = WPSceneParser().Parse(
+            SceneParseRequest { .scene_id = "model-timeline", .project_properties = &properties },
+            PerspectiveSceneJson("[" + object({ { "id", 7 }, { "name", "planet" },
+                                                { "model", "planet.mdl" },
+                                                { "perspective", true }, { "visible", true } }) +
+                                 "]"),
+            vfs, sound);
+        ASSERT_NE(scene, nullptr);
+        const auto model = FindRootChildByName(*scene, "planet");
+        ASSERT_NE(model, nullptr);
+        expect_pose(*model, 0.0f, "model start");
+        scene->runtime->Tick(1.0);
+        expect_pose(*model, 1.0f, "model end");
+    }
+}
+
+// A looping timeline with `wraploop` (the editor's default for a loop) comes back
+// to its first key by the end of the timeline's length: after its last key the
+// value runs back, where without the flag it would hold the last key to the end
+// and then jump. The same on origin and alpha, which share the curve reader.
+TEST(SceneSchema, WrapLoopTimelinesReturnToTheirFirstKeyOnEveryAnimatedSetting) {
+    for (const bool wrap : { false, true }) {
+        SCOPED_TRACE(wrap ? "wraploop" : "plain loop");
+        fs::VFS vfs;
+        MountSceneFiles(vfs);
+        audio::SoundManager sound;
+        const auto timeline = [&](const char* base) {
+            return std::string(R"({"value":)") + base + R"(,"animation":{"relative":false,
+                "options":{"fps":10,"length":10,"mode":"loop","wraploop":)" +
+                   (wrap ? "true" : "false") + R"(},
+                "c0":[{"frame":0,"value":0},{"frame":5,"value":1}]}})";
+        };
+        auto scene = ParseOrthoShotScene(
+            vfs, sound,
+            R"({"id":21,"name":"sway","image":"image.json","scale":)" + timeline("[0,1,1]") +
+                R"(,"origin":)" + timeline("[0,0,0]") + R"(})");
+        ASSERT_NE(scene, nullptr);
+        auto node = FindRootChildByName(*scene, "sway");
+        ASSERT_NE(node, nullptr);
+        auto& runtime = *scene->runtime;
+        runtime.Tick(0.5);
+        EXPECT_FLOAT_EQ(node->Scale().x(), 1.0f);
+        runtime.Tick(0.25);
+        // Frame 7.5 of 10: half way back, or still on the last key.
+        EXPECT_FLOAT_EQ(node->Scale().x(), wrap ? 0.5f : 1.0f);
+        EXPECT_FLOAT_EQ(node->Translate().x(), wrap ? 0.5f : 1.0f);
+        runtime.Tick(0.25);
+        EXPECT_FLOAT_EQ(node->Scale().x(), 0.0f);
+    }
+}
+
+// The edge a layer is anchored to sits on its scaled size, so a scale that
+// moves keeps the anchored edge where it is.
+TEST(SceneSchema, ScaleTimelineKeepsAnAnchoredLayersEdgeOnItsScaledSize) {
+    fs::VFS vfs;
+    MountSceneFiles(vfs);
+    audio::SoundManager sound;
+    auto scene = ParseOrthoShotScene(vfs, sound, R"({
+        "id":21,"name":"anchored card","image":"image.json","alignment":"left",
+        "origin":[10,0,0],
+        "scale":{"value":[1,1,1],"animation":{
+            "options":{"fps":10,"length":10,"mode":"single"},
+            "c0":[{"frame":0,"value":1},{"frame":10,"value":3}],
+            "c1":[{"frame":0,"value":1},{"frame":10,"value":3}]
+        }}
+    })");
+    ASSERT_NE(scene, nullptr);
+    auto& runtime = *scene->runtime;
+    auto node = FindRootChildByName(*scene, "anchored card");
+    ASSERT_NE(node, nullptr);
+    const float width = runtime.NodeSize("anchored card").x();
+    EXPECT_FLOAT_EQ(node->Scale().x(), 1.0f);
+    EXPECT_FLOAT_EQ(node->Translate().x(), 10.0f + width * 1.0f * 0.5f);
+    runtime.Tick(1.0);
+    EXPECT_FLOAT_EQ(node->Scale().x(), 3.0f);
+    EXPECT_FLOAT_EQ(node->Translate().x(), 10.0f + width * 3.0f * 0.5f);
+}
+
+// A group's scale scales what it holds, and so does a drawn layer's that has
+// children.
+TEST(SceneSchema, ScaleTimelineScalesAParentsChildren) {
+    for (bool group : { true, false }) {
+        SCOPED_TRACE(group ? "group" : "image layer");
+        fs::VFS vfs;
+        MountSceneFiles(vfs);
+        audio::SoundManager sound;
+        auto parent = nlohmann::json::parse(R"({
+            "id":21,"name":"growing parent",
+            "scale":{"value":[1,1,1],"animation":{
+                "relative":true,
+                "options":{"fps":10,"length":10,"mode":"single"},
+                "c0":[{"frame":0,"value":0},{"frame":10,"value":1}],
+                "c1":[{"frame":0,"value":0},{"frame":10,"value":1}]
+            }}
+        })");
+        if (!group) parent["image"] = "image.json";
+        auto scene = ParseOrthoShotScene(vfs, sound, parent.dump() + R"(,
+            {"id":22,"name":"child card","image":"image.json","parent":21,"origin":[5,6,0]}
+        )");
+        ASSERT_NE(scene, nullptr);
+        auto& runtime = *scene->runtime;
+        auto node = FindRootChildByName(*scene, "growing parent");
+        ASSERT_NE(node, nullptr);
+        ASSERT_EQ(node->GetChildren().size(), 1u);
+        runtime.Tick(0.5);
+        EXPECT_FLOAT_EQ(node->Scale().x(), 1.5f);
+        node->GetChildren().front()->UpdateTrans();
+        EXPECT_NEAR(node->GetChildren().front()->ModelTrans()(0, 3), 5.0f * 1.5f, 1e-4);
+        runtime.Tick(0.5);
+        EXPECT_FLOAT_EQ(node->Scale().x(), 2.0f);
+        EXPECT_EQ(runtime.DescribeTimeAdvancingWork() & SceneDemandReason::Animation, 0u);
+    }
+}
+
+// A layer colour keyed on a timeline tints the layer's own material and every
+// effect pass as the playhead moves, and keeps the layer's alpha. Like any
+// timeline it can start paused at its first colour and be played by name.
+TEST(SceneSchema, ImageColourTimelineTintsEveryLayerMaterialAsItPlays) {
+    fs::VFS vfs;
+    MountTintableImageFiles(vfs);
+    audio::SoundManager sound_manager(audio::SoundManager::OutputBackend::Null);
+    ProjectProperties   properties;
+    const auto keys = [](double first, double last) {
+        return nlohmann::json::array({ { { "frame", 0 }, { "value", first } },
+                                       { { "frame", 10 }, { "value", last } } });
+    };
+    const auto colour = [&](bool paused) {
+        return nlohmann::json {
+            { "value", "1 1 1" },
+            { "animation", {
+                { "options", { { "fps", 10 }, { "length", 10 }, { "mode", "single" },
+                                 { "name", "tint" }, { "startpaused", paused } } },
+                { "c0", keys(0.2, 1.0) }, { "c1", keys(0.4, 0.0) }, { "c2", keys(0.6, 0.6) }
+            } }
+        };
+    };
+    nlohmann::json scene_json = {
+        { "camera", { { "center", { 0, 0, 0 } }, { "eye", { 0, 0, 1 } }, { "up", { 0, 1, 0 } } } },
+        { "general", { { "ambientcolor", { 0.2, 0.2, 0.2 } }, { "skylightcolor", { 0.3, 0.3, 0.3 } },
+                       { "clearcolor", { 0, 0, 0 } }, { "cameraparallax", false },
+                       { "cameraparallaxamount", 0 }, { "cameraparallaxdelay", 0 },
+                       { "cameraparallaxmouseinfluence", 0 },
+                       { "orthogonalprojection", { { "width", 640 }, { "height", 360 } } } } },
+        { "objects", nlohmann::json::array({
+            { { "id", 1 }, { "name", "plain" }, { "image", "image.json" }, { "alpha", 0.5 },
+              { "color", colour(false) }, { "visible", true } },
+            { { "id", 2 }, { "name", "with effect" }, { "image", "image.json" }, { "alpha", 0.5 },
+              { "color", colour(false) }, { "visible", true },
+              { "effects", nlohmann::json::array({
+                  { { "file", "effects/copy/effect.json" }, { "id", 3 }, { "visible", true } } }) } },
+            { { "id", 4 }, { "name", "held" }, { "image", "image.json" }, { "alpha", 0.5 },
+              { "color", colour(true) }, { "visible", true } } }) }
+    };
+    auto parsed = WPSceneParser().Parse(SceneParseRequest {
+                                            .scene_id           = "image-colour-timeline",
+                                            .project_properties = &properties,
+                                        },
+                                        scene_json.dump(),
+                                        vfs,
+                                        sound_manager);
+    ASSERT_NE(parsed, nullptr);
+    ASSERT_NE(parsed->runtime, nullptr);
+    auto& runtime = *parsed->runtime;
+
+    const auto expect_colour = [&](std::string_view name, std::array<float, 3> rgb,
+                                   std::size_t expected_materials) {
+        SCOPED_TRACE(std::string(name));
+        const auto materials = LayerMaterials(*parsed, name);
+        ASSERT_EQ(materials.size(), expected_materials);
+        for (const auto* material : materials) {
+            const auto& values = material->customShader.constValues;
+            ASSERT_TRUE(values.contains("g_Color4"));
+            ASSERT_TRUE(values.contains("g_Color"));
+            for (std::size_t index = 0; index < 3; ++index) {
+                EXPECT_FLOAT_EQ(values.at("g_Color4")[index], rgb[index]);
+                EXPECT_FLOAT_EQ(values.at("g_Color")[index], rgb[index]);
+            }
+            EXPECT_FLOAT_EQ(values.at("g_Color4")[3], 0.5f);
+        }
+    };
+
+    // The first colour is the layer's colour from the first frame.
+    expect_colour("plain", { 0.2f, 0.4f, 0.6f }, 1u);
+    expect_colour("with effect", { 0.2f, 0.4f, 0.6f }, 2u);
+    expect_colour("held", { 0.2f, 0.4f, 0.6f }, 1u);
+    EXPECT_NE(runtime.DescribeTimeAdvancingWork() & SceneDemandReason::Animation, 0u);
+
+    runtime.Tick(0.5);
+    expect_colour("plain", { 0.6f, 0.2f, 0.6f }, 1u);
+    expect_colour("with effect", { 0.6f, 0.2f, 0.6f }, 2u);
+    expect_colour("held", { 0.2f, 0.4f, 0.6f }, 1u);
+    runtime.Tick(0.5);
+    expect_colour("plain", { 1.0f, 0.0f, 0.6f }, 1u);
+    expect_colour("with effect", { 1.0f, 0.0f, 0.6f }, 2u);
+    expect_colour("held", { 0.2f, 0.4f, 0.6f }, 1u);
+
+    auto* clock = runtime.FindScalarAnimation("held", "tint");
+    ASSERT_NE(clock, nullptr);
+    clock->Play();
+    runtime.Tick(0.5);
+    expect_colour("held", { 0.6f, 0.2f, 0.6f }, 1u);
+    runtime.Tick(0.5);
+    expect_colour("held", { 1.0f, 0.0f, 0.6f }, 1u);
+    EXPECT_EQ(runtime.DescribeTimeAdvancingWork() & SceneDemandReason::Animation, 0u);
+    EXPECT_EQ(runtime.scriptErrorCount(), 0u);
+}
+
+// The three sources of an image layer's colour agree on one rule: a script or
+// a user property is the colour's only writer, a timeline plays where there is
+// neither, and wherever the scene renders HDR the layer's brightness multiplies
+// whichever colour applies into `g_Color4` of every material (the `g_Color` a
+// shader reads for the plain colour stays the colour).
+TEST(SceneSchema, ImageColourSourcesKeepTheirPrecedenceAndTheHdrBrightnessMultipliesEach) {
+    fs::VFS vfs;
+    MountTintableImageFiles(vfs, true);
+    audio::SoundManager sound_manager(audio::SoundManager::OutputBackend::Null);
+    ProjectProperties   properties { { "tint", RuntimeScalarValue::String("0 0 1") } };
+    const auto timeline = [](const char* name) {
+        return nlohmann::json {
+            { "options", { { "fps", 10 }, { "length", 10 }, { "mode", "single" }, { "name", name } } },
+            { "c0", nlohmann::json::array({ { { "frame", 0 }, { "value", 0.2 } },
+                                            { { "frame", 10 }, { "value", 1.0 } } }) },
+            { "c1", nlohmann::json::array({ { { "frame", 0 }, { "value", 0.4 } },
+                                            { { "frame", 10 }, { "value", 0.0 } } }) },
+            { "c2", nlohmann::json::array({ { { "frame", 0 }, { "value", 0.6 } },
+                                            { { "frame", 10 }, { "value", 0.6 } } }) }
+        };
+    };
+    const auto layer = [&](int id, const char* name, nlohmann::json colour, bool effect) {
+        nlohmann::json object = {
+            { "id", id }, { "name", name }, { "image", "image.json" }, { "alpha", 0.5 },
+            { "brightness", 0.5 }, { "color", std::move(colour) }, { "visible", true } };
+        if (effect) object["effects"] = nlohmann::json::array(
+            { { { "file", "effects/copy/effect.json" }, { "id", id + 100 }, { "visible", true } } });
+        return object;
+    };
+    const auto keyed = [&](const char* name) {
+        return nlohmann::json { { "value", "1 1 1" }, { "animation", timeline(name) } };
+    };
+    auto scripted = keyed("script clock");
+    scripted["script"] = "export function update(value) { return new Vec3(0, 1, 0); }";
+    auto bound = keyed("property clock");
+    bound["user"] = "tint";
+    nlohmann::json scene_json = {
+        { "camera", { { "center", { 0, 0, 0 } }, { "eye", { 0, 0, 1 } }, { "up", { 0, 1, 0 } } } },
+        { "general", { { "ambientcolor", { 0.2, 0.2, 0.2 } }, { "skylightcolor", { 0.3, 0.3, 0.3 } },
+                       { "clearcolor", { 0, 0, 0 } }, { "cameraparallax", false },
+                       { "cameraparallaxamount", 0 }, { "cameraparallaxdelay", 0 },
+                       { "cameraparallaxmouseinfluence", 0 }, { "hdr", true }, { "bloom", true },
+                       { "orthogonalprojection", { { "width", 640 }, { "height", 360 } } } } },
+        { "objects", nlohmann::json::array({
+            layer(1, "keyed", keyed("keyed clock"), true),
+            layer(2, "scripted", scripted, true),
+            layer(3, "bound", bound, true) }) }
+    };
+    auto parsed = WPSceneParser().Parse(SceneParseRequest {
+                                            .scene_id           = "image-colour-sources",
+                                            .project_properties = &properties,
+                                        },
+                                        scene_json.dump(),
+                                        vfs,
+                                        sound_manager);
+    ASSERT_NE(parsed, nullptr);
+    ASSERT_NE(parsed->runtime, nullptr);
+    ASSERT_TRUE(parsed->hdr);
+    auto& runtime = *parsed->runtime;
+
+    const auto expect_colour = [&](std::string_view name, std::array<float, 3> rgb) {
+        SCOPED_TRACE(std::string(name));
+        const auto materials = LayerMaterials(*parsed, name);
+        ASSERT_EQ(materials.size(), 2u);
+        for (const auto* material : materials) {
+            const auto& values = material->customShader.constValues;
+            for (std::size_t index = 0; index < 3; ++index) {
+                EXPECT_FLOAT_EQ(values.at("g_Color4")[index], rgb[index] * 0.5f);
+                EXPECT_FLOAT_EQ(values.at("g_Color")[index], rgb[index]);
+            }
+            EXPECT_FLOAT_EQ(values.at("g_Color4")[3], 0.5f);
+        }
+    };
+
+    expect_colour("keyed", { 0.2f, 0.4f, 0.6f });
+    expect_colour("bound", { 0.0f, 0.0f, 1.0f });
+    runtime.Tick(0.5);
+    // The timeline plays on the layer that has no binding, brightness applied
+    // to each frame's colour; a script or a property has no clock beside it.
+    expect_colour("keyed", { 0.6f, 0.2f, 0.6f });
+    expect_colour("scripted", { 0.0f, 1.0f, 0.0f });
+    expect_colour("bound", { 0.0f, 0.0f, 1.0f });
+    EXPECT_NE(runtime.FindScalarAnimation("keyed", "keyed clock"), nullptr);
+    EXPECT_EQ(runtime.FindScalarAnimation("scripted", "script clock"), nullptr);
+    EXPECT_EQ(runtime.FindScalarAnimation("bound", "property clock"), nullptr);
+
+    runtime.ApplyProjectPropertyOverride({ { "tint", RuntimeScalarValue::String("0.25 0.5 0.75") } });
+    runtime.Tick(0.5);
+    expect_colour("keyed", { 1.0f, 0.0f, 0.6f });
+    expect_colour("bound", { 0.25f, 0.5f, 0.75f });
+    EXPECT_EQ(runtime.scriptErrorCount(), 0u);
+}
+
 TEST(SceneSchema, ImageAlignmentAnchorSurvivesScriptedOriginAndScale) {
     fs::VFS vfs;
     MountSceneFiles(vfs);
@@ -3474,7 +5697,9 @@ TEST(SceneSchema, ImageAlignmentAnchorSurvivesScriptedOriginAndScale) {
 TEST(SceneSchema, DuplicateParsedImageClickScriptsGateRealAssetSoundLayers) {
     fs::VFS vfs;
     MountSceneFiles(vfs);
-    audio::SoundManager sound_manager;
+    // The parse mounts these sound layers, and a mount opens the output device
+    // on the system backend even though nothing plays.
+    audio::SoundManager sound_manager(audio::SoundManager::OutputBackend::Null);
     WPSceneParser       parser;
     ProjectProperties   properties {
           { "click_count", RuntimeScalarValue::String("2") },
@@ -3672,7 +5897,7 @@ TEST(SceneSchema, ParserBuildsLdrBloomPostProcessWhenBloomEnabledWithoutHdr) {
     ASSERT_NE(copy, nullptr);
     EXPECT_EQ(pass0->output, "_rt_bloom_mip1");
     EXPECT_EQ(pass1->output, "_rt_bloom_mip2");
-    EXPECT_EQ(pass2->output, "_rt_bloom_mip1");
+    EXPECT_EQ(pass2->output, "_rt_bloom_blur");
     EXPECT_EQ(pass3->output, "_rt_bloom_combine");
     EXPECT_EQ(copy->src, "_rt_bloom_combine");
     EXPECT_EQ(copy->dst, SpecTex_Default);
@@ -3723,11 +5948,206 @@ TEST(SceneSchema, ParserBuildsLdrBloomPostProcessWhenBloomEnabledWithoutHdr) {
     EXPECT_DOUBLE_EQ(mip2_rt->bind.scale, 0.125);
     EXPECT_EQ(mip2_rt->width, 80);
     EXPECT_EQ(mip2_rt->height, 45);
+    // The horizontal blur writes an eighth-size image of its own, as Wallpaper
+    // Engine's does, and the combine reads it.
+    const auto* blur_rt = parsed->FindRenderTarget("_rt_bloom_blur");
+    ASSERT_NE(blur_rt, nullptr);
+    EXPECT_DOUBLE_EQ(blur_rt->bind.scale, 0.125);
+    EXPECT_EQ(blur_rt->width, 80);
+    ASSERT_GE(pass3->node->Mesh()->Material()->textures.size(), 2u);
+    EXPECT_EQ(pass3->node->Mesh()->Material()->textures[1], "_rt_bloom_blur");
     EXPECT_TRUE(combine_rt->bind.enable);
     EXPECT_TRUE(combine_rt->bind.screen);
     EXPECT_DOUBLE_EQ(combine_rt->bind.scale, 1.0);
     EXPECT_EQ(combine_rt->width, 640);
     EXPECT_EQ(combine_rt->height, 360);
+}
+
+// Wallpaper Engine binds the scene's own settings to user properties like any
+// other: the property's value is the setting's. Bloom on or off and which
+// layers follow the cursor shape the scene, so they are read when it loads and
+// a change reloads it; strength, threshold, tint, parallax delay and zoom
+// follow the property while the scene runs.
+TEST(SceneSchema, SceneSettingsBoundToUserPropertiesFollowThem) {
+    fs::VFS vfs;
+    MountBloomSceneFiles(vfs);
+    audio::SoundManager sound_manager;
+    WPSceneParser       parser;
+    const std::string json = R"({
+      "camera": {"center":[0,0,0], "eye":[0,0,1], "up":[0,1,0]},
+      "general": {
+        "clearcolor":[0,0,0],
+        "bloom":{"user":"glow","value":false},
+        "bloomstrength":{"user":"glowstrength","value":1.0}, "bloomthreshold":0.25,
+        "bloomtint":{"user":"glowtint","value":"1 1 1"},
+        "cameraparallax":{"user":"parallax","value":false},
+        "cameraparallaxamount":{"user":"depth","value":0.2},
+        "cameraparallaxdelay":{"user":"lag","value":0.5},
+        "zoom":{"user":"lens","value":1.0},
+        "orthogonalprojection":{"width":640,"height":360}
+      },
+      "objects": []
+    })";
+    const ProjectProperties properties {
+        { "glow", RuntimeScalarValue::Bool(true) },
+        { "glowstrength", RuntimeScalarValue::Float(3.0f) },
+        { "glowtint", RuntimeScalarValue::String("0.5 0.25 1") },
+        { "parallax", RuntimeScalarValue::Bool(true) },
+        { "depth", RuntimeScalarValue::Float(0.8f) },
+        { "lag", RuntimeScalarValue::Float(1.5f) },
+        { "lens", RuntimeScalarValue::Float(2.0f) },
+    };
+    auto scene = parser.Parse(
+        SceneParseRequest { .scene_id = "bound-general", .project_properties = &properties }, json,
+        vfs, sound_manager);
+    ASSERT_NE(scene, nullptr);
+    ASSERT_NE(scene->runtime, nullptr);
+    auto& runtime = *scene->runtime;
+
+    // Read when the scene loads.
+    ASSERT_EQ(scene->post_processes.size(), 1u) << "the saved bloom choice was ignored";
+    const auto& parallax =
+        static_cast<WPShaderValueUpdater&>(*scene->shaderValueUpdater).CameraParallax();
+    EXPECT_TRUE(parallax.enable);
+    EXPECT_FLOAT_EQ(parallax.amount, 0.8f);
+    const auto load_only = runtime.LoadOnlyProperties();
+    for (const char* name : { "glow", "parallax", "depth" }) {
+        EXPECT_NE(std::find(load_only.begin(), load_only.end(), name), load_only.end()) << name;
+    }
+
+    // Followed while the scene runs.
+    const auto* extract = PostProcessPassAt(*scene->post_processes[0], 0);
+    ASSERT_NE(extract, nullptr);
+    const auto& constants = extract->node->Mesh()->Material()->customShader.constValues;
+    EXPECT_FLOAT_EQ(constants.at("g_BloomStrength")[0], 3.0f);
+    EXPECT_FLOAT_EQ(constants.at("g_BloomTint")[1], 0.25f);
+    EXPECT_FLOAT_EQ(parallax.delay, 1.5f);
+    EXPECT_DOUBLE_EQ(scene->cameras.at("global")->Width(), 320.0);
+    runtime.ApplyProjectPropertyOverride({
+        { "glowstrength", RuntimeScalarValue::Float(0.5f) },
+        { "glowtint", RuntimeScalarValue::String("1 0 0") },
+        { "lag", RuntimeScalarValue::Float(0.25f) },
+        { "lens", RuntimeScalarValue::Float(4.0f) },
+    });
+    EXPECT_FLOAT_EQ(constants.at("g_BloomStrength")[0], 0.5f);
+    EXPECT_FLOAT_EQ(constants.at("g_BloomTint")[1], 0.0f);
+    EXPECT_FLOAT_EQ(static_cast<WPShaderValueUpdater&>(*scene->shaderValueUpdater)
+                        .CameraParallax().delay, 0.25f);
+    EXPECT_DOUBLE_EQ(scene->cameras.at("global")->Width(), 160.0);
+}
+
+// A scene that switches parallax or HDR bloom on and leaves their settings out
+// gets Wallpaper Engine's defaults.
+TEST(SceneSchema, SceneSettingsLeftOutTakeWallpaperEnginesDefaults) {
+    wpscene::WPScene sc;
+    sc.FromJson(nlohmann::json::parse(R"({
+      "camera": {"center":[0,0,0], "eye":[0,0,1], "up":[0,1,0]},
+      "general": {"cameraparallax":true, "orthogonalprojection":{"width":640,"height":360}}
+    })"));
+    EXPECT_TRUE(sc.general.cameraparallax);
+    EXPECT_FLOAT_EQ(sc.general.cameraparallaxamount, 0.5f);
+    EXPECT_FLOAT_EQ(sc.general.cameraparallaxdelay, 0.1f);
+    EXPECT_FLOAT_EQ(sc.general.cameraparallaxmouseinfluence, 0.5f);
+    // The ambient and sky light are black.
+    for (int i = 0; i < 3; ++i) {
+        EXPECT_FLOAT_EQ(sc.general.ambientcolor[i], 0.0f);
+        EXPECT_FLOAT_EQ(sc.general.skylightcolor[i], 0.0f);
+    }
+    // And the HDR bloom keys, likewise.
+    EXPECT_FLOAT_EQ(sc.general.bloomhdrstrength, 2.0f);
+    EXPECT_FLOAT_EQ(sc.general.bloomhdrthreshold, 1.0f);
+    EXPECT_FLOAT_EQ(sc.general.bloomhdrfeather, 0.1f);
+    EXPECT_FLOAT_EQ(sc.general.bloomhdrscatter, 1.619f);
+    EXPECT_EQ(sc.general.bloomhdriterations, 8);
+}
+
+// Wallpaper Engine's HDR bloom: as many half-size levels as the frame allows,
+// at most eight and at most the scene's iterations; extraction and
+// downsampling read a texel either side, upsampling half of one, the two
+// coarsest levels bicubically; the scatter weighs each upsampled level as it
+// is, and the extraction strength is divided by one more than the scatter
+// raised to the levels past the second.
+TEST(SceneSchema, HdrBloomBuildsWallpaperEnginesLevelsAndWeights) {
+    std::map<std::string, std::string> files;
+    AddHdrBloomFixtureFiles(files);
+    fs::VFS vfs;
+    ASSERT_TRUE(vfs.Mount("/assets", std::make_unique<MemoryFs>(std::move(files))));
+    audio::SoundManager sound_manager { audio::SoundManager::OutputBackend::Null };
+    WPSceneParser       parser;
+    const auto scene_json = [](int iterations) {
+        return std::string(R"({
+          "camera": {"center":[0,0,0], "eye":[0,0,1], "up":[0,1,0]},
+          "general": {"clearcolor":[0,0,0], "bloom":true, "hdr":true,
+            "bloomhdrstrength":3.0, "bloomhdrscatter":2.0, "bloomhdrthreshold":1.0,
+            "bloomhdrfeather":0.1, "bloomhdriterations":)") + std::to_string(iterations) + R"(,
+            "orthogonalprojection":{"width":640,"height":360}},
+          "objects": []
+        })";
+    };
+
+    // Twelve asked for; a 360-pixel side allows eight.
+    auto deep = parser.Parse("hdr-bloom-deep", scene_json(12), vfs, sound_manager);
+    ASSERT_NE(deep, nullptr);
+    ASSERT_EQ(deep->post_processes.size(), 1u);
+    EXPECT_NE(deep->FindRenderTarget("_rt_hdr_bloom_7"), nullptr);
+    EXPECT_EQ(deep->FindRenderTarget("_rt_hdr_bloom_8"), nullptr);
+    const auto& steps = deep->post_processes[0]->steps;
+    ASSERT_EQ(steps.size(), 1u + 7u + 7u + 1u + 1u);
+    const auto pass = [&steps](std::size_t index) {
+        const auto* step = std::get_if<ScenePostProcessPass>(&steps.at(index));
+        EXPECT_NE(step, nullptr);
+        return step;
+    };
+    const auto material = [&pass](std::size_t index) {
+        return pass(index)->node->Mesh()->Material();
+    };
+    EXPECT_FLOAT_EQ(material(0)->customShader.constValues.at("g_BloomStrength")[0],
+                    3.0f / (std::pow(2.0f, 6.0f) + 1.0f));
+    EXPECT_FLOAT_EQ(pass(0)->source_texel_radius, 1.0f);
+    for (std::size_t i = 1; i <= 7; ++i) EXPECT_FLOAT_EQ(pass(i)->source_texel_radius, 1.0f);
+    for (std::size_t i = 8; i <= 14; ++i) {
+        SCOPED_TRACE(i);
+        EXPECT_FLOAT_EQ(pass(i)->source_texel_radius, 0.5f);
+        EXPECT_FLOAT_EQ(material(i)->customShader.constValues.at("g_BloomScatter")[0], 2.0f);
+        // The first two upsamples read the two coarsest levels.
+        EXPECT_EQ(material(i)->name, i <= 9 ? "hdr_cubic" : "hdr_up");
+    }
+    EXPECT_FLOAT_EQ(pass(15)->source_texel_radius, 0.0f);
+
+    // Three levels: both upsamples are of the two coarsest.
+    auto shallow = parser.Parse("hdr-bloom-shallow", scene_json(3), vfs, sound_manager);
+    ASSERT_NE(shallow, nullptr);
+    const auto& shallow_steps = shallow->post_processes.at(0)->steps;
+    ASSERT_EQ(shallow_steps.size(), 1u + 2u + 2u + 1u + 1u);
+    for (std::size_t i : { 3u, 4u }) {
+        EXPECT_EQ(std::get<ScenePostProcessPass>(shallow_steps[i]).node->Mesh()->Material()->name,
+                  "hdr_cubic");
+    }
+}
+
+// Wallpaper Engine's HDR pipeline needs the scene's bloom as well as its
+// `hdr`: an HDR scene with bloom off is drawn with ordinary 8-bit targets.
+TEST(SceneSchema, AnHdrSceneWithoutBloomRendersAsAnOrdinaryOne) {
+    std::map<std::string, std::string> files;
+    AddHdrBloomFixtureFiles(files);
+    fs::VFS vfs;
+    ASSERT_TRUE(vfs.Mount("/assets", std::make_unique<MemoryFs>(std::move(files))));
+    audio::SoundManager sound_manager { audio::SoundManager::OutputBackend::Null };
+    WPSceneParser       parser;
+    for (const bool bloom : { false, true }) {
+        SCOPED_TRACE(bloom);
+        auto scene = parser.Parse(
+            bloom ? "hdr-with-bloom" : "hdr-without-bloom",
+            std::string(R"({"camera": {"center":[0,0,0], "eye":[0,0,1], "up":[0,1,0]},
+              "general": {"clearcolor":[0,0,0], "hdr":true, "bloom":)") +
+                (bloom ? "true" : "false") +
+                R"(, "orthogonalprojection":{"width":640,"height":360}}, "objects": []})",
+            vfs, sound_manager);
+        ASSERT_NE(scene, nullptr);
+        EXPECT_EQ(scene->hdr, bloom);
+        EXPECT_EQ(scene->FindRenderTarget(SpecTex_Default)->format,
+                  bloom ? TextureFormat::RGBA16F : TextureFormat::RGBA8);
+    }
 }
 
 TEST(SceneSchema, HdrBloomRejectsMissingHdrMaterialsRatherThanFallingBackToLdr) {
@@ -3753,6 +6173,7 @@ TEST(SceneSchema, ParserDoesNotCommitPartialBloomStateWhenMaterialLoadFails) {
     EXPECT_TRUE(parsed->post_processes.empty());
     EXPECT_EQ(parsed->FindRenderTarget("_rt_bloom_mip1"), nullptr);
     EXPECT_EQ(parsed->FindRenderTarget("_rt_bloom_mip2"), nullptr);
+    EXPECT_EQ(parsed->FindRenderTarget("_rt_bloom_blur"), nullptr);
     EXPECT_EQ(parsed->FindRenderTarget("_rt_bloom_combine"), nullptr);
 }
 
@@ -3957,7 +6378,8 @@ TEST(SceneSchema, ParallaxInheritanceResolvesRootsWithoutDependingOnDeclarationO
         if (reversed) std::reverse(objects.begin(), objects.end());
         EXPECT_EQ(objects[0]["parallaxDepth"], original[2]["parallaxDepth"]);
         EXPECT_EQ(objects[1]["parallaxDepth"], original[2]["parallaxDepth"]);
-        EXPECT_EQ(objects[3]["parallaxDepth"], nlohmann::json::array({0, 0}));
+        // A root without a depth has Wallpaper Engine's default, (1, 1).
+        EXPECT_EQ(objects[3]["parallaxDepth"], nlohmann::json::array({1, 1}));
         for (std::size_t i : {2u, 4u, 5u, 6u, 7u, 8u, 9u, 10u})
             EXPECT_EQ(objects[i], original[i]);
     }
@@ -4054,8 +6476,10 @@ TEST(SceneSchema, ParentedPuppetSlotsFollowTheRootDepthAndKeepTheirLocalTransfor
                         if (name == "g_ModelMatrix") model = value;
                     });
                 ASSERT_EQ(model.size(), 16u);
-                EXPECT_NEAR(model[12], 143.0f + (0.5f - x) * 640 * 2 * 0.75f, 1e-4);
-                EXPECT_NEAR(model[13], 137.0f + (0.5f - x) * 360 * 2 * -0.25f, 1e-4);
+                // The cursor's offset plus the root group's distance from the
+                // view centre (320, 180), both times the root's depth.
+                EXPECT_NEAR(model[12], 143.0f + ((0.5f - x) * 640 + (100 - 320)) * 2 * 0.75f, 1e-3);
+                EXPECT_NEAR(model[13], 137.0f + ((0.5f - x) * 360 + (80 - 180)) * 2 * -0.25f, 1e-3);
             }
         }
     }
@@ -4154,6 +6578,7 @@ TEST(SceneSchema, CameraZoomTimelineRevealsFullCanvasWithoutResizingRenderTarget
     EXPECT_DOUBLE_EQ(camera->Width(), 320);
     EXPECT_DOUBLE_EQ(camera->Height(), 180);
     const auto initial_fov = perspective->Fov();
+    const auto initial_distance = perspective->GetPosition().z();
     const auto target = parsed->renderTargets.at(std::string(SpecTex_Default));
     parsed->runtime->Tick(10.0);
     EXPECT_DOUBLE_EQ(camera->Width(), 320);
@@ -4165,7 +6590,12 @@ TEST(SceneSchema, CameraZoomTimelineRevealsFullCanvasWithoutResizingRenderTarget
     EXPECT_DOUBLE_EQ(camera->Height(), 540);
     EXPECT_DOUBLE_EQ(linked->Width(), camera->Width());
     EXPECT_DOUBLE_EQ(linked->Height(), camera->Height());
-    EXPECT_GT(perspective->Fov(), initial_fov);
+    // The zoom reframes the canvas, not the lens: the field of view stays the
+    // scene's and the eye backs off as more of the canvas shows.
+    EXPECT_DOUBLE_EQ(perspective->Fov(), initial_fov);
+    EXPECT_GT(perspective->GetPosition().z(), initial_distance);
+    EXPECT_NEAR(perspective->GetPosition().z(),
+                270.0 / std::tan(initial_fov * M_PI / 360.0), 1e-3);
     EXPECT_DOUBLE_EQ(perspective->Aspect(), camera->Aspect());
     for (const auto* view : {camera.get(), perspective.get(), linked.get()}) {
         for (const auto& corner : {Eigen::Vector4d(0, 0, 0, 1),
@@ -4181,6 +6611,165 @@ TEST(SceneSchema, CameraZoomTimelineRevealsFullCanvasWithoutResizingRenderTarget
     EXPECT_EQ(parsed->ortho[1], 540);
     EXPECT_EQ(parsed->renderTargets.at(std::string(SpecTex_Default)).width, target.width);
     EXPECT_EQ(parsed->renderTargets.at(std::string(SpecTex_Default)).height, target.height);
+}
+
+// A 2D scene's perspective layers -- particles and models with the
+// `perspective` flag -- are drawn through a camera that Wallpaper Engine seats
+// (canvas height / 2) / tan(fov / 2) in front of the canvas, with the scene's
+// `perspectiveoverridefov` (95 when it leaves the key out; `fov` belongs to
+// scenes with a perspective projection). The canvas plane maps exactly as the
+// orthographic view does; what lies off it is magnified by D / (D - z), and
+// nothing is clipped before it reaches the eye.
+std::shared_ptr<Scene> ParseCanvasPerspectiveScene(int width, int height,
+                                                   std::optional<double> override_fov) {
+    auto source = nlohmann::json::parse(BasicImageSceneJson());
+    source["objects"] = nlohmann::json::array();
+    source["general"]["orthogonalprojection"] = {{"width", width}, {"height", height}};
+    source["general"]["fov"] = 60;
+    if (override_fov.has_value()) source["general"]["perspectiveoverridefov"] = *override_fov;
+    fs::VFS vfs;
+    audio::SoundManager sound;
+    ProjectProperties properties;
+    return WPSceneParser().Parse(SceneParseRequest {
+        .scene_id = "canvas-perspective", .project_properties = &properties,
+    }, source.dump(), vfs, sound);
+}
+
+Eigen::Vector4d ClipOf(const SceneCamera& camera, double x, double y, double z) {
+    return camera.GetViewProjectionMatrix() * Eigen::Vector4d(x, y, z, 1.0);
+}
+
+TEST(SceneSchema, A2DScenesPerspectiveCameraSitsWhereItsFieldOfViewPutsTheEye) {
+    struct Case {
+        int                  width;
+        int                  height;
+        std::optional<double> override_fov;
+        double               fov;
+    };
+    const Case cases[] = {
+        { 1920, 1080, 50.0, 50.0 },
+        { 3840, 2160, 25.0, 25.0 },
+        { 1366, 768, 95.0, 95.0 },
+        // No key: 95, whatever `fov` says.
+        { 1366, 768, std::nullopt, 95.0 },
+        { 7680, 2160, 170.0, 170.0 },
+    };
+    for (const auto& c : cases) {
+        SCOPED_TRACE(std::to_string(c.width) + "x" + std::to_string(c.height) + " fov " +
+                     std::to_string(c.fov));
+        auto parsed = ParseCanvasPerspectiveScene(c.width, c.height, c.override_fov);
+        ASSERT_NE(parsed, nullptr);
+        const auto& canvas      = *parsed->cameras.at("global");
+        const auto& perspective = *parsed->cameras.at("global_perspective");
+        const double distance   = (c.height / 2.0) / std::tan(c.fov * M_PI / 360.0);
+
+        EXPECT_DOUBLE_EQ(perspective.Fov(), c.fov);
+        const auto eye = perspective.GetPosition();
+        EXPECT_NEAR(eye.x(), c.width / 2.0, 1e-3);
+        EXPECT_NEAR(eye.y(), c.height / 2.0, 1e-3);
+        EXPECT_NEAR(eye.z(), distance, distance * 1e-6);
+        EXPECT_DOUBLE_EQ(perspective.NearClip(), 5.0);
+        EXPECT_NEAR(perspective.FarClip(), std::max(distance + 1000.0, 15000.0), 1e-2);
+
+        // The canvas plane is mapped as the orthographic camera maps it.
+        for (const auto& point : {std::pair {0.0, 0.0}, std::pair {double(c.width), double(c.height)},
+                                  std::pair {c.width * 0.3, c.height * 0.8}}) {
+            const auto flat = ClipOf(canvas, point.first, point.second, 0.0);
+            const auto deep = ClipOf(perspective, point.first, point.second, 0.0);
+            EXPECT_NEAR(deep.x() / deep.w(), flat.x() / flat.w(), 1e-5);
+            EXPECT_NEAR(deep.y() / deep.w(), flat.y() / flat.w(), 1e-5);
+        }
+
+        // What lies in front of the plane is larger by D / (D - z) and stays
+        // in view up to the near plane, 5 units from the eye, past a thousand
+        // units out or not.
+        const double offset = c.width / 200.0;
+        const auto   centre_x = c.width / 2.0;
+        const auto   flat = ClipOf(perspective, centre_x + offset, c.height / 2.0, 0.0);
+        for (const double z : {distance * 0.1, distance * 0.5, distance * 0.9, distance - 6.0}) {
+            SCOPED_TRACE("z " + std::to_string(z));
+            const auto at = ClipOf(perspective, centre_x + offset, c.height / 2.0, z);
+            ASSERT_GT(at.w(), 0.0);
+            // The eye is stored as a float, which near a far eye is a fraction of a
+            // unit: the ratio is taken against where it really is.
+            const double seen = eye.z() / (eye.z() - z);
+            EXPECT_NEAR((at.x() / at.w()) / (flat.x() / flat.w()), seen, seen * 1e-5);
+            const auto middle = ClipOf(perspective, centre_x, c.height / 2.0, z);
+            const double depth = middle.z() / middle.w();
+            EXPECT_GE(depth, 0.0);
+            EXPECT_LE(depth, 1.0);
+        }
+    }
+}
+
+TEST(SceneSchema, TheFieldOfViewOfA2DScenesPerspectiveCameraIsReadFromAnyPackageVersion) {
+    const auto json = nlohmann::json::parse(R"({"perspectiveoverridefov":70.0,"windenabled":true})");
+    // `windenabled` is a package-version-21 key and stays gated; the field of view
+    // is read from whatever file carries it.
+    wpscene::WPSceneGeneral v9;
+    ASSERT_TRUE(v9.FromJson(json, 9));
+    EXPECT_FLOAT_EQ(v9.perspectiveoverridefov, 70.0f);
+    EXPECT_FALSE(v9.windenabled);
+}
+
+// What a shader reads as `g_EyePosition` in a 2D scene is not where the perspective
+// camera sits. Wallpaper Engine keeps that eye at the centre of the view, 2000
+// units in front of the canvas (the scene-wide eye of FUN_1401891a0), whatever
+// distance the field of view puts the projection's eye at; the particle trail
+// shaders orient their ribbons by it.
+TEST(SceneSchema, A2DScenesPerspectiveModelReadsTheEyeTwoThousandUnitsOutWhateverTheLens) {
+    auto files = std::map<std::string, std::string> {};
+    AddLeafModelSceneFiles(files);
+    fs::VFS vfs;
+    ASSERT_TRUE(vfs.Mount("/assets", std::make_unique<MemoryFs>(std::move(files))));
+    audio::SoundManager sound_manager;
+    auto parsed = WPSceneParser().Parse("canvas-eye", R"({
+      "camera": {"center":[0,0,0], "eye":[0,0,1], "up":[0,1,0]},
+      "general": {
+        "ambientcolor":[0.2,0.2,0.2], "skylightcolor":[0.3,0.3,0.3],
+        "clearcolor":[0,0,0], "cameraparallax":false,
+        "cameraparallaxamount":0, "cameraparallaxdelay":0,
+        "cameraparallaxmouseinfluence":0, "perspectiveoverridefov":40,
+        "orthogonalprojection":{"width":640,"height":360}
+      },
+      "objects": [
+        {"id":7,"name":"planet","model":"planet.mdl","perspective":true,
+         "origin":[0,0,0],"scale":[1,1,1],"angles":[0,0,0],"visible":true}
+      ]
+    })", vfs, sound_manager);
+    ASSERT_NE(parsed, nullptr);
+    auto node = FindRootChildByName(*parsed, "planet");
+    ASSERT_NE(node, nullptr);
+    ASSERT_EQ(node->Camera(), "global_perspective");
+    auto* updater = parsed->shaderValueUpdater.get();
+    ASSERT_NE(updater, nullptr);
+    updater->InitUniforms(node.get(), 0, [](std::string_view name) { return name == "g_EyePosition"; });
+    const auto read_eye = [&] {
+        std::array<float, 3> eye { 0.0f, 0.0f, 0.0f };
+        sprite_map_t         sprites;
+        updater->UpdateUniforms(node.get(), sprites,
+                                [&](std::string_view name, const ShaderValue& value) {
+                                    if (name == "g_EyePosition") eye = { value[0], value[1], value[2] };
+                                });
+        return eye;
+    };
+
+    // The projection's eye is (360 / 2) / tan(20 degrees) = 494.6 units out.
+    const auto& perspective = *parsed->cameras.at("global_perspective");
+    ASSERT_NEAR(perspective.GetPosition().z(), 180.0 / std::tan(20.0 * M_PI / 180.0), 1e-2);
+    auto eye = read_eye();
+    EXPECT_NEAR(eye[0], 320.0f, 1e-3f);
+    EXPECT_NEAR(eye[1], 180.0f, 1e-3f);
+    EXPECT_NEAR(eye[2], 2000.0f, 1e-3f);
+
+    // A reframed canvas moves the view's centre and the projection's eye; the
+    // shader's eye follows the centre and keeps its distance.
+    parsed->FrameCanvas(3.0, Eigen::Vector2f(40.0f, -20.0f));
+    ASSERT_GT(std::abs(perspective.GetPosition().z() - 494.6), 100.0);
+    eye = read_eye();
+    EXPECT_NEAR(eye[0], 360.0f, 1e-3f);
+    EXPECT_NEAR(eye[1], 160.0f, 1e-3f);
+    EXPECT_NEAR(eye[2], 2000.0f, 1e-3f);
 }
 
 TEST(SceneSchema, CameraZoomTimelineHonorsPausedFirstKeyAndLooping) {
@@ -5032,6 +7621,189 @@ constexpr std::string_view kPlainImageObjects =
     R"([{"id":1,"name":"plain","image":"image.json","visible":true}])";
 }
 
+TEST(SceneSchema, AnEmitterOriginScalesWithItsLayerUnlessTheFileIsWorldspace) {
+    // A particle system lives in its layer's space: Wallpaper Engine draws it
+    // through the layer's model matrix, which scales the emitter origin along
+    // with every position and size the system makes. A worldspace file is drawn
+    // through no such matrix: the origin is added unscaled, in world units, so
+    // the drawn place is the layer's position plus the authored 50, not 100.
+    for (const auto& [flags, world_y] : { std::pair<int, float> { 0, 280.0f }, { 1, 230.0f } }) {
+        SCOPED_TRACE(flags);
+        fs::VFS vfs;
+        MountSceneFiles(vfs);
+        auto files = std::map<std::string, std::string> {
+            { "/still_particle.json",
+              R"({"emitter":[{"name":"boxrandom","id":1,"origin":"0 50 0",)"
+              R"("distancemin":"0 0 0","distancemax":"0 0 0","speedmin":0,"speedmax":0,)"
+              R"("rate":100,"instantaneous":1}],)"
+              R"("initializer":[{"name":"lifetimerandom","min":10,"max":10}],)"
+              R"("material":"mat.json","maxcount":1,"starttime":0,"flags":)" +
+                  std::to_string(flags) + "}" },
+        };
+        ASSERT_TRUE(vfs.Mount("/assets", std::make_unique<MemoryFs>(std::move(files))));
+        audio::SoundManager sound_manager;
+        auto scene = WPSceneParser().Parse(
+            SceneParseRequest { .scene_id = "emitter-origin" },
+            R"({"camera":{"center":[0,0,0],"eye":[0,0,1],"up":[0,1,0]},
+                "general":{"clearcolor":[0,0,0],"cameraparallax":false,"bloom":false,
+                           "orthogonalprojection":{"width":640,"height":360}},
+                "objects":[{"id":1,"name":"snow","particle":"still_particle.json",
+                            "origin":[320,180,0],"scale":[2,2,1],"visible":true}]})",
+            vfs, sound_manager);
+        ASSERT_NE(scene, nullptr);
+        ASSERT_FALSE(scene->paritileSys->subsystems.empty());
+        scene->frameTime = 1.0 / 60.0;
+        scene->paritileSys->Emitt();
+        const auto& subsystem = *scene->paritileSys->subsystems.front();
+        ASSERT_FALSE(subsystem.Instances().empty());
+        const auto particles = subsystem.Instances().front()->Particles();
+        ASSERT_FALSE(particles.empty());
+        const auto layer = FindRootChildByName(*scene, "snow");
+        ASSERT_NE(layer, nullptr);
+        layer->UpdateTrans();
+        const auto& at = particles.front().position;
+        const Eigen::Vector3d drawn =
+            (layer->RenderTrans() * Eigen::Vector4d(at.x(), at.y(), at.z(), 1.0)).head<3>();
+        EXPECT_NEAR(drawn.x(), 320.0, 1.0e-3);
+        EXPECT_NEAR(drawn.y(), world_y, 1.0e-3);
+    }
+}
+
+TEST(SceneSchema, AWorldspaceLayerStretchesItsSpawnsButNotTheSpeedOfItsParticles) {
+    // A stretched layer (24 times wider than tall) carries a particle file whose
+    // emitter sends each particle out from its spawn point at 60 units a second.
+    // A layer-space file draws the particles and their motion through the
+    // layer's matrix, so the speed is stretched along with everything else (about
+    // 17 times faster on screen for a particle that leaves at 45 degrees), while a
+    // worldspace file is in scene units: the spawn offset is stretched, the
+    // particle heads along it, and goes at the speed the file wrote.
+    constexpr double kAlong = 0.70710678118654752;
+    struct Case {
+        int    flags;
+        double first_x;
+        double step_length;
+    };
+    // After the first step the particle has gone a sixtieth of its speed.
+    // Layer space: 5 units out along the diagonal, 0.7071 further on each axis,
+    // all drawn 24 wide. Worldspace: 120 out along x (24 * 5), and the unit step
+    // along the heading (120, 5), which is 0.99913 on x.
+    const double heading_x = 120.0 / std::hypot(120.0, 5.0);
+    for (const auto& [flags, first_x, step_length] :
+         { Case { 0, 24.0 * (5.0 + kAlong), kAlong * std::hypot(24.0, 1.0) },
+           Case { 1, 120.0 + heading_x, 1.0 } }) {
+        SCOPED_TRACE(flags);
+        fs::VFS vfs;
+        MountSceneFiles(vfs);
+        auto files = std::map<std::string, std::string> {
+            { "/stretched_particle.json",
+              R"({"emitter":[{"name":"boxrandom","id":1,"origin":"0 0 0","directions":"1 1 0",)"
+              R"("distancemin":"5 5 0","distancemax":"5 5 0","speedmin":60,"speedmax":60,)"
+              R"("rate":100,"instantaneous":1}],)"
+              R"("initializer":[{"name":"lifetimerandom","min":10,"max":10}],)"
+              R"("operator":[{"name":"movement","id":2}],)"
+              R"("material":"mat.json","maxcount":1,"starttime":0,"flags":)" +
+                  std::to_string(flags) + "}" },
+        };
+        ASSERT_TRUE(vfs.Mount("/assets", std::make_unique<MemoryFs>(std::move(files))));
+        audio::SoundManager sound_manager;
+        auto scene = WPSceneParser().Parse(
+            SceneParseRequest { .scene_id = "stretched" },
+            R"({"camera":{"center":[0,0,0],"eye":[0,0,1],"up":[0,1,0]},
+                "general":{"clearcolor":[0,0,0],"cameraparallax":false,"bloom":false,
+                           "orthogonalprojection":{"width":640,"height":360}},
+                "objects":[{"id":1,"name":"haze","particle":"stretched_particle.json",
+                            "origin":[320,180,0],"scale":[24,1,1],"visible":true}]})",
+            vfs, sound_manager);
+        ASSERT_NE(scene, nullptr);
+        ASSERT_FALSE(scene->paritileSys->subsystems.empty());
+        const auto layer = FindRootChildByName(*scene, "haze");
+        ASSERT_NE(layer, nullptr);
+        scene->frameTime = 1.0 / 60.0;
+        const auto drawn_position = [&] {
+            scene->paritileSys->Emitt();
+            const auto& subsystem = *scene->paritileSys->subsystems.front();
+            const auto  particles = subsystem.Instances().front()->Particles();
+            EXPECT_FALSE(particles.empty());
+            layer->UpdateTrans();
+            const auto& at = particles.front().position;
+            return Eigen::Vector3d((layer->RenderTrans() * Eigen::Vector4d(at.x(), at.y(), at.z(), 1.0))
+                                       .head<3>());
+        };
+        const auto first  = drawn_position();
+        const auto second = drawn_position();
+        EXPECT_NEAR(std::abs(first.x() - 320.0), first_x, 1.0e-3);
+        EXPECT_NEAR((second - first).norm(), step_length, 1.0e-3);
+    }
+}
+
+TEST(SceneSchema, AChildSystemOriginScalesWithItsLayerUnlessItsParentIsWorldspace) {
+    // A child system's matrix, with the origin as its translation, is composed
+    // with its parent system's, and a layer-space parent is drawn through the
+    // layer's model matrix: the offset scales along with the rest. The
+    // particles of a worldspace parent are already in world units, so the child
+    // hangs at the authored offset unscaled, held here at half its value under
+    // a layer scaled by two. An event child follows its parent's flag alone,
+    // whatever its own file says. A static child whose own file is worldspace is
+    // not settled by any reference scene and keeps the authored offset in world
+    // units, as it did before the origin was scaled.
+    struct Case {
+        const char* type;
+        int         parent_flags;
+        int         child_flags;
+        float       world_y;
+    };
+    for (const auto& [type, parent_flags, child_flags, world_y] : {
+             Case { "static", 0, 0, 280.0f },
+             Case { "static", 0, 1, 230.0f },
+             Case { "static", 1, 0, 230.0f },
+             Case { "static", 1, 1, 230.0f },
+             Case { "eventfollow", 0, 0, 280.0f },
+             Case { "eventfollow", 0, 1, 280.0f },
+             Case { "eventfollow", 1, 0, 230.0f },
+             Case { "eventfollow", 1, 1, 230.0f },
+         }) {
+        SCOPED_TRACE(std::string(type) + " " + std::to_string(parent_flags) + "/" +
+                     std::to_string(child_flags));
+        const auto still = [](int flags, std::string_view children) {
+            return std::string(R"({"emitter":[{"name":"boxrandom","id":1,"origin":"0 0 0",)"
+                               R"("distancemin":"0 0 0","distancemax":"0 0 0","speedmin":0,)"
+                               R"("speedmax":0,"rate":100,"instantaneous":1}],)"
+                               R"("initializer":[{"name":"lifetimerandom","min":10,"max":10}],)"
+                               R"("material":"mat.json","maxcount":1,"starttime":0,"flags":)") +
+                   std::to_string(flags) + std::string(children) + "}";
+        };
+        fs::VFS vfs;
+        MountSceneFiles(vfs);
+        auto files = std::map<std::string, std::string> {
+            { "/parent_particle.json",
+              still(parent_flags,
+                    std::string(R"(,"children":[{"name":"child_particle.json","type":")") + type +
+                        R"(","maxcount":1,"origin":"0 50 0"}])") },
+            { "/child_particle.json", still(child_flags, "") },
+        };
+        ASSERT_TRUE(vfs.Mount("/assets", std::make_unique<MemoryFs>(std::move(files))));
+        audio::SoundManager sound_manager;
+        auto scene = WPSceneParser().Parse(
+            SceneParseRequest { .scene_id = "child-origin" },
+            R"({"camera":{"center":[0,0,0],"eye":[0,0,1],"up":[0,1,0]},
+                "general":{"clearcolor":[0,0,0],"cameraparallax":false,"bloom":false,
+                           "orthogonalprojection":{"width":640,"height":360}},
+                "objects":[{"id":1,"name":"snow","particle":"parent_particle.json",
+                            "origin":[320,180,0],"scale":[2,2,1],"visible":true}]})",
+            vfs, sound_manager);
+        ASSERT_NE(scene, nullptr);
+        const auto layer = FindRootChildByName(*scene, "snow");
+        ASSERT_NE(layer, nullptr);
+        ASSERT_EQ(layer->GetChildren().size(), 1u);
+        const auto& child_node = layer->GetChildren().front();
+        child_node->UpdateTrans();
+        const Eigen::Vector3d placed =
+            (child_node->ModelTrans() * Eigen::Vector4d(0, 0, 0, 1)).head<3>();
+        EXPECT_NEAR(placed.x(), 320.0, 1.0e-3);
+        EXPECT_NEAR(placed.y(), world_y, 1.0e-3);
+    }
+}
+
 TEST(SceneSchema, AudioRequirementComesOnlyFromContentThatReadsAudio) {
     AudioProbeScene plain(kPlainImageObjects);
     ASSERT_NE(plain.scene, nullptr);
@@ -5534,7 +8306,7 @@ TEST(SceneSchema, MediaStateSurvivesTheSceneItArrivedBefore) {
     ASSERT_TRUE(wallpaper.init());
     wallpaper.setPropertyBool(wallpaper::PROPERTY_MEDIA_INTEGRATION_ENABLED, true);
     wallpaper.setPropertyString(wallpaper::PROPERTY_MEDIA_EVENT_JSON,
-                                R"({"type":"mediaPlaybackChanged","state":0})");
+                                R"({"type":"mediaPlaybackChanged","state":1})");
 
     std::shared_ptr<wallpaper::SceneNode> probe;
     auto scene = MakeMediaProbeScene(probe);
@@ -5603,7 +8375,7 @@ TEST(SceneSchema, WithdrawingConsentDropsWhatWasRetained) {
     ASSERT_TRUE(wallpaper.init());
     wallpaper.setPropertyBool(wallpaper::PROPERTY_MEDIA_INTEGRATION_ENABLED, true);
     wallpaper.setPropertyString(wallpaper::PROPERTY_MEDIA_EVENT_JSON,
-                                R"({"type":"mediaPlaybackChanged","state":0})");
+                                R"({"type":"mediaPlaybackChanged","state":1})");
     wallpaper.setPropertyBool(wallpaper::PROPERTY_MEDIA_INTEGRATION_ENABLED, false);
     wallpaper.setPropertyBool(wallpaper::PROPERTY_MEDIA_INTEGRATION_ENABLED, true);
 
@@ -5674,7 +8446,8 @@ TEST(SceneSchema, ASoundFollowsTheSliderValueTheUserActuallyHas) {
     EXPECT_FLOAT_EQ(object.volume, 0.3f) << "the author's number is still read";
     EXPECT_EQ(object.volume_user, "buttonsvolume");
 
-    audio::SoundManager sound_manager;
+    // Parse mounts the layer, which would open a system output device.
+    audio::SoundManager sound_manager(audio::SoundManager::OutputBackend::Null);
     WPSoundParser::Parse(object, vfs, sound_manager, runtime.get());
 
     ASSERT_TRUE(runtime->HasSoundLayer("button_press"));
@@ -5694,7 +8467,7 @@ TEST(SceneSchema, ASoundWithNoBindingKeepsTheAuthorsVolume) {
     ASSERT_TRUE(object.FromJson(json, vfs));
     EXPECT_TRUE(object.volume_user.empty());
 
-    audio::SoundManager sound_manager;
+    audio::SoundManager sound_manager(audio::SoundManager::OutputBackend::Null);
     WPSoundParser::Parse(object, vfs, sound_manager, runtime.get());
     EXPECT_FLOAT_EQ(runtime->SoundLayerVolume("click"), 0.75f);
 }
@@ -5719,7 +8492,7 @@ TEST(SceneSchema, AButtonSoundStartsSilentAndPlaysWhenAsked) {
     ASSERT_TRUE(object.FromJson(json, vfs));
     EXPECT_TRUE(object.startsilent);
 
-    audio::SoundManager sound_manager;
+    audio::SoundManager sound_manager(audio::SoundManager::OutputBackend::Null);
     WPSoundParser::Parse(object, vfs, sound_manager, runtime.get());
 
     ASSERT_TRUE(runtime->HasSoundLayer("button_press"))
@@ -6105,4 +8878,472 @@ TEST(SceneSchema, ALayerCreatedFromAWorkshopModelIsSizedByItsPictureAndShows) {
     EXPECT_TRUE(created->Visible());
     EXPECT_TRUE(scene->runtime->NodeSize(created->Name()).isApprox(Eigen::Vector2f(12, 6)));
     EXPECT_EQ(scene->runtime->scriptErrorCount(), 0u);
+}
+
+// ---------------------------------------------------------------------------
+// SceneScript API parity: what needs the parser's own state.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+nlohmann::json ScriptParityScene(nlohmann::json objects) {
+    return {
+        { "camera", { { "center", { 0, 0, -1 } }, { "eye", { 0, 0, 0 } }, { "up", { 0, 1, 0 } } } },
+        { "general",
+          { { "ambientcolor", { 0, 0, 0 } },
+            { "skylightcolor", { 0, 0, 0 } },
+            { "clearcolor", { 0, 0, 0 } },
+            { "cameraparallax", false },
+            { "orthogonalprojection", { { "width", 640 }, { "height", 360 } } } } },
+        { "objects", std::move(objects) },
+    };
+}
+
+std::shared_ptr<Scene> ParseScriptParityScene(fs::VFS& vfs, const nlohmann::json& source) {
+    audio::SoundManager sound_manager;
+    WPSceneParser       parser;
+    ProjectProperties   properties;
+    return parser.Parse(SceneParseRequest {
+        .scene_id = "script-parity", .project_properties = &properties,
+    }, source.dump(), vfs, sound_manager);
+}
+
+void WaitForTextLayoutToSettle(SceneRuntimeContext& runtime, const std::string& layer) {
+    for (int attempt = 0; attempt < 400 && runtime.NodeTextDirty(layer); ++attempt) {
+        runtime.PumpTextLayerCache();
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+}
+
+} // namespace
+
+// Layers are counted in the order the scene file declares them, found by their
+// scene.json id, and their object is readable: all from the parse, not from the
+// order scripts happened to register things in.
+TEST(SceneSchema, ScriptsEnumerateLayersInSceneFileOrderAndReadTheirScenesObjects) {
+    fs::VFS vfs;
+    MountSceneFiles(vfs);
+    const auto scene = ParseScriptParityScene(vfs, ScriptParityScene(nlohmann::json::array({
+        { { "id", 31 }, { "name", "first" }, { "image", "image.json" }, { "origin", { 10, 20, 0 } } },
+        { { "id", 7 }, { "name", "label" }, { "text", "hello" }, { "font", "Arial" }, { "pointsize", 24 } },
+        { { "id", 12 }, { "name", "last" }, { "image", "image.json" },
+          { "visible",
+            { { "value", true },
+              { "script",
+                "export function init(value) {\n"
+                "  const names = thisScene.enumerateLayers().map(l => l.name);\n"
+                "  if (names.join(',') !== 'first,label,last') throw new Error('order: ' + names.join(','));\n"
+                "  if (thisScene.getLayerCount() !== 3) throw new Error('count');\n"
+                "  if (thisScene.getLayerByID(31) !== thisScene.getLayer('first')) throw new Error('id 31');\n"
+                "  if (thisScene.getLayerByID(7) !== thisScene.getLayer(1)) throw new Error('id 7');\n"
+                "  const config = thisScene.getInitialLayerConfig(thisScene.getLayer('label'));\n"
+                "  if (config.text !== 'hello' || config.font !== 'Arial' || config.id !== 7) throw new Error('config');\n"
+                "  const own = thisScene.getInitialLayerConfig(thisLayer);\n"
+                "  if (own.image !== 'image.json' || own.name !== 'last') throw new Error('own config');\n"
+                "  return value;\n"
+                "}\n"
+                "export function update(value) { return value; }\n" } } } },
+    })));
+    ASSERT_NE(scene, nullptr);
+    ASSERT_NE(scene->runtime, nullptr);
+    scene->runtime->Tick(1.0 / 60.0);
+    for (const auto& error : scene->runtime->scriptErrors()) ADD_FAILURE() << error;
+    EXPECT_EQ(scene->runtime->LayerCount(), 3u);
+    EXPECT_EQ(scene->runtime->LayerNameAt(0), "first");
+    EXPECT_EQ(scene->runtime->LayerNameAt(1), "label");
+    EXPECT_EQ(scene->runtime->LayerNameForId(12), "last");
+    EXPECT_TRUE(scene->runtime->InitialLayerConfigRequested());
+}
+
+// A scene whose scripts never read the object list does not keep a copy of it.
+TEST(SceneSchema, ASceneWithoutLayerConfigReadersKeepsNoCopyOfItsObjects) {
+    fs::VFS vfs;
+    MountSceneFiles(vfs);
+    const auto scene = ParseScriptParityScene(vfs, ScriptParityScene(nlohmann::json::array({
+        { { "id", 1 }, { "name", "plain" }, { "image", "image.json" },
+          { "visible", { { "value", true }, { "script", "export function update(value) { return value; }" } } } },
+    })));
+    ASSERT_NE(scene, nullptr);
+    scene->runtime->Tick(1.0 / 60.0);
+    EXPECT_FALSE(scene->runtime->InitialLayerConfigRequested());
+    EXPECT_EQ(scene->runtime->InitialLayerConfigJson("plain"), "");
+}
+
+// createLayer({ text }) builds the layer as the scene file's own text layers are
+// built, so the new layer is a real one: it has a card, a material that takes
+// the color and alpha, a measured size, and a place in the scene.
+TEST(SceneSchema, CreateLayerBuildsATextLayerThroughTheParsersOwnTextPath) {
+    fs::VFS vfs;
+    MountSceneFiles(vfs);
+    const auto scene = ParseScriptParityScene(vfs, ScriptParityScene(nlohmann::json::array({
+        { { "id", 1 }, { "name", "label" }, { "text", "hello" }, { "font", "Arial" }, { "pointsize", 24 } },
+        { { "id", 2 }, { "name", "owner" }, { "image", "image.json" },
+          { "visible",
+            { { "value", true },
+              { "script",
+                "export function init(value) {\n"
+                "  const shadow = thisScene.createLayer({\n"
+                "    text: thisScene.getInitialLayerConfig(thisScene.getLayer('label')).text,\n"
+                "    font: thisScene.getLayer('label').font,\n"
+                "    pointsize: thisScene.getLayer('label').pointsize,\n"
+                "    color: '0.2 0.4 0.6', alpha: 0.5, name: 'shadow', horizontalalign: 'left'\n"
+                "  });\n"
+                "  shadow.origin = new Vec3(40, 50, 0);\n"
+                // A text object has no `alignment`: a layer made with one is centred.
+                "  thisScene.createLayer({ text: 'ghost', font: 'Arial', name: 'ghost',\n"
+                "    alignment: 'right', verticalalign: 'Top' });\n"
+                "  return value;\n"
+                "}\n"
+                "export function update(value) { return value; }\n" } } } },
+    })));
+    ASSERT_NE(scene, nullptr);
+    ASSERT_NE(scene->runtime, nullptr);
+    auto& runtime = *scene->runtime;
+    runtime.Tick(1.0 / 60.0);
+    for (const auto& error : runtime.scriptErrors()) ADD_FAILURE() << error;
+
+    const std::string name = runtime.ResolveLayerName("shadow");
+    ASSERT_TRUE(runtime.HasNodeNamed(name)) << "the new layer is reachable by the name it was given";
+    EXPECT_TRUE(name.starts_with("__we_text_")) << name;
+    EXPECT_EQ(runtime.NodeText(name), "hello");
+    const auto state = runtime.NodeTextState(name);
+    ASSERT_TRUE(state.has_value());
+    EXPECT_FLOAT_EQ(state->point_size, 24.0f);
+    EXPECT_EQ(state->font_key, "Arial");
+    EXPECT_EQ(state->horizontal_align, "left");
+    const auto ghost = runtime.NodeTextState(runtime.ResolveLayerName("ghost"));
+    ASSERT_TRUE(ghost.has_value());
+    EXPECT_EQ(ghost->horizontal_align, "center") << "`alignment` names nothing a text layer has";
+    EXPECT_EQ(ghost->vertical_align, "center") << "`Top` is not a word of the registry";
+    EXPECT_GT(runtime.NodeSize(name).x(), 0.0f) << "laid out like the scene's own text";
+    EXPECT_NEAR(runtime.NodeSize(name).x(), runtime.NodeSize("label").x(), 1e-3f);
+
+    SceneNode* node = nullptr;
+    for (const auto& child : scene->sceneGraph->GetChildren()) {
+        if (child->Name() == name) node = child.get();
+    }
+    ASSERT_NE(node, nullptr) << "the layer joined the scene graph";
+    ASSERT_NE(node->Mesh(), nullptr);
+    ASSERT_NE(node->Mesh()->Material(), nullptr);
+    const auto& constants = node->Mesh()->Material()->customShader.constValues;
+    ASSERT_TRUE(constants.contains("g_Color"));
+    EXPECT_FLOAT_EQ(constants.at("g_Color")[0], 0.2f);
+    EXPECT_FLOAT_EQ(constants.at("g_Color")[1], 0.4f);
+    EXPECT_FLOAT_EQ(constants.at("g_Color")[2], 0.6f);
+    EXPECT_FLOAT_EQ(constants.at("g_Alpha")[0], 0.5f);
+    EXPECT_TRUE(runtime.ConsumeSceneGraphMutationFlag());
+    EXPECT_EQ(runtime.LayerCount(), 4u);
+    EXPECT_EQ(runtime.LayerNameAt(2), name) << "created layers follow the scene's own";
+}
+
+// createLayer({ text, size }) goes through the parser's text path, which ignores the
+// authored `size`: the card is the text plus its padding, as Wallpaper Engine sets it
+// from the layout every time the text is laid out.
+TEST(SceneSchema, ATextLayerAScriptMakesIgnoresAnAuthoredSize) {
+    fs::VFS vfs;
+    MountSceneFiles(vfs);
+    const auto scene = ParseScriptParityScene(vfs, ScriptParityScene(nlohmann::json::array({
+        { { "id", 1 }, { "name", "label" }, { "text", "hello" }, { "font", "Arial" }, { "pointsize", 24 } },
+        { { "id", 2 }, { "name", "owner" }, { "image", "image.json" },
+          { "visible",
+            { { "value", true },
+              { "script",
+                "export function init(value) {\n"
+                "  thisScene.createLayer({ text: 'hello', font: 'Arial', pointsize: 24,\n"
+                "    name: 'boxed', size: '640 400' });\n"
+                "  return value;\n"
+                "}\n"
+                "export function update(value) { return value; }\n" } } } },
+    })));
+    ASSERT_NE(scene, nullptr);
+    ASSERT_NE(scene->runtime, nullptr);
+    auto& runtime = *scene->runtime;
+    runtime.Tick(1.0 / 60.0);
+    for (const auto& error : runtime.scriptErrors()) ADD_FAILURE() << error;
+
+    const std::string name = runtime.ResolveLayerName("boxed");
+    ASSERT_TRUE(runtime.HasNodeNamed(name));
+    const auto card = runtime.NodeSize(name);
+    EXPECT_GT(card.x(), 0.0f);
+    EXPECT_LT(card.x(), 640.0f);
+    EXPECT_LT(card.y(), 400.0f);
+    EXPECT_TRUE(card.isApprox(runtime.NodeSize("label")));
+}
+
+// createLayer({ text, horizontalalign, verticalalign }) goes through the same path, so the
+// layer it makes is placed as a scene's own: where the script puts its origin, with the
+// card hung from it by the edges it is aligned to.
+TEST(SceneSchema, ATextLayerAScriptMakesHangsFromItsOriginLikeASceneOne) {
+    fs::VFS vfs;
+    MountSceneFiles(vfs);
+    const auto scene = ParseScriptParityScene(vfs, ScriptParityScene(nlohmann::json::array({
+        { { "id", 1 }, { "name", "owner" }, { "image", "image.json" },
+          { "visible",
+            { { "value", true },
+              { "script",
+                "export function init(value) {\n"
+                "  const label = thisScene.createLayer({ text: 'hello', font: 'Arial', pointsize: 24,\n"
+                "    name: 'label', horizontalalign: 'right', verticalalign: 'bottom',\n"
+                "    size: '640 400' });\n"
+                "  label.origin = new Vec3(300, 100, 0);\n"
+                "  return value;\n"
+                "}\n"
+                "export function update(value) { return value; }\n" } } } },
+    })));
+    ASSERT_NE(scene, nullptr);
+    ASSERT_NE(scene->runtime, nullptr);
+    auto& runtime = *scene->runtime;
+    runtime.Tick(1.0 / 60.0);
+    for (const auto& error : runtime.scriptErrors()) ADD_FAILURE() << error;
+
+    const std::string name = runtime.ResolveLayerName("label");
+    ASSERT_TRUE(runtime.HasNodeNamed(name));
+    SceneNode* node = nullptr;
+    for (const auto& child : scene->sceneGraph->GetChildren()) {
+        if (child->Name() == name) node = child.get();
+    }
+    ASSERT_NE(node, nullptr);
+    ASSERT_NE(node->Mesh(), nullptr);
+    EXPECT_TRUE(node->Translate().isApprox(Eigen::Vector3f(300.0f, 100.0f, 0.0f)));
+    EXPECT_TRUE(runtime.NodeTranslate(name).isApprox(Eigen::Vector3f(300.0f, 100.0f, 0.0f)));
+    const auto layout = runtime.NodeTextLayout(name);
+    ASSERT_TRUE(layout.has_value());
+    const auto& vertices = node->Mesh()->GetVertexArray(0);
+    float       max_x = -1.0e9f;
+    float       max_y = -1.0e9f;
+    for (std::size_t index = 0; index < vertices.VertexCount(); ++index) {
+        max_x = std::max(max_x, vertices.Data()[index * vertices.OneSize()]);
+        max_y = std::max(max_y, vertices.Data()[index * vertices.OneSize() + 1u]);
+    }
+    EXPECT_NEAR(max_x, 0.0f, 1.0e-3f) << "right aligned: the card ends on the origin";
+    EXPECT_NEAR(max_y, layout->top + layout->descender, 1.0e-3f)
+        << "bottom aligned: the descender line of the row is on the origin";
+    EXPECT_LT(runtime.NodeSize(name).x(), 640.0f);
+}
+
+// A text layer's style is changed by script through the parser's own font
+// resolution: a named system font resolves like the scene file's, a larger size
+// and a new alignment lay the text out again and move the card about the layer's origin.
+TEST(SceneSchema, ScriptsRestyleASceneTextLayerAndItIsLaidOutAgain) {
+    fs::VFS vfs;
+    MountSceneFiles(vfs);
+    const auto scene = ParseScriptParityScene(vfs, ScriptParityScene(nlohmann::json::array({
+        { { "id", 1 }, { "name", "clock" }, { "text", "12:30" }, { "font", "Arial" }, { "pointsize", 20 },
+          { "origin", { 320, 180, 0 } }, { "horizontalalign", "left" }, { "verticalalign", "top" } },
+        { { "id", 2 }, { "name", "owner" }, { "image", "image.json" },
+          { "visible",
+            { { "value", true },
+              { "script",
+                "export function init(value) { return value; }\n"
+                "export function update(value) { return value; }\n"
+                "export function cursorClick() {\n"
+                "  const clock = thisScene.getLayer('clock');\n"
+                "  clock.pointsize = clock.pointsize * 2;\n"
+                "  clock.font = 'systemfont_arial';\n"
+                "  clock.horizontalalign = 'right';\n"
+                "}\n" } } } },
+    })));
+    ASSERT_NE(scene, nullptr);
+    auto& runtime = *scene->runtime;
+    runtime.Tick(1.0 / 60.0);
+    WaitForTextLayoutToSettle(runtime, "clock");
+    const auto before        = runtime.NodeSize("clock");
+    EXPECT_EQ(runtime.NodeTextState("clock")->horizontal_align, "left");
+
+    // The script's cursorClick runs when the pointer is over the owner's card.
+    runtime.DispatchCursorClick();
+    for (const auto& error : runtime.scriptErrors()) ADD_FAILURE() << error;
+
+    const auto state = runtime.NodeTextState("clock");
+    ASSERT_TRUE(state.has_value());
+    EXPECT_FLOAT_EQ(state->point_size, 40.0f);
+    EXPECT_EQ(state->font_key, "systemfont_arial");
+    EXPECT_EQ(state->resolved_font_kind, "system") << "resolved by the parser's own rule";
+    EXPECT_EQ(state->horizontal_align, "right");
+    // The authored vertical alignment survives a horizontal change.
+    EXPECT_EQ(state->vertical_align, "top");
+
+    WaitForTextLayoutToSettle(runtime, "clock");
+    ASSERT_FALSE(runtime.NodeTextDirty("clock"));
+    const auto after = runtime.NodeSize("clock");
+    EXPECT_GT(after.x(), before.x());
+    EXPECT_GT(after.y(), before.y());
+}
+
+// A layer whose name is shared or empty is registered under a generated key, but
+// scripts see the name the scene file gave it.
+TEST(SceneSchema, ScriptsSeeTheAuthoredNameOfLayersTheParserRegisteredUnderGeneratedKeys) {
+    fs::VFS vfs;
+    MountSceneFiles(vfs);
+    const auto scene = ParseScriptParityScene(vfs, ScriptParityScene(nlohmann::json::array({
+        { { "id", 1 }, { "name", "twin" }, { "image", "image.json" } },
+        { { "id", 2 }, { "name", "twin" }, { "image", "image.json" } },
+        { { "id", 3 }, { "image", "image.json" } },
+        { { "id", 4 }, { "name", "solo" }, { "image", "image.json" },
+          { "visible",
+            { { "value", true },
+              { "script",
+                "export function init(value) {\n"
+                "  const names = thisScene.enumerateLayers().map(l => l.name);\n"
+                "  if (names.join(',') !== 'twin,twin,,solo') throw new Error('names: ' + names.join(','));\n"
+                "  if (thisScene.getLayerByID(2).name !== 'twin') throw new Error('id 2');\n"
+                "  if (thisScene.getLayerByID(2) === thisScene.getLayer('twin')) throw new Error('the twins are one');\n"
+                "  if (thisScene.getLayer('twin') !== thisScene.getLayer(0)) throw new Error('first twin');\n"
+                "  if (thisScene.getLayer(2).name !== '') throw new Error('nameless');\n"
+                "  if (thisScene.getLayerIndex(thisScene.getLayerByID(2)) !== 1) throw new Error('index');\n"
+                "  if (thisLayer.name !== 'solo') throw new Error('this');\n"
+                "  return value;\n"
+                "}\n"
+                "export function update(value) { return value; }\n" } } } },
+    })));
+    ASSERT_NE(scene, nullptr);
+    ASSERT_NE(scene->runtime, nullptr);
+    scene->runtime->Tick(1.0 / 60.0);
+    for (const auto& error : scene->runtime->scriptErrors()) ADD_FAILURE() << error;
+    EXPECT_EQ(scene->runtime->LayerCount(), 4u);
+    EXPECT_EQ(scene->runtime->LayerAuthoredName(scene->runtime->LayerNameAt(1)), "twin");
+    EXPECT_EQ(scene->runtime->LayerAuthoredName(scene->runtime->LayerNameAt(2)), "");
+}
+
+// A scene script runs `init` as it is registered. By then the layers' order and
+// ids, the scene file's objects, and the hooks that restyle and create text
+// layers are in place, as they are for every call after it.
+TEST(SceneSchema, ASceneScriptsInitSeesTheLayerOrderIdsObjectsAndTextHooks) {
+    fs::VFS vfs;
+    MountSceneFiles(vfs);
+    const auto scene = ParseScriptParityScene(vfs, ScriptParityScene(nlohmann::json::array({
+        { { "id", 31 }, { "name", "first" }, { "image", "image.json" } },
+        { { "id", 7 }, { "name", "label" }, { "text", "hello" }, { "font", "Arial" }, { "pointsize", 24 } },
+        { { "id", 12 }, { "name", "last" }, { "image", "image.json" },
+          { "visible",
+            { { "value", true },
+              { "script",
+                "engine.on('resizeScreen', function() {});\n"
+                "export function init(value) {\n"
+                "  const names = thisScene.enumerateLayers().map(l => l.name);\n"
+                "  if (names.join(',') !== 'first,label,last') throw new Error('order: ' + names.join(','));\n"
+                "  if (thisScene.getLayerByID(31) !== thisScene.getLayer('first')) throw new Error('id 31');\n"
+                "  if (thisScene.getLayerByID(7) !== thisScene.getLayer(1)) throw new Error('id 7');\n"
+                "  const config = thisScene.getInitialLayerConfig(thisScene.getLayer('label'));\n"
+                "  if (config === null || config.text !== 'hello' || config.id !== 7) throw new Error('config');\n"
+                "  thisScene.getLayer('label').font = 'systemfont_arial';\n"
+                "  const made = thisScene.createLayer({ text: 'from init', name: 'made', pointsize: 18 });\n"
+                "  if (thisScene.getLayer('made') !== made || thisScene.getLayerCount() !== 4) throw new Error('made');\n"
+                "  return value;\n"
+                "}\n" } } } },
+    })));
+    ASSERT_NE(scene, nullptr);
+    ASSERT_NE(scene->runtime, nullptr);
+    auto& runtime = *scene->runtime;
+    for (const auto& error : runtime.scriptErrors()) ADD_FAILURE() << error;
+    EXPECT_TRUE(runtime.InitialLayerConfigRequested());
+    EXPECT_EQ(runtime.sceneScriptCount(), 1u) << "the script ran as a scene script";
+    EXPECT_EQ(runtime.LayerCount(), 4u);
+    EXPECT_EQ(runtime.NodeTextState("label")->font_key, "systemfont_arial");
+    const auto made = runtime.ResolveLayerName("made");
+    ASSERT_TRUE(runtime.HasNodeNamed(made));
+    EXPECT_EQ(runtime.NodeText(made), "from init");
+}
+
+namespace {
+
+// A file system that says whether it was asked while it still existed.
+struct FsProbe {
+    std::atomic<int>  asked_alive { 0 };
+    std::atomic<int>  asked_after_death { 0 };
+    std::atomic<bool> dead { false };
+};
+
+class ProbeFs final : public fs::Fs {
+public:
+    explicit ProbeFs(std::shared_ptr<FsProbe> probe): m_probe(std::move(probe)) {}
+    ~ProbeFs() override { m_probe->dead = true; }
+
+    bool Contains(std::string_view) const override {
+        (m_probe->dead ? m_probe->asked_after_death : m_probe->asked_alive)++;
+        return false;
+    }
+    std::shared_ptr<fs::IBinaryStream>  Open(std::string_view) override { return nullptr; }
+    std::shared_ptr<fs::IBinaryStreamW> OpenW(std::string_view) override { return nullptr; }
+
+private:
+    std::shared_ptr<FsProbe> m_probe;
+};
+
+} // namespace
+
+// A script's destroy() runs while the scene's files, layers and registries still
+// exist: it can restyle a text layer, which asks the files for the font, and the
+// request is answered by a file system that is still there.
+TEST(SceneSchema, ScriptsEndWhileTheScenesFilesAndLayersStillExist) {
+    auto probe = std::make_shared<FsProbe>();
+    auto vfs   = std::make_unique<fs::VFS>();
+    MountSceneFiles(*vfs);
+    ASSERT_TRUE(vfs->Mount("/assets", std::make_unique<ProbeFs>(probe)));
+    auto scene = ParseScriptParityScene(*vfs, ScriptParityScene(nlohmann::json::array({
+        { { "id", 1 }, { "name", "label" }, { "text", "hello" }, { "font", "Arial" }, { "pointsize", 24 } },
+        { { "id", 2 }, { "name", "owner" }, { "image", "image.json" },
+          { "visible",
+            { { "value", true },
+              { "script",
+                "export function init(value) { return value; }\n"
+                "export function update(value) { return value; }\n"
+                "export function destroy() {\n"
+                "  thisScene.getLayer('label').font = 'fonts/probe.ttf';\n"
+                "  thisLayer.visible = true;\n"
+                "}\n" } } } },
+    })));
+    ASSERT_NE(scene, nullptr);
+    scene->vfs = std::move(vfs);  // as the player hands the scene its files
+    scene->runtime->Tick(1.0 / 60.0);
+    for (const auto& error : scene->runtime->scriptErrors()) ADD_FAILURE() << error;
+    const int asked_before = probe->asked_alive;
+
+    scene.reset();
+    EXPECT_GT(probe->asked_alive, asked_before) << "destroy() reached the files";
+    EXPECT_EQ(probe->asked_after_death, 0) << "and they were still there";
+    EXPECT_TRUE(probe->dead);
+}
+
+// Text layers a script makes and destroys over and over do not accumulate their
+// rasters: each one's texture goes once the graph that drew it is gone.
+TEST(SceneSchema, TextLayersAScriptMadeAndDestroyedLeaveNoTextureBehind) {
+    fs::VFS vfs;
+    MountSceneFiles(vfs);
+    const auto scene = ParseScriptParityScene(vfs, ScriptParityScene(nlohmann::json::array({
+        { { "id", 2 }, { "name", "owner" }, { "image", "image.json" } },
+    })));
+    ASSERT_NE(scene, nullptr);
+    auto& runtime = *scene->runtime;
+    auto* images  = dynamic_cast<RuntimeImageSource*>(scene->imageParser.get());
+    ASSERT_NE(images, nullptr);
+    const auto text_textures = [&] {
+        std::size_t count = 0;
+        for (const auto& [name, texture] : scene->textures) {
+            if (name.starts_with("runtime/text/")) ++count;
+        }
+        return count;
+    };
+    runtime.Tick(1.0 / 60.0);
+    const std::size_t baseline = text_textures();
+
+    for (int round = 0; round < 4; ++round) {
+        SCOPED_TRACE(round);
+        const auto name = runtime.CreateTextLayer(R"({"text":"x","pointsize":20,"visible":true})", "owner");
+        ASSERT_FALSE(name.empty());
+        const auto texture = TextTextureName(name);
+        EXPECT_TRUE(scene->textures.contains(texture));
+        EXPECT_TRUE(images->IsRuntimeImage(texture));
+        EXPECT_EQ(text_textures(), baseline + 1);
+
+        runtime.ConsumeSceneGraphMutationFlag();
+        EXPECT_TRUE(runtime.DestroyLayer(name));
+        EXPECT_TRUE(scene->textures.contains(texture)) << "the graph compiled before still samples it";
+        runtime.ConsumeSceneGraphMutationFlag();  // a graph without the layer was built
+        runtime.Tick(1.0 / 60.0);
+        EXPECT_FALSE(scene->textures.contains(texture));
+        EXPECT_FALSE(images->IsRuntimeImage(texture));
+        EXPECT_EQ(text_textures(), baseline);
+    }
+    EXPECT_TRUE(images->IsRuntimeImage("$mediaThumbnail")) << "the covers are never removed";
 }

@@ -811,6 +811,96 @@ void main() {
     REQUIRE(screen_readers == 1);
 }
 
+// Wallpaper Engine draws a layer whose colour blend mode is 31 ("add") with
+// additive blending straight onto the scene: no passthrough, no copy of the
+// screen for it to sample. With effects the last effect pass is the one that
+// adds; without, the layer's own draw.
+TEST(RenderGraph, addColorBlendLayersAddOntoTheSceneWithoutSamplingIt) {
+    const std::string vert = R"(attribute vec3 a_Position;
+attribute vec2 a_TexCoord;
+varying vec2 v_TexCoord;
+void main() {
+  gl_Position = vec4(a_Position, 1.0);
+  v_TexCoord = a_TexCoord;
+}
+)";
+    const std::string frag = R"(uniform sampler2D g_Texture0;
+#if BLENDMODE
+uniform sampler2D g_Texture4; // {"hidden":true,"default":"_rt_FullFrameBuffer"}
+#endif
+varying vec2 v_TexCoord;
+void main() {
+  gl_FragColor = texture(g_Texture0, v_TexCoord);
+#if BLENDMODE
+  gl_FragColor.rgb += texture(g_Texture4, v_TexCoord).rgb;
+#endif
+}
+)";
+    wallpaper::fs::VFS vfs;
+    auto files = std::map<std::string, std::string> {
+        { "/models/util/solidlayer.json", R"({"material":"materials/util/solidlayer.json"})" },
+        { "/materials/util/solidlayer.json",
+          R"({"passes":[{"blending":"translucent","cullmode":"nocull","depthtest":"disabled",)"
+          R"("depthwrite":"disabled","shader":"genericimage","textures":["solid.tex"]}]})" },
+        { "/materials/util/effectpassthrough.json",
+          R"({"passes":[{"shader":"blend_probe","cullmode":"nocull","blending":"normal",)"
+          R"("depthwrite":"disabled","depthtest":"disabled"}]})" },
+        { "/effects/tint/effect.json",
+          R"({"name":"tint","passes":[{"material":"materials/effects/tint.json"}]})" },
+        { "/materials/effects/tint.json",
+          R"({"passes":[{"blending":"translucent","cullmode":"nocull","depthtest":"disabled",)"
+          R"("depthwrite":"disabled","shader":"effects/tint","textures":[null]}]})" },
+        { "/shaders/genericimage.vert", vert },
+        { "/shaders/genericimage.frag", frag },
+        { "/shaders/blend_probe.vert", vert },
+        { "/shaders/blend_probe.frag", frag },
+        { "/shaders/effects/tint.vert", vert },
+        { "/shaders/effects/tint.frag", frag },
+        { "/materials/solid.tex.tex", "" },
+    };
+    REQUIRE(vfs.Mount("/assets", std::make_unique<MemoryFs>(std::move(files))));
+
+    const std::string scene_json = R"({
+      "camera": {"center":[0,0,0], "eye":[0,0,1], "up":[0,1,0]},
+      "general": {
+        "ambientcolor":[0.2,0.2,0.2], "skylightcolor":[0.3,0.3,0.3],
+        "clearcolor":[0,0,0], "cameraparallax":false,
+        "cameraparallaxamount":0, "cameraparallaxdelay":0,
+        "cameraparallaxmouseinfluence":0,
+        "orthogonalprojection":{"width":640,"height":360}
+      },
+      "objects": [
+        {"id":940,"name":"plain","image":"models/util/solidlayer.json","colorBlendMode":31,
+         "origin":[0,0,0],"scale":[1,1,1],"angles":[0,0,0],"size":[64,64],"visible":true},
+        {"id":941,"name":"with effect","image":"models/util/solidlayer.json","colorBlendMode":31,
+         "origin":[0,0,0],"scale":[1,1,1],"angles":[0,0,0],"size":[64,64],"visible":true,
+         "effects":[{"file":"effects/tint/effect.json","id":942,"visible":true}]}
+      ]
+    })";
+
+    wallpaper::audio::SoundManager sound_manager(wallpaper::audio::SoundManager::OutputBackend::Null);
+    wallpaper::WPSceneParser       parser;
+    auto parsed = parser.Parse("add-color-blend", scene_json, vfs, sound_manager);
+    REQUIRE(parsed != nullptr);
+
+    const auto graph  = wallpaper::sceneToRenderGraph(*parsed);
+    const auto passes = graphPasses(*graph);
+    std::size_t onto_scene = 0;
+    for (const auto& pass : passes) {
+        REQUIRE(pass.copy == nullptr);
+        if (pass.custom == nullptr) continue;
+        const auto& desc = pass.custom->desc();
+        for (const auto& texture : desc.textures) REQUIRE(! texture.starts_with(SpecTex_Default));
+        if (desc.output != SpecTex_Default) continue;
+        ++onto_scene;
+        const auto* material = desc.node->Mesh()->MaterialForSlot(desc.material_slot);
+        REQUIRE(material != nullptr);
+        REQUIRE(material->blenmode == wallpaper::BlendMode::Additive);
+        REQUIRE(material->name != "blend_probe");
+    }
+    REQUIRE(onto_scene == 2);
+}
+
 TEST(RenderGraph, skippedBasePassStillEmitsEffectPasses) {
     Scene scene;
     installDefaultTargets(scene);

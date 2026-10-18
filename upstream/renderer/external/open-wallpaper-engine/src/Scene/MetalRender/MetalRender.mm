@@ -31,6 +31,7 @@
 #include "Interface/IShaderValueUpdater.h"
 #include "Scene/Scene.h"
 #include "SpecTexs.hpp"
+#include "Utils/AutoDeletor.hpp"
 #include "Utils/Logging.h"
 
 #include <Eigen/Dense>
@@ -213,6 +214,19 @@ double NormalizeScaleFactor(double value)
     return value;
 }
 
+/// The longest side of a 2D texture this device can create, from Apple's
+/// published feature-set limits: 16384 from the third GPU family on and on every
+/// Mac family, 8192 below that. The Metal API has no query for it, so this is
+/// the table the documentation gives.
+uint32_t MaxTextureDimension(id<MTLDevice> device)
+{
+    if (device != nil && ([device supportsFamily:MTLGPUFamilyApple3] ||
+                          [device supportsFamily:MTLGPUFamilyMac2])) {
+        return 16384;
+    }
+    return 8192;
+}
+
 MTLVertexFormat ToMetalVertexFormat(std::string_view name)
 {
     if (name == "r32_sfloat") return MTLVertexFormatFloat;
@@ -293,6 +307,37 @@ bool ToMetalImageFormat(TextureFormat format, bool block_compression, MTLPixelFo
     case TextureFormat::RGB8: return false;
     }
     return false;
+}
+
+/// Writes every level of `slot` into `texture`, as the pixels or the 4x4 blocks
+/// the image holds. A level with no data is skipped; false when a block-
+/// compressed level is shorter than its own block grid, which the copy would
+/// read past.
+bool UploadImageLevels(id<MTLTexture> texture, const Image::Slot& slot, uint32_t bytes_per_pixel,
+                       uint32_t block_bytes)
+{
+    for (std::size_t level = 0; level < slot.mipmaps.size(); ++level) {
+        const auto& mipmap = slot.mipmaps[level];
+        if (mipmap.data == nullptr || mipmap.width <= 0 || mipmap.height <= 0) continue;
+        MTLRegion region = MTLRegionMake2D(0, 0, (NSUInteger)mipmap.width,
+                                           (NSUInteger)mipmap.height);
+        NSUInteger bytes_per_row = (NSUInteger)mipmap.width * bytes_per_pixel;
+        if (block_bytes > 0) {
+            const NSUInteger blocks_wide = ((NSUInteger)mipmap.width + 3) / 4;
+            const NSUInteger blocks_high = ((NSUInteger)mipmap.height + 3) / 4;
+            bytes_per_row                = blocks_wide * block_bytes;
+            // A level shorter than its own block grid would be read past
+            // its end by the copy below.
+            if (mipmap.size < 0 || (NSUInteger)mipmap.size < bytes_per_row * blocks_high) {
+                return false;
+            }
+        }
+        [texture replaceRegion:region
+                   mipmapLevel:level
+                     withBytes:mipmap.data.get()
+                   bytesPerRow:bytes_per_row];
+    }
+    return true;
 }
 
 /// Reads the material texture slot out of a generated chroma-plane resource
@@ -1431,6 +1476,11 @@ struct MetalRender::Impl
         uint32_t                    height { 0 };
         MTLPixelFormat              format { MTLPixelFormatRGBA8Unorm };
         uint32_t                    bytes_per_pixel { 4 };
+        /// Non-zero for a block-compressed image: a cover slot stands in for
+        /// its cover with the picture its author shipped, which is whatever
+        /// the file held, mip chain included.
+        uint32_t                    block_bytes { 0 };
+        uint32_t                    levels { 1 };
         TextureSample               sample {};
     };
     std::unordered_map<std::string, RuntimeImageRing> runtime_image_rings;
@@ -2008,14 +2058,15 @@ bool MetalRender::Impl::encodeComposition(id<MTLCommandBuffer> command,
 
 id<MTLSamplerState> MetalRender::Impl::samplerFor(const TextureSample& sample)
 {
-    char key_bytes[5] = {
+    char key_bytes[6] = {
         static_cast<char>(sample.wrapS),
         static_cast<char>(sample.wrapT),
         static_cast<char>(sample.magFilter),
         static_cast<char>(sample.minFilter),
+        static_cast<char>(sample.mipFilter),
         '\0',
     };
-    const std::string key(key_bytes, 4);
+    const std::string key(key_bytes, 5);
     if (auto found = samplers.find(key); found != samplers.end()) return found->second;
 
     MTLSamplerDescriptor* descriptor = [MTLSamplerDescriptor new];
@@ -2023,7 +2074,11 @@ id<MTLSamplerState> MetalRender::Impl::samplerFor(const TextureSample& sample)
     descriptor.tAddressMode = ToMetalAddressMode(sample.wrapT);
     descriptor.magFilter    = ToMetalFilter(sample.magFilter);
     descriptor.minFilter    = ToMetalFilter(sample.minFilter);
-    descriptor.mipFilter    = MTLSamplerMipFilterLinear;
+    // Only a texture whose file asks for point sampling picks its mip level by
+    // point; see `TextureSample::mipFilter`.
+    descriptor.mipFilter    = sample.mipFilter == TextureFilter::NEAREST
+                                  ? MTLSamplerMipFilterNearest
+                                  : MTLSamplerMipFilterLinear;
     id<MTLSamplerState> state = [device newSamplerStateWithDescriptor:descriptor];
     if (state == nil) return nil;
     samplers.emplace(key, state);
@@ -2092,20 +2147,22 @@ void MetalRender::Impl::refreshRuntimeImages(Scene& scene)
         const auto& mipmap = source.mipmaps.front();
         if (mipmap.data == nullptr || mipmap.width <= 0 || mipmap.height <= 0) continue;
 
-        // A runtime image is pixels the runtime rasterised, never blocks, so
-        // block compression is not offered here.
+        // Pixels the runtime rasterised are never blocks. The picture a cover
+        // slot shows while no cover exists is the author's own file, which may
+        // be block-compressed and carry a mip chain, so both are offered.
         MTLPixelFormat format {};
         uint32_t       bytes_per_pixel = 0;
         uint32_t       block_bytes     = 0;
-        if (! ToMetalImageFormat(parsed->header.format, false, format, bytes_per_pixel,
-                                 block_bytes)) {
+        if (! ToMetalImageFormat(parsed->header.format, device.supportsBCTextureCompression,
+                                 format, bytes_per_pixel, block_bytes)) {
             continue;
         }
 
         const auto width  = static_cast<uint32_t>(mipmap.width);
         const auto height = static_cast<uint32_t>(mipmap.height);
+        const auto levels = static_cast<uint32_t>(source.mipmaps.size());
         if (ring.slots.size() != kFramesInFlight || ring.width != width ||
-            ring.height != height || ring.format != format) {
+            ring.height != height || ring.format != format || ring.levels != levels) {
             // A new size or format needs new images. The ones being replaced
             // are released here and stay alive exactly as long as the command
             // buffers that reference them, which retain what they encode.
@@ -2116,7 +2173,8 @@ void MetalRender::Impl::refreshRuntimeImages(Scene& scene)
                     [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format
                                                                        width:(NSUInteger)width
                                                                       height:(NSUInteger)height
-                                                                   mipmapped:NO];
+                                                                   mipmapped:levels > 1];
+                if (levels > 1) descriptor.mipmapLevelCount = levels;
                 descriptor.usage       = MTLTextureUsageShaderRead;
                 descriptor.storageMode = MTLStorageModeShared;
                 id<MTLTexture> texture = [device newTextureWithDescriptor:descriptor];
@@ -2130,16 +2188,18 @@ void MetalRender::Impl::refreshRuntimeImages(Scene& scene)
             ring.height          = height;
             ring.format          = format;
             ring.bytes_per_pixel = bytes_per_pixel;
+            ring.block_bytes     = block_bytes;
+            ring.levels          = levels;
         }
 
-        const auto found = scene.textures.find(key);
-        ring.sample = found != scene.textures.end() ? found->second.sample : parsed->header.sample;
+        // The sampler follows the image the name shows now, as the compatibility
+        // backend's does: a cover slot shows its author's picture, sampled as the
+        // file says, and then a track's cover, clamped and linear.
+        ring.sample = parsed->header.sample;
 
-        MTLRegion region = MTLRegionMake2D(0, 0, (NSUInteger)width, (NSUInteger)height);
-        [ring.slots[slot] replaceRegion:region
-                            mipmapLevel:0
-                              withBytes:mipmap.data.get()
-                            bytesPerRow:(NSUInteger)width * bytes_per_pixel];
+        // Into the texture the next frame owns, never one a queued command
+        // buffer is still reading. A level the image does not hold stays as it was.
+        if (! UploadImageLevels(ring.slots[slot], source, bytes_per_pixel, block_bytes)) continue;
         ring.slot_versions[slot] = version;
         ++runtime_image_uploads;
     }
@@ -2243,31 +2303,7 @@ id<MTLTexture> MetalRender::Impl::resolveTexture(Scene& scene, const std::string
 
         id<MTLTexture> texture = [device newTextureWithDescriptor:descriptor];
         if (texture == nil) break;
-        bool complete = true;
-        for (std::size_t level = 0; level < slot.mipmaps.size(); ++level) {
-            const auto& mipmap = slot.mipmaps[level];
-            if (mipmap.data == nullptr || mipmap.width <= 0 || mipmap.height <= 0) continue;
-            MTLRegion region = MTLRegionMake2D(0, 0, (NSUInteger)mipmap.width,
-                                               (NSUInteger)mipmap.height);
-            NSUInteger bytes_per_row = (NSUInteger)mipmap.width * bytes_per_pixel;
-            if (block_bytes > 0) {
-                const NSUInteger blocks_wide = ((NSUInteger)mipmap.width + 3) / 4;
-                const NSUInteger blocks_high = ((NSUInteger)mipmap.height + 3) / 4;
-                bytes_per_row                = blocks_wide * block_bytes;
-                // A level shorter than its own block grid would be read past
-                // its end by the copy below.
-                if (mipmap.size < 0 ||
-                    (NSUInteger)mipmap.size < bytes_per_row * blocks_high) {
-                    complete = false;
-                    break;
-                }
-            }
-            [texture replaceRegion:region
-                       mipmapLevel:level
-                         withBytes:mipmap.data.get()
-                       bytesPerRow:bytes_per_row];
-        }
-        if (! complete) break;
+        if (! UploadImageLevels(texture, slot, bytes_per_pixel, block_bytes)) break;
         slot_textures.push_back(texture);
     }
     if (slot_textures.empty()) return nil;
@@ -2312,7 +2348,10 @@ void MetalRender::Impl::resolveTargetSizes(Scene& scene)
 {
     const VkExtent2D fallback { std::max<uint32_t>(1, output_width),
                                 std::max<uint32_t>(1, output_height) };
-    const auto extents      = vulkan::ResolveScreenBoundRenderTargetSizes(scene, fallback);
+    const auto extents      = vulkan::ResolveScreenBoundRenderTargetSizes(
+        scene, fallback,
+        vulkan::SceneRasterSurface { .display_scale_factor = NormalizeScaleFactor(display_scale_factor),
+                                     .max_dimension        = MaxTextureDimension(device) });
     const auto render_scale = vulkan::ResolveSceneRenderScale(scene);
     raster_width            = std::max(1u, extents.raster.width);
     raster_height           = std::max(1u, extents.raster.height);
@@ -3705,6 +3744,14 @@ void MetalRender::Impl::writeUniforms(Scene& scene, const ScenePassDescription& 
         };
         write(WE_GLTEX_RESOLUTION_NAMES[i],
               ShaderValue(std::span<const float>(resolution.data(), resolution.size())));
+        if (width > 0 && height > 0) {
+            const std::array<float, 4> texel {
+                1.0f / static_cast<float>(width), 1.0f / static_cast<float>(height),
+                static_cast<float>(width), static_cast<float>(height),
+            };
+            write(WE_GLTEX_TEXEL_NAMES[i],
+                  ShaderValue(std::span<const float>(texel.data(), texel.size())));
+        }
     }
 
 }
@@ -4143,6 +4190,13 @@ vulkan::StaticPassSample MetalRender::Impl::frameSample(Scene& scene, std::size_
         desc.node->UpdateTrans();
         const auto model = desc.node->ModelTrans();
         hash = vulkan::StaticHashBytes(hash, model.data(), sizeof(double) * 16);
+        // Where the node is drawn, when that is not where its world matrix puts it: a
+        // layer a screen anchor shifts, or a final card drawn through an override that
+        // carries the shift.
+        if (desc.node->HasRenderTransformOverride() || ! desc.node->DrawOffset().isZero()) {
+            const auto drawn = desc.node->RenderTrans();
+            hash = vulkan::StaticHashBytes(hash, drawn.data(), sizeof(double) * 16);
+        }
         if (auto* mesh = desc.node->Mesh(); mesh != nullptr) {
             hash = vulkan::StaticHashMix(hash, mesh->DirtyGeneration());
             if (const auto* material = mesh->MaterialForSlot(desc.material_slot);
@@ -4153,6 +4207,11 @@ vulkan::StaticPassSample MetalRender::Impl::frameSample(Scene& scene, std::size_
                                                    value.size() * sizeof(float));
                 }
             }
+        }
+        // Lights move, fade and switch without touching this node or material.
+        if (const auto* updater = scene.shaderValueUpdater.get(); updater != nullptr) {
+            hash = vulkan::StaticHashMix(hash,
+                                         updater->LightStateHash(desc.node, desc.material_slot));
         }
     }
 
@@ -4251,6 +4310,9 @@ bool MetalRender::Impl::planStaticSkips(Scene& scene)
 bool MetalRender::Impl::compile(Scene& scene, rg::RenderGraph& graph)
 {
     releaseGraph();
+    // The videos a rebuild set aside and this graph does not take back are the
+    // ones it no longer uses: closed with the compile, however it ends.
+    AUTO_DELETER(held_videos, [this]() { video.closeHeld(); });
     if (scene.imageParser != nullptr) {
         scene.imageParser->SetTextureSurfaceSize(scene.display_sized ? 0 : output_width,
                                                  scene.display_sized ? 0 : output_height);
@@ -4451,6 +4513,7 @@ void MetalRender::destroy()
             [drain waitUntilCompleted];
         }
         pImpl->releaseGraph();
+        pImpl->video.closeHeld();
         pImpl->releasePresentation();
         pImpl->present_pipelines.clear();
         pImpl->queue  = nil;
@@ -4506,34 +4569,59 @@ bool MetalRender::clearLastRenderGraph()
 {
     @autoreleasepool {
         pImpl->releaseGraph();
+        pImpl->video.closeHeld();
+        return true;
+    }
+}
+
+bool MetalRender::clearLastRenderGraphForRebuild()
+{
+    @autoreleasepool {
+        pImpl->video.hold();
+        pImpl->releaseGraph();
         return true;
     }
 }
 
 bool MetalRender::compileRenderGraph(Scene& scene, rg::RenderGraph& graph)
 {
-    if (! pImpl->inited) return pImpl->fail("the native renderer is not initialised");
+    if (! pImpl->inited) {
+        // The compile a rebuild set its videos aside for is not going to happen, and
+        // nothing else would close them.
+        pImpl->video.closeHeld();
+        return pImpl->fail("the native renderer is not initialised");
+    }
     @autoreleasepool {
         return pImpl->compile(scene, graph);
     }
 }
 
-bool MetalRender::ApplyRenderScale(Scene& scene, rg::RenderGraph& graph, double scale)
+bool MetalRender::ApplyRenderScale(Scene& scene, rg::RenderGraph& graph, double scale,
+                                   SceneResolution resolution)
 {
     // The same guard the compatibility backend has, and for a sharper reason
-    // here: `compile` starts by releasing the graph, which closes every video
-    // and drops every uploaded image. The host pushes this as a live property
-    // to every open scene whenever the value *might* have moved — on scene
-    // creation, and on each power-source change while the battery profile is
-    // on — precisely so a quality control the user drags does not reparse the
-    // project or reopen its video. Acting on an unchanged value would turn
+    // here: `compile` starts by releasing the graph, which drops every uploaded
+    // image and sets every video aside for the new graph to take back. The host
+    // pushes this as a live property to every open scene whenever the value
+    // *might* have moved — on scene creation, and on each power-source change
+    // while the battery profile is on — precisely so a quality control the user
+    // drags does not reparse the project. Acting on an unchanged value would turn
     // every plug and unplug into exactly that.
     if (! std::isfinite(scale) || scale <= 0.0) return true;
     const double clamped = std::min(1.0, std::max(vulkan::kMinRenderScale, scale));
-    if (scene.render_scale == clamped) return true;
+    if (scene.render_scale == clamped && scene.resolution == resolution) return true;
 
+    // A resolution that this scene has no canvas to apply to changes nothing
+    // that is drawn, so it must not cost a perspective scene or a video its
+    // compiled graph either.
+    const bool resizes =
+        scene.render_scale != clamped ||
+        (scene.resolution != resolution && vulkan::SceneResolutionAffectsRaster(scene));
     scene.render_scale = clamped;
+    scene.resolution   = resolution;
+    if (! resizes) return true;
     @autoreleasepool {
+        pImpl->video.hold();
         return pImpl->compile(scene, graph);
     }
 }

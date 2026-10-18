@@ -392,6 +392,19 @@ struct UniformMemo {
         return constants;
     }
 };
+
+/// What a video texture's consumer asks of its source at this moment: the
+/// layer's own clock and controls, or the scene's clock for a texture no layer
+/// controls. The one answer for the frame being drawn and for a source being
+/// opened, which must start from the clock its first frame will be given.
+wallpaper::video::VideoPlaybackState VideoPlaybackOf(const wallpaper::Scene& scene,
+                                                     const std::string&      key) {
+    wallpaper::video::VideoPlaybackState state =
+        scene.runtime != nullptr ? scene.runtime->ResolveVideoPlaybackState(key, scene.elapsingTime)
+                                 : wallpaper::video::VideoPlaybackState {};
+    if (scene.runtime == nullptr) state.scene_elapsed_seconds = scene.elapsingTime;
+    return state;
+}
 } // namespace
 
 void CustomShaderPass::prepare(Scene& scene, const Device& device, RenderingResources& rr) {
@@ -423,10 +436,27 @@ void CustomShaderPass::prepare(Scene& scene, const Device& device, RenderingReso
             if (runtime_images == nullptr || ! runtime_images->IsRuntimeImage(tex_name)) {
                 cached = device.tex_cache().FindTex(tex_name);
             }
+            // A video the scene draws is open already when another pass bound it
+            // first, or when this graph is built again under it: the cache set the
+            // decoder aside. Neither is read again, which for a video packaged in
+            // the scene would copy and hash the whole file, nor opened over, which
+            // would show the head of the clip until a seek to the clock had landed.
+            std::optional<ImageSlotsRef> open_video;
+            if (! cached.has_value()) {
+                const auto declared = scene.textures.find(tex_name);
+                if (declared != scene.textures.end() && declared->second.isVideo) {
+                    open_video = device.tex_cache().FindVideoTex(tex_name,
+                                                                 VideoPlaybackOf(scene, tex_name));
+                }
+            }
             if (cached.has_value()) {
                 m_desc.video_textures[i]        = false;
                 m_desc.vk_texture_image_keys[i] = tex_name;
                 img_slots                       = std::move(*cached);
+            } else if (open_video.has_value()) {
+                m_desc.video_textures[i]        = true;
+                m_desc.vk_texture_image_keys[i] = tex_name;
+                img_slots                       = std::move(*open_video);
             } else {
                 std::shared_ptr<wallpaper::Image> image;
                 if (auto prefetched = rr.texture_prefetch != nullptr
@@ -439,7 +469,8 @@ void CustomShaderPass::prepare(Scene& scene, const Device& device, RenderingReso
                 if (image) {
                     m_desc.video_textures[i] = image->header.isVideo;
                     m_desc.vk_texture_image_keys[i] = image->key;
-                    img_slots                = device.tex_cache().CreateTex(*image);
+                    img_slots                = device.tex_cache().CreateTex(
+                        *image, VideoPlaybackOf(scene, tex_name));
                 } else {
                     LOG_ERROR("parse tex \"%s\" failed", tex_name.c_str());
                 }
@@ -875,13 +906,7 @@ void CustomShaderPass::prepare(Scene& scene, const Device& device, RenderingReso
             if (i >= textures.size() || i >= vk_textures.size()) continue;
 
             std::string                          error;
-            wallpaper::video::VideoPlaybackState playback_state =
-                scene_ptr->runtime != nullptr ? scene_ptr->runtime->ResolveVideoPlaybackState(
-                                                    textures[i], scene_ptr->elapsingTime)
-                                              : wallpaper::video::VideoPlaybackState {};
-            if (scene_ptr->runtime == nullptr) {
-                playback_state.scene_elapsed_seconds = scene_ptr->elapsingTime;
-            }
+            const auto playback_state = VideoPlaybackOf(*scene_ptr, textures[i]);
             if (! device_ptr->tex_cache().UpdateVideoFrame(
                     textures[i], playback_state, &vk_textures[i], &error)) {
                 // A software-decode import that cannot land fails every tick.
@@ -1116,6 +1141,10 @@ StaticPassSample CustomShaderPass::frameSample(const Scene& scene) const {
                     hash = StaticHashBytes(hash, value.data(), value.size() * sizeof(float));
                 }
             }
+        }
+        // Lights move, fade and switch without touching this node or material.
+        if (const auto* updater = scene.shaderValueUpdater.get(); updater != nullptr) {
+            hash = StaticHashMix(hash, updater->LightStateHash(node, m_desc.material_slot));
         }
     }
     hash = FoldPassCameras(hash, scene, m_desc.camera_override, node);

@@ -25,18 +25,6 @@ bool read_file(const std::filesystem::path& path, std::string* content)
     return input.good() || input.eof();
 }
 
-std::string lowercase(std::string value)
-{
-    std::transform(
-        value.begin(),
-        value.end(),
-        value.begin(),
-        [](unsigned char ch) {
-            return static_cast<char>(std::tolower(ch));
-        });
-    return value;
-}
-
 RuntimeScalarValue parse_scalar_value(const nlohmann::json& value)
 {
     if (value.is_boolean()) return RuntimeScalarValue::Bool(value.get<bool>());
@@ -47,6 +35,18 @@ RuntimeScalarValue parse_scalar_value(const nlohmann::json& value)
 }
 
 } // namespace
+
+bool StringIsTrue(std::string_view value)
+{
+    // Read for every string a scripted value returns on every tick, so it compares
+    // in place and makes no copy.
+    constexpr std::string_view kTrue = "true";
+    if (value == "1") return true;
+    return value.size() == kTrue.size() &&
+           std::equal(value.begin(), value.end(), kTrue.begin(), [](unsigned char ch, char expected) {
+               return static_cast<char>(std::tolower(ch)) == expected;
+           });
+}
 
 RuntimeScalarValue RuntimeScalarValue::Bool(bool value)
 {
@@ -72,7 +72,7 @@ RuntimeScalarValue RuntimeScalarValue::String(std::string value)
 {
     RuntimeScalarValue result;
     result.kind         = Kind::String;
-    result.bool_value   = lowercase(value) == "true" || value == "1";
+    result.bool_value   = StringIsTrue(value);
     result.float_value  = 0.0f;
     result.string_value = std::move(value);
     return result;
@@ -83,7 +83,7 @@ bool RuntimeScalarValue::asBool() const
     switch (kind) {
     case Kind::Bool: return bool_value;
     case Kind::Float: return float_value != 0.0f;
-    case Kind::String: return lowercase(string_value) == "true" || string_value == "1";
+    case Kind::String: return StringIsTrue(string_value);
     }
     return false;
 }

@@ -18,14 +18,18 @@ struct AppThemePreferences: Equatable {
     case neutral, warm, cool
   }
 
-  enum Icon: String {
+  enum Icon: String, CaseIterable {
     case minimal, day, night
 
+    /// The asset catalog image set holding the 1024 px artwork.
+    var imageName: String { "AppIcon" + rawValue.capitalized }
+
     func image(in bundle: Bundle = .main) throws -> NSImage {
-      guard let url = bundle.url(
-        forResource: rawValue, withExtension: "png", subdirectory: "WebUI/app-icons")
-      else { throw CocoaError(.fileNoSuchFile) }
-      guard let image = NSImage(contentsOf: url), image.isValid else {
+      guard let source = bundle.image(forResource: NSImage.Name(imageName)) else {
+        throw CocoaError(.fileNoSuchFile)
+      }
+      // The catalog hands out one shared instance; the Dock gets its own sized copy.
+      guard source.isValid, let image = source.copy() as? NSImage else {
         throw CocoaError(.fileReadCorruptFile)
       }
       image.size = NSSize(width: 512, height: 512)
@@ -82,23 +86,23 @@ final class AppThemeStore: ObservableObject {
     switch key {
     case "mode":
       guard let mode = AppThemePreferences.Mode(rawValue: value) else {
-        throw WebPanelRequest.invalid
+        throw InvalidControlValue()
       }
       next.mode = mode
     case "accent":
-      guard AppThemePreferences.validAccent(value) else { throw WebPanelRequest.invalid }
+      guard AppThemePreferences.validAccent(value) else { throw InvalidControlValue() }
       next.accent = value.lowercased()
     case "tone":
       guard let tone = AppThemePreferences.Tone(rawValue: value) else {
-        throw WebPanelRequest.invalid
+        throw InvalidControlValue()
       }
       next.tone = tone
     case "icon":
       guard let icon = AppThemePreferences.Icon(rawValue: value) else {
-        throw WebPanelRequest.invalid
+        throw InvalidControlValue()
       }
       next.icon = icon
-    default: throw WebPanelRequest.invalid
+    default: throw InvalidControlValue()
     }
     guard next != preferences else { return }
     defaults.set(next.snapshot, forKey: Self.defaultsKey)

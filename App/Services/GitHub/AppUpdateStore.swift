@@ -357,11 +357,12 @@ struct AppUpdateWorkspace: Sendable {
                 let sanitized = name.isEmpty ? "WallpaperMachine-\(version).dmg" : name
                 return folder.appendingPathComponent(sanitized)
             },
+            // The store calls these on the main actor; `DesktopActions` is where tests stop them.
             reveal: { url in
-                NSWorkspace.shared.activateFileViewerSelecting([url])
+                MainActor.assumeIsolated { DesktopActions.current.reveal([url]) }
             },
             open: { url in
-                NSWorkspace.shared.open(url)
+                MainActor.assumeIsolated { _ = DesktopActions.current.open(url) }
             }
         )
     }

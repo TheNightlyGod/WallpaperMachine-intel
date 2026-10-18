@@ -149,6 +149,17 @@ public:
 
     enum class VideoFrameState { Idle, Recording, Submitted };
     bool Clear(std::string* error = nullptr);
+    /// `Clear` for a graph that is about to be prepared again for the scene that
+    /// is drawing it. The live video textures are not closed: each is set aside
+    /// as its decoder, with what is counted of it, for `FindVideoTex` to give back
+    /// to the pass that binds the same key, and `CloseHeldVideos` closes the ones
+    /// no pass took back. The frames imported from them go, as in `Clear`.
+    bool ClearForRebuild(std::string* error = nullptr);
+    /// Closes the videos `ClearForRebuild` set aside and `FindVideoTex` did not
+    /// give back: the ones the graph prepared since no longer uses. The renderer
+    /// calls it as the compile ends, however it ends, and when the clear that
+    /// set them aside fails.
+    void CloseHeldVideos();
     /// Evicts render-target textures only, keeping uploaded images and live
     /// video decoders. Used when the internal render scale changes, which
     /// resizes render targets but nothing else.
@@ -171,11 +182,24 @@ public:
     std::optional<ExImageParameters> CreateExTex(uint32_t witdh, uint32_t height, VkFormat,
                                                  VkImageTiling);
     ImageSlotsRef CreateTex(Image&);
+    /// `CreateTex` for an image that may be a video, whose first frame is asked
+    /// for at `video_state`'s clock and not at the head of the clip: a graph built
+    /// again opens its videos again while the clip is playing.
+    ImageSlotsRef CreateTex(Image&, const video::VideoPlaybackState& video_state);
     /// The slots `CreateTex` already holds for this image key, if any. For a
     /// cached key `CreateTex` returns them without reading the pixels it was
     /// handed, so a caller that asks first can skip decoding the image again.
     /// Static images only: videos live in their own map and are never found.
     std::optional<ImageSlotsRef> FindTex(std::string_view key) const;
+    /// The slots of a video that is open for this key already: one this graph has
+    /// open, or one `ClearForRebuild` set aside, which is taken back and asked for
+    /// its frame at `video_state`'s clock like any video a pass binds. A caller
+    /// that asks first neither reads the video again, which for one packaged in
+    /// the scene copies and hashes the whole file, nor opens a decoder at the head
+    /// of its clip. Empty when there is none, or when the one set aside failed
+    /// while it waited; `CreateTex` then opens the video as it would any.
+    std::optional<ImageSlotsRef> FindVideoTex(std::string_view key,
+                                              const video::VideoPlaybackState& video_state);
     ImageSlotsRef ReplaceTex(Image&, std::string_view previous_key);
     void          CollectCompletedUploads();
     void          SetVideoPlaybackPaused(bool paused);
@@ -243,10 +267,15 @@ public:
 
 private:
     friend struct TextureCacheVideoInteropTestAccess;
-    ImageSlotsRef CreateVideoTex(Image&, std::shared_ptr<video::VideoTextureSource>);
+    ImageSlotsRef CreateVideoTex(Image&, std::shared_ptr<video::VideoTextureSource>,
+                                 const video::VideoPlaybackState& video_state = {});
     struct ImportedVideoFrame;
     struct VideoImportImage;
-    ImageSlotsRef                     CreateTex(Image&, TextureUploadSynchronization);
+    ImageSlotsRef                     CreateTex(Image&, TextureUploadSynchronization,
+                                                const video::VideoPlaybackState& video_state = {});
+    bool                              clearCache(bool hold_videos, std::string* error);
+    struct VideoTex;
+    ImageSlotsRef                     currentVideoSlots(const VideoTex& video_tex) const;
     std::optional<VmaImageParameters> CreateTex(TextureKey);
     VkSampler                         GetOrCreateSampler(TextureKey, std::string* error);
     /// Exports, once, the Metal device and the MTLCommandQueue MoltenVK runs
@@ -380,6 +409,9 @@ private:
     /// to a running decoder rather than to a file path.
     void                publishVideoSourceIdentity();
     Map<std::string, std::unique_ptr<VideoTex>> m_video_tex_map;
+    /// What `ClearForRebuild` set aside: each video texture without the frames
+    /// imported from it, which belonged to the graph that went.
+    Map<std::string, std::unique_ptr<VideoTex>> m_held_video_tex_map;
     video::VideoPlaybackState                   m_video_playback_state {};
     /// Null outside a scene, e.g. in tests and standalone tools.
     RendererCounters*                           m_counters { nullptr };

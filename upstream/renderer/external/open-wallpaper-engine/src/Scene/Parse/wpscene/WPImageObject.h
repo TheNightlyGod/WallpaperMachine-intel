@@ -39,6 +39,10 @@ public:
     std::string name;
     std::string format;
     uint32_t    scale { 1 };
+    // A size of its own, and the longest side it may have; zero for none.
+    uint32_t    width { 0 };
+    uint32_t    height { 0 };
+    uint32_t    fit { 0 };
 };
 
 class WPImageEffect {
@@ -51,10 +55,12 @@ public:
     int32_t                      id;
     std::string                  name;
     bool                         visible { true };
-    /// `visible` as written when a user property decides it: `visible` above
-    /// is then only the editor's default, which the parser replaces with the
-    /// property's current value. Null for a fixed or scripted visibility.
+    /// `visible` as written when a user property or a script decides it:
+    /// `visible` above is then only the editor's default. A property's current
+    /// value replaces it as the scene loads; a script keeps deciding it while
+    /// the scene runs (`scripted_visible`). Null for a fixed visibility.
     nlohmann::json               visible_setting;
+    bool                         scripted_visible { false };
     int32_t                      version;
     std::vector<WPMaterial>      materials;
     std::vector<WPMaterialPass>  passes;
@@ -75,7 +81,8 @@ public:
     std::array<float, 3>       scale { 1.0f, 1.0f, 1.0f };
     std::array<float, 3>       angles { 0.0f, 0.0f, 0.0f };
     std::array<float, 2>       size { 2.0f, 2.0f };
-    std::array<float, 2>       parallaxDepth { 0.0f, 0.0f };
+    // Wallpaper Engine's default for an object that leaves the key out.
+    std::array<float, 2>       parallaxDepth { 1.0f, 1.0f };
     std::array<float, 2>       cropoffset { 0.0f, 0.0f };
     std::array<float, 3>       color { 1.0f, 1.0f, 1.0f };
     int32_t                    colorBlendMode { 0 };
@@ -87,11 +94,23 @@ public:
     // How the layer's texture (`_rt_imageLayerComposite_<id>`) is addressed
     // outside 0..1. Unspecified keeps the historical clamp.
     bool                       clampuvs { true };
+    // Point-samples the layer's own render targets (the ping-pong pair its
+    // effects run through and the composite other layers read), as a texture
+    // whose header asks for it is sampled. Off by default.
+    bool                       nointerpolation { false };
+    // Cursor targeting: `solid` layers are hit-tested, on by default, and a layer
+    // with `disablepropagation` hides the layers behind it from the cursor where
+    // it is under it.
+    bool                       solid { true };
+    bool                       disablepropagation { false };
     bool                       visible { true };
+    // The model's own flags (`models/util/*.json`): `autosize` sizes the layer from
+    // its texture, or from the scene's canvas with `projectlayer`, instead of from
+    // the object's `size`; `solidlayer` marks a layer drawn as a flat colour.
     bool                       autosize { false };
+    bool                       projectlayer { false };
+    bool                       solidlayer { false };
     bool                       dynamic_origin { false };
-    bool                       dynamic_scale { false };
-    bool                       dynamic_angles { false };
     bool                       dynamic_visible { false };
     bool                       dynamic_alpha { false };
     std::string                image;
@@ -102,6 +121,10 @@ public:
     nlohmann::json             visible_setting;
     nlohmann::json             alpha_setting;
     WPMaterial                 material;
+    // The slots a solid instance layer's `instance` block delegates, kept apart
+    // from the model material's: the parser, which can read the project's
+    // properties, decides from them whether a picture replaced the placeholder.
+    std::vector<WPUserTexture> instance_usertextures;
     std::vector<WPImageEffect> effects;
     Config                     config;
     std::vector<int32_t>       dependencies;

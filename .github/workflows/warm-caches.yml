@@ -22,8 +22,8 @@ concurrency:
 
 jobs:
   warm:
-    # Build's release job runs on macOS 15 and its test job on macOS 26; each keeps
-    # its own entries.
+    # Build's release job runs on macOS 15, and the Test workflow and CodeQL's Swift job
+    # on macOS 26; each macOS keeps its own entries.
     strategy:
       fail-fast: false
       matrix:

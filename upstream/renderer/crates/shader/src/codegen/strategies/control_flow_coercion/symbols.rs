@@ -1,5 +1,6 @@
 use smol_str::SmolStr;
 
+use super::int_step::float_step_names;
 use crate::{
     codegen::{
         ScopedDeclarationFacts, ScopedDeclarationFactsConfig, ScopedDeclarationTypeMode,
@@ -33,24 +34,34 @@ impl<'src> SymbolFacts<'src> {
                 local_types: ScopedDeclarationTypeMode::BuiltinsAndStructs,
             },
         );
+        let float_steps = float_step_names(module.token_stream().cursor(), module.token_facts());
         Self {
             bindings: scoped_facts
                 .declarations()
                 .iter()
-                .map(|declaration| SymbolBinding {
-                    name: declaration.name().into(),
-                    ty: match declaration.ty() {
-                        "bool" => ScalarType::Bool,
-                        "int" => ScalarType::Int,
-                        "uint" => ScalarType::Uint,
-                        "float" | "float1" => ScalarType::Float,
-                        "vec2" | "vec3" | "vec4" | "float2" | "float3" | "float4" => {
-                            ScalarType::FloatVector
-                        }
-                        _ => ScalarType::NonFloatAggregate,
-                    },
-                    visible_start: declaration.visible_start(),
-                    scope_end: declaration.scope_end(),
+                .map(|declaration| {
+                    // A local becomes visible right after its name token, and
+                    // the step repair turns an `int` declared there into a float.
+                    let step_float = declaration
+                        .visible_start()
+                        .checked_sub(1)
+                        .is_some_and(|name| float_steps.contains(&name));
+                    SymbolBinding {
+                        name: declaration.name().into(),
+                        ty: match declaration.ty() {
+                            "int" if step_float => ScalarType::Float,
+                            "bool" => ScalarType::Bool,
+                            "int" => ScalarType::Int,
+                            "uint" => ScalarType::Uint,
+                            "float" | "float1" => ScalarType::Float,
+                            "vec2" | "vec3" | "vec4" | "float2" | "float3" | "float4" => {
+                                ScalarType::FloatVector
+                            }
+                            _ => ScalarType::NonFloatAggregate,
+                        },
+                        visible_start: declaration.visible_start(),
+                        scope_end: declaration.scope_end(),
+                    }
                 })
                 .collect(),
             macros: module

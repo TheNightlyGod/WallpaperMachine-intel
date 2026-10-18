@@ -49,7 +49,16 @@ device.
   depth-attached target takes its material's cull mode with counter-clockwise
   front faces, as Compatibility does; every other pass culls nothing. Native
   Metal culled nothing, so a planet's ring drew its unlit back over its front.
-- **The host's frame step** — `MetalSceneDraw.ThePointerSmoothingStepsOnceForEachFrameTheHostDraws`:
+- **A screen read before any draw** — `MetalSceneDraw.AScreenReadBeforeAnyDrawSeesTheBackgroundEveryFrameOnBothRenderers`:
+  the only layer blends with the screen, so the first thing each frame does to
+  the scene's image is copy it for that layer. Compatibility clears the image
+  to the background at the start of every frame; Native Metal clears it in the
+  first pass that draws into it, so it copied an image nothing had cleared --
+  empty and transparent on the first frame, the previous frame's picture after
+  it -- and the layer vanished. Native Metal now clears the scene just before a
+  pass that copies or samples it ahead of any draw. Three frames are drawn; both
+  renderers must agree and show the background plus the blend's quarter red.
+- **The host's frame step** — `MetalSceneDraw.TheParallaxEasingStepsOnceForEachFrameTheHostDraws`:
   `WPShaderValueUpdater::FrameBegin` (the parallax cursor's smoothing, puppet
   attachments) is the host's, once per frame before it draws, on either
   backend. `MetalRender::drawFrame` used to call it again, which stepped the
@@ -59,7 +68,9 @@ device.
   draw does.
 - **Perspective cameras** — `MetalProjection.PerspectiveUsesFovAspectNearFarAndAHomogeneousDivide`,
   `.UnprojectingNdcHitsTheLayerPlane` and `.CameraAxesFollowTheAttachedNode` in
-  `metal_backend_test`; `MetalSceneDraw.APerspectiveCameraDrawsThroughTheAuthoredShader`.
+  `metal_backend_test`; `MetalSceneDraw.APerspectiveCameraDrawsThroughTheAuthoredShader`
+  (see also the 2D scene's perspective camera in
+  [scene regressions](scene-regressions.md)).
   Projection is the scene camera's own FOV/aspect/near/far, not an orthographic
   scale; a rotated card must foreshorten.
 - **Depth writes** — `MetalSceneDraw.ADepthWritingDrawHidesLaterDrawsAsOnCompatibility`:
@@ -72,7 +83,11 @@ device.
   depth state from `ResolveSceneDepthState` (`SceneMaterial.h`). Native Metal used
   to drop depth writes for translucent and additive materials, and depth-tested
   into targets with no depth attachment, where Compatibility draws in painter's
-  order.
+  order. A layer drawn through effects takes the same state from the layer, not
+  its effect pass, except that a layer Wallpaper Engine sorts (blending `translucent` or
+  `additive`) in a scene that sorts takes no write from it
+  (`MetalSceneDraw.ALayerDrawnThroughEffectsKeepsItsOwnDepthTestAndWriteOnBothRenderers`,
+  [scene regressions](scene-regressions.md#layers-textures-and-compositing)).
 - **Render passes** — `MetalSceneDraw.LayersSharingATargetShareOneRenderPassAndHiddenLayersCostNone`:
   consecutive passes into one image share one render pass, a hidden layer starts
   none, a hidden card draws exactly what a dropped one does, and showing it
@@ -181,6 +196,15 @@ device.
   tail of every loop. It also covers cancellation during a drain, a bounded
   no-progress budget, and releasing a held packet exactly once on seek, stop or
   failure.
+- **Decoder eligibility and first-frame import** — `VideoDecoderSelection.*` in
+  `playback_gpu_test` writes an original embedded 64×64 red AV1 clip, primes the
+  real source, requires an IOSurface-backed NV12 frame, and reads known red Metal
+  pixels after releasing the decoder. This catches a software-only default
+  hiding another decoder's VideoToolbox capability. The AV1 case explicitly skips
+  machines without AV1 hardware decode; a failed decode on capable hardware is a
+  failure, not a skip. The suite also imports generated H.264 through an already
+  eligible default and verifies that a valid software-only PPM stream remains
+  rejected instead of broadening software decode admission.
 - **Color range** — `video_color_conversion_test` pins known pixels for
   BT.601/709/2020 in both ranges, studio black and white with clamping, 75%
   color bars round-tripped from their RGB primaries, matrix separation,
@@ -221,6 +245,64 @@ device.
   compiles cleanly. `video_source_input_test` owns a private `TMPDIR` and only
   removes its own media cache; never clear the app's decode cache to make a test
   pass.
+- **A decoder survives a rebuild of the graph** -
+  `MetalVideoTexture.AVideoSetAsideByARebuildIsTakenBackAsItIsAndNotReadAgain`,
+  `.AVideoTheNewGraphDoesNotUseIsClosedWithItsCompile`,
+  `.VideosSetAsideAreClosedByClosingThemAndByTheObjectGoingAway` and
+  `.AVideoSetAsideThatFailedWhileItWaitedIsOpenedAgainLikeAnyOther` in `metal_video_texture_test`
+  (`MetalVideoTextures::hold`, `closeHeld`, `prepare`), and
+  `PlaybackGPU.AVideoSetAsideByARebuildIsGivenBackToThePassThatBindsItNotOpenedAgain`,
+  `.AVideoTheRebuiltGraphDoesNotBindIsClosedWithItsCompile`,
+  `.AClearThatIsNotARebuildClosesEveryVideoAndSetAsideOnesToo`,
+  `.AVideoSetAsideThatFailsWhenAskedForItsFrameIsLeftToBeOpenedAgain` and
+  `.APassBindingAVideoSetAsideByARebuildIsGivenItAndTheSceneIsNotReadForIt` in `playback_gpu_test`
+  (`TextureCache::ClearForRebuild`, `FindVideoTex`, `CloseHeldVideos`; the last runs a real
+  `CustomShaderPass::prepare`, from two passes that bind one video, on a scene whose parser counts
+  and refuses, and requires no read for either: the others hold whichever way a pass goes about
+  asking the cache). A graph built again for the scene that is drawing it sets its videos aside
+  instead of closing them. The compile takes back the ones its textures name without asking the
+  scene's parser for them (the Metal test hands `prepare` a parser that counts and refuses, and
+  requires no call: reading a packaged video copies and hashes the whole file), gives them the
+  scene's clock (the source's last `syncPlayback` carries the 4 s of the Metal test's scene, the
+  9 s of the Vulkan test's) and goes on with the frames the same decoder delivers. A video it does
+  not name is closed when the compile ends (the weak pointer to the source expires then and not
+  before). A plain release or clear closes what was set aside too, and a decoder that fails when
+  it is given the clock is dropped and opened as any other (the Metal test sees the parser asked
+  once, the Vulkan one the cache report nothing found). With the keeping switched off for the run,
+  three of the four Metal tests and four of the five Compatibility ones fail and the failing
+  decoder passes by construction; with the cache asked after the scene's parser in
+  `CustomShaderPass::prepare` the pass test alone fails. The scenes that show it end to end are in
+  [scene regressions](scene-regressions.md#text-fonts-and-clocks).
+- **A reopened source is sought once and left to land, and a jump of the clock is one seek** —
+  `VideoSourceClock.*` and `VideoSeekPolicy.*` in `video_source_input_test`, against media the
+  tests encode (a 10 second clip of 30 frames a second whose frames have their own pts). A source
+  that is opened while the clip is playing (a scene that falls back to the other renderer, a
+  surface split off a shared decoder) opens at the head, and gives it the clock by the first
+  call. `.AReopenedSourceIsSoughtToTheClockOnceAndLeftToLand` requires the open to return the
+  head's frame whatever clock it was handed before (it waits for no seek), one seek request by
+  the first call with the clock after it (6.5 s of a 10 s clip; 7.2 s of a 3 s clip, which is in
+  its third pass), and that call to return with the head still on offer (the display only moves
+  inside the call, so a call that waited for the seek is caught), and the frame on offer at the
+  clock within two seconds with still one request in all; before the seek policy it made 2 to
+  1263 requests where one is asked, in every run it was tried.
+  `.AJumpOfTheClockLandsWhileFramesAreAskedForFasterThanASeekTakes` hands a source a clock that
+  jumps to 7.5 s and then a draw every millisecond, a seek's decode being several times that,
+  and requires the frame at the clock within two seconds and one request: a seek asked for again
+  on every call restarts the decode from its keyframe each time (1306 requests in two seconds
+  and the display on frame 0 on a cold run before the policy; one request when the seek landed
+  inside a step, so this one was red in 2 of 6 runs there).
+  `.AClockThatLeavesASeekBehindAsksForAnother` is the other side, a clock that goes back before
+  the seek on its way gets its own seek, and `.ASourceThatIsKeptUpWithNeverSeeks` that playing
+  on from the start asks for none. `VideoSeekPolicy.*` is the arithmetic of the wait, which a clip
+  small enough to test cannot make long: a seek is waited for as long as it takes while the
+  clock only runs on (and at a faster clock's pace), is asked for again when the clock jumps past
+  that or goes back before its target, and a landing that came late raises the lag the source
+  decodes on through before it seeks again. That a seek of seconds lands with one request was
+  measured on libx264 clips of 1080p and 4K with a keyframe every 250 frames and on a 4K 60 frame
+  one with a keyframe every 600 (landing 0.35 to 4.2 s after the open, one request each). With
+  the one second of slack fixed, a seek on its way was asked for again each second, and the
+  600 frame clip did not land at 5 s in six seconds (six requests) and took three requests and
+  3.2 to 3.7 s from 9.9 s on.
 - **One clock per shared decoder** — `SharedVideoSessionTest.AFrameStaysValidAfterTheDecoderMovesOn`
   and `.PausingOneSurfaceLeavesTheOtherPlaying`: exactly one elected consumer
   moves a shared session's clock, so a test that advances the non-driving
@@ -582,6 +664,18 @@ engine to redo, and when.
   `::mouse_polling_in_a_monitor_gap_checks_the_cursor_without_engine_work` and
   `engine::snapshot::tests::a_paused_scene_is_not_a_pointer_consumer_and_its_resume_drops_paused_clicks`.
   A consumer with no input is never sampled; a paused scene is not a consumer.
+- **A press counts only on the desktop** — in `window::tests`:
+  `a_press_over_another_window_reaches_no_wallpaper_and_neither_does_its_release`,
+  `a_press_first_seen_by_a_sample_is_judged_once_and_stays_hidden_while_held`,
+  `a_press_the_wallpapers_received_is_released_wherever_the_pointer_ends`,
+  `a_desktop_tap_and_a_window_press_in_one_sample_deliver_only_the_tap`,
+  `a_button_held_through_the_gap_is_adopted_only_over_the_desktop`,
+  `a_press_seen_before_the_gap_keeps_its_verdict_through_it` and
+  `only_windows_stacked_beneath_application_windows_count_as_the_desktop`. A press over
+  another application's window must reach no scene, nor its level or release; a delivered
+  press is always released; the hit test runs once per press, never per move or sample.
+  The window-server query itself (`press_lands_on_desktop`) needs a live desktop and is
+  not exercised by any test.
 - **A global resume keeps covered displays paused** — `display_presentation::a_global_resume_never_restarts_a_display_that_is_still_covered`:
   the scene pause log must never show `paused=false` for a display that is still
   suspended.
@@ -777,8 +871,8 @@ engine to redo, and when.
   load and a quit during a load leaving no strike, only scenes that really open
   being recorded, Apply reaching the engine for an unchanged draft, a rotation leaving a hold alone, and a Try
   again or an Apply that fails leaving the wallpaper held, with a crash during an Apply counting a
-  third strike (`ControlPanelHeldWallpaperTests`
-  covers the banner and the action). Choosing a held wallpaper again must reach
+  third strike (`PanelLibraryActionsTests` and `ShellBannersTests`
+  cover the banner and the action). Choosing a held wallpaper again must reach
   the bridge even though its display still reads as showing it, while a
   rotation's or rule's activation of it stays a no-op
   (`WallpaperActivationRecoveryTests`). A real

@@ -142,6 +142,21 @@ pub(crate) struct StageInterface<'src> {
 }
 
 impl StageInterface<'_> {
+    /// Prefix of the stage input that backs the local copy of a written input.
+    pub(crate) const LOCAL_COPY_PREFIX: &'static str = "_we_in_";
+
+    /// Returns the shader-source name of an emitted stage input name.
+    ///
+    /// A written input is declared as `_we_in_<name>` and copied into a local
+    /// called `<name>`. Reflection sees the prefixed declaration, but the mesh
+    /// attribute it reads is known by `<name>`.
+    #[must_use]
+    pub(crate) fn source_name(emitted: &str) -> &str {
+        emitted
+            .strip_prefix(Self::LOCAL_COPY_PREFIX)
+            .unwrap_or(emitted)
+    }
+
     /// Marks this input for local mutable-copy emission.
     pub(crate) fn use_local_copy(&mut self) {
         self.local_copy = true;
@@ -172,7 +187,7 @@ impl StageInterface<'_> {
     /// Returns the name used in generated interface declarations.
     fn emitted_name(&self) -> String {
         if self.local_copy {
-            let mut name = String::from("_we_in_");
+            let mut name = String::from(Self::LOCAL_COPY_PREFIX);
             name.push_str(self.name.as_ref());
             name
         } else {

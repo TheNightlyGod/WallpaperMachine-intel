@@ -52,10 +52,10 @@ void read_vec3_setting(
     nlohmann::json*        setting,
     bool*                  dynamic)
 {
-    if (!json.contains(key) || destination == nullptr || setting == nullptr || dynamic == nullptr) return;
+    if (!json.contains(key) || destination == nullptr || setting == nullptr) return;
 
     *setting = json.at(key);
-    *dynamic = has_dynamic_setting(*setting);
+    if (dynamic != nullptr) *dynamic = has_dynamic_setting(*setting);
 
     const auto& source = unwrap_setting(*setting);
     if (source.is_array() && source.size() >= 3) {
@@ -94,6 +94,9 @@ bool WPEffectFbo::FromJson(const nlohmann::json& json) {
         LOG_ERROR("fbo scale can't be 0");
         scale = 1;
     }
+    GET_JSON_NAME_VALUE_NOWARN(json, "width", width);
+    GET_JSON_NAME_VALUE_NOWARN(json, "height", height);
+    GET_JSON_NAME_VALUE_NOWARN(json, "fit", fit);
     return true;
 }
 
@@ -128,8 +131,10 @@ bool WPImageEffect::FromJson(const nlohmann::json& json, fs::VFS& vfs) {
         visible = false;
     } else if (json.contains("visible")) {
         const auto& setting = json.at("visible");
-        if (setting.is_object() && setting.contains("user") && ! setting.contains("script"))
-            visible_setting = setting;
+        if (setting.is_object() && (setting.contains("user") || setting.contains("script"))) {
+            visible_setting  = setting;
+            scripted_visible = setting.contains("script");
+        }
     }
 	GET_JSON_NAME_VALUE_NOWARN(json, "id", id);
     nlohmann::json jEffect;
@@ -226,6 +231,9 @@ bool WPImageObject::FromJson(const nlohmann::json& json, fs::VFS& vfs) {
         return false;
     }
     GET_JSON_NAME_VALUE_NOWARN(jImage, "fullscreen", fullscreen);
+    GET_JSON_NAME_VALUE_NOWARN(jImage, "autosize", autosize);
+    GET_JSON_NAME_VALUE_NOWARN(jImage, "projectlayer", projectlayer);
+    GET_JSON_NAME_VALUE_NOWARN(jImage, "solidlayer", solidlayer);
     GET_JSON_NAME_VALUE_NOWARN(jImage, "passthrough", config.passthrough);
 	GET_JSON_NAME_VALUE_NOWARN(json, "name", name);
 	GET_JSON_NAME_VALUE_NOWARN(json, "id", id);
@@ -234,20 +242,27 @@ bool WPImageObject::FromJson(const nlohmann::json& json, fs::VFS& vfs) {
 	GET_JSON_NAME_VALUE_NOWARN(json, "colorBlendMode", colorBlendMode);
     GET_JSON_NAME_VALUE_NOWARN(json, "copybackground", copybackground);
     GET_JSON_NAME_VALUE_NOWARN(json, "clampuvs", clampuvs);
+    GET_JSON_NAME_VALUE_NOWARN(json, "nointerpolation", nointerpolation);
+    GET_JSON_NAME_VALUE_NOWARN(json, "solid", solid);
+    GET_JSON_NAME_VALUE_NOWARN(json, "disablepropagation", disablepropagation);
     read_vec3_setting(json, "origin", &origin, &origin_setting, &dynamic_origin);
-    read_vec3_setting(json, "scale", &scale, &scale_setting, &dynamic_scale);
-    read_vec3_setting(json, "angles", &angles, &angles_setting, &dynamic_angles);
+    read_vec3_setting(json, "scale", &scale, &scale_setting, nullptr);
+    read_vec3_setting(json, "angles", &angles, &angles_setting, nullptr);
 	if(!fullscreen) {
 		GET_JSON_NAME_VALUE_NOWARN(json, "parallaxDepth", parallaxDepth);
-		if(jImage.contains("width")) {
-			int32_t w,h;
-			GET_JSON_NAME_VALUE(jImage, "width", w);	
-			GET_JSON_NAME_VALUE(jImage, "height", h);	
-			size = {(float)w, (float)h};
-		} else if(json.contains("size")) {
-			GET_JSON_NAME_VALUE(json, "size", size);	
-		} else {
-			size = {origin.at(0)*2, origin.at(1)*2};
+		// The size the scene saved is the one the layer was given in the editor;
+		// a model's own size (a sprite sheet's frame) is only for a layer that
+		// saved none it can be read from.
+		const bool saved_size = json.contains("size");
+		if(!(saved_size && GET_JSON_NAME_VALUE(json, "size", size))) {
+			if(jImage.contains("width")) {
+				int32_t w,h;
+				GET_JSON_NAME_VALUE(jImage, "width", w);
+				GET_JSON_NAME_VALUE(jImage, "height", h);
+				size = {(float)w, (float)h};
+			} else if(!saved_size) {
+				size = {origin.at(0)*2, origin.at(1)*2};
+			}
 		}
     }
     GET_JSON_NAME_VALUE_NOWARN(jImage, "nopadding", nopadding);
@@ -301,6 +316,7 @@ bool WPImageObject::FromJson(const nlohmann::json& json, fs::VFS& vfs) {
                         instance_pass.usertextures.end(),
                         IsSystemUserTexture);
         material.MergePass(instance_pass);
+        instance_usertextures = instance_pass.usertextures;
         // The layer colour of a solid instance layer tints the placeholder the
         // model material ships — `util/white`. Once a runtime image is actually
         // substituted into that slot the colour has nothing left to describe,
@@ -308,9 +324,8 @@ bool WPImageObject::FromJson(const nlohmann::json& json, fs::VFS& vfs) {
         // cover layer to 0.118, while the author's own recording of it shows
         // the cover at full strength. A binding that names a project property
         // substitutes too, but only once its user has chosen a picture, and the
-        // property table is not readable from here. Such a layer keeps its
-        // colour rather than guess at a slot that may still hold the
-        // placeholder.
+        // property table is not readable from here: the parser makes that call
+        // (ParseImageObj), and until then the layer keeps its colour.
         if (replaces_placeholder) color = { 1.0f, 1.0f, 1.0f };
         runtime_image_replaces_color = replaces_placeholder;
     }

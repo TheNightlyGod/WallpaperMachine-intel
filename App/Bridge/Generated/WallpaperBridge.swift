@@ -1357,6 +1357,25 @@ public protocol WallpaperBridgeProtocol : AnyObject {
     func setSceneRenderer(mode: String) async throws  -> BridgeSnapshotBundle
     
     /**
+     * Chooses how many pixels a 2D scene wallpaper is rasterized with.
+     *
+     * `"display"` (the default) rasterizes the canvas at the size it is
+     * presented at on the display, as Wallpaper Engine does; `"canvas"`
+     * rasterizes at the size the author made it and stretches the result,
+     * which costs the least. The internal render scale divides whichever is
+     * chosen. Perspective scenes and plain videos ignore it. Running scenes
+     * resize their render targets in place; nothing is reparsed, a scene's
+     * own video layers stay open and carry on, and a pause the user asked for
+     * is untouched.
+     *
+     * # Errors
+     *
+     * Returns an error when `mode` is not one of the two names, when the
+     * setting cannot be saved, or when the renderer rejects the change.
+     */
+    func setSceneResolution(mode: String) async throws  -> BridgeSnapshotBundle
+    
+    /**
      * Lets a native Metal scene's materials sample a video's NV12 planes
      * directly instead of one pre-converted colour image.
      *
@@ -3391,6 +3410,40 @@ open func setSceneRenderer(mode: String)async throws  -> BridgeSnapshotBundle {
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_wallpaper_bridge_fn_method_wallpaperbridge_set_scene_renderer(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(mode)
+                )
+            },
+            pollFunc: ffi_wallpaper_bridge_rust_future_poll_rust_buffer,
+            completeFunc: ffi_wallpaper_bridge_rust_future_complete_rust_buffer,
+            freeFunc: ffi_wallpaper_bridge_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeBridgeSnapshotBundle.lift,
+            errorHandler: FfiConverterTypeBridgeError.lift
+        )
+}
+    
+    /**
+     * Chooses how many pixels a 2D scene wallpaper is rasterized with.
+     *
+     * `"display"` (the default) rasterizes the canvas at the size it is
+     * presented at on the display, as Wallpaper Engine does; `"canvas"`
+     * rasterizes at the size the author made it and stretches the result,
+     * which costs the least. The internal render scale divides whichever is
+     * chosen. Perspective scenes and plain videos ignore it. Running scenes
+     * resize their render targets in place; nothing is reparsed, a scene's
+     * own video layers stay open and carry on, and a pause the user asked for
+     * is untouched.
+     *
+     * # Errors
+     *
+     * Returns an error when `mode` is not one of the two names, when the
+     * setting cannot be saved, or when the renderer rejects the change.
+     */
+open func setSceneResolution(mode: String)async throws  -> BridgeSnapshotBundle {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_wallpaper_bridge_fn_method_wallpaperbridge_set_scene_resolution(
                     self.uniffiClonePointer(),
                     FfiConverterString.lower(mode)
                 )
@@ -6720,6 +6773,13 @@ public struct BridgeSettingsSnapshot {
      */
     public var sceneRenderer: String
     /**
+     * `"display"` or `"canvas"`: how many pixels a 2D scene is rasterized
+     * with before the render scale divides them. The saved preference, which
+     * every running 2D scene follows; perspective scenes and plain videos
+     * ignore it.
+     */
+    public var sceneResolution: String
+    /**
      * Live per-scene state read back from the renderer on this rebuild. One
      * row per running scene wallpaper; an empty vector means no scene
      * wallpaper is running, and a row reading `unknown` means one is running
@@ -6811,6 +6871,12 @@ public struct BridgeSettingsSnapshot {
          * reports. A saved preference, not a read-back.
          */sceneRenderer: String, 
         /**
+         * `"display"` or `"canvas"`: how many pixels a 2D scene is rasterized
+         * with before the render scale divides them. The saved preference, which
+         * every running 2D scene follows; perspective scenes and plain videos
+         * ignore it.
+         */sceneResolution: String, 
+        /**
          * Live per-scene state read back from the renderer on this rebuild. One
          * row per running scene wallpaper; an empty vector means no scene
          * wallpaper is running, and a row reading `unknown` means one is running
@@ -6865,6 +6931,7 @@ public struct BridgeSettingsSnapshot {
         self.sceneOnDemandEnabled = sceneOnDemandEnabled
         self.sceneVideoPlaneSamplingEnabled = sceneVideoPlaneSamplingEnabled
         self.sceneRenderer = sceneRenderer
+        self.sceneResolution = sceneResolution
         self.sceneUpdateModes = sceneUpdateModes
         self.sceneRenderers = sceneRenderers
         self.userAssetsPath = userAssetsPath
@@ -6947,6 +7014,9 @@ extension BridgeSettingsSnapshot: Equatable, Hashable {
         if lhs.sceneRenderer != rhs.sceneRenderer {
             return false
         }
+        if lhs.sceneResolution != rhs.sceneResolution {
+            return false
+        }
         if lhs.sceneUpdateModes != rhs.sceneUpdateModes {
             return false
         }
@@ -7008,6 +7078,7 @@ extension BridgeSettingsSnapshot: Equatable, Hashable {
         hasher.combine(sceneOnDemandEnabled)
         hasher.combine(sceneVideoPlaneSamplingEnabled)
         hasher.combine(sceneRenderer)
+        hasher.combine(sceneResolution)
         hasher.combine(sceneUpdateModes)
         hasher.combine(sceneRenderers)
         hasher.combine(userAssetsPath)
@@ -7052,6 +7123,7 @@ public struct FfiConverterTypeBridgeSettingsSnapshot: FfiConverterRustBuffer {
                 sceneOnDemandEnabled: FfiConverterBool.read(from: &buf), 
                 sceneVideoPlaneSamplingEnabled: FfiConverterBool.read(from: &buf), 
                 sceneRenderer: FfiConverterString.read(from: &buf), 
+                sceneResolution: FfiConverterString.read(from: &buf), 
                 sceneUpdateModes: FfiConverterSequenceTypeBridgeSceneUpdateModeReport.read(from: &buf), 
                 sceneRenderers: FfiConverterSequenceTypeBridgeSceneBackendReport.read(from: &buf), 
                 userAssetsPath: FfiConverterString.read(from: &buf), 
@@ -7089,6 +7161,7 @@ public struct FfiConverterTypeBridgeSettingsSnapshot: FfiConverterRustBuffer {
         FfiConverterBool.write(value.sceneOnDemandEnabled, into: &buf)
         FfiConverterBool.write(value.sceneVideoPlaneSamplingEnabled, into: &buf)
         FfiConverterString.write(value.sceneRenderer, into: &buf)
+        FfiConverterString.write(value.sceneResolution, into: &buf)
         FfiConverterSequenceTypeBridgeSceneUpdateModeReport.write(value.sceneUpdateModes, into: &buf)
         FfiConverterSequenceTypeBridgeSceneBackendReport.write(value.sceneRenderers, into: &buf)
         FfiConverterString.write(value.userAssetsPath, into: &buf)
@@ -10474,6 +10547,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_wallpaper_bridge_checksum_method_wallpaperbridge_set_scene_renderer() != 23711) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_wallpaper_bridge_checksum_method_wallpaperbridge_set_scene_resolution() != 15138) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_wallpaper_bridge_checksum_method_wallpaperbridge_set_scene_video_plane_sampling_enabled() != 19099) {

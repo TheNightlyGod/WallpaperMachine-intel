@@ -224,9 +224,13 @@ json dump_effect_fbo(const wallpaper::wpscene::WPEffectFbo& f) {
 // instead of forcing a particular C++ type.
 json dump_object_common(const json& obj) {
     json o;
-    o["id"]      = obj.value("id", -1);
-    o["name"]    = obj.value("name", std::string {});
-    o["visible"] = obj.value("visible", true);
+    o["id"]   = obj.value("id", -1);
+    o["name"] = obj.value("name", std::string {});
+    // A layer bound to a user property or script stores its visibility as an
+    // object ({"value": ..., "user": ...}); "value" is the authored state.
+    const json visible = obj.value("visible", json(true));
+    const json& state  = visible.is_object() ? visible.value("value", json(true)) : visible;
+    o["visible"]       = state.is_boolean() ? state.get<bool>() : true;
     for (const char* key :
          { "origin", "scale", "angles", "size", "parallaxDepth", "alignment" }) {
         if (obj.contains(key)) o[key] = obj[key];

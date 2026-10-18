@@ -1,5 +1,6 @@
 //! Top-level declaration planning and generated declaration models.
 
+pub mod builtins;
 pub mod functions;
 pub mod interface;
 pub mod layout;
@@ -64,6 +65,7 @@ impl<'src> DeclarationPlan<'src> {
             self.entries.iter().filter_map(|entry| match entry.kind {
                 PlannedDeclaration::Texture(texture) => Some(texture),
                 PlannedDeclaration::Keep
+                | PlannedDeclaration::BuiltinRedeclaration
                 | PlannedDeclaration::MacroAliasedPosition(_)
                 | PlannedDeclaration::Interface(_)
                 | PlannedDeclaration::UniformMember(_) => None,
@@ -78,6 +80,7 @@ impl<'src> DeclarationPlan<'src> {
                 self.entries.iter().find_map(|entry| match &entry.kind {
                     PlannedDeclaration::UniformMember(member) => member.explicit_binding,
                     PlannedDeclaration::Keep
+                    | PlannedDeclaration::BuiltinRedeclaration
                     | PlannedDeclaration::MacroAliasedPosition(_)
                     | PlannedDeclaration::Interface(_)
                     | PlannedDeclaration::Texture(_) => None,
@@ -201,6 +204,7 @@ impl<'src> DeclarationPlan<'src> {
         self.entries.iter().filter_map(|entry| match &entry.kind {
             PlannedDeclaration::Interface(interface) => Some(interface),
             PlannedDeclaration::Keep
+            | PlannedDeclaration::BuiltinRedeclaration
             | PlannedDeclaration::MacroAliasedPosition(_)
             | PlannedDeclaration::Texture(_)
             | PlannedDeclaration::UniformMember(_) => None,
@@ -228,6 +232,7 @@ impl<'src> DeclarationPlan<'src> {
                 member.ty.as_str(),
             )),
             PlannedDeclaration::Keep
+            | PlannedDeclaration::BuiltinRedeclaration
             | PlannedDeclaration::MacroAliasedPosition(_)
             | PlannedDeclaration::Texture(_) => None,
         })
@@ -251,6 +256,7 @@ impl<'src> DeclarationPlan<'src> {
             .filter_map(|entry| match &entry.kind {
                 PlannedDeclaration::UniformMember(member) => Some(member.clone()),
                 PlannedDeclaration::Keep
+                | PlannedDeclaration::BuiltinRedeclaration
                 | PlannedDeclaration::MacroAliasedPosition(_)
                 | PlannedDeclaration::Interface(_)
                 | PlannedDeclaration::Texture(_) => None,
@@ -259,6 +265,7 @@ impl<'src> DeclarationPlan<'src> {
         let binding = self.entries.iter().find_map(|entry| match &entry.kind {
             PlannedDeclaration::UniformMember(member) => member.binding,
             PlannedDeclaration::Keep
+            | PlannedDeclaration::BuiltinRedeclaration
             | PlannedDeclaration::MacroAliasedPosition(_)
             | PlannedDeclaration::Interface(_)
             | PlannedDeclaration::Texture(_) => None,
@@ -287,6 +294,7 @@ impl<'src> DeclarationPlan<'src> {
         self.entries.iter().filter_map(|entry| match entry.kind {
             PlannedDeclaration::Texture(texture) => Some(texture),
             PlannedDeclaration::Keep
+            | PlannedDeclaration::BuiltinRedeclaration
             | PlannedDeclaration::MacroAliasedPosition(_)
             | PlannedDeclaration::Interface(_)
             | PlannedDeclaration::UniformMember(_) => None,
@@ -452,7 +460,8 @@ impl<'src> DeclarationEntry<'src> {
     const fn is_removed_from_original(&self) -> bool {
         matches!(
             self.kind,
-            PlannedDeclaration::Interface(_)
+            PlannedDeclaration::BuiltinRedeclaration
+                | PlannedDeclaration::Interface(_)
                 | PlannedDeclaration::Texture(_)
                 | PlannedDeclaration::UniformMember(_)
         )
@@ -463,6 +472,7 @@ impl<'src> DeclarationEntry<'src> {
         match &mut self.kind {
             PlannedDeclaration::Interface(interface) => Some(interface),
             PlannedDeclaration::Keep
+            | PlannedDeclaration::BuiltinRedeclaration
             | PlannedDeclaration::MacroAliasedPosition(_)
             | PlannedDeclaration::Texture(_)
             | PlannedDeclaration::UniformMember(_) => None,
@@ -490,6 +500,7 @@ impl<'src> DeclarationEntry<'src> {
         match self.kind {
             PlannedDeclaration::Texture(texture) => texture.sampler_binding.is_some(),
             PlannedDeclaration::Keep
+            | PlannedDeclaration::BuiltinRedeclaration
             | PlannedDeclaration::MacroAliasedPosition(_)
             | PlannedDeclaration::Interface(_)
             | PlannedDeclaration::UniformMember(_) => false,
@@ -508,6 +519,7 @@ impl<'src> DeclarationEntry<'src> {
         match self.kind {
             PlannedDeclaration::Texture(texture) => Some(texture.name),
             PlannedDeclaration::Keep
+            | PlannedDeclaration::BuiltinRedeclaration
             | PlannedDeclaration::MacroAliasedPosition(_)
             | PlannedDeclaration::Interface(_)
             | PlannedDeclaration::UniformMember(_) => None,
@@ -519,6 +531,7 @@ impl<'src> DeclarationEntry<'src> {
         match self.kind {
             PlannedDeclaration::Texture(texture) => texture.texture_binding(stage),
             PlannedDeclaration::Keep
+            | PlannedDeclaration::BuiltinRedeclaration
             | PlannedDeclaration::MacroAliasedPosition(_)
             | PlannedDeclaration::Interface(_)
             | PlannedDeclaration::UniformMember(_) => Ok(None),
@@ -560,6 +573,12 @@ impl TopLevelQualifier {
 pub(crate) enum PlannedDeclaration<'src> {
     /// Keep the original declaration in place.
     Keep,
+    /// Drop a declaration that restates a builtin variable.
+    ///
+    /// Re-emitting Wallpaper Engine's `in uint gl_VertexID;` as a stage input
+    /// would make a vertex attribute of that name instead, which compiles and
+    /// reads whatever sits at its location.
+    BuiltinRedeclaration,
     /// Keep a macro-aliased position declaration as a private variable.
     MacroAliasedPosition(MacroAliasedPositionDeclaration),
     /// Re-emit the declaration as a stage input or output.
@@ -617,6 +636,18 @@ impl<'module> PlannedDeclarationSource<'module, '_> {
             declaration.type_name(),
             declaration.name(),
         ) {
+            (
+                Some(
+                    TopLevelQualifier::Attribute
+                    | TopLevelQualifier::In
+                    | TopLevelQualifier::Out
+                    | TopLevelQualifier::Varying,
+                ),
+                ty,
+                Some(name),
+            ) if builtins::is_restated(name, ty.unwrap_or_default()) => {
+                PlannedDeclaration::BuiltinRedeclaration
+            },
             (Some(TopLevelQualifier::Uniform), Some(ty), Some(name)) => {
                 if let Some(sampler) = SamplerType::new(ty) {
                     if sampler.supports_texture_split() {

@@ -2,9 +2,11 @@
 #include <vector>
 #include <list>
 #include <memory>
+#include <optional>
 #include <cstdint>
 #include <string>
 #include "Core/Literals.hpp"
+#include "SceneMaterial.h"
 #include "Type.hpp"
 
 namespace wallpaper
@@ -19,6 +21,11 @@ enum class MeshUpdate : uint8_t;
 struct SceneImageEffectNode {
     std::string                output; // render target
     std::shared_ptr<SceneNode> sceneNode;
+    /// `output` and the material's textures as the parser wrote them, with the
+    /// chain's ping-pong placeholders still in, so the chain can be resolved
+    /// again when the set of visible effects changes.
+    std::string                authored_output;
+    std::vector<std::string>   authored_textures;
 };
 
 struct SceneImageEffect {
@@ -31,9 +38,21 @@ struct SceneImageEffect {
         std::string dst;
         std::string src;
         i32         afterpos { 0 }; // start at 1, 0 for begin at all
+        std::string authored_dst;
+        std::string authored_src;
     };
     std::vector<Command>            commands;
     std::list<SceneImageEffectNode> nodes;
+    /// Whether the effect runs: a script can switch it while the scene runs
+    /// (`SceneRuntimeContext::RegisterEffectVisibility`), and the chain is then
+    /// resolved again over the effects that run.
+    bool visible { true };
+    /// A passthrough that closes the chain only while no other effect runs, so
+    /// a layer whose effects a script has all switched off is still drawn.
+    bool fallback { false };
+    /// Set by `SceneImageEffectLayer::ResolveEffect`: the effect is part of the
+    /// chain as last resolved.
+    bool included { true };
 };
 
 class SceneImageEffectLayer {
@@ -50,6 +69,18 @@ public:
     SceneNode*  ResolvedFinalRenderNode() const { return m_resolved_final_render_node; }
     void        SetFinalMeshDynamic(MeshUpdate update);
     void        SetFinalBlend(BlendMode m) { m_final_blend = m; }
+    /// The depth test and depth write the last pass draws with. The chain's
+    /// last pass is what puts the layer into the scene, and Wallpaper Engine
+    /// draws it with the ones the layer authored for its own material, as it
+    /// does with the layer's blending, not with the state its effect pass
+    /// authored; the parser leaves the write out for a layer Wallpaper Engine
+    /// sorts, which this engine draws in scene order. A layer that never sets
+    /// them keeps the pass's own.
+    void        SetFinalDepth(bool test, bool write) { m_final_depth = SceneDepthState { test, write }; }
+    /// How the last pass is drawn instead of the final blend while no effect of the chain runs
+    /// and the chain ends in its passthrough fallback (a script has switched every effect off).
+    /// Without it the final blend applies then too.
+    void        SetIdleFinalBlend(BlendMode m) { m_idle_final_blend = m; }
     /// The camera the chain's last pass draws its result through. Empty is the
     /// scene's active camera, which is right for a layer that sits in the
     /// scene; a fullscreen layer's result is the screen and must cover it
@@ -69,7 +100,13 @@ private:
     std::unique_ptr<SceneNode> m_final_node;
     SceneNode*                 m_resolved_final_render_node { nullptr };
     BlendMode                  m_final_blend;
+    std::optional<BlendMode>   m_idle_final_blend;
+
+    /// The depth test and write the last pass is drawn with; empty keeps the
+    /// ones its own material authored.
+    std::optional<SceneDepthState> m_final_depth;
 
     std::vector<std::shared_ptr<SceneImageEffect>> m_effects;
+    bool                                           m_authored_captured { false };
 };
 } // namespace wallpaper

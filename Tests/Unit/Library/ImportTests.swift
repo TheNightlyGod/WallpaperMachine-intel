@@ -1228,17 +1228,6 @@ final class ImportTests: XCTestCase {
         XCTAssertEqual(text(library.appendingPathComponent("local-My Video.mp4/My Video.mp4")), "another video")
     }
 
-    func testThePanelsChoiceNamesThePolicyAndAnythingElseKeepsWhatIsInstalled() {
-        typealias Policy = WallpaperImportService.DuplicatePolicy
-        XCTAssertEqual(Policy(panelValue: "skip"), .skip)
-        XCTAssertEqual(Policy(panelValue: "keepBoth"), .keepBoth)
-        XCTAssertEqual(Policy(panelValue: "replaceChanged"), .replaceChanged)
-        // A stale or damaged page can never select the one policy that overwrites.
-        for value in [nil, "", "replace", "Replace if changed", "replaceChanged ", "REPLACECHANGED", 1, true, ["replaceChanged"]] as [Any?] {
-            XCTAssertEqual(Policy(panelValue: value), .skip, "\(String(describing: value))")
-        }
-    }
-
     @MainActor
     private func finish(_ imports: LibraryImportStore) async throws {
         let deadline = ContinuousClock.now.advanced(by: .seconds(10))

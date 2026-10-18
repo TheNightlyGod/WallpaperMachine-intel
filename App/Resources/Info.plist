@@ -71,6 +71,8 @@
 	<string>$(MACOSX_DEPLOYMENT_TARGET)</string>
 	<key>NSAppleEventsUsageDescription</key>
 	<string>WallpaperMachine asks Music and Spotify what is playing, only while you have turned media integration on for a wallpaper.</string>
+	<key>NSLocationUsageDescription</key>
+	<string>WallpaperMachine uses this Mac’s approximate location to calculate sunrise and sunset for automatic wallpaper changes.</string>
 	<key>NSAudioCaptureUsageDescription</key>
 	<string>WallpaperMachine captures system audio only when you enable audio-reactive wallpapers.</string>
 </dict>

@@ -415,14 +415,6 @@ TEST(MetalCapability, ASpriteParticleLayerWithAPerspectiveCameraIsAccepted)
     EXPECT_EQ(selection.backend, SceneBackend::NativeMetal) << selection.fallback_reason;
 }
 
-TEST(MetalCapability, AnUnsupportedDepthCompareIsRefusedWithItsOwnReason)
-{
-    ImageScene fixture;
-    fixture.material().depth_compare_unsupported = true;
-    EXPECT_EQ(RejectionFor(fixture),
-              "a material uses a depth compare the native renderer does not support");
-}
-
 TEST(MetalCapability, EveryUnsupportedConstructHasItsOwnReason)
 {
     std::vector<std::pair<std::string, std::string>> reasons;
@@ -1056,6 +1048,30 @@ TEST(MetalProjection, UnprojectingNdcHitsTheLayerPlane)
     const auto rotated_hit = IntersectNdcWithNodePlane(camera, rotated, 0.0, 0.0);
     ASSERT_TRUE(rotated_hit.has_value());
     EXPECT_NEAR(rotated_hit->z(), 0.0, 1e-6);
+}
+
+TEST(MetalProjection, TheLayerPlaneIsWhereTheLayerIsDrawn)
+{
+    SceneCamera camera(16.0f / 9.0f, 0.1f, 10000.0f, 50.0f);
+    auto        cam_node = std::make_shared<SceneNode>(
+        Eigen::Vector3f { 0.0f, 0.0f, 1000.0f }, Eigen::Vector3f { 1.0f, 1.0f, 1.0f },
+        Eigen::Vector3f::Zero());
+    camera.AttatchNode(cam_node);
+
+    // A layer a screen anchor draws 25 right and 10 down of where its node is: the point
+    // under the cursor is that far from the layer's own origin.
+    SceneNode layer(Eigen::Vector3f::Zero(), Eigen::Vector3f { 2.0f, 2.0f, 1.0f },
+                    Eigen::Vector3f::Zero());
+    layer.SetDrawOffset(Eigen::Vector3f { 25.0f, -10.0f, 0.0f });
+    const Eigen::Vector4d world { 40.0, -15.0, 0.0, 1.0 };
+    const Eigen::Vector4d clip = camera.GetViewProjectionMatrix() * world;
+    ASSERT_NE(clip.w(), 0.0);
+    const auto hit =
+        IntersectNdcWithNodePlane(camera, layer, clip.x() / clip.w(), clip.y() / clip.w());
+    ASSERT_TRUE(hit.has_value());
+    // (40 - 25, -15 + 10) in the world, in the layer's own plane at scale 2.
+    EXPECT_NEAR(hit->x(), 7.5, 1e-4);
+    EXPECT_NEAR(hit->y(), -2.5, 1e-4);
 }
 
 TEST(MetalProjection, CameraAxesFollowTheAttachedNode)

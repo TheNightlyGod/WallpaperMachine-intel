@@ -450,9 +450,10 @@ int main() {
         collect_text(collect_text, scene->sceneGraph.get());
         std::size_t text_index = 0;
         for (const auto& name : text_names) {
-            const auto state = scene->runtime->NodeTextState(name);
+            const auto state  = scene->runtime->NodeTextState(name);
+            const auto layout = scene->runtime->NodeTextLayout(name);
             std::cout << name << " font=" << state->resolved_font_path << " kind=" << state->resolved_font_kind
-                      << " text=" << state->text << " size=" << state->raster_size.transpose() << std::endl;
+                      << " text=" << state->text << " size=" << layout->card.transpose() << std::endl;
             const auto image = scene->imageParser->Parse(TextTextureName(name));
             if (image && !image->slots.empty()) {
                 const auto& mip = image->slots[0].mipmaps[0];

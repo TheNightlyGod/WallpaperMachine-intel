@@ -34,6 +34,69 @@ final class PixivFixtureTransport: PixivTransport, @unchecked Sendable {
     }
 }
 
+/// Holds every request that passes it until opened, optionally retaining cancellation cleanup too.
+final class PixivGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private let finishesOnCancellation: Bool
+    private var isOpen = false
+    private var held: [UUID: CheckedContinuation<Void, Error>] = [:]
+    var waiting: Int { lock.withLock { held.count } }
+
+    init(finishesOnCancellation: Bool = true) {
+        self.finishesOnCancellation = finishesOnCancellation
+    }
+
+    func pass() async throws {
+        let id = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                let resume: Bool = lock.withLock {
+                    if isOpen || Task.isCancelled { return true }
+                    held[id] = continuation
+                    return false
+                }
+                if resume { continuation.resume() }
+            }
+        } onCancel: {
+            guard finishesOnCancellation else { return }
+            lock.withLock { held.removeValue(forKey: id) }?.resume(throwing: CancellationError())
+        }
+        try Task.checkCancellation()
+    }
+
+    func open() {
+        let released: [CheckedContinuation<Void, Error>] = lock.withLock {
+            isOpen = true
+            defer { held.removeAll() }
+            return Array(held.values)
+        }
+        for continuation in released { continuation.resume() }
+    }
+}
+
+/// Answers from `fixture`, holding originals at `originals` and rankings and searches at `listings`.
+///
+/// A held request ends as soon as its task is cancelled, as a real transfer does. A semaphore in
+/// a fixture's answer would keep a concurrency-pool thread until it timed out, out of reach of
+/// cancellation, and a panel that shuts down would wait for that thread.
+struct PixivHeldTransport: PixivTransport {
+    let fixture: PixivFixtureTransport
+    var originals: PixivGate?
+    var listings: PixivGate?
+
+    func data(from url: URL, session: String?) async throws -> Data {
+        if url.path == "/ranking.php" || url.path.hasPrefix("/ajax/search/") { try await listings?.pass() }
+        return try await fixture.data(from: url, session: session)
+    }
+
+    func image(
+        from url: URL, limit: Int, progress: @escaping @Sendable (Int64, Int64?) -> Void
+    ) async throws -> Data {
+        if url.path.contains("/img-original/") { try await originals?.pass() }
+        return try await fixture.image(from: url, limit: limit, progress: progress)
+    }
+}
+
 /// Keeps the session in memory in place of the keychain.
 final class PixivMemorySessionStore: PixivSessionStoring, @unchecked Sendable {
     private let lock = NSLock()

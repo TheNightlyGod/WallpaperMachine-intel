@@ -11,7 +11,6 @@ namespace wallpaper
 namespace algorism
 {
 double CalculatePersperctiveDistance(double fov, double height) noexcept;
-double CalculatePersperctiveFov(double distence, double height) noexcept;
 
 constexpr u32 PowOfTwo(u32 x) {
     u32 pow2 { 8 };

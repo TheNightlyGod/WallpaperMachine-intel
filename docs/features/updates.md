@@ -11,8 +11,8 @@ notes marker, signing, assets) is in
 
 **Settings → About** is the update surface: an **Updates** group with the status,
 one action button, a progress bar while downloading and the latest release's notes
-([Tabs](control-panel.md#tabs) lists the rest of About). **Check for Updates…** in
-the application menu opens About and starts the same check.
+([Pages and Settings](control-panel.md#pages-and-settings) lists the rest of About).
+**Check for Updates…** in the application menu opens About and starts the same check.
 
 The app checks at launch once the library has loaded (whether or not it loaded
 cleanly, since the update may be the fix), every six hours after, because a
@@ -130,7 +130,7 @@ downloaded, so Finder shows its drag-to-Applications window for a manual install
 ## Installing
 
 Installing is a second confirmation: **Restart and Install** in About (which asks
-**Restart and install this update?** natively first), **Restart to Update** in the
+**Restart and install this update?** in a confirmation sheet first), **Restart to Update** in the
 alert, or **Restart to Update to x.y.z** in the status menu, which installs at
 once. The install runs the *running* version's code, so a change to the installer
 reaches users only after the update that carries it. A failed install started from
@@ -179,8 +179,13 @@ one is offered exactly once afterwards.
 
 On the first launch of a newer version, a separate, nonmodal **What’s New** window
 shows the installed version and every release since the last announced version,
-newest first. It opens with a 760 × 720-point content area and resizes down to
-600 × 480. **English / 简体中文** tabs display one translation at a time for every
+newest first. It opens with a 760 × 800-point content area and resizes down to
+600 × 480. When the installed version has a bundled banner
+([release banners](../release.md#release-banners)), the banner sits above the
+header, at most as wide as the default window, and follows the selected
+translation; skipped versions' banners are not shown. List entries are bulleted
+with a hanging indent, and a feature release's **Highlights / 亮点** stand out in
+the accent color with ✦ markers. **English / 简体中文** tabs display one translation at a time for every
 release; the initial tab follows the app’s effective language (Settings → General
 → Language, including **System** matching, not the bundle’s launch-time language):
 Simplified or Traditional Chinese uses Simplified Chinese notes, English or

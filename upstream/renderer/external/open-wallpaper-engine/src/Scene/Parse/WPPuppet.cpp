@@ -311,18 +311,32 @@ void WPPuppetLayer::updateInterpolation(double time) noexcept {
     double delta   = (state.m_last_elapsed < 0.0) ? 0.0 : (time - state.m_last_elapsed);
     bool   advance = (state.m_last_elapsed < 0.0) || (delta > 0.0);
     if (advance) state.m_last_elapsed = time;
-    for (auto& layer : state.m_layers) {
+    for (usize index = 0; index < state.m_layers.size(); ++index) {
+        auto& layer = state.m_layers[index];
         if (! layer) continue;
         auto& alayer = layer.anim_layer;
         if (advance && alayer.playing) alayer.cur_time += delta * alayer.rate;
         layer.interp_info = layer.anim->getInterpolationInfo(&alayer.cur_time);
         // A finished single-shot layer holds its last frame and reports
-        // stopped so play() restarts it instead of re-clamping forever.
+        // stopped so play() restarts it instead of re-clamping forever. It
+        // finishes once: the script that asked to hear about it hears it then.
         if (alayer.playing && layer.anim->mode == WPPuppet::PlayMode::Single &&
             alayer.cur_time >= layer.anim->max_time) {
             alayer.playing = false;
+            // Bounded: a puppet nobody drains must not grow without limit.
+            constexpr usize kMaxPendingFinished = 256;
+            if (state.m_finished_layers.size() < kMaxPendingFinished) {
+                state.m_finished_layers.push_back(static_cast<i32>(index));
+            }
         }
     }
+}
+
+std::vector<i32> WPPuppetLayer::takeFinishedLayers() noexcept {
+    if (! m_state) return {};
+    std::vector<i32> finished;
+    finished.swap(m_state->m_finished_layers);
+    return finished;
 }
 
 WPPuppetLayer::Layer* WPPuppetLayer::layerAt(i32 index) noexcept {
@@ -358,6 +372,11 @@ i32 WPPuppetLayer::findLayer(std::string_view name) const noexcept {
 
 usize WPPuppetLayer::layerCount() const noexcept {
     return m_state ? m_state->m_layers.size() : 0;
+}
+
+std::string WPPuppetLayer::layerName(i32 index) const {
+    const auto* layer = layerAt(index);
+    return layer != nullptr ? layer->anim_layer.name : std::string {};
 }
 
 bool WPPuppetLayer::play(i32 index) noexcept {

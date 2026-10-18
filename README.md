@@ -48,11 +48,11 @@
      changes, upload the new one there and update the alt text and caption below, here and in
      README.zh-CN.md. -->
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/1284cc37-34eb-4618-b4b1-efe7c2ce8127" width="100%" alt="WallpaperMachine’s window on the Installed tab: filters for collections, type, age rating and tags on the left, a grid of Steam Workshop wallpapers in the middle, and the selected wallpaper’s preview, compatibility check and options in the inspector on the right.">
+  <img src="https://github.com/user-attachments/assets/9526d41a-4764-4df9-a678-22d75982a7fd" width="100%" alt="WallpaperMachine’s window in the dark appearance: the Library, Steam Workshop, pixiv and Settings tabs across the top, a grid of installed wallpapers with the active one marked, the active wallpaper’s preview, compatibility check and options in the inspector on the right, and what is playing along the bottom.">
 </p>
 
 <p align="center">
-  <sub>Filters on the left, your library in the middle, the selected wallpaper’s options on the right. Press play and it becomes your desktop.</sub>
+  <sub>Your library in the middle, the selected wallpaper’s options on the right, what is playing along the bottom. Apply wallpaper and it becomes your desktop.</sub>
 </p>
 
 <p align="center">
@@ -80,8 +80,10 @@ Rather build it yourself? It takes two commands: see
 
 ## The app
 
-One window, four tabs: Discover, pixiv, Installed and Settings. The website runs that
-same interface on a demo library, so you can
+One window with tabs across the top: your library (all wallpapers, favorites and your
+collections), Steam Workshop and pixiv to browse, and Settings, with what is playing in a bar
+along the bottom. The website has a demo of it on a
+sample library, so you can
 [try it in your browser](https://www.wallpapermachine.app/#app). Close the
 window and the app keeps running in the menu bar, where you can pause, resume, mute
 or go to the previous, next or a random wallpaper, on each display separately when you have more than one. When it launches at login, it starts there
@@ -89,7 +91,7 @@ without opening the window.
 
 | Feature | What it does |
 | --- | --- |
-| [**Apply**](docs/features/control-panel.md#selection-versus-apply) | Scene, video or [web](docs/features/web-wallpapers.md): press play and it becomes your desktop. Choosing a wallpaper only selects it. |
+| [**Apply**](docs/features/control-panel.md#selection-versus-apply) | Scene, video or [web](docs/features/web-wallpapers.md): Apply wallpaper and it becomes your desktop. Choosing a wallpaper only selects it. |
 | [**Preview**](docs/features/wallpaper-properties.md#live-preview) | Try an installed scene, video or web wallpaper in its own window, with the current options and separate playback controls, before changing the desktop. Sliders, colours and switches show in it as you change them. |
 | [**Workshop**](docs/features/workshop-downloads.md) | The live Steam Workshop, no sign-in to browse, with [collections, each author's wallpapers and your subscriptions](docs/features/workshop-downloads.md#collections-authors-and-subscriptions). Downloads run in the app, several at once, with a Steam account that owns Wallpaper Engine. [Updates](docs/features/workshop-downloads.md#updates) to the wallpapers you have are found once a day and installed in one click. |
 | [**pixiv**](docs/features/pixiv.md) | pixiv's illustration rankings and tag search. Save any page of a work as a still wallpaper; sign in to pixiv for members-only works and, if your account allows them, R-18. |
@@ -141,7 +143,7 @@ without opening the window.
 
 | Layer | What it does |
 | --- | --- |
-| **Swift shell** | The AppKit app. Its control panel is HTML in `WKWebView` ([`WebUI/`](WebUI)), and [web wallpapers](docs/features/web-wallpapers.md) run in web views of their own. |
+| **Swift shell** | The AppKit app. Its control panel is native SwiftUI ([`App/Views/ControlPanel`](App/Views/ControlPanel)), and [web wallpapers](docs/features/web-wallpapers.md) run in web views of their own. |
 | **Rust core** | The vendored renderer ([`upstream/renderer`](upstream/renderer)): displays, wallpaper windows, video decode and audio capture, bridged to Swift with uniffi. |
 | **C++ scene engine** | Open Wallpaper Engine, statically linked into the Rust core, draws scene wallpapers. |
 | **Metal** | Scenes render natively on Metal, and a scene the native renderer cannot draw falls back to Vulkan on Metal through MoltenVK. AVFoundation video is opt-in under [Settings → Performance](docs/features/performance.md), where the scene renderer can also be set to Compatibility. |
@@ -290,7 +292,7 @@ desktop, [become a Supporter](SPONSORS.md).
 
 <!-- supporters:start: written by scripts/update_sponsors.py from the website's sponsor wall; edits here are overwritten -->
 <p align="center">
-  <a href="https://www.wallpapermachine.app/#sponsors"><img src="https://www.wallpapermachine.app/sponsors/wall?v=30fe4b2f9944" width="100%" alt="WallpaperMachine Supporters: xwei12, ReinforceZwei. 2 Supporters on the wall. 2 more support privately."></a>
+  <a href="https://www.wallpapermachine.app/#sponsors"><img src="https://www.wallpapermachine.app/sponsors/wall?v=8baa903db4aa" width="100%" alt="WallpaperMachine Supporters: xwei12, umitsurumi, ReinforceZwei, hahagei2580. 4 Supporters on the wall. 1 more supports privately."></a>
 </p>
 <!-- supporters:end -->
 
@@ -303,7 +305,8 @@ recorded in [upstream/provenance.json](upstream/provenance.json). Every recipien
 keeps every right the GPL grants, whether or not they are a Supporter.
 
 **No binary is cleared for distribution yet.** Apache-2.0 components (MoltenVK,
-the Vulkan loader, SPIRV-Tools, parts of glslang and the vendored spirv_reflect)
+the Vulkan loader, SPIRV-Tools, parts of glslang, the vendored spirv_reflect, and
+several Rust crates the renderer links, such as codespan-reporting and miette)
 are in every build's link closure and are not compatible with GPLv2.
 [LICENSING.md](LICENSING.md) records the policy, the Supporter model, each
 component's license, the open blockers and what would resolve them. Workshop
@@ -317,7 +320,7 @@ Engine you own; the app bundles neither.
 <br>
 
 <p align="center">
-  <img src="WebUI/app-icons/day.png" width="72" alt="WallpaperMachine app icon">
+  <img src="App/Resources/Assets.xcassets/AppIconDay.imageset/day.png" width="72" alt="WallpaperMachine app icon">
 </p>
 
 <p align="center">

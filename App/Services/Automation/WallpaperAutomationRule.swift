@@ -63,6 +63,31 @@ struct WallpaperSolarLocation: Codable, Equatable, Sendable {
     }
 }
 
+/// Where the sun rules take their times from: coordinates the user typed, clock times the
+/// user fixed, or coordinates the system keeps up to date.
+enum WallpaperSolarSource: String, Codable, CaseIterable, Sendable {
+    case coordinates, fixed, automatic
+}
+
+/// The Sunrise and sunset settings. `location` is what the coordinates and automatic sources
+/// plan with; the fixed source ignores it and uses the two clock times instead.
+struct WallpaperSolarSettings: Codable, Equatable, Sendable {
+    var source: WallpaperSolarSource = .coordinates
+    var location: WallpaperSolarLocation?
+    var fixedSunriseMinute: Int = 7 * 60
+    var fixedSunsetMinute: Int = 18 * 60
+
+    var isValid: Bool {
+        (0..<1440).contains(fixedSunriseMinute) && (0..<1440).contains(fixedSunsetMinute)
+            && location?.isValid != false
+    }
+
+    /// The coordinates the solar maths may use; nil for fixed times and when none is known.
+    var planningLocation: WallpaperSolarLocation? {
+        source == .fixed ? nil : location
+    }
+}
+
 struct WallpaperAutomationOccurrence: Equatable, Sendable {
     let key: String
     let date: Date
@@ -78,7 +103,7 @@ enum WallpaperAutomationPlanner {
     }
 
     static func resolve(_ configuration: DisplayWallpaperAutomation, now: Date, dark: Bool,
-                        location: WallpaperSolarLocation?, calendar: Calendar = .autoupdatingCurrent) -> Result {
+                        solar: WallpaperSolarSettings?, calendar: Calendar = .autoupdatingCurrent) -> Result {
         let today = calendar.startOfDay(for: now)
         let tomorrow = calendar.date(byAdding: .day, value: 1, to: today) ?? now.addingTimeInterval(24 * 3600)
         var result = Result(reevaluateAt: tomorrow)
@@ -103,8 +128,19 @@ enum WallpaperAutomationPlanner {
                         matchingPolicy: .nextTime, repeatedTimePolicy: .first, direction: .forward)
                     date = match.flatMap { calendar.isDate($0, inSameDayAs: day) ? $0 : nil }
                 case .sunrise, .sunset:
-                    date = location.flatMap { WallpaperSolarTimes.event(rule.event, on: day, location: $0, calendar: calendar) }
-                        .map { $0.addingTimeInterval(TimeInterval(rule.offset * 60)) }
+                    let event: Date?
+                    if solar?.source == .fixed, let solar {
+                        let minute = rule.event == .sunrise ? solar.fixedSunriseMinute : solar.fixedSunsetMinute
+                        event = calendar.nextDate(after: day.addingTimeInterval(-1),
+                            matching: DateComponents(hour: minute / 60, minute: minute % 60, second: 0),
+                            matchingPolicy: .nextTime, repeatedTimePolicy: .first, direction: .forward)
+                            .flatMap { calendar.isDate($0, inSameDayAs: day) ? $0 : nil }
+                    } else {
+                        event = solar?.planningLocation.flatMap {
+                            WallpaperSolarTimes.event(rule.event, on: day, location: $0, calendar: calendar)
+                        }
+                    }
+                    date = event.map { $0.addingTimeInterval(TimeInterval(rule.offset * 60)) }
                 }
                 if let date {
                     occurrences.append((index, .init(key: "schedule:\(configuration.revision):\(rule.id):\(Int64(date.timeIntervalSince1970))", date: date, target: rule.target)))

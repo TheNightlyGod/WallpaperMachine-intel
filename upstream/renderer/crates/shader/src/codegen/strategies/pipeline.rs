@@ -342,7 +342,7 @@ mod tests {
     fn production_pipeline_contains_each_strategy_once() {
         let names = LEGALIZER_PIPELINE.ordered_names();
 
-        assert_eq!(names.len(), 15);
+        assert_eq!(names.len(), 16);
         let unique = names.iter().copied().collect::<BTreeSet<_>>();
         assert_eq!(unique.len(), names.len());
         assert_eq!(
@@ -350,6 +350,7 @@ mod tests {
             [
                 "alpha_to_coverage",
                 "array_parameters",
+                "builtin_variables",
                 "compatibility_functions",
                 "control_flow_coercion",
                 "fragment_output",
@@ -376,6 +377,7 @@ mod tests {
         assert_eq!(
             names,
             [
+                "builtin_variables",
                 "legacy_types",
                 "texture_sampling",
                 "legacy_builtins",

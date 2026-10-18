@@ -1,9 +1,8 @@
-import CryptoKit
 import Foundation
 import ImageIO
 import UniformTypeIdentifiers
 
-/// Author artwork is relayed as raster bytes, never as remote panel content.
+/// Author artwork is loaded as raster bytes only, never as remote content.
 actor PropertyImageCache {
     struct Image: Sendable {
         let data: Data
@@ -52,12 +51,8 @@ actor PropertyImageCache {
         ].contains(url.host?.lowercased() ?? "")
     }
 
-    nonisolated static func key(for url: URL) -> String {
-        SHA256.hash(data: Data(url.absoluteString.utf8)).map { String(format: "%02x", $0) }.joined()
-    }
-
-    /// Source spelling is retained for the inert HTML parser's lookup. Only src on
-    /// an img tag is registered; URL validation is repeated when the route is used.
+    /// Source spelling is retained so a label's markup can be matched to its image. Only src on
+    /// an img tag is registered; URL validation is repeated when the image is loaded.
     nonisolated static func sources(in html: String) -> [String: URL] {
         guard html.utf8.count <= 65_536 else { return [:] }
         let pattern = #"<img\b[^>]*?\s+src\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))"#
@@ -74,10 +69,6 @@ actor PropertyImageCache {
             }
         }
         return result
-    }
-
-    nonisolated static func addresses(in html: String) -> [String: String] {
-        sources(in: html).mapValues { "mwe-ui://property-image/" + key(for: $0) }
     }
 
     func image(for url: URL) async throws -> Image {

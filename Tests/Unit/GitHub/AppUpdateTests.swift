@@ -102,6 +102,8 @@ final class AppUpdateTests: XCTestCase {
 
     func testReleaseNotesReadTheSectionsAndStopAtTheInstallFooter() throws {
         let body = """
+        ![WallpaperMachine 1.2.3](https://raw.githubusercontent.com/o/r/v1.2.3/Resources/ReleaseBanners/1.2.3.jpg)
+
         ### New
 
         - **panel** — Add a filter rail ([`aaa1111`](https://github.com/o/r/commit/aaa1111))
@@ -307,10 +309,10 @@ final class AppUpdateTests: XCTestCase {
 
         http.respond(latest: .init(status: 404, body: Data()))
         let empty = await store.checkForUpdates()
-        let snapshot = WebPanelController.update(empty)
-        XCTAssertEqual(snapshot["status"] as? String, "noRelease")
-        XCTAssertEqual(snapshot["action"] as? String, "checkForUpdates")
-        XCTAssertEqual(snapshot["showsReleases"] as? Bool, false)
+        let card = UpdatePresentation(state: empty)
+        XCTAssertEqual(card.status, .noRelease)
+        XCTAssertEqual(card.action, .checkForUpdates)
+        XCTAssertFalse(card.showsReleases)
         XCTAssertNil(empty.availableVersion)
         XCTAssertNil(store.releaseNotes)
         XCTAssertFalse(empty.isBusy)
@@ -349,10 +351,9 @@ final class AppUpdateTests: XCTestCase {
         let store = AppUpdateStore(currentVersion: "1.0.0", client: http.client, now: { clock })
         await expect(store.checkForUpdates(), equals: .error(currentVersion: "1.0.0", operation: .check, code: .rateLimited, availableVersion: nil))
         XCTAssertEqual(store.rateLimitedUntil, reset)
-        let snapshot = WebPanelController.update(store.state, rateLimitedUntil: store.rateLimitedUntil)
-        XCTAssertEqual(snapshot["statusText"] as? String,
-                       WebPanelController.updateErrorText(.rateLimited, rateLimitedUntil: reset))
-        XCTAssertNotEqual(snapshot["statusText"] as? String, WebPanelController.updateErrorText(.network))
+        let card = UpdatePresentation(state: store.state, rateLimitedUntil: store.rateLimitedUntil)
+        XCTAssertEqual(card.statusText, UpdatePresentation.errorText(.rateLimited, rateLimitedUntil: reset))
+        XCTAssertNotEqual(card.statusText, UpdatePresentation.errorText(.network))
 
         // A plain 403 (no limit headers) is still an ordinary failure.
         http.respond(latest: .init(status: 403, body: Data()))

@@ -71,13 +71,18 @@ struct ScalarAnimationPlayback
     [[nodiscard]] float Value() const;
 };
 
-// A layer origin's three curves share one clock. Relative keys are offsets
-// from the authored origin, not from the previous sample.
-struct NodeOriginAnimation
+// A vec3 setting's three curves share one clock: a layer's origin, scale or
+// angles, or an image layer's colour. Relative keys are offsets from the
+// authored value, not from the previous sample. Settings the editor keyed
+// together (`options.parent`) hold the same `playback`.
+struct NodeVec3Animation
 {
     std::shared_ptr<ScalarAnimationPlayback> playback;
     std::array<ScalarAnimation, 3>           components;
     std::array<float, 3>                     offset {};
+
+    // The setting's value at the clock's current frame.
+    [[nodiscard]] std::array<float, 3> Value() const;
 };
 
 // A vector shader constant animates one curve per component, and several

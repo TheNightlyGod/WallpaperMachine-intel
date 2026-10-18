@@ -23,10 +23,10 @@ struct WPUserTexture {
     std::string type;
 };
 
-/// Whether this binding names an image the runtime supplies, which is the only
-/// kind that actually replaces the texture in its slot. A binding that names a
-/// project property is left for the authored texture, so the two cases must not
-/// be confused: one has its slot substituted, the other does not.
+/// Whether this binding names an image the runtime supplies, which always
+/// replaces the texture in its slot. A binding that names a project property
+/// replaces it only once the property names a picture, which only a parse that
+/// reads the properties can tell, so the two cases must not be confused.
 bool IsSystemUserTexture(const WPUserTexture& user_texture);
 
 struct WPConstantShaderValue {

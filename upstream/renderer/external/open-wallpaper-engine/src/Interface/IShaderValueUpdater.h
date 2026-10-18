@@ -3,6 +3,7 @@
 #include "Core/NoCopyMove.hpp"
 #include "Core/MapSet.hpp"
 
+#include <array>
 #include <functional>
 #include <string>
 #include <string_view>
@@ -69,12 +70,41 @@ public:
         (void)camera_override;
         return frame_varying_uniform::kAll;
     }
+    /// The scene's lights as this node's material reads them, hashed, or 0
+    /// when it reads no light uniform. Lights move, fade and switch on and off
+    /// without a graph edit or a material change, so a pass that lights itself
+    /// folds this into its static sample.
+    virtual uint64_t LightStateHash(SceneNode* node, uint32_t material_slot) const {
+        (void)node;
+        (void)material_slot;
+        return 0;
+    }
     /// Drops what was recorded for a node that is about to be freed, so a
     /// later node allocated at the same address starts from nothing.
     virtual void ForgetNode(SceneNode* node) { (void)node; }
+    /// How far cursor parallax moves a layer: the layer's depth on each axis,
+    /// which a script reads and writes as `parallaxDepth`. A write reaches the
+    /// layer, whatever is drawn for it (its effect passes) and the layers below
+    /// it; the layers above and beside it keep theirs. The answer is whether
+    /// anything started or stopped following the cursor, which a graph built
+    /// earlier does not know. An updater that has no parallax reports zero,
+    /// keeps nothing and answers false.
+    virtual bool SetNodeParallaxDepth(SceneNode* node, float x, float y) {
+        (void)node;
+        (void)x;
+        (void)y;
+        return false;
+    }
+    virtual std::array<float, 2> NodeParallaxDepth(const SceneNode* node) const {
+        (void)node;
+        return { 0.0f, 0.0f };
+    }
     virtual void FrameEnd()                                                        = 0;
 
     virtual void MouseInput(double x, double y) = 0;
+    /// The pointer buttons held this frame, one bit per button with the
+    /// primary button in bit 0, as the host reports them to scripts.
+    virtual void MouseButtonsInput(uint32_t down) { (void)down; }
     virtual void SetTexelSize(float x, float y) = 0;
     virtual void SetScreenSize(i32 w, i32 h)    = 0;
 };

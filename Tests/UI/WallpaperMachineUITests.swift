@@ -2,9 +2,16 @@ import AppKit
 import CoreGraphics
 import XCTest
 
+/// Opt-in desktop tests of the real app: they drive the native control panel through the
+/// accessibility tree, so they need a desktop run (`python3 scripts/test.py --ui`).
+///
+/// The panel is SwiftUI. Controls are found by the stable `accessibilityIdentifier` the shell gives
+/// them (`scope-*`, `collection-*`, `now-playing-*`, `dismiss-error`, `settings-section-*`) or, for
+/// the title bar's tabs and the pages, by the label VoiceOver reads (the same words the interface
+/// shows).
 final class WallpaperMachineUITests: XCTestCase {
   private var app: XCUIApplication!
-  private var panel: XCUIElement { app.webViews.firstMatch }
+  private var window: XCUIElement { app.windows.firstMatch }
 
   override func setUpWithError() throws {
     continueAfterFailure = false
@@ -53,34 +60,45 @@ final class WallpaperMachineUITests: XCTestCase {
     app.launch()
     XCTAssertTrue(
       app.windows.firstMatch.waitForExistence(timeout: 30), "The client must open a real window")
-    XCTAssertTrue(panel.waitForExistence(timeout: 30), "The window must expose its WebKit panel")
+    XCTAssertTrue(
+      identified("scope-all").waitForExistence(timeout: 30),
+      "The window must show the Library page")
   }
 
-  private func button(_ label: String) -> XCUIElement {
-    panel.buttons[label].firstMatch
+  // MARK: Finding things
+
+  /// A control by its accessibility identifier, whatever kind of element SwiftUI made of it.
+  private func identified(_ identifier: String) -> XCUIElement {
+    window.descendants(matching: .any).matching(identifier: identifier).firstMatch
+  }
+
+  /// A control by the label VoiceOver reads.
+  private func labelled(_ label: String) -> XCUIElement {
+    window.descendants(matching: .any).matching(NSPredicate(format: "label == %@", label)).firstMatch
   }
 
   private func wallpaper(_ title: String) -> XCUIElement {
-    panel.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "\(title), ")).firstMatch
+    window.descendants(matching: .any)
+      .matching(NSPredicate(format: "label BEGINSWITH %@", "\(title), ")).firstMatch
   }
 
+  /// A search field by its label, or by its prompt (`PageSearchBar` names each page's field).
   private func searchField(_ label: String) -> XCUIElement {
-    panel.descendants(matching: .any)
+    window.descendants(matching: .any)
       .matching(
         NSPredicate(
-          format: "label == %@ AND (elementType == %d OR elementType == %d)",
-          label, XCUIElement.ElementType.searchField.rawValue,
+          format: "(label == %@ OR placeholderValue == %@) AND (elementType == %d OR elementType == %d)",
+          label, label, XCUIElement.ElementType.searchField.rawValue,
           XCUIElement.ElementType.textField.rawValue)
       ).firstMatch
   }
 
   private func pageText(_ prefix: String) -> XCUIElement {
-    panel.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", prefix)).firstMatch
+    window.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", prefix)).firstMatch
   }
 
   private func expectPage(_ number: Int, timeout: TimeInterval = 40) {
-    let field = panel.descendants(matching: .any)
-      .matching(NSPredicate(format: "label == %@", "Page number")).firstMatch
+    let field = labelled("Page number")
     let loaded = XCTNSPredicateExpectation(
       predicate: NSPredicate(format: "exists == true AND enabled == true AND value == %@", String(number)),
       object: field)
@@ -88,26 +106,47 @@ final class WallpaperMachineUITests: XCTestCase {
       "The enabled page-number control must show page \(number)")
   }
 
-  private func navigate(_ label: String) {
-    let tab = button(label)
-    XCTAssertTrue(tab.waitForExistence(timeout: 10))
-    tab.click()
+  /// A tab of the title bar by its title: `Library`, `Steam Workshop`, `pixiv`, `Settings`.
+  private func navigate(_ tab: String) {
+    let item = window.toolbars.descendants(matching: .any)
+      .matching(NSPredicate(format: "label == %@", tab)).firstMatch
+    XCTAssertTrue(item.waitForExistence(timeout: 10), tab)
+    item.click()
+  }
+
+  /// A view of the library by its chip: `all`, `favorites`.
+  private func showLibrary(_ scope: String) {
+    navigate("Library")
+    let chip = identified("scope-\(scope)")
+    XCTAssertTrue(chip.waitForExistence(timeout: 10), "scope-\(scope)")
+    chip.click()
+  }
+
+  /// A Settings section by its title, from Settings' section list.
+  private func openSection(_ title: String) {
+    let row = window.descendants(matching: .any)
+      .matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "settings-section-", title))
+      .firstMatch
+    XCTAssertTrue(row.waitForExistence(timeout: 10), title)
+    row.click()
   }
 
   private func selectAurora() {
     let tile = wallpaper("Aurora Drift")
     XCTAssertTrue(tile.waitForExistence(timeout: 15))
     tile.click()
-    XCTAssertTrue(button("Apply wallpaper").waitForExistence(timeout: 10))
+    XCTAssertTrue(labelled("Apply wallpaper").waitForExistence(timeout: 10))
   }
 
   private func applyAurora() {
     selectAurora()
-    button("Apply wallpaper").click()
+    labelled("Apply wallpaper").click()
     XCTAssertTrue(
-      button("Reapply wallpaper").waitForExistence(timeout: 30),
+      labelled("Reapply wallpaper").waitForExistence(timeout: 30),
       "The selected wallpaper must become active on the target display")
   }
+
+  // MARK: Tests
 
   func testLaunchHasNoBlankFloatingWindows() {
     XCTAssertTrue(wallpaper("Aurora Drift").waitForExistence(timeout: 15))
@@ -132,54 +171,95 @@ final class WallpaperMachineUITests: XCTestCase {
   }
 
   func testSettingsShortcutUsesExistingWindow() {
-    XCTAssertTrue(searchField("Search installed wallpapers").waitForExistence(timeout: 15))
-    app.windows.firstMatch.click()
+    XCTAssertTrue(searchField("Search wallpapers").waitForExistence(timeout: 15))
+    window.click()
     app.typeKey(",", modifierFlags: .command)
-    XCTAssertTrue(button("Library & Steam").waitForExistence(timeout: 10))
+    XCTAssertTrue(identified("settings-section-library").waitForExistence(timeout: 10))
     XCTAssertEqual(app.windows.count, 1)
-    navigate("Installed")
+    navigate("Library")
+    XCTAssertTrue(identified("scope-all").waitForExistence(timeout: 10))
     app.typeKey(",", modifierFlags: .command)
-    XCTAssertTrue(button("Library & Steam").waitForExistence(timeout: 10))
+    XCTAssertTrue(identified("settings-section-library").waitForExistence(timeout: 10))
     XCTAssertEqual(app.windows.count, 1)
   }
 
   func testFirstLaunchNavigationAndSettingsCategories() {
     XCTAssertTrue(wallpaper("Aurora Drift").waitForExistence(timeout: 15))
+    XCTAssertEqual(window.title, "All wallpapers", "the window is named for the place on show")
     navigate("Settings")
-    XCTAssertTrue(button("General").waitForExistence(timeout: 10))
-    button("Displays").click()
+    XCTAssertTrue(identified("settings-section-general").waitForExistence(timeout: 10))
+    openSection("Displays")
     XCTAssertTrue(pageText("Display mode").waitForExistence(timeout: 10))
-    button("Library & Steam").click()
+    openSection("Library & Steam")
     XCTAssertTrue(pageText("SteamCMD").waitForExistence(timeout: 10))
-    navigate("Discover")
+    navigate("Steam Workshop")
     XCTAssertTrue(searchField("Search Steam Workshop").waitForExistence(timeout: 10))
-    navigate("Installed")
-    XCTAssertTrue(searchField("Search installed wallpapers").waitForExistence(timeout: 10))
+    XCTAssertEqual(window.title, "Steam Workshop")
+    showLibrary("all")
+    XCTAssertTrue(searchField("Search wallpapers").waitForExistence(timeout: 10))
     XCTAssertEqual(app.alerts.count, 0)
   }
 
+  func testCommandFFocusesThePagesSearchField() {
+    let search = searchField("Search wallpapers")
+    XCTAssertTrue(search.waitForExistence(timeout: 15))
+    window.click()
+    app.typeKey("f", modifierFlags: .command)
+    app.typeText("aurora")
+    XCTAssertEqual(search.value as? String, "aurora", "Command-F put the keyboard in the search field")
+  }
+
+  func testCollectionsAreMadeRenamedAndDeletedInTheFiltersPanel() {
+    XCTAssertTrue(identified("installed-filter").waitForExistence(timeout: 15))
+    identified("installed-filter").click()
+    XCTAssertTrue(identified("collection-new").waitForExistence(timeout: 15))
+    identified("collection-new").click()
+    let field = identified("collection-name")
+    XCTAssertTrue(field.waitForExistence(timeout: 5))
+    field.typeText("Chill evenings\r")
+    let row = window.descendants(matching: .any)
+      .matching(NSPredicate(format: "label CONTAINS %@", "Chill evenings")).firstMatch
+    XCTAssertTrue(row.waitForExistence(timeout: 10), "the new collection is listed")
+    XCTAssertEqual(window.title, "Chill evenings", "and shown")
+    row.rightClick()
+    app.menuItems["Rename…"].click()
+    let rename = identified("collection-name")
+    XCTAssertTrue(rename.waitForExistence(timeout: 5))
+    rename.typeKey("a", modifierFlags: .command)
+    rename.typeText("Evenings\r")
+    XCTAssertTrue(
+      window.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "Evenings"))
+        .firstMatch.waitForExistence(timeout: 10))
+    window.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "Evenings"))
+      .firstMatch.rightClick()
+    app.menuItems["Delete…"].click()
+    XCTAssertTrue(app.sheets.firstMatch.waitForExistence(timeout: 5), "deleting asks first")
+    app.sheets.firstMatch.buttons["Delete"].click()
+    XCTAssertTrue(identified("collection-notice").waitForExistence(timeout: 5))
+  }
+
   func testImportPanePickerCancelAndEmptyLibrarySearch() {
-    XCTAssertTrue(button("Import").waitForExistence(timeout: 15))
-    button("Import").click()
+    XCTAssertTrue(labelled("Import").waitForExistence(timeout: 15))
+    labelled("Import").click()
     XCTAssertTrue(pageText("Import wallpapers").waitForExistence(timeout: 5))
-    XCTAssertTrue(button("Choose wallpapers").exists)
+    XCTAssertTrue(labelled("Choose wallpapers").exists)
     XCTAssertEqual(app.sheets.count, 0, "Opening the import pane must not open the native picker")
-    button("Choose wallpapers").click()
+    labelled("Choose wallpapers").click()
     let picker = app.sheets.firstMatch
     XCTAssertTrue(
       picker.waitForExistence(timeout: 10), "Choosing files must open the native picker")
     picker.buttons["Cancel"].click()
     XCTAssertFalse(picker.exists)
-    button("Close import").click()
+    labelled("Close import").click()
     XCTAssertFalse(pageText("Import wallpapers").exists)
 
-    let search = searchField("Search installed wallpapers")
+    let search = searchField("Search wallpapers")
     XCTAssertTrue(search.waitForExistence(timeout: 10))
     search.click()
     search.typeText("no-local-wallpaper-with-this-title")
     XCTAssertTrue(pageText("No matching wallpapers").waitForExistence(timeout: 10))
     XCTAssertFalse(wallpaper("Aurora Drift").exists)
-    button("Clear search").click()
+    labelled("Clear search").click()
     XCTAssertTrue(wallpaper("Aurora Drift").waitForExistence(timeout: 10))
     XCTAssertEqual(app.alerts.count, 0)
   }
@@ -187,11 +267,11 @@ final class WallpaperMachineUITests: XCTestCase {
   func testSelectionSurvivesLibraryRefreshWithoutApplying() {
     selectAurora()
     XCTAssertFalse(
-      button("Reapply wallpaper").exists,
+      labelled("Reapply wallpaper").exists,
       "Selecting a tile must not activate the wallpaper")
-    button("Refresh library").click()
+    labelled("Refresh library").click()
     XCTAssertTrue(
-      button("Apply wallpaper").waitForExistence(timeout: 30),
+      labelled("Apply wallpaper").waitForExistence(timeout: 30),
       "Refresh must retain the selected wallpaper without activating it")
     XCTAssertEqual(app.alerts.count, 0)
   }
@@ -201,7 +281,7 @@ final class WallpaperMachineUITests: XCTestCase {
     XCTAssertTrue(app.wait(for: .runningBackground, timeout: 10))
     app.activate()
     XCTAssertTrue(app.windows.firstMatch.waitForExistence(timeout: 10))
-    XCTAssertTrue(panel.waitForExistence(timeout: 10))
+    XCTAssertTrue(identified("scope-all").waitForExistence(timeout: 10))
     XCTAssertEqual(app.alerts.count, 0)
   }
 
@@ -210,42 +290,45 @@ final class WallpaperMachineUITests: XCTestCase {
     XCTAssertTrue(app.wait(for: .runningBackground, timeout: 10), "Command-W must close the panel")
     app.activate()
     XCTAssertTrue(app.windows.firstMatch.waitForExistence(timeout: 10))
-    XCTAssertTrue(panel.waitForExistence(timeout: 10))
+    XCTAssertTrue(identified("scope-all").waitForExistence(timeout: 10))
     XCTAssertEqual(app.alerts.count, 0)
   }
 
   func testApplyPauseResumeAndRelaunch() {
     applyAurora()
-    button("Pause wallpaper playback").click()
-    XCTAssertTrue(button("Resume wallpaper playback").waitForExistence(timeout: 5))
-    XCTAssertTrue(pageText("Playback paused").exists)
-    button("Resume wallpaper playback").click()
-    XCTAssertTrue(button("Pause wallpaper playback").waitForExistence(timeout: 5))
-    XCTAssertTrue(pageText("Playback running").exists)
+    let toggle = identified("now-playing-toggle")
+    XCTAssertEqual(toggle.label, "Pause wallpaper playback")
+    toggle.click()
+    XCTAssertTrue(labelled("Resume wallpaper playback").waitForExistence(timeout: 5))
+    XCTAssertEqual(
+      identified("now-playing").value as? String, "Playback paused", "the bar says so")
+    toggle.click()
+    XCTAssertTrue(labelled("Pause wallpaper playback").waitForExistence(timeout: 5))
+    XCTAssertEqual(identified("now-playing").value as? String, "Playback running")
     app.terminate()
     app.launch()
-    XCTAssertTrue(panel.waitForExistence(timeout: 30))
-    XCTAssertTrue(button("Pause wallpaper playback").waitForExistence(timeout: 30))
+    XCTAssertTrue(identified("scope-all").waitForExistence(timeout: 30))
+    XCTAssertTrue(labelled("Pause wallpaper playback").waitForExistence(timeout: 30))
     XCTAssertTrue(wallpaper("Aurora Drift").waitForExistence(timeout: 15))
     XCTAssertEqual(app.alerts.count, 0)
   }
 
   func testWorkshopSearchPaginationAndNavigationPersistence() {
-    navigate("Discover")
+    navigate("Steam Workshop")
     let search = searchField("Search Steam Workshop")
     XCTAssertTrue(search.waitForExistence(timeout: 10))
     search.click()
     search.typeText("forest")
-    button("Search").click()
+    labelled("Search").click()
     expectPage(1)
-    let next = button("Next page")
+    let next = labelled("Next page")
     XCTAssertTrue(next.waitForExistence(timeout: 40))
     XCTAssertTrue(
       next.isEnabled, "The Workshop query needs more than one page to exercise pagination")
     next.click()
     expectPage(2)
-    navigate("Installed")
-    navigate("Discover")
+    showLibrary("all")
+    navigate("Steam Workshop")
     XCTAssertEqual(searchField("Search Steam Workshop").value as? String, "forest")
     expectPage(2)
     XCTAssertEqual(app.alerts.count, 0)
@@ -255,15 +338,15 @@ final class WallpaperMachineUITests: XCTestCase {
     let broken = wallpaper("Broken Video")
     XCTAssertTrue(broken.waitForExistence(timeout: 15))
     broken.click()
-    XCTAssertTrue(button("Apply wallpaper").waitForExistence(timeout: 10))
-    button("Apply wallpaper").click()
+    XCTAssertTrue(labelled("Apply wallpaper").waitForExistence(timeout: 10))
+    labelled("Apply wallpaper").click()
     XCTAssertTrue(
-      button("Dismiss error").waitForExistence(timeout: 30),
+      identified("dismiss-error").waitForExistence(timeout: 30),
       "The invalid video must report an error in the panel")
     XCTAssertFalse(
-      button("Reapply wallpaper").exists,
+      labelled("Reapply wallpaper").exists,
       "A failed activation must not mark the invalid video active")
     applyAurora()
-    XCTAssertTrue(button("Pause wallpaper playback").isEnabled)
+    XCTAssertTrue(identified("now-playing-toggle").isEnabled)
   }
 }

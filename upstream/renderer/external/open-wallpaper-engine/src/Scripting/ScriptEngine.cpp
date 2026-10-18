@@ -60,6 +60,7 @@ struct RegisteredAudioBuffer {
 };
 
 struct ContextScriptCacheState {
+    bool                                     shared_primitives_installed { false };
     bool                                     shared_bindings_installed { false };
     bool                                     shared_bootstrap_installed { false };
     ScriptHostContext                        last_host_context {};
@@ -124,112 +125,618 @@ void ReleaseContextScriptCache(JSContext* context) {
 
 constexpr char kVectorBootstrap[] = R"JS(
 (function() {
-  function __vecNumber(value) {
+  var EPSILON = 0.00001;
+  var DEG2RAD = Math.PI / 180;
+  var RAD2DEG = 180 / Math.PI;
+
+  // Methods are defined the way `class` bodies define them: writable,
+  // configurable, and not enumerable, so `for (k in vector)` lists only the
+  // components.
+  function define(target, methods) {
+    Object.keys(methods).forEach(function(name) {
+      Object.defineProperty(target, name, {
+        value: methods[name], writable: true, configurable: true, enumerable: false
+      });
+    });
+  }
+
+  // A plain object handed to a vector constructor (the host and older scripts
+  // pass `{x, y, z}`) is read leniently: a missing or non-finite field is 0.
+  function lenient(value) {
     if (typeof value === 'number') return value;
     if (value === undefined || value === null) return 0;
     var numeric = Number(value);
     return Number.isFinite(numeric) ? numeric : 0;
   }
 
-  function __defineVector(name, fields) {
-    function Vector(a, b, c, d) {
-      if (!(this instanceof Vector)) {
-        return new Vector(a, b, c, d);
-      }
+  var Vec2, Vec3, Vec4;
 
-      if (a !== null && typeof a === 'object') {
-        for (var i = 0; i < fields.length; ++i) {
-          this[fields[i]] = __vecNumber(a[fields[i]]);
+  function defineVector(name, fields) {
+    var size = fields.length;
+    var Vector;
+
+    function make(values) {
+      var instance = new Vector();
+      for (var i = 0; i < size; ++i) instance[fields[i]] = values[i];
+      return instance;
+    }
+
+    // Component `index` of an operand that is a number (applies to every
+    // component) or a vector. A Vec2 beside a Vec3 or Vec4 stands for the
+    // components it has; `rest` is what the arithmetic leaves of the others.
+    function component(other, index, rest) {
+      if (typeof other === 'number') return other;
+      var value = other[fields[index]];
+      if (value === undefined && rest !== undefined && other instanceof Vec2 && index >= 2) return rest;
+      return value;
+    }
+
+    function combine(self, other, rest, op) {
+      var values = new Array(size);
+      for (var i = 0; i < size; ++i) values[i] = op(self[fields[i]], component(other, i, rest));
+      return make(values);
+    }
+
+    function each(self, op) {
+      var values = new Array(size);
+      for (var i = 0; i < size; ++i) values[i] = op(self[fields[i]]);
+      return make(values);
+    }
+
+    // `op` receives each component, the lower and the upper bound.
+    function bounded(self, low, high, op) {
+      var values = new Array(size);
+      for (var i = 0; i < size; ++i) {
+        values[i] = op(self[fields[i]], component(low, i), component(high, i));
+      }
+      return make(values);
+    }
+
+    Vector = class {
+      constructor(a, b, c, d) {
+        if (typeof a === 'string') {
+          var parts = a.trim().split(/[\s,]+/);
+          for (var i = 0; i < size; ++i) this[fields[i]] = parseFloat(parts[i]);
+        } else if (a !== null && typeof a === 'object') {
+          // Another vector keeps its values as they are; a plain `{x, y, ...}`
+          // is read leniently. What either lacks is zero.
+          var isVector = a instanceof Vec2 || a instanceof Vec3 || a instanceof Vec4;
+          for (var j = 0; j < size; ++j) {
+            var source = a[fields[j]];
+            this[fields[j]] = isVector ? (source === undefined ? 0 : source) : lenient(source);
+          }
+        } else if (a === undefined) {
+          for (var k = 0; k < size; ++k) this[fields[k]] = 0;
+        } else {
+          // A lone number fills every component. With a second number, the
+          // components the call does not name are zero, and a Vec4 given three
+          // numbers repeats the third as its fourth.
+          var third = a;
+          if (typeof c === 'number') third = c;
+          else if (typeof b === 'number') third = 0;
+          var set = [a,
+                     typeof b === 'number' ? b : a,
+                     third,
+                     typeof d === 'number' ? d : third];
+          for (var m = 0; m < size; ++m) this[fields[m]] = set[m];
         }
-        return;
       }
-
-      var input = [a, b, c, d];
-      if (fields.length > 1 && typeof a === 'number' && b === undefined && c === undefined && d === undefined) {
-        for (var i = 1; i < fields.length; ++i) input[i] = a;
-      }
-      for (var i = 0; i < fields.length; ++i) {
-        this[fields[i]] = __vecNumber(input[i]);
-      }
-    }
-
-    function createFromBinary(self, rhs, op) {
-      var source = (rhs !== null && typeof rhs === 'object') ? rhs : null;
-      var scalar = source === null ? __vecNumber(rhs) : 0;
-      var values = [];
-      for (var i = 0; i < fields.length; ++i) {
-        var field = fields[i];
-        var other = source === null ? scalar : __vecNumber(source[field]);
-        values.push(op(__vecNumber(self[field]), other));
-      }
-      return new Vector(values[0], values[1], values[2], values[3]);
-    }
-
-    Vector.prototype.clone = function() {
-      return createFromBinary(this, 0, function(lhs) { return lhs; });
     };
-    Vector.prototype.copy = function() {
-      return this.clone();
-    };
-    Vector.prototype.add = function(rhs) {
-      return createFromBinary(this, rhs, function(lhs, other) { return lhs + other; });
-    };
-    Vector.prototype.subtract = function(rhs) {
-      return createFromBinary(this, rhs, function(lhs, other) { return lhs - other; });
-    };
-    Vector.prototype.mix = function(rhs, amount) {
-      return createFromBinary(this, rhs, function(lhs, other) { return lhs * (1 - amount) + other * amount; });
-    };
-    Vector.prototype.multiply = function(rhs) {
-      return createFromBinary(this, rhs, function(lhs, other) { return lhs * other; });
-    };
-    Vector.prototype.divide = function(rhs) {
-      return createFromBinary(this, rhs, function(lhs, other) { return lhs / other; });
-    };
-    Vector.prototype.length = function() {
-      var sum = 0;
-      for (var i = 0; i < fields.length; ++i) {
-        var field = fields[i];
-        var value = __vecNumber(this[field]);
-        sum += value * value;
-      }
-      return Math.sqrt(sum);
-    };
-    Vector.prototype.normalize = function() {
-      var len = this.length();
-      return len === 0 ? this.clone() : this.divide(len);
-    };
-    Vector.prototype.toString = function() {
-      var values = [];
-      for (var i = 0; i < fields.length; ++i) {
-        values.push(String(this[fields[i]]));
-      }
-      return values.join(', ');
-    };
-
     Object.defineProperty(Vector, 'name', { value: name });
+
+    define(Vector.prototype, {
+      length: function() { return Math.sqrt(this.lengthSqr()); },
+      lengthSqr: function() {
+        var sum = 0;
+        for (var i = 0; i < size; ++i) sum += this[fields[i]] * this[fields[i]];
+        return sum;
+      },
+      distance: function(v) { return Math.sqrt(this.distanceSqr(v)); },
+      distanceSqr: function(v) {
+        var sum = 0;
+        for (var i = 0; i < size; ++i) {
+          var delta = this[fields[i]] - v[fields[i]];
+          sum += delta * delta;
+        }
+        return sum;
+      },
+      normalize: function() { return this.divide(this.length()); },
+      copy: function() { return each(this, function(value) { return value; }); },
+      clone: function() { return this.copy(); },
+      equals: function(other) {
+        if (!(other instanceof Vector)) return false;
+        for (var i = 0; i < size; ++i) {
+          if (!(Math.abs(this[fields[i]] - other[fields[i]]) < EPSILON)) return false;
+        }
+        return true;
+      },
+      isFinite: function() {
+        for (var i = 0; i < size; ++i) if (!Number.isFinite(this[fields[i]])) return false;
+        return true;
+      },
+      negate: function() { return each(this, function(value) { return -value; }); },
+      add: function(f) { return combine(this, f, 0, function(a, b) { return a + b; }); },
+      subtract: function(f) { return combine(this, f, 0, function(a, b) { return a - b; }); },
+      multiply: function(f) { return combine(this, f, 1, function(a, b) { return a * b; }); },
+      divide: function(f) { return combine(this, f, 1, function(a, b) { return a / b; }); },
+      dot: function(f) {
+        var sum = 0;
+        for (var i = 0; i < size; ++i) sum += this[fields[i]] * f[fields[i]];
+        return sum;
+      },
+      reflect: function(normal) { return this.subtract(normal.multiply(this.dot(normal) * 2)); },
+      // The part of this along `onto`; nothing when `onto` has no length.
+      project: function(onto) {
+        var lengthSquared = onto.lengthSqr();
+        return lengthSquared === 0 ? each(this, function() { return 0; })
+                                   : onto.multiply(this.dot(onto) / lengthSquared);
+      },
+      mix: function(other, amount) {
+        var values = new Array(size);
+        for (var i = 0; i < size; ++i) {
+          var from = this[fields[i]];
+          values[i] = from + (component(other, i) - from) * component(amount, i);
+        }
+        return make(values);
+      },
+      min: function(v) { return combine(this, v, undefined, function(a, b) { return Math.min(a, b); }); },
+      max: function(v) { return combine(this, v, undefined, function(a, b) { return Math.max(a, b); }); },
+      clamp: function(low, high) {
+        return bounded(this, low, high, function(value, lo, hi) {
+          return Math.max(lo, Math.min(hi, value));
+        });
+      },
+      abs: function() { return each(this, Math.abs); },
+      sign: function() { return each(this, Math.sign); },
+      round: function() { return each(this, Math.round); },
+      floor: function() { return each(this, Math.floor); },
+      ceil: function() { return each(this, Math.ceil); },
+      fract: function() { return each(this, function(value) { return value - Math.floor(value); }); },
+      mod: function(v) {
+        return combine(this, v, undefined, function(a, b) { return a - b * Math.floor(a / b); });
+      },
+      step: function(edge) {
+        return combine(this, edge, undefined, function(a, b) { return a < b ? 0 : 1; });
+      },
+      smoothStep: function(low, high) {
+        return bounded(this, low, high, function(value, lo, hi) {
+          var t = Math.max(0, Math.min(1, (value - lo) / (hi - lo)));
+          return t * t * (3 - 2 * t);
+        });
+      },
+      toString: function() {
+        var parts = new Array(size);
+        for (var i = 0; i < size; ++i) parts[i] = String(this[fields[i]]);
+        return parts.join(' ');
+      },
+      toConfigString: function() { return this.toString(); }
+    });
     return Vector;
   }
 
-  Object.defineProperty(globalThis, '__WEVec2', {
-    value: __defineVector('Vec2', ['x', 'y']),
-    configurable: false,
-    writable: false
-  });
-  Object.defineProperty(globalThis, '__WEVec3', {
-    value: __defineVector('Vec3', ['x', 'y', 'z']),
-    configurable: false,
-    writable: false
-  });
-  Object.defineProperty(globalThis, '__WEVec4', {
-    value: __defineVector('Vec4', ['x', 'y', 'z', 'w']),
-    configurable: false,
-    writable: false
+  Vec2 = defineVector('Vec2', ['x', 'y']);
+  Vec3 = defineVector('Vec3', ['x', 'y', 'z']);
+  Vec4 = defineVector('Vec4', ['x', 'y', 'z', 'w']);
+
+  define(Vec2.prototype, {
+    perpendicular: function() { return new Vec2(this.y, -this.x); },
+    angle: function() { return Math.atan2(this.y, this.x) * RAD2DEG; },
+    // The signed angle from this vector to `v`: the cross product's z over the dot product.
+    angleBetween: function(v) {
+      var crossZ = this.x * v.y - this.y * v.x;
+      var dotted = this.x * v.x + this.y * v.y;
+      return Math.atan2(crossZ, dotted) * RAD2DEG;
+    },
+    rotate: function(degrees) {
+      var turn = degrees * DEG2RAD;
+      var cosine = Math.cos(turn);
+      var sine = Math.sin(turn);
+      return new Vec2(this.x * cosine - this.y * sine, this.x * sine + this.y * cosine);
+    }
   });
 
-  if (typeof globalThis.Vec2 !== 'function') globalThis.Vec2 = globalThis.__WEVec2;
-  if (typeof globalThis.Vec3 !== 'function') globalThis.Vec3 = globalThis.__WEVec3;
-  if (typeof globalThis.Vec4 !== 'function') globalThis.Vec4 = globalThis.__WEVec4;
+  define(Vec3.prototype, {
+    cross: function(v) {
+      return new Vec3(this.y * v.z - this.z * v.y,
+                      this.z * v.x - this.x * v.z,
+                      this.x * v.y - this.y * v.x);
+    },
+    // Snell's law for a unit normal and a ratio of indices; zero past the
+    // critical angle.
+    refract: function(normal, eta) {
+      var cosIncident = this.dot(normal);
+      var radicand = 1 - eta * eta * (1 - cosIncident * cosIncident);
+      return radicand < 0
+          ? new Vec3(0, 0, 0)
+          : normal.multiply(-(eta * cosIncident + Math.sqrt(radicand))).add(this.multiply(eta));
+    },
+    // The unsigned angle between the two; zero when either has no length.
+    angleBetween: function(v) {
+      var magnitude = Math.sqrt(this.lengthSqr() * v.lengthSqr());
+      if (magnitude === 0) return 0;
+      var cosine = Math.min(1, Math.max(-1, this.dot(v) / magnitude));
+      return Math.acos(cosine) * RAD2DEG;
+    },
+    // (length, angle from +y, angle about +y from +x), in degrees.
+    toSpherical: function() {
+      var length = this.length();
+      return length === 0
+          ? new Vec3(0, 0, 0)
+          : new Vec3(length, Math.acos(this.y / length) * RAD2DEG, Math.atan2(this.z, this.x) * RAD2DEG);
+    }
+  });
+  define(Vec3, {
+    fromSpherical: function(radius, polarDegrees, azimuthDegrees) {
+      var polar = polarDegrees * DEG2RAD, azimuth = azimuthDegrees * DEG2RAD;
+      var ring = radius * Math.sin(polar);
+      return new Vec3(ring * Math.cos(azimuth), radius * Math.cos(polar), ring * Math.sin(azimuth));
+    }
+  });
+
+  // ---- Matrices -------------------------------------------------------------
+  // A matrix keeps its elements in `m`, column after column: in a matrix with
+  // `side` rows and columns, the element in row r and column c is m[c * side + r].
+
+  function identityArray(side) {
+    var values = new Array(side * side).fill(0);
+    for (var i = 0; i < side; ++i) values[i * side + i] = 1;
+    return values;
+  }
+
+  function defineMatrix(name, side) {
+    var count = side * side;
+    var Matrix = class {
+      // Another matrix, an array of the right length, or a string of numbers
+      // gives its elements; anything else (or a wrong length) gives the identity.
+      constructor(arg) {
+        var elements = null;
+        if (arg instanceof Matrix) elements = arg.m;
+        else if (Array.isArray(arg)) elements = arg;
+        else if (typeof arg === 'string') elements = arg.trim().split(/[\s,]+/).map(parseFloat);
+        this.m = elements !== null && elements.length === count ? elements.slice() : identityArray(side);
+      }
+    };
+    Object.defineProperty(Matrix, 'name', { value: name });
+    return Matrix;
+  }
+
+  var Mat3 = defineMatrix('Mat3', 3);
+  var Mat4 = defineMatrix('Mat4', 4);
+
+  // The product a * b of two such arrays. Column c of the result combines the
+  // columns of `a`, each weighted by the matching entry of column c of `b`.
+  function product(a, b, side) {
+    var out = new Array(side * side).fill(0);
+    for (var col = 0; col < side; ++col) {
+      for (var k = 0; k < side; ++k) {
+        var weight = b[col * side + k];
+        for (var row = 0; row < side; ++row) out[col * side + row] += a[k * side + row] * weight;
+      }
+    }
+    return out;
+  }
+
+  // The array applied to a column of `side` numbers.
+  function applyArray(array, side, column) {
+    var out = new Array(side).fill(0);
+    for (var col = 0; col < side; ++col) {
+      for (var row = 0; row < side; ++row) out[row] += array[col * side + row] * column[col];
+    }
+    return out;
+  }
+
+  // Determinant of what is left of an n-by-n array when row `skipRow` and column
+  // `skipColumn` are taken out (-1 takes out nothing), found by expanding along
+  // the leftmost remaining column. `usedRows` is the set of rows already spent
+  // by the columns to its left, as bits.
+  function expand(a, n, column, skipColumn, usedRows) {
+    if (column === skipColumn) column += 1;
+    if (column >= n) return 1;
+    var total = 0;
+    var sign = 1;
+    for (var row = 0; row < n; ++row) {
+      if (usedRows & (1 << row)) continue;
+      total += sign * a[column * n + row] * expand(a, n, column + 1, skipColumn, usedRows | (1 << row));
+      sign = -sign;
+    }
+    return total;
+  }
+
+  function determinantOf(a, n) { return expand(a, n, 0, -1, 0); }
+
+  // The inverse as the adjugate over the determinant: the element in row r and
+  // column c is the minor that leaves out row c and column r, signed by the
+  // parity of r + c, and divided by the determinant.
+  function inverseOf(a, n) {
+    var reciprocal = 1 / determinantOf(a, n);
+    var out = new Array(n * n);
+    for (var r = 0; r < n; ++r) {
+      for (var c = 0; c < n; ++c) {
+        var sign = (r + c) % 2 === 0 ? 1 : -1;
+        out[c * n + r] = sign * expand(a, n, 0, r, 1 << c) * reciprocal;
+      }
+    }
+    return out;
+  }
+
+  // The turn by `radians` about the coordinate axis k (0 x, 1 y, 2 z) of a
+  // matrix with `side` rows. The other two axes follow k in cyclic order, and
+  // the turn carries the first of them toward the second.
+  function turnArray(side, k, radians) {
+    var first = (k + 1) % 3;
+    var second = (k + 2) % 3;
+    var cosine = Math.cos(radians);
+    var sine = Math.sin(radians);
+    var out = identityArray(side);
+    out[first * side + first] = cosine;
+    out[second * side + second] = cosine;
+    out[first * side + second] = sine;
+    out[second * side + first] = -sine;
+    return out;
+  }
+
+  // Column c of an array, as a Vec3 of its first three rows.
+  function columnVec3(array, side, c) {
+    return new Vec3(array[c * side], array[c * side + 1], array[c * side + 2]);
+  }
+
+  // A matrix with `scales` on its diagonal and ones where there are none.
+  function diagonalArray(side, scales) {
+    var out = identityArray(side);
+    for (var i = 0; i < scales.length; ++i) out[i * side + i] = scales[i];
+    return out;
+  }
+
+  // A matrix whose last column, above the corner, is `offset`.
+  function offsetArray(side, offset) {
+    var out = identityArray(side);
+    for (var i = 0; i < offset.length; ++i) out[(side - 1) * side + i] = offset[i];
+    return out;
+  }
+
+  // Methods that read the same for both sizes.
+  function defineMatrixCommon(Matrix, side) {
+    var count = side * side;
+    define(Matrix.prototype, {
+      add: function(other) {
+        return new Matrix(this.m.map(function(value, i) { return value + other.m[i]; }));
+      },
+      subtract: function(other) {
+        return new Matrix(this.m.map(function(value, i) { return value - other.m[i]; }));
+      },
+      copy: function() { return new Matrix(this); },
+      equals: function(other) {
+        return other instanceof Matrix &&
+               this.m.every(function(value, i) { return Math.abs(value - other.m[i]) < EPSILON; });
+      },
+      transpose: function() {
+        var result = new Matrix();
+        for (var column = 0; column < side; ++column) {
+          for (var row = 0; row < side; ++row) result.m[column * side + row] = this.m[row * side + column];
+        }
+        return result;
+      },
+      determinant: function() { return determinantOf(this.m, side); },
+      inverse: function() { return new Matrix(inverseOf(this.m, side)); },
+      toString: function() { return this.m.join(' '); },
+      toConfigString: function() { return this.toString(); }
+    });
+    define(Matrix, {
+      identity: function() { return new Matrix(); }
+    });
+  }
+  defineMatrixCommon(Mat3, 3);
+  defineMatrixCommon(Mat4, 4);
+
+  // A scale argument is one number for every axis or a vector.
+  var AXIS_NAMES = ['x', 'y', 'z'];
+  function axisFactors(v, length) {
+    var factors = [];
+    for (var i = 0; i < length; ++i) factors.push(typeof v === 'number' ? v : v[AXIS_NAMES[i]]);
+    return factors;
+  }
+
+  define(Mat3, {
+    fromTranslation: function(v) { return new Mat3(offsetArray(3, [v.x, v.y])); },
+    fromScale: function(v) { return new Mat3(diagonalArray(3, axisFactors(v, 2))); },
+    fromRotation: function(degrees) { return new Mat3(turnArray(3, 2, degrees * DEG2RAD)); },
+    fromBasis: function(right, up) {
+      return new Mat3([right.x, right.y, 0, up.x, up.y, 0, 0, 0, 1]);
+    },
+    fromMat4: function(matrix) {
+      var a = matrix.m;
+      return new Mat3([a[0], a[1], a[2], a[4], a[5], a[6], a[8], a[9], a[10]]);
+    },
+    // Translate, then turn, then scale: T * R * S.
+    compose: function(translation, rotation, scale) {
+      var placed = product(offsetArray(3, [translation.x, translation.y]),
+                           turnArray(3, 2, rotation * DEG2RAD), 3);
+      return new Mat3(product(placed, diagonalArray(3, axisFactors(scale, 2)), 3));
+    }
+  });
+  define(Mat3.prototype, {
+    right: function() { return columnVec3(this.m, 3, 0); },
+    up: function() { return columnVec3(this.m, 3, 1); },
+    forward: function() { return columnVec3(this.m, 3, 2); },
+    // With a Vec2 it sets the offset and answers the matrix; without, it answers the offset.
+    translation: function(v) {
+      if (!(v instanceof Vec2)) return new Vec2(this.m[6], this.m[7]);
+      this.m.splice(6, 2, v.x, v.y);
+      return this;
+    },
+    angle: function() { return Math.atan2(this.m[0], -this.m[1]) * RAD2DEG; },
+    multiply: function(f) {
+      if (f instanceof Mat3) return new Mat3(product(this.m, f.m, 3));
+      if (f instanceof Vec3) {
+        var moved = applyArray(this.m, 3, [f.x, f.y, f.z]);
+        return new Vec3(moved[0], moved[1], moved[2]);
+      }
+      if (typeof f === 'number') return new Mat3(this.m.map(function(value) { return value * f; }));
+    },
+    translate: function(v) { return new Mat3(product(this.m, offsetArray(3, [v.x, v.y]), 3)); },
+    rotate: function(degrees) { return new Mat3(product(this.m, turnArray(3, 2, degrees * DEG2RAD), 3)); },
+    scale: function(v) { return new Mat3(product(this.m, diagonalArray(3, axisFactors(v, 2)), 3)); },
+    transformPoint: function(v) {
+      var moved = applyArray(this.m, 3, [v.x, v.y, 1]);
+      return new Vec2(moved[0], moved[1]);
+    },
+    transformDirection: function(v) {
+      var moved = applyArray(this.m, 3, [v.x, v.y, 0]);
+      return new Vec2(moved[0], moved[1]);
+    },
+    // The x scale is negative when the upper 2x2 part mirrors the plane.
+    decompose: function() {
+      var m = this.m;
+      var length = Math.hypot(m[0], m[1]);
+      var xScale = expand(m, 3, 0, 2, 1 << 2) < 0 ? -length : length;
+      return {
+        translation: new Vec2(m[6], m[7]),
+        rotation: xScale === 0 ? 0
+                  : Math.atan2(xScale < 0 ? -m[1] : m[1], xScale < 0 ? -m[0] : m[0]) * RAD2DEG,
+        scale: new Vec2(xScale, Math.hypot(m[3], m[4]))
+      };
+    }
+  });
+
+  define(Mat4, {
+    fromTranslation: function(v) {
+      var offset = [];
+      if (v instanceof Vec3) offset = [v.x, v.y, v.z];
+      else if (v instanceof Vec2) offset = [v.x, v.y];
+      return new Mat4(offsetArray(4, offset));
+    },
+    fromScale: function(v) { return new Mat4(diagonalArray(4, axisFactors(v, 3))); },
+    // Rotation by `degrees` about `axis`: cos * I + (1 - cos) * u u^T + sin * [u]x,
+    // where u is the unit axis and [u]x the matrix that crosses a vector with it.
+    fromRotation: function(degrees, axis) {
+      var radians = degrees * DEG2RAD;
+      var unit = axis.normalize();
+      var u = [unit.x, unit.y, unit.z];
+      var cosine = Math.cos(radians);
+      var sine = Math.sin(radians);
+      var crossing = [0, u[2], -u[1],  -u[2], 0, u[0],  u[1], -u[0], 0];
+      var out = identityArray(4);
+      for (var col = 0; col < 3; ++col) {
+        for (var row = 0; row < 3; ++row) {
+          out[col * 4 + row] = (row === col ? cosine : 0) + (1 - cosine) * u[row] * u[col] +
+                               sine * crossing[col * 3 + row];
+        }
+      }
+      return new Mat4(out);
+    },
+    // Turns about x, then y, then z, each about the fixed axes: Rz * Ry * Rx.
+    fromEuler: function(x, y, z) {
+      var angles = x instanceof Vec3 ? [x.x, x.y, x.z] : [x, y, z];
+      var turned = identityArray(4);
+      for (var axis = 2; axis >= 0; --axis) {
+        turned = product(turned, turnArray(4, axis, angles[axis] * DEG2RAD), 4);
+      }
+      return new Mat4(turned);
+    },
+    fromBasis: function(right, up, forward) {
+      return new Mat4([right.x, right.y, right.z, 0,
+                       up.x, up.y, up.z, 0,
+                       forward.x, forward.y, forward.z, 0,
+                       0, 0, 0, 1]);
+    },
+    // The view matrix of a camera at `eye` looking at `center`: its rows are the
+    // camera's side, above and (negated) ahead axes, then the eye moved to the origin.
+    lookAt: function(eye, center, up) {
+      var ahead = eye.multiply(-1).add(center).normalize();
+      var side = ahead.cross(up).normalize();
+      var above = side.cross(ahead);
+      return new Mat4([side.x, above.x, -ahead.x, 0,
+                       side.y, above.y, -ahead.y, 0,
+                       side.z, above.z, -ahead.z, 0,
+                       -side.dot(eye), -above.dot(eye), ahead.dot(eye), 1]);
+    },
+    // Translate, then turn, then scale: T * R * S.
+    compose: function(translation, rotation, scale) {
+      var placed = product(Mat4.fromTranslation(translation).m, Mat4.fromEuler(rotation).m, 4);
+      return new Mat4(product(placed, diagonalArray(4, axisFactors(scale, 3)), 4));
+    }
+  });
+  define(Mat4.prototype, {
+    // With a Vec3 (or a Vec2, whose z is 0) it sets the offset and answers the
+    // matrix; with anything else it answers the offset.
+    translation: function(v) {
+      if (!(v instanceof Vec3 || v instanceof Vec2)) return columnVec3(this.m, 4, 3);
+      this.m.splice(12, 3, v.x, v.y, v instanceof Vec3 ? v.z : 0);
+      return this;
+    },
+    right: function() { return columnVec3(this.m, 4, 0); },
+    up: function() { return columnVec3(this.m, 4, 1); },
+    forward: function() { return columnVec3(this.m, 4, 2); },
+    multiply: function(f) {
+      if (f instanceof Mat4) return new Mat4(product(this.m, f.m, 4));
+      if (f instanceof Vec4) {
+        var moved = applyArray(this.m, 4, [f.x, f.y, f.z, f.w]);
+        return new Vec4(moved[0], moved[1], moved[2], moved[3]);
+      }
+      if (typeof f === 'number') return new Mat4(this.m.map(function(value) { return value * f; }));
+    },
+    translate: function(v) {
+      var offset = [v.x, v.y, v instanceof Vec2 ? 0 : v.z];
+      return new Mat4(product(this.m, offsetArray(4, offset), 4));
+    },
+    rotate: function(degrees, axis) { return this.multiply(Mat4.fromRotation(degrees, axis)); },
+    scale: function(v) { return new Mat4(product(this.m, diagonalArray(4, axisFactors(v, 3)), 4)); },
+    transformPoint: function(v) {
+      var moved = applyArray(this.m, 4, [v.x, v.y, v.z, 1]);
+      return new Vec3(moved[0], moved[1], moved[2]);
+    },
+    transformDirection: function(v) {
+      var moved = applyArray(this.m, 4, [v.x, v.y, v.z, 0]);
+      return new Vec3(moved[0], moved[1], moved[2]);
+    },
+    // The turns about x, y, z (degrees) that Mat4.fromEuler would compose into
+    // this matrix, which is Rz * Ry * Rx. The x axis lands at (cos y cos z,
+    // cos y sin z, -sin y), so z and y follow from the first column and the
+    // length of the bottom row's other two entries. x is read after undoing the
+    // turn about z: what remains is Ry * Rx, whose middle row is (0, cos x, -sin x),
+    // and that stays defined where y is +-90 degrees and the bottom row vanishes.
+    extractEuler: function() {
+      var m = this.m;
+      var yaw = Math.atan2(m[1], m[0]);
+      var pitch = Math.atan2(-m[2], Math.hypot(m[6], m[10]));
+      var rest = product(turnArray(4, 2, -yaw), m, 4);
+      var roll = Math.atan2(-rest[9], rest[5]);
+      return new Vec3(roll * RAD2DEG, pitch * RAD2DEG, yaw * RAD2DEG);
+    },
+    normalMatrix: function() { return Mat3.fromMat4(this).inverse().transpose(); },
+    // Translation, Euler angles and scale. The x scale is negative when the
+    // upper 3x3 part mirrors space.
+    decompose: function() {
+      var m = this.m;
+      var scales = [];
+      for (var col = 0; col < 3; ++col) scales.push(Math.hypot(m[col * 4], m[col * 4 + 1], m[col * 4 + 2]));
+      if (expand(m, 4, 0, 3, 1 << 3) < 0) scales[0] = -scales[0];
+      var rotation = new Mat4(this);
+      for (var column = 0; column < 3; ++column) {
+        if (scales[column] === 0) continue;
+        for (var row = 0; row < 3; ++row) rotation.m[column * 4 + row] /= scales[column];
+      }
+      rotation.m[12] = 0; rotation.m[13] = 0; rotation.m[14] = 0;
+      return {
+        translation: new Vec3(m[12], m[13], m[14]),
+        rotation: rotation.extractEuler(),
+        scale: new Vec3(scales[0], scales[1], scales[2])
+      };
+    }
+  });
+
+  // The host builds its vectors and the layer matrices through these frozen
+  // names, so a script that reassigns the global `Vec3` or `Mat4` cannot change
+  // what the host hands back.
+  var exposed = { Vec2: Vec2, Vec3: Vec3, Vec4: Vec4, Mat3: Mat3, Mat4: Mat4 };
+  ['Vec2', 'Vec3', 'Vec4', 'Mat4'].forEach(function(key) {
+    Object.defineProperty(globalThis, '__WE' + key, {
+      value: exposed[key], configurable: false, writable: false
+    });
+  });
+  Object.keys(exposed).forEach(function(key) {
+    if (typeof globalThis[key] !== 'function') globalThis[key] = exposed[key];
+  });
 })();
 )JS";
 
@@ -359,6 +866,28 @@ JSValue RuntimeScalarValueToJS(JSContext* context, const RuntimeScalarValue& val
     return JS_UNDEFINED;
 }
 
+// A number handed back where a vector is expected is that number on every
+// component, as an authored single number is, so the next `update(value)` still
+// receives a vector to read `.x` from. False when `hint` is not a vector.
+bool UpdateVectorFromNumber(DynamicValue& result, double number,
+                            DynamicValue::UnderlyingType hint) {
+    const auto scalar  = static_cast<float>(number);
+    const auto integer = static_cast<int>(number);
+    switch (hint) {
+    case DynamicValue::Vec2: result.update(Eigen::Vector2f(scalar, scalar)); return true;
+    case DynamicValue::Vec3: result.update(Eigen::Vector3f(scalar, scalar, scalar)); return true;
+    case DynamicValue::Vec4:
+        result.update(Eigen::Vector4f(scalar, scalar, scalar, scalar));
+        return true;
+    case DynamicValue::IVec2: result.update(Eigen::Vector2i(integer, integer)); return true;
+    case DynamicValue::IVec3: result.update(Eigen::Vector3i(integer, integer, integer)); return true;
+    case DynamicValue::IVec4:
+        result.update(Eigen::Vector4i(integer, integer, integer, integer));
+        return true;
+    default: return false;
+    }
+}
+
 bool FillDynamicValueFromJS(JSContext* context, JSValue value, DynamicValue::UnderlyingType hint,
                             DynamicValue& result) {
     result.update();
@@ -369,6 +898,7 @@ bool FillDynamicValueFromJS(JSContext* context, JSValue value, DynamicValue::Und
     if (tag == JS_TAG_INT) {
         int32_t int_value = 0;
         JS_ToInt32(context, &int_value, value);
+        if (UpdateVectorFromNumber(result, int_value, hint)) return true;
         if (hint == DynamicValue::Float) {
             result.update(static_cast<float>(int_value));
         } else {
@@ -383,6 +913,7 @@ bool FillDynamicValueFromJS(JSContext* context, JSValue value, DynamicValue::Und
     if (JS_TAG_IS_FLOAT64(tag)) {
         double float_value = 0.0;
         JS_ToFloat64(context, &float_value, value);
+        if (UpdateVectorFromNumber(result, float_value, hint)) return true;
         result.update(static_cast<float>(float_value));
         return true;
     }
@@ -1010,16 +1541,19 @@ void AppendCommonHostBootstrap(std::ostringstream& wrapper) {
         << "    if (typeof globalThis.console[name] !== 'function') "
            "globalThis.console[name] = __consoleNoop;\n"
         << "  });\n"
+        // `deg2rad` and `rad2deg` are the conversion factors, as Wallpaper
+        // Engine's WEMath module exports them: `angle * WEMath.deg2rad`. A
+        // function in their place made that product NaN.
         << "  globalThis.WEMath = globalThis.WEMath || {\n"
-        << "    mix: function(x, y, a) { return x * (1 - a) + y * a; },\n"
+        << "    mix: function(a, b, v) { return a + (b - a) * v; },\n"
         << "    lerp: function(x, y, a) { return x * (1 - a) + y * a; },\n"
         << "    clamp: function(value, min, max) { return Math.min(Math.max(value, min), max); },\n"
         << "    saturate: function(value) { return Math.min(Math.max(value, 0), 1); },\n"
         << "    step: function(edge, value) { return value < edge ? 0 : 1; },\n"
         << "    sign: function(value) { return Math.sign(value); },\n"
         << "    fract: function(value) { return value - Math.floor(value); },\n"
-        << "    deg2rad: function(value) { return value * (Math.PI / 180); },\n"
-        << "    rad2deg: function(value) { return value * (180 / Math.PI); },\n"
+        << "    deg2rad: Math.PI / 180,\n"
+        << "    rad2deg: 180 / Math.PI,\n"
         << "    smoothstep: function(edge0, edge1, value) {\n"
         << "      var t = Math.min(Math.max((value - edge0) / (edge1 - edge0), 0), 1);\n"
         << "      return t * t * (3 - 2 * t);\n"
@@ -1029,11 +1563,29 @@ void AppendCommonHostBootstrap(std::ostringstream& wrapper) {
         << "    }\n"
         << "  };\n"
         << "  globalThis.WEColor = globalThis.WEColor || {\n"
+        << "    rgb2hsv: function(rgb) {\n"
+        << "      var r = rgb.x, g = rgb.y, b = rgb.z;\n"
+        << "      var max = Math.max(r, g, b), min = Math.min(r, g, b), d = max - min, h;\n"
+        << "      if (max === min) h = 0;\n"
+        << "      else if (max === r) h = ((g - b) + (g < b ? 6 * d : 0)) / (6 * d);\n"
+        << "      else if (max === g) h = ((b - r) + 2 * d) / (6 * d);\n"
+        << "      else h = ((r - g) + 4 * d) / (6 * d);\n"
+        << "      return new Vec3(h, max === 0 ? 0 : d / max, max);\n"
+        << "    },\n"
+        << "    normalizeColor: function(color) {\n"
+        << "      return new Vec3(color.x / 255, color.y / 255, color.z / 255);\n"
+        << "    },\n"
+        << "    expandColor: function(color) {\n"
+        << "      return new Vec3(color.x * 255, color.y * 255, color.z * 255);\n"
+        << "    },\n"
+        // Saturation is not clamped and the hue is not wrapped, as in Wallpaper
+        // Engine: a saturation above 1 gives components outside 0..1, hue 1.0 or
+        // more repeats the sextants, and a negative hue is no sextant at all and
+        // gives black.
         << "    hsv2rgb: function(hsv) {\n"
         << "      var h = Number((hsv && hsv.x) || 0);\n"
-        << "      var s = Math.min(Math.max(Number((hsv && hsv.y) || 0), 0), 1);\n"
+        << "      var s = Number((hsv && hsv.y) || 0);\n"
         << "      var v = Number((hsv && hsv.z) || 0);\n"
-        << "      h = h - Math.floor(h);\n"
         << "      var i = Math.floor(h * 6.0);\n"
         << "      var f = h * 6.0 - i;\n"
         << "      var p = v * (1.0 - s);\n"
@@ -1045,7 +1597,8 @@ void AppendCommonHostBootstrap(std::ostringstream& wrapper) {
         << "      case 2: return new Vec3(p, v, t);\n"
         << "      case 3: return new Vec3(p, q, v);\n"
         << "      case 4: return new Vec3(t, p, v);\n"
-        << "      default: return new Vec3(v, p, q);\n"
+        << "      case 5: return new Vec3(v, p, q);\n"
+        << "      default: return new Vec3(0, 0, 0);\n"
         << "      }\n"
         << "    }\n"
         << "  };\n"
@@ -1053,15 +1606,21 @@ void AppendCommonHostBootstrap(std::ostringstream& wrapper) {
         << "    angleVector2: function(angle) {\n"
         << "      var radians = Number(angle || 0) * Math.PI / 180.0;\n"
         << "      return new Vec2(Math.cos(radians), Math.sin(radians));\n"
+        << "    },\n"
+        << "    vectorAngle2: function(direction) {\n"
+        << "      return Math.atan2(direction.y, direction.x) * (180 / Math.PI);\n"
         << "    }\n"
         << "  };\n"
         << "  globalThis.shared = globalThis.shared || {};\n"
         << "  globalThis.shared.STARTS_WITH = 0;\n"
         << "  globalThis.shared.END_WITH = 1;\n"
+        // The numbers are Wallpaper Engine's own, and what a host sends as
+        // `event.state`: 0 stopped, 1 playing, 2 paused. Scripts compare against
+        // the literals as often as against the names.
         << "  globalThis.MediaPlaybackEvent = globalThis.MediaPlaybackEvent || {\n"
-        << "    PLAYBACK_PLAYING: 0,\n"
-        << "    PLAYBACK_PAUSED: 1,\n"
-        << "    PLAYBACK_STOPPED: 2\n"
+        << "    PLAYBACK_STOPPED: 0,\n"
+        << "    PLAYBACK_PLAYING: 1,\n"
+        << "    PLAYBACK_PAUSED: 2\n"
         << "  };\n"
         << "  globalThis.shared.userPropertyCategories = globalThis.shared.userPropertyCategories "
            "|| new Map();\n"
@@ -1071,6 +1630,9 @@ void AppendCommonHostBootstrap(std::ostringstream& wrapper) {
         << "    get: function(key) { return globalThis.__localStorageData[String(key)]; },\n"
         << "    set: function(key, value) { globalThis.__localStorageData[String(key)] = value; "
            "return value; },\n"
+        // `delete` is the name Wallpaper Engine's store has; `remove` stays
+        // for the scripts written against this one.
+        << "    delete: function(key) { delete globalThis.__localStorageData[String(key)]; },\n"
         << "    remove: function(key) { delete globalThis.__localStorageData[String(key)]; },\n"
         << "    clear: function() { globalThis.__localStorageData = Object.create(null); }\n"
         << "  };\n"
@@ -1103,8 +1665,8 @@ void AppendCommonHostBootstrap(std::ostringstream& wrapper) {
         << "    };\n"
         << "  }\n"
         << "  globalThis.isRunningInEditor = false;\n"
-        << "  globalThis.MediaPlaybackEvent = Object.freeze({ PLAYBACK_PLAYING: 0, "
-           "PLAYBACK_PAUSED: 1, PLAYBACK_STOPPED: 2 });\n"
+        << "  globalThis.MediaPlaybackEvent = Object.freeze({ PLAYBACK_STOPPED: 0, "
+           "PLAYBACK_PLAYING: 1, PLAYBACK_PAUSED: 2 });\n"
         << "  engine.isScreensaver = engine.isScreensaver || function() { return false; };\n"
         << "  engine.isWallpaper = engine.isWallpaper || "
            "function() { return !engine.isScreensaver(); };\n"
@@ -1131,8 +1693,9 @@ void AppendCommonHostBootstrap(std::ostringstream& wrapper) {
         << "  globalThis.input.cursorWorldPosition = globalThis.__cursorWorldPosition;\n"
         << "  globalThis.input.cursorLocalPosition = globalThis.input.cursorLocalPosition || "
            "globalThis.__cursorWorldPosition;\n"
-        << "  globalThis.input.cursorScreenPosition = globalThis.input.cursorScreenPosition || "
-           "globalThis.__cursorWorldPosition;\n"
+        // Screen pixels, y counted from the top, as Wallpaper Engine reports it.
+        << "  globalThis.input.cursorScreenPosition = globalThis.__cursorScreenPosition;\n"
+        << "  globalThis.input.cursorLeftDown = !!globalThis.__cursorLeftDown;\n"
         << "  globalThis.input.mouseButtonsDown = globalThis.__mouseButtonsDown || 0;\n"
         << "  globalThis.input.mouseButtonsPressed = globalThis.__mouseButtonsPressed || 0;\n"
         << "  globalThis.input.mouseButtonsReleased = globalThis.__mouseButtonsReleased || 0;\n"
@@ -1198,24 +1761,45 @@ void AppendCommonHostBootstrap(std::ostringstream& wrapper) {
         << "  globalThis.__layerCache = globalThis.__layerCache || Object.create(null);\n"
         << "  globalThis.__sceneAnimations = globalThis.__sceneAnimations || "
            "Object.create(null);\n"
-        << "  globalThis.__layerOrder = globalThis.__layerOrder || [];\n"
         << "  globalThis.__videoTextureCache = globalThis.__videoTextureCache || "
            "Object.create(null);\n"
-        << "  function __rememberLayer(name) {\n"
-        << "    if (globalThis.__layerOrder.indexOf(name) < 0) "
-           "globalThis.__layerOrder.push(name);\n"
-        << "  }\n"
+        // A layer is addressed by the key the runtime registered it under, which
+        // a layer given a name of its own (`createLayer({name})`) no longer shows
+        // as `.name`.
         << "  function __resolveLayerName(layerOrName) {\n"
         << "    if (typeof layerOrName === 'string') return layerOrName;\n"
+        << "    if (layerOrName && typeof layerOrName.__runtimeName === 'string') "
+           "return layerOrName.__runtimeName;\n"
         << "    if (layerOrName && typeof layerOrName.name === 'string') return layerOrName.name;\n"
         << "    return '';\n"
         << "  }\n"
+        // `addEndedCallback` listeners, by layer and animation-layer index, so
+        // a layer asked for by name and again by number is one set of listeners.
+        << "  globalThis.__animationLayerEnded = globalThis.__animationLayerEnded || "
+           "Object.create(null);\n"
+        << "  function __endedListeners(layer, index) {\n"
+        << "    var byLayer = globalThis.__animationLayerEnded[layer] || "
+           "(globalThis.__animationLayerEnded[layer] = Object.create(null));\n"
+        << "    return byLayer[index] || (byLayer[index] = []);\n"
+        << "  }\n"
+        << "  globalThis.__fireAnimationLayerEnded = function(layer, index) {\n"
+        << "    var byLayer = globalThis.__animationLayerEnded[layer];\n"
+        << "    var listeners = byLayer && byLayer[index] ? byLayer[index].slice() : [];\n"
+        << "    var capturedError;\n"
+        << "    for (var i = 0; i < listeners.length; ++i) {\n"
+        << "      try { listeners[i](); } catch (error) {\n"
+        << "        if (capturedError === undefined) capturedError = error;\n"
+        << "      }\n"
+        << "    }\n"
+        << "    if (capturedError !== undefined) throw capturedError;\n"
+        << "  };\n"
         << "  function __makePuppetAnimation(layer, name) {\n"
         << "    var native = __puppetAnimationControl(layer, name, 'exists') !== 0;\n"
         << "    var control = function(op, value) { return native ? "
            "__puppetAnimationControl(layer, name, op, value) : 0; };\n"
+        // The animation layer's own (authored) name, whichever way it was asked for.
         << "    return {\n"
-        << "      name: name || '',\n"
+        << "      name: native ? __puppetAnimationLayerName(layer, name) : (name || ''),\n"
         << "      get fps() { return control('fps'); },\n"
         << "      get frameCount() { return native ? control('frameCount') : 1; },\n"
         << "      get duration() { return this.fps > 0 ? this.frameCount / this.fps : 0; },\n"
@@ -1225,7 +1809,6 @@ void AppendCommonHostBootstrap(std::ostringstream& wrapper) {
         << "      set blend(value) { control('setBlend', Number(value)); },\n"
         << "      get visible() { return native ? control('visible') !== 0 : true; },\n"
         << "      set visible(value) { control('setVisible', value ? 1 : 0); },\n"
-        << "      _endedCallbacks: [],\n"
         << "      play: function() { control('play'); },\n"
         << "      pause: function() { control('pause'); },\n"
         << "      stop: function() { control('stop'); },\n"
@@ -1234,10 +1817,22 @@ void AppendCommonHostBootstrap(std::ostringstream& wrapper) {
         << "      setFrame: function(frame) { control('setFrame', Number(frame) || 0); },\n"
         << "      getCurrentTime: function() { return this.fps > 0 ? control('frame') / "
            "this.fps : 0; },\n"
-        << "      addEndedCallback: function(callback) { if (typeof callback === 'function') "
-           "this._endedCallbacks.push(callback); },\n"
-        << "      removeEndedCallback: function(callback) { this._endedCallbacks = "
-           "this._endedCallbacks.filter(function(item) { return item !== callback; }); }\n"
+        // Called, with no arguments, when a single-play animation layer reaches
+        // its end. Heard by every wrapper of the same layer, whether it was asked
+        // for by name or by number.
+        << "      addEndedCallback: function(callback) {\n"
+        << "        if (typeof callback !== 'function' || !native) return;\n"
+        << "        var index = __puppetAnimationControl(layer, name, 'index');\n"
+        << "        if (index >= 0) __endedListeners(layer, index).push(callback);\n"
+        << "      },\n"
+        << "      removeEndedCallback: function(callback) {\n"
+        << "        if (!native) return;\n"
+        << "        var index = __puppetAnimationControl(layer, name, 'index');\n"
+        << "        if (index < 0) return;\n"
+        << "        var listeners = __endedListeners(layer, index);\n"
+        << "        var position = listeners.indexOf(callback);\n"
+        << "        if (position >= 0) listeners.splice(position, 1);\n"
+        << "      }\n"
         << "    };\n"
         << "  }\n"
         << "  function __makeAnimation(layer, name) {\n"
@@ -1272,20 +1867,48 @@ void AppendCommonHostBootstrap(std::ostringstream& wrapper) {
         << "    }\n"
         << "    return globalThis.__videoTextureCache[name];\n"
         << "  }\n"
+        // `layer.getTextureAnimation()`: the layer's sprite sheet. Reading it
+        // before the renderer has drawn one reports no frames. `setFrame` pins a
+        // frame, which holds until `play()` lets the sheet run on from there.
+        << "  function __makeTextureAnimation(name) {\n"
+        << "    var info = function(key) { return __textureAnimation(name, key); };\n"
+        << "    return {\n"
+        << "      get name() { return __textureAnimation(name, 'name'); },\n"
+        << "      get frameCount() { return info('frameCount'); },\n"
+        << "      get fps() { return info('fps'); },\n"
+        << "      get duration() { return info('duration'); },\n"
+        << "      get rate() { return info('rate'); },\n"
+        << "      set rate(value) { __textureAnimation(name, 'setRate', Number(value)); },\n"
+        << "      play: function() { __textureAnimation(name, 'play'); },\n"
+        << "      pause: function() { __textureAnimation(name, 'pause'); },\n"
+        << "      stop: function() { __textureAnimation(name, 'stop'); },\n"
+        << "      isPlaying: function() { return info('isPlaying') !== 0; },\n"
+        << "      setFrame: function(frame) { __textureSetFrame(name, Number(frame)); },\n"
+        << "      getFrame: function() { return __textureGetFrame(name); }\n"
+        << "    };\n"
+        << "  }\n"
+        << "  function __layerObject(name) {\n"
+        << "    if (!globalThis.__layerCache[name]) globalThis.__layerCache[name] = "
+           "__createLayer(name);\n"
+        << "    return globalThis.__layerCache[name];\n"
+        << "  }\n"
         << "  function __createLayer(name) {\n"
-        << "    __rememberLayer(name);\n"
         << "    var state = {\n"
         << "      alpha: 1,\n"
         << "      animations: Object.create(null),\n"
         << "      animationLayers: Object.create(null),\n"
         << "      callbacks: Object.create(null),\n"
+        << "      extra: Object.create(null),\n"
         << "      playing: false,\n"
         << "      volume: 1,\n"
         << "      muted: false\n"
         << "    };\n"
         << "    var originalOrigin = __layerGetOrigin(name);\n"
-        << "    return {\n"
-        << "      name: name,\n"
+        // `name` is what the scene file calls the layer. A layer whose name is
+        // shared or empty is registered under a generated key, which only the
+        // natives see (`__runtimeName`).
+        << "    var layer = {\n"
+        << "      name: __layerAuthoredName(name),\n"
         << "      originalOrigin: originalOrigin,\n"
         << "      get visible() { return __layerGetVisible(name); },\n"
         << "      set visible(v) { __layerSetVisible(name, !!v); },\n"
@@ -1323,6 +1946,11 @@ void AppendCommonHostBootstrap(std::ostringstream& wrapper) {
         << "      getParent: function() {\n"
         << "        var parent = __layerGetParentName(name);\n"
         << "        return parent ? globalThis.scene.getLayer(parent) : null;\n"
+        << "      },\n"
+        // Where the layer stands in the scene, in canvas units: its own
+        // placement with every ancestor's applied, x and y in m[12] and m[13].
+        << "      getTransformMatrix: function() {\n"
+        << "        return new globalThis.__WEMat4(__layerGetTransformMatrix(name));\n"
         << "      },\n"
         << "      play: function() {\n"
         << "        if (__soundKnown(name)) {\n"
@@ -1377,33 +2005,84 @@ void AppendCommonHostBootstrap(std::ostringstream& wrapper) {
         << "        if (!state.animations[key]) state.animations[key] = __makeAnimation(name, key);\n"
         << "        return state.animations[key];\n"
         << "      },\n"
+        // The same wrapper comes back for the same animation layer, whether it
+        // was asked for by name or by position.
         << "      getAnimationLayer: function(layerName) {\n"
         << "        var key = String(layerName);\n"
-        << "        if (!state.animationLayers[key]) state.animationLayers[key] = "
+        << "        var slot = __puppetAnimationControl(name, key, 'exists') !== 0 "
+           "? '#' + __puppetAnimationControl(name, key, 'index') : key;\n"
+        << "        if (!state.animationLayers[slot]) state.animationLayers[slot] = "
            "__makePuppetAnimation(name, key);\n"
-        << "        return state.animationLayers[key];\n"
+        << "        return state.animationLayers[slot];\n"
         << "      },\n"
+        // How many animation layers the puppet has, not how many this script
+        // has asked for: a loop over `getAnimationLayerCount()` is how a script
+        // reaches every one of them.
         << "      getAnimationLayerCount: function() { return "
-           "Object.keys(state.animationLayers).length; },\n"
+           "__puppetAnimationControl(name, '', 'layerCount'); },\n"
         << "      getTextureAnimation: function() {\n"
-        << "        if (!state.textureAnimation) state.textureAnimation = {\n"
-        << "          setFrame: function(frame) { __textureSetFrame(name, Number(frame)); },\n"
-        << "          getFrame: function() { return __textureGetFrame(name); }\n"
-        << "        };\n"
+        << "        if (!state.textureAnimation) state.textureAnimation = __makeTextureAnimation(name);\n"
         << "        return state.textureAnimation;\n"
         << "      },\n"
         << "      getVideoTexture: function() { return __makeVideoTexture(name); }\n"
         << "    };\n"
+        // Text layers: the style a script reads and writes. Another kind of layer
+        // keeps what a script writes here as a plain property, as it always did.
+        << "    ['font', 'pointsize', 'horizontalalign', 'verticalalign'].forEach(function(key) {\n"
+        << "      Object.defineProperty(layer, key, {\n"
+        << "        enumerable: true, configurable: true,\n"
+        << "        get: function() {\n"
+        << "          var live = __textStyleGet(name, key);\n"
+        << "          if (live === null) return state.extra[key];\n"
+        << "          return key === 'pointsize' ? Number(live) : live;\n"
+        << "        },\n"
+        << "        set: function(value) {\n"
+        << "          if (!__textStyleSet(name, key, String(value))) state.extra[key] = value;\n"
+        << "        }\n"
+        << "      });\n"
+        << "    });\n"
+        << "    Object.defineProperty(layer, 'parallaxDepth', {\n"
+        << "      enumerable: true, configurable: true,\n"
+        << "      get: function() { return __layerGetParallaxDepth(name); },\n"
+        << "      set: function(value) { __layerSetParallaxDepth(name, value); }\n"
+        << "    });\n"
+        << "    Object.defineProperty(layer, '__runtimeName', { value: name });\n"
+        << "    return layer;\n"
         << "  }\n"
         << "  var __sceneBase = {\n"
         << "    on: function(event, fn) {\n"
         << "      __registerCallback(globalThis.__callbacks, event, fn);\n"
         << "    },\n"
+        // The same wrapper object comes back for the same layer, however it is
+        // reached, so `layers.includes(thisScene.getLayer(name))` and a cached
+        // reference agree. A number is a position in the scene's layer order.
         << "    getLayer: function(name) {\n"
-        << "      name = __layerResolveName(String(name));\n"
-        << "      if (!globalThis.__layerCache[name]) globalThis.__layerCache[name] = "
-           "__createLayer(name);\n"
-        << "      return globalThis.__layerCache[name];\n"
+        << "      if (typeof name === 'number') {\n"
+        << "        var runtimeName = __layerNameAt(name);\n"
+        << "        return runtimeName ? __layerObject(runtimeName) : null;\n"
+        << "      }\n"
+        << "      return __layerObject(__layerResolveName(String(name)));\n"
+        << "    },\n"
+        << "    getLayerCount: function() { return __layerCount(); },\n"
+        << "    enumerateLayers: function() {\n"
+        << "      var layers = [];\n"
+        << "      for (var i = 0, count = __layerCount(); i < count; ++i) {\n"
+        << "        var runtimeName = __layerNameAt(i);\n"
+        << "        if (runtimeName) layers.push(__layerObject(runtimeName));\n"
+        << "      }\n"
+        << "      return layers;\n"
+        << "    },\n"
+        << "    getLayerByID: function(id) {\n"
+        << "      var runtimeName = __layerNameForId(Number(id));\n"
+        << "      return runtimeName ? __layerObject(runtimeName) : null;\n"
+        << "    },\n"
+        // What the scene file says about the layer, as a fresh plain object each
+        // time (scripts take pieces of it and may change them).
+        << "    getInitialLayerConfig: function(layerOrName) {\n"
+        << "      var key = __resolveLayerName(layerOrName);\n"
+        << "      if (typeof layerOrName === 'string') key = __layerResolveName(key);\n"
+        << "      var json = key ? __layerInitialConfig(key) : '';\n"
+        << "      return json ? JSON.parse(json) : null;\n"
         << "    },\n"
         << "    getAnimation: function(animationName) {\n"
         << "      var key = String(animationName || '');\n"
@@ -1428,30 +2107,86 @@ void AppendCommonHostBootstrap(std::ostringstream& wrapper) {
         << "    },\n"
         << "    set: function(target, prop, value) { target[String(prop)] = value; return true; }\n"
         << "  });\n"
+        // The position in the order `getLayer(index)` and `enumerateLayers()` use;
+        // -1 for something that is not a layer of the scene.
+        << "  function __layerKey(layerOrName) {\n"
+        << "    return typeof layerOrName === 'string' ? __layerResolveName(layerOrName) : "
+           "__resolveLayerName(layerOrName);\n"
+        << "  }\n"
         << "  __sceneBase.getLayerIndex = function(layerOrName) {\n"
-        << "    var name = __resolveLayerName(layerOrName);\n"
-        << "    if (!name) return -1;\n"
-        << "    if (!globalThis.__layerCache[name]) globalThis.__layerCache[name] = "
-           "__createLayer(name);\n"
-        << "    var nativeIndex = __layerGetIndex(name);\n"
-        << "    if (nativeIndex >= 0) return nativeIndex;\n"
-        << "    return globalThis.__layerOrder.indexOf(name);\n"
+        << "    var name = __layerKey(layerOrName);\n"
+        << "    return name ? __layerGetIndex(name) : -1;\n"
         << "  };\n"
         << "  function __layerConfigVector(value) {\n"
         << "    if (typeof value !== 'string') return value;\n"
         << "    var parts = value.trim().split(/\\s+/).map(Number);\n"
         << "    return new Vec3(parts[0], parts[1], parts[2]);\n"
         << "  }\n"
+        // A vector as the scene file writes it: "x y z". Strings pass through.
+        << "  function __configVectorString(value) {\n"
+        << "    if (typeof value === 'string') return value;\n"
+        << "    if (value === null || typeof value !== 'object') return String(value);\n"
+        << "    return [value.x, value.y, value.z, value.w].filter(function(part) { "
+           "return part !== undefined; }).join(' ');\n"
+        << "  }\n"
+        // The scene.json keys a text layer is made from. What names a text
+        // object's value or font may be a plain value or `{ value }`, as the
+        // scene file writes it.
+        << "  function __textLayerConfig(options) {\n"
+        << "    function plain(value) {\n"
+        << "      return value !== null && typeof value === 'object' && 'value' in value ? value.value : value;\n"
+        << "    }\n"
+        << "    var config = { text: String(plain(options.text)), visible: true };\n"
+        << "    ['font', 'horizontalalign', 'verticalalign', 'anchor'].forEach(function(key) {\n"
+        << "      var value = plain(options[key]);\n"
+        << "      if (value !== undefined && value !== null) config[key] = String(value);\n"
+        << "    });\n"
+        << "    ['pointsize', 'padding', 'maxwidth', 'maxrows', 'alpha', 'brightness'].forEach(function(key) {\n"
+        << "      var value = plain(options[key]);\n"
+        << "      if (value !== undefined && value !== null && Number.isFinite(Number(value))) config[key] = Number(value);\n"
+        << "    });\n"
+        << "    ['limitwidth', 'limitrows', 'limituseellipsis', 'perspective'].forEach(function(key) {\n"
+        << "      if (options[key] !== undefined) config[key] = !!plain(options[key]);\n"
+        << "    });\n"
+        << "    ['color', 'size'].forEach(function(key) {\n"
+        << "      var value = plain(options[key]);\n"
+        << "      if (value !== undefined && value !== null) config[key] = __configVectorString(value);\n"
+        << "    });\n"
+        << "    return config;\n"
+        << "  }\n"
+        // `createLayer(path)` copies a model; `createLayer({ image })` copies it
+        // and applies the configuration; `createLayer({ text })` makes a text layer.
         << "  __sceneBase.__createLayerFor = function(currentLayerName, configuration, workshopId) {\n"
         << "    var options = typeof configuration === 'object' && configuration !== null ? configuration : null;\n"
         << "    var templateName = options ? String(options.image || '') : String(configuration || '');\n"
-        << "    var generatedName = __layerCreate(templateName, String(currentLayerName || ''), "
-           "String(workshopId || ''));\n"
-        << "    if (!generatedName) throw new Error('Unable to create layer: ' + templateName);\n"
+        << "    var isText = !!options && !templateName && options.text !== undefined && options.text !== null;\n"
+        << "    var generatedName = isText\n"
+        << "      ? __textLayerCreate(JSON.stringify(__textLayerConfig(options)), String(currentLayerName || ''))\n"
+        << "      : __layerCreate(templateName, String(currentLayerName || ''), String(workshopId || ''));\n"
+        << "    if (!generatedName) throw new Error(isText ? 'Unable to create text layer' : "
+           "'Unable to create layer: ' + templateName);\n"
         << "    var generated = __createLayer(generatedName);\n"
         << "    generated.template = templateName;\n"
         << "    globalThis.__layerCache[generatedName] = generated;\n"
         << "    if (options) {\n"
+        // A parent that names no layer (a number, an object without a name) leaves
+        // the new layer beside the layer that made it, not at the scene root.
+        << "      if (options.parent !== undefined && options.parent !== null) {\n"
+        << "        var parentName = __layerKey(options.parent);\n"
+        << "        if (parentName) __layerSetParent(generatedName, parentName);\n"
+        << "      }\n"
+        << "      if (!isText && options.size !== undefined && options.size !== null) {\n"
+        << "        var sizeParts = __configVectorString(options.size).trim().split(/\\s+/).map(Number);\n"
+        << "        __layerSetSize(generatedName, sizeParts[0], sizeParts.length > 1 ? sizeParts[1] : sizeParts[0]);\n"
+        << "      }\n"
+        << "      if (options.name !== undefined && options.name !== null) {\n"
+        << "        var authoredName = String(options.name);\n"
+        << "        if (__layerNameAs(generatedName, authoredName)) generated.name = authoredName;\n"
+        << "      }\n"
+        << "      if (options.parallaxDepth !== undefined && options.parallaxDepth !== null) {\n"
+        << "        generated.parallaxDepth = typeof options.parallaxDepth === 'string' ? "
+           "new Vec2(options.parallaxDepth) : options.parallaxDepth;\n"
+        << "      }\n"
         << "      if (options.origin !== undefined) generated.origin = __layerConfigVector(options.origin);\n"
         << "      if (options.scale !== undefined) generated.scale = __layerConfigVector(options.scale);\n"
         << "      if (options.angles !== undefined) generated.angles = __layerConfigVector(options.angles);\n"
@@ -1467,31 +2202,23 @@ void AppendCommonHostBootstrap(std::ostringstream& wrapper) {
         << "    return this.__createLayerFor('', sourcePath);\n"
         << "  };\n"
         // Only a layer a script created is removed. The scene file's own
-        // layers stay, as does a layer named by index (getLayer resolves no
-        // index either), and the call answers false for them.
+        // layers stay, and the call answers false for them.
+        // The native call answers the names of every layer it removed (the one
+        // asked for and any made below it), or false when it removed none.
         << "  __sceneBase.destroyLayer = function(layerOrName) {\n"
-        << "    var name = typeof layerOrName === 'string' ? __layerResolveName(layerOrName) : "
-           "__resolveLayerName(layerOrName);\n"
-        << "    if (!name || !__layerDestroy(name)) return false;\n"
-        << "    delete globalThis.__layerCache[name];\n"
-        << "    var order = globalThis.__layerOrder.indexOf(name);\n"
-        << "    if (order >= 0) globalThis.__layerOrder.splice(order, 1);\n"
+        << "    var name = __layerKey(layerOrName);\n"
+        << "    var removed = name ? __layerDestroy(name) : false;\n"
+        << "    if (!removed) return false;\n"
+        << "    for (var i = 0; i < removed.length; ++i) delete globalThis.__layerCache[removed[i]];\n"
         << "    return true;\n"
         << "  };\n"
+        // Moves the layer to that position of the same order `getLayer(index)` and
+        // `getLayerIndex` use, and the draw order follows.
         << "  __sceneBase.sortLayer = function(layerOrName, index) {\n"
-        << "    var name = __resolveLayerName(layerOrName);\n"
+        << "    var name = __layerKey(layerOrName);\n"
         << "    if (!name) return;\n"
-        << "    if (!globalThis.__layerCache[name]) globalThis.__layerCache[name] = "
-           "__createLayer(name);\n"
-        << "    var currentIndex = globalThis.__layerOrder.indexOf(name);\n"
-        << "    if (currentIndex >= 0) globalThis.__layerOrder.splice(currentIndex, 1);\n"
         << "    var requestedIndex = Math.floor(Number(index) || 0);\n"
-        << "    if (requestedIndex < 0) requestedIndex = 0;\n"
-        << "    var targetIndex = requestedIndex;\n"
-        << "    if (targetIndex > globalThis.__layerOrder.length) targetIndex = "
-           "globalThis.__layerOrder.length;\n"
-        << "    globalThis.__layerOrder.splice(targetIndex, 0, name);\n"
-        << "    __layerSort(name, requestedIndex);\n"
+        << "    __layerSort(name, requestedIndex < 0 ? 0 : requestedIndex);\n"
         << "  };\n"
         << "  globalThis.__runSceneCallbacks = function(event, payload) {\n"
         << "    var callbacks = globalThis.__callbacks[event] || [];\n"
@@ -1525,6 +2252,26 @@ JSValue CreateCursorPositionObject(JSContext* context, const ScriptHostContext& 
     return CreateJsVec2(context,
                         host_context.cursor_normalized_position.x(),
                         host_context.cursor_normalized_position.y());
+}
+
+// Where the pointer is on the display, in pixels counted from its top-left
+// corner: the window-normalized position (which already counts y from the top)
+// scaled by `engine.screenResolution`, so a script that divides one by the
+// other gets the fraction back.
+JSValue CreateCursorScreenPositionObject(JSContext* context, const ScriptHostContext& host_context) {
+    const float width  = host_context.screen_resolution.x() > 0.0f
+                             ? host_context.screen_resolution.x()
+                             : host_context.canvas_size.x();
+    const float height = host_context.screen_resolution.y() > 0.0f
+                             ? host_context.screen_resolution.y()
+                             : host_context.canvas_size.y();
+    return CreateJsVec2(context,
+                        static_cast<double>(host_context.cursor_normalized_position.x()) * width,
+                        static_cast<double>(host_context.cursor_normalized_position.y()) * height);
+}
+
+bool PrimaryButtonDown(const ScriptHostContext& host_context) {
+    return (host_context.mouse_buttons_down & 1u) != 0u;
 }
 
 SceneScriptBridgeState* GetBridgeState(JSContext* context);
@@ -1762,7 +2509,11 @@ void UpdateEngineObject(JSContext* context, JSValue global_object,
             JS_SetPropertyStr(context,
                               input_object,
                               "cursorScreenPosition",
-                              CreateCursorWorldPositionObject(context, host_context));
+                              CreateCursorScreenPositionObject(context, host_context));
+            JS_SetPropertyStr(context,
+                              input_object,
+                              "cursorLeftDown",
+                              JS_NewBool(context, PrimaryButtonDown(host_context)));
             JS_SetPropertyStr(context,
                               input_object,
                               "mouseButtonsDown",
@@ -1827,6 +2578,14 @@ void UpdateEngineObject(JSContext* context, JSValue global_object,
                           global_object,
                           "__cursorWorldPosition",
                           CreateCursorWorldPositionObject(context, host_context));
+        JS_SetPropertyStr(context,
+                          global_object,
+                          "__cursorScreenPosition",
+                          CreateCursorScreenPositionObject(context, host_context));
+        JS_SetPropertyStr(context,
+                          global_object,
+                          "__cursorLeftDown",
+                          JS_NewBool(context, PrimaryButtonDown(host_context)));
 
         JSValue canvas_size = CreateCanvasSizeObject(context, host_context);
         JS_SetPropertyStr(context, global_object, "canvasSize", JS_DupValue(context, canvas_size));
@@ -1967,6 +2726,26 @@ JSValue JsLayerGetOrigin(JSContext* context, JSValueConst, int argc, JSValueCons
                                                    : Eigen::Vector3f::Zero();
     if (layer_name != nullptr) JS_FreeCString(context, layer_name);
     return CreateJsVec3(context, value.x(), value.y(), value.z());
+}
+
+JSValue JsLayerGetTransformMatrix(JSContext* context, JSValueConst, int argc,
+                                  JSValueConst* argv) {
+    Eigen::Matrix4d matrix = Eigen::Matrix4d::Identity();
+    auto*           bridge = GetBridgeState(context);
+    if (argc >= 1 && bridge != nullptr && bridge->runtime != nullptr) {
+        if (const char* layer_name = JS_ToCString(context, argv[0]); layer_name != nullptr) {
+            matrix = bridge->runtime->NodeTransformMatrix(layer_name);
+            JS_FreeCString(context, layer_name);
+        }
+    }
+    // Eigen keeps a matrix column after column, which is how a script's Mat4
+    // keeps its elements.
+    JSValue elements = JS_NewArray(context);
+    for (int index = 0; index < 16; ++index) {
+        JS_SetPropertyUint32(
+            context, elements, static_cast<uint32_t>(index), JS_NewFloat64(context, matrix.data()[index]));
+    }
+    return elements;
 }
 
 JSValue JsLayerSetOrigin(JSContext* context, JSValueConst, int argc, JSValueConst* argv) {
@@ -2185,15 +2964,25 @@ JSValue JsLayerCreate(JSContext* context, JSValueConst, int argc, JSValueConst* 
     return JS_NewString(context, generated_name.c_str());
 }
 
+// Answers an array of the runtime names of every layer removed (the one asked
+// for, and any made below it), or false when none was.
 JSValue JsLayerDestroy(JSContext* context, JSValueConst, int argc, JSValueConst* argv) {
     if (argc < 1) return JS_NewBool(context, false);
     auto* bridge = GetBridgeState(context);
     if (bridge == nullptr || bridge->runtime == nullptr) return JS_NewBool(context, false);
 
     const char* layer_name = JS_ToCString(context, argv[0]);
-    const bool  destroyed  = layer_name != nullptr && bridge->runtime->DestroyLayer(layer_name);
+    std::vector<std::string> removed;
+    const bool destroyed =
+        layer_name != nullptr && bridge->runtime->DestroyLayer(layer_name, &removed);
     if (layer_name != nullptr) JS_FreeCString(context, layer_name);
-    return JS_NewBool(context, destroyed);
+    if (! destroyed) return JS_NewBool(context, false);
+    JSValue names = JS_NewArray(context);
+    for (std::size_t index = 0; index < removed.size(); ++index) {
+        JS_SetPropertyUint32(context, names, static_cast<uint32_t>(index),
+                             JS_NewStringLen(context, removed[index].data(), removed[index].size()));
+    }
+    return names;
 }
 
 JSValue JsLayerGetIndex(JSContext* context, JSValueConst, int argc, JSValueConst* argv) {
@@ -2202,7 +2991,7 @@ JSValue JsLayerGetIndex(JSContext* context, JSValueConst, int argc, JSValueConst
     if (bridge == nullptr || bridge->runtime == nullptr) return JS_NewInt32(context, -1);
 
     const char* layer_name = JS_ToCString(context, argv[0]);
-    const int   index = layer_name != nullptr ? bridge->runtime->NodeSiblingIndex(layer_name) : -1;
+    const int   index = layer_name != nullptr ? bridge->runtime->LayerIndex(layer_name) : -1;
     if (layer_name != nullptr) JS_FreeCString(context, layer_name);
     return JS_NewInt32(context, index);
 }
@@ -2216,10 +3005,186 @@ JSValue JsLayerSort(JSContext* context, JSValueConst, int argc, JSValueConst* ar
     int32_t     index      = 0;
     JS_ToInt32(context, &index, argv[1]);
     if (layer_name != nullptr) {
-        bridge->runtime->SortNode(layer_name, static_cast<int>(index));
+        bridge->runtime->SortLayer(layer_name, static_cast<int>(index));
         JS_FreeCString(context, layer_name);
     }
     return JS_UNDEFINED;
+}
+
+// The argument as text; empty when it is missing or cannot be converted.
+std::string ArgumentString(JSContext* context, int argc, JSValueConst* argv, int index) {
+    if (index >= argc) return {};
+    const char* text = JS_ToCString(context, argv[index]);
+    if (text == nullptr) return {};
+    std::string result(text);
+    JS_FreeCString(context, text);
+    return result;
+}
+
+SceneRuntimeContext* BridgeRuntime(JSContext* context) {
+    auto* bridge = GetBridgeState(context);
+    return bridge != nullptr ? bridge->runtime : nullptr;
+}
+
+JSValue JsLayerCount(JSContext* context, JSValueConst, int, JSValueConst*) {
+    auto* runtime = BridgeRuntime(context);
+    return JS_NewInt32(context, runtime != nullptr ? static_cast<int32_t>(runtime->LayerCount()) : 0);
+}
+
+JSValue JsLayerNameAt(JSContext* context, JSValueConst, int argc, JSValueConst* argv) {
+    auto*   runtime = BridgeRuntime(context);
+    double  index   = -1.0;
+    if (runtime == nullptr || argc < 1 || JS_ToFloat64(context, &index, argv[0]) < 0 ||
+        ! std::isfinite(index) || index < 0.0 || std::floor(index) != index) {
+        return JS_NewString(context, "");
+    }
+    const auto name = runtime->LayerNameAt(static_cast<std::size_t>(index));
+    return JS_NewStringLen(context, name.data(), name.size());
+}
+
+JSValue JsLayerNameForId(JSContext* context, JSValueConst, int argc, JSValueConst* argv) {
+    auto*  runtime = BridgeRuntime(context);
+    double id      = 0.0;
+    if (runtime == nullptr || argc < 1 || JS_ToFloat64(context, &id, argv[0]) < 0 ||
+        ! std::isfinite(id)) {
+        return JS_NewString(context, "");
+    }
+    const auto name = runtime->LayerNameForId(static_cast<int32_t>(id));
+    return JS_NewStringLen(context, name.data(), name.size());
+}
+
+// What the scene file calls the layer registered under this key (the key itself
+// when it has no name on record).
+JSValue JsLayerAuthoredName(JSContext* context, JSValueConst, int argc, JSValueConst* argv) {
+    auto* runtime = BridgeRuntime(context);
+    const std::string key = ArgumentString(context, argc, argv, 0);
+    const std::string name = runtime != nullptr ? runtime->LayerAuthoredName(key) : key;
+    return JS_NewStringLen(context, name.data(), name.size());
+}
+
+JSValue JsPuppetAnimationLayerName(JSContext* context, JSValueConst, int argc, JSValueConst* argv) {
+    auto* runtime = BridgeRuntime(context);
+    const std::string name =
+        runtime != nullptr ? runtime->PuppetAnimationLayerName(ArgumentString(context, argc, argv, 0),
+                                                               ArgumentString(context, argc, argv, 1))
+                           : std::string {};
+    return JS_NewStringLen(context, name.data(), name.size());
+}
+
+JSValue JsLayerInitialConfig(JSContext* context, JSValueConst, int argc, JSValueConst* argv) {
+    auto* runtime = BridgeRuntime(context);
+    if (runtime == nullptr) return JS_NewString(context, "");
+    const auto json = runtime->InitialLayerConfigJson(ArgumentString(context, argc, argv, 0));
+    return JS_NewStringLen(context, json.data(), json.size());
+}
+
+// `thisLayer.font` / `pointsize` / `horizontalalign` / `verticalalign`: the
+// value as text, or null when the layer is not text.
+JSValue JsTextStyleGet(JSContext* context, JSValueConst, int argc, JSValueConst* argv) {
+    auto* runtime = BridgeRuntime(context);
+    if (runtime == nullptr) return JS_NULL;
+    const auto value =
+        runtime->NodeTextStyle(ArgumentString(context, argc, argv, 0), ArgumentString(context, argc, argv, 1));
+    return value ? JS_NewStringLen(context, value->data(), value->size()) : JS_NULL;
+}
+
+JSValue JsTextStyleSet(JSContext* context, JSValueConst, int argc, JSValueConst* argv) {
+    auto* runtime = BridgeRuntime(context);
+    if (runtime == nullptr) return JS_NewBool(context, false);
+    return JS_NewBool(context,
+                      runtime->SetNodeTextStyle(ArgumentString(context, argc, argv, 0),
+                                                ArgumentString(context, argc, argv, 1),
+                                                ArgumentString(context, argc, argv, 2)));
+}
+
+JSValue JsTextLayerCreate(JSContext* context, JSValueConst, int argc, JSValueConst* argv) {
+    auto* runtime = BridgeRuntime(context);
+    if (runtime == nullptr) return JS_NewString(context, "");
+    const auto name = runtime->CreateTextLayer(ArgumentString(context, argc, argv, 0),
+                                               ArgumentString(context, argc, argv, 1));
+    return JS_NewStringLen(context, name.data(), name.size());
+}
+
+JSValue JsLayerNameAs(JSContext* context, JSValueConst, int argc, JSValueConst* argv) {
+    auto* runtime = BridgeRuntime(context);
+    if (runtime == nullptr) return JS_NewBool(context, false);
+    return JS_NewBool(context,
+                      runtime->NameLayer(ArgumentString(context, argc, argv, 0),
+                                         ArgumentString(context, argc, argv, 1)));
+}
+
+JSValue JsLayerSetParent(JSContext* context, JSValueConst, int argc, JSValueConst* argv) {
+    auto* runtime = BridgeRuntime(context);
+    if (runtime == nullptr) return JS_NewBool(context, false);
+    return JS_NewBool(context,
+                      runtime->SetNodeParent(ArgumentString(context, argc, argv, 0),
+                                             ArgumentString(context, argc, argv, 1)));
+}
+
+JSValue JsLayerSetSize(JSContext* context, JSValueConst, int argc, JSValueConst* argv) {
+    auto*  runtime = BridgeRuntime(context);
+    double width   = 0.0;
+    double height  = 0.0;
+    if (runtime == nullptr || argc < 3 || JS_ToFloat64(context, &width, argv[1]) < 0 ||
+        JS_ToFloat64(context, &height, argv[2]) < 0) {
+        return JS_NewBool(context, false);
+    }
+    return JS_NewBool(context,
+                      runtime->SetNodeSize(ArgumentString(context, argc, argv, 0),
+                                           Eigen::Vector2f(static_cast<float>(width),
+                                                           static_cast<float>(height))));
+}
+
+JSValue JsLayerGetParallaxDepth(JSContext* context, JSValueConst, int argc, JSValueConst* argv) {
+    auto* runtime = BridgeRuntime(context);
+    const Eigen::Vector2f depth = runtime != nullptr
+                                      ? runtime->NodeParallaxDepth(ArgumentString(context, argc, argv, 0))
+                                      : Eigen::Vector2f::Zero();
+    return CreateJsVec2(context, depth.x(), depth.y());
+}
+
+JSValue JsLayerSetParallaxDepth(JSContext* context, JSValueConst, int argc, JSValueConst* argv) {
+    auto* runtime = BridgeRuntime(context);
+    if (runtime == nullptr || argc < 2) return JS_UNDEFINED;
+    DynamicValue depth;
+    FillDynamicValueFromJS(context, argv[1], DynamicValue::Vec2, depth);
+    if (depth.getType() == DynamicValue::Vec2) {
+        runtime->SetNodeParallaxDepth(ArgumentString(context, argc, argv, 0), depth.getVec2());
+    }
+    return JS_UNDEFINED;
+}
+
+// `layer.getTextureAnimation()`: `__textureAnimation(layer, operation, value)`.
+// The text operation `name` answers a string; the rest answer numbers.
+JSValue JsTextureAnimation(JSContext* context, JSValueConst, int argc, JSValueConst* argv) {
+    auto* runtime = BridgeRuntime(context);
+    if (runtime == nullptr || argc < 2) return JS_NewFloat64(context, 0.0);
+    const std::string layer     = ArgumentString(context, argc, argv, 0);
+    const std::string operation = ArgumentString(context, argc, argv, 1);
+    double            value     = 0.0;
+    const bool has_value = argc > 2 && JS_ToFloat64(context, &value, argv[2]) == 0 && std::isfinite(value);
+
+    if (operation == "play") return JS_NewFloat64(context, runtime->PlayNodeTextureAnimation(layer) ? 1.0 : 0.0);
+    if (operation == "pause") return JS_NewFloat64(context, runtime->PauseNodeTextureAnimation(layer) ? 1.0 : 0.0);
+    if (operation == "stop") return JS_NewFloat64(context, runtime->StopNodeTextureAnimation(layer) ? 1.0 : 0.0);
+    if (operation == "setRate") {
+        return JS_NewFloat64(
+            context, has_value && runtime->SetNodeTextureAnimationRate(layer, value) ? 1.0 : 0.0);
+    }
+    if (operation == "isPlaying") {
+        return JS_NewFloat64(context, runtime->NodeTextureAnimationPlaying(layer) ? 1.0 : 0.0);
+    }
+    if (operation == "rate") return JS_NewFloat64(context, runtime->NodeTextureAnimationRate(layer));
+    const auto info = runtime->NodeTextureAnimation(layer);
+    if (operation == "name") {
+        const std::string name = info ? info->name : std::string();
+        return JS_NewStringLen(context, name.data(), name.size());
+    }
+    if (! info) return JS_NewFloat64(context, 0.0);
+    if (operation == "frameCount") return JS_NewFloat64(context, static_cast<double>(info->frame_count));
+    if (operation == "duration") return JS_NewFloat64(context, info->duration);
+    if (operation == "fps") return JS_NewFloat64(context, info->fps);
+    return JS_NewFloat64(context, 0.0);
 }
 
 JSValue JsSoundKnown(JSContext* context, JSValueConst, int argc, JSValueConst* argv) {
@@ -2555,6 +3520,37 @@ void CallSceneExport(JSContext* context, const char* export_name, int argc, JSVa
     JS_FreeValue(context, result);
 }
 
+// `applyGeneralSettings(settings)`: what the wallpaper is told about the
+// environment it runs in. Only the interface language is known.
+void CallGeneralSettings(JSContext* context, const std::string& exports_object_name,
+                         const ScriptHostContext& host_context) {
+    JSValue settings = JS_NewObject(context);
+    JS_SetPropertyStr(context, settings, "language",
+                      JS_NewStringLen(context, host_context.language.data(),
+                                      host_context.language.size()));
+    JSValueConst argv[] = { settings };
+    JSValue      result =
+        CallStoredExport(context, exports_object_name.c_str(), "applyGeneralSettings", 1, argv);
+    JS_FreeValue(context, result);
+    JS_FreeValue(context, settings);
+}
+
+// `resizeScreen(size)`: the display's size in pixels, as `engine.screenResolution`.
+void CallResizeScreen(JSContext* context, const std::string& exports_object_name,
+                      const ScriptHostContext& host_context) {
+    JSValue      size   = CreateScreenResolutionObject(context, host_context);
+    JSValueConst argv[] = { size };
+    JSValue      result =
+        CallStoredExport(context, exports_object_name.c_str(), "resizeScreen", 1, argv);
+    JS_FreeValue(context, result);
+    JS_FreeValue(context, size);
+}
+
+void CallDestroy(JSContext* context, const std::string& exports_object_name) {
+    JSValue result = CallStoredExport(context, exports_object_name.c_str(), "destroy", 0, nullptr);
+    JS_FreeValue(context, result);
+}
+
 // The authored AnimationEvent carries the marker's name and its frame.
 JSValue BuildAnimationEventObject(JSContext* context, std::string_view event_name, double frame) {
     JSValue event = JS_NewObject(context);
@@ -2673,11 +3669,18 @@ std::string BuildPropertyScriptFactorySource(const ScriptFrontEndResult& front_e
     AppendThisScene(wrapper);
     wrapper << "  let thisLayer = __scriptContext.layerName ? "
                "globalThis.scene.getLayer(__scriptContext.layerName) : undefined;\n"
-            << "  let thisObject = thisLayer;\n"
+            // A script bound to one of a layer's animation layers is about that
+            // animation layer: `thisObject` is it, and `thisLayer` stays the layer.
+            << "  let thisObject = (thisLayer && __scriptContext.animationLayerIndex >= 0)\n"
+            << "    ? thisLayer.getAnimationLayer(__scriptContext.animationLayerIndex) : thisLayer;\n"
             << front_end.transformed_body << "\n"
             << "  globalThis[__scriptContext.exportsName] = {\n"
             << "    init: (typeof init === 'function') ? init : null,\n"
             << "    update: (typeof update === 'function') ? update : null,\n"
+            << "    destroy: (typeof destroy === 'function') ? destroy : null,\n"
+            << "    resizeScreen: (typeof resizeScreen === 'function') ? resizeScreen : null,\n"
+            << "    applyGeneralSettings: (typeof applyGeneralSettings === 'function') ? "
+               "applyGeneralSettings : null,\n"
             << "    cursorClick: (typeof cursorClick === 'function') ? cursorClick : null,\n"
             << "    cursorDown: (typeof cursorDown === 'function') ? cursorDown : null,\n"
             << "    cursorEnter: (typeof cursorEnter === 'function') ? cursorEnter : null,\n"
@@ -2720,6 +3723,10 @@ std::string BuildSceneScriptFactorySource(const ScriptFrontEndResult& front_end)
             << "  globalThis[__scriptContext.exportsName] = {\n"
             << "    init: (typeof init === 'function') ? init : null,\n"
             << "    update: (typeof update === 'function') ? update : null,\n"
+            << "    destroy: (typeof destroy === 'function') ? destroy : null,\n"
+            << "    resizeScreen: (typeof resizeScreen === 'function') ? resizeScreen : null,\n"
+            << "    applyGeneralSettings: (typeof applyGeneralSettings === 'function') ? "
+               "applyGeneralSettings : null,\n"
             << "    cursorClick: (typeof cursorClick === 'function') ? cursorClick : null,\n"
             << "    cursorDown: (typeof cursorDown === 'function') ? cursorDown : null,\n"
             << "    cursorEnter: (typeof cursorEnter === 'function') ? cursorEnter : null,\n"
@@ -2762,6 +3769,14 @@ bool EnsureSharedHostBindings(JSContext* context, SceneRuntimeContext* runtime,
         bridge_state->runtime = runtime;
     }
 
+    // The vector classes come first: the host fills `engine` and `input` with
+    // vectors below, and one made before the classes exist is a bare `{x, y}`
+    // with none of their methods, for as long as nothing moves.
+    if (! cache_state.shared_primitives_installed) {
+        if (! InstallScriptPrimitives(context)) return false;
+        cache_state.shared_primitives_installed = true;
+    }
+
     JSValue    global_object        = JS_GetGlobalObject(context);
     const auto registration_started = std::chrono::steady_clock::now();
 
@@ -2782,6 +3797,11 @@ bool EnsureSharedHostBindings(JSContext* context, SceneRuntimeContext* runtime,
                           global_object,
                           "__layerGetOrigin",
                           JS_NewCFunction(context, JsLayerGetOrigin, "__layerGetOrigin", 1));
+        JS_SetPropertyStr(
+            context,
+            global_object,
+            "__layerGetTransformMatrix",
+            JS_NewCFunction(context, JsLayerGetTransformMatrix, "__layerGetTransformMatrix", 1));
         JS_SetPropertyStr(context,
                           global_object,
                           "__layerSetOrigin",
@@ -2851,6 +3871,25 @@ bool EnsureSharedHostBindings(JSContext* context, SceneRuntimeContext* runtime,
                           global_object,
                           "__layerSort",
                           JS_NewCFunction(context, JsLayerSort, "__layerSort", 2));
+        const auto register_function = [&](const char* name, JSCFunction* function, int length) {
+            JS_SetPropertyStr(context, global_object, name,
+                              JS_NewCFunction(context, function, name, length));
+        };
+        register_function("__layerCount", JsLayerCount, 0);
+        register_function("__layerNameAt", JsLayerNameAt, 1);
+        register_function("__layerNameForId", JsLayerNameForId, 1);
+        register_function("__layerInitialConfig", JsLayerInitialConfig, 1);
+        register_function("__layerAuthoredName", JsLayerAuthoredName, 1);
+        register_function("__puppetAnimationLayerName", JsPuppetAnimationLayerName, 2);
+        register_function("__textStyleGet", JsTextStyleGet, 2);
+        register_function("__textStyleSet", JsTextStyleSet, 3);
+        register_function("__textLayerCreate", JsTextLayerCreate, 2);
+        register_function("__layerNameAs", JsLayerNameAs, 2);
+        register_function("__layerSetParent", JsLayerSetParent, 2);
+        register_function("__layerSetSize", JsLayerSetSize, 3);
+        register_function("__layerGetParallaxDepth", JsLayerGetParallaxDepth, 1);
+        register_function("__layerSetParallaxDepth", JsLayerSetParallaxDepth, 2);
+        register_function("__textureAnimation", JsTextureAnimation, 3);
         JS_SetPropertyStr(context,
                           global_object,
                           "__soundKnown",
@@ -2955,11 +3994,6 @@ bool EnsureSharedHostBindings(JSContext* context, SceneRuntimeContext* runtime,
     g_script_startup_metrics.callback_registration_ms += MeasureElapsedMs(registration_started);
 
     if (! cache_state.shared_bootstrap_installed) {
-        if (! InstallScriptPrimitives(context)) {
-            JS_FreeValue(context, global_object);
-            return false;
-        }
-
         const std::string bootstrap_source = BuildCommonHostBootstrapSource();
         const auto        eval_started     = std::chrono::steady_clock::now();
         JSValue           bootstrap_result = JS_Eval(context,
@@ -3000,6 +4034,14 @@ JSValue AcquireScriptFactory(JSContext* context, const std::string& script_sourc
     // restored factory), so the second load of a scene in one process never
     // produced a first frame. Compiling from source is also not measurably
     // slower than restoring bytecode.
+    // The scene's object list is a copy of everything the scene file says,
+    // scripts included, so it is only kept for a scene whose scripts read it.
+    if (script_source.find("getInitialLayerConfig") != std::string::npos) {
+        if (auto* bridge = GetBridgeState(context); bridge != nullptr && bridge->runtime != nullptr) {
+            bridge->runtime->RequestInitialLayerConfig();
+        }
+    }
+
     ScriptFrontEndResult front_end      = RunScriptFrontEnd(script_source);
     const std::string    factory_source = mode == ScriptProgramMode::Property
                                               ? BuildPropertyScriptFactorySource(front_end)
@@ -3038,8 +4080,10 @@ JSValue AcquireScriptFactory(JSContext* context, const std::string& script_sourc
 bool ExecuteScriptFactory(JSContext* context, JSValue factory,
                           const std::string& exports_object_name,
                           const std::string& current_layer_name, const std::string_view props_name,
-                          const char* scope) {
+                          const char* scope, int animation_layer_index = -1) {
     JSValue script_context = JS_NewObject(context);
+    JS_SetPropertyStr(context, script_context, "animationLayerIndex",
+                      JS_NewInt32(context, animation_layer_index));
     JS_SetPropertyStr(
         context, script_context, "exportsName", JS_NewString(context, exports_object_name.c_str()));
     JS_SetPropertyStr(
@@ -3097,13 +4141,14 @@ PropertyScriptProgram::PropertyScriptProgram(
     std::map<std::string, DynamicValue*> script_properties, DynamicValue initial_value,
     ScriptHostContext host_context, JSRuntime* shared_runtime, JSContext* shared_context,
     std::string exports_object_name, std::string script_properties_name,
-    PropertyScriptValueSemantic semantic)
+    PropertyScriptValueSemantic semantic, int animation_layer_index)
     : m_script_properties(std::move(script_properties)),
       m_runtime(runtime),
       m_current_layer_name(std::move(current_layer_name)),
       m_exports_object_name(std::move(exports_object_name)),
       m_script_properties_name(std::move(script_properties_name)),
-      m_semantic(semantic) {
+      m_semantic(semantic),
+      m_animation_layer_index(animation_layer_index) {
     auto* runtime_handle = shared_runtime;
     if (runtime_handle == nullptr) {
         LOG_ERROR("PropertyScriptProgram: failed to create JS runtime");
@@ -3147,7 +4192,8 @@ PropertyScriptProgram::PropertyScriptProgram(
                                m_exports_object_name,
                                m_current_layer_name,
                                m_script_properties_name,
-                               "PropertyScriptProgram")) {
+                               "PropertyScriptProgram",
+                               m_animation_layer_index)) {
         JS_FreeValue(context_handle, factory);
         JS_FreeValue(context_handle, global_object);
         return;
@@ -3245,6 +4291,8 @@ DynamicValueUniquePtr PropertyScriptProgram::Evaluate(const ScriptHostContext& h
             CallStoredExport(context_handle, m_exports_object_name.c_str(), "init", 1, init_argv);
         JS_FreeValue(context_handle, init_result);
         JS_FreeValue(context_handle, initial_value_js);
+        // Right after `init`: a script keeps its language tables here.
+        CallGeneralSettings(context_handle, m_exports_object_name, host_context);
         if (m_runtime != nullptr) {
             JSValue changed_properties =
                 CreateChangedPropertiesObject(context_handle, m_runtime->projectProperties());
@@ -3269,6 +4317,7 @@ DynamicValueUniquePtr PropertyScriptProgram::Evaluate(const ScriptHostContext& h
     JS_FreeValue(context_handle, current_value_js);
 
     auto published = std::make_unique<DynamicValue>();
+    m_update_returned_value = false;
     if (JS_IsException(result) || JS_IsUndefined(result) ||
         (current_value.getType() == DynamicValue::Boolean &&
          JS_VALUE_GET_TAG(result) == JS_TAG_OBJECT)) {
@@ -3277,6 +4326,7 @@ DynamicValueUniquePtr PropertyScriptProgram::Evaluate(const ScriptHostContext& h
         return published;
     }
 
+    m_update_returned_value = true;
     FillDynamicValueFromJS(context_handle, result, current_value.getType(), *published);
     if (m_semantic == PropertyScriptValueSemantic::AnglesDegrees &&
         published->getType() == DynamicValue::Vec3) {
@@ -3419,6 +4469,32 @@ void PropertyScriptProgram::DispatchMediaEventJson(std::string_view event_json) 
     DispatchMediaEventJsonToScript(context_handle, m_exports_object_name, event_json, false);
 }
 
+void PropertyScriptProgram::DispatchResizeScreen(const ScriptHostContext& host_context) {
+    // Before `init` there is nothing to be told: `init` reads the current size.
+    if (! m_valid || ! m_init_called || m_destroyed) return;
+    auto* context_handle = static_cast<JSContext*>(m_impl_context);
+    if (context_handle == nullptr) return;
+    UpdateHostContext(host_context);
+    CallResizeScreen(context_handle, m_exports_object_name, host_context);
+}
+
+void PropertyScriptProgram::DispatchGeneralSettings(const ScriptHostContext& host_context) {
+    if (! m_valid || ! m_init_called || m_destroyed) return;
+    auto* context_handle = static_cast<JSContext*>(m_impl_context);
+    if (context_handle == nullptr) return;
+    UpdateHostContext(host_context);
+    CallGeneralSettings(context_handle, m_exports_object_name, host_context);
+}
+
+void PropertyScriptProgram::Destroy() {
+    // `destroy` pairs with `init`: a script that never started has nothing to undo.
+    if (! m_valid || ! m_init_called || m_destroyed) return;
+    m_destroyed          = true;
+    auto* context_handle = static_cast<JSContext*>(m_impl_context);
+    if (context_handle == nullptr) return;
+    CallDestroy(context_handle, m_exports_object_name);
+}
+
 SceneScriptProgram::SceneScriptProgram(SceneRuntimeContext& runtime, std::string script_source,
                                        std::string       current_layer_name,
                                        ProjectProperties project_properties,
@@ -3475,6 +4551,7 @@ SceneScriptProgram::SceneScriptProgram(SceneRuntimeContext& runtime, std::string
     JSValue init_result =
         CallStoredExport(context_handle, m_exports_object_name.c_str(), "init", 0, nullptr);
     JS_FreeValue(context_handle, init_result);
+    CallGeneralSettings(context_handle, m_exports_object_name, host_context);
     ApplyUserProperties(m_project_properties);
     RunSceneCallbacks(context_handle, "load");
     m_valid = true;
@@ -3687,6 +4764,30 @@ void SceneScriptProgram::DispatchMediaEventJson(std::string_view event_json) {
     DispatchMediaEventJsonToScript(context_handle, m_exports_object_name, event_json, true);
 }
 
+void SceneScriptProgram::DispatchResizeScreen(const ScriptHostContext& host_context) {
+    if (! m_valid || m_destroyed) return;
+    auto* context_handle = static_cast<JSContext*>(m_impl_context);
+    if (context_handle == nullptr) return;
+    UpdateHostContext(host_context);
+    CallResizeScreen(context_handle, m_exports_object_name, host_context);
+}
+
+void SceneScriptProgram::DispatchGeneralSettings(const ScriptHostContext& host_context) {
+    if (! m_valid || m_destroyed) return;
+    auto* context_handle = static_cast<JSContext*>(m_impl_context);
+    if (context_handle == nullptr) return;
+    UpdateHostContext(host_context);
+    CallGeneralSettings(context_handle, m_exports_object_name, host_context);
+}
+
+void SceneScriptProgram::Destroy() {
+    if (! m_valid || m_destroyed) return;
+    m_destroyed          = true;
+    auto* context_handle = static_cast<JSContext*>(m_impl_context);
+    if (context_handle == nullptr) return;
+    CallDestroy(context_handle, m_exports_object_name);
+}
+
 ScriptEngine::ScriptEngine() {
     m_runtime = JS_NewRuntime();
     if (m_runtime == nullptr) {
@@ -3743,7 +4844,8 @@ ScriptEngine::Evaluate(const std::string&                          script_source
 std::unique_ptr<PropertyScriptProgram> ScriptEngine::CreatePropertyScriptProgram(
     SceneRuntimeContext* runtime, std::string script_source, std::string current_layer_name,
     std::map<std::string, DynamicValue*> script_properties, DynamicValue initial_value,
-    ScriptHostContext host_context, PropertyScriptValueSemantic semantic) {
+    ScriptHostContext host_context, PropertyScriptValueSemantic semantic,
+    int animation_layer_index) {
     if (m_context == nullptr || m_runtime == nullptr) return nullptr;
     const auto program_id = ++m_next_program_id;
     auto       program =
@@ -3757,7 +4859,8 @@ std::unique_ptr<PropertyScriptProgram> ScriptEngine::CreatePropertyScriptProgram
                                                 m_context,
                                                 "__propertyExports_" + std::to_string(program_id),
                                                 "__scriptProps_" + std::to_string(program_id),
-                                                semantic);
+                                                semantic,
+                                                animation_layer_index);
     if (! program->Valid()) return nullptr;
     return program;
 }
@@ -3791,6 +4894,37 @@ void ScriptEngine::RunAnimationEventCallbacks(const ScriptHostContext& host_cont
     JSValue event_object = BuildAnimationEventObject(m_context, event_name, frame);
     RunSceneCallbacks(m_context, "animationEvent", event_object);
     JS_FreeValue(m_context, event_object);
+}
+
+void ScriptEngine::RunResizeScreenCallbacks(const ScriptHostContext& host_context) {
+    if (m_context == nullptr) return;
+    JSValue global_object = JS_GetGlobalObject(m_context);
+    UpdateEngineObject(m_context, global_object, host_context);
+    JS_FreeValue(m_context, global_object);
+    JSValue size = CreateScreenResolutionObject(m_context, host_context);
+    RunSceneCallbacks(m_context, "resizeScreen", size);
+    JS_FreeValue(m_context, size);
+}
+
+void ScriptEngine::NotifyAnimationLayerEnded(const ScriptHostContext& host_context,
+                                             std::string_view layer_name,
+                                             int animation_layer_index) {
+    if (m_context == nullptr) return;
+    JSValue global_object = JS_GetGlobalObject(m_context);
+    UpdateEngineObject(m_context, global_object, host_context);
+    JSValue notify = JS_GetPropertyStr(m_context, global_object, "__fireAnimationLayerEnded");
+    if (JS_IsFunction(m_context, notify)) {
+        std::array<JSValue, 2> argv {
+            JS_NewStringLen(m_context, layer_name.data(), layer_name.size()),
+            JS_NewInt32(m_context, animation_layer_index),
+        };
+        JSValue result = JS_Call(m_context, notify, JS_UNDEFINED, 2, argv.data());
+        if (JS_IsException(result)) LogJsException(m_context, "animation layer ended");
+        JS_FreeValue(m_context, result);
+        for (const auto value : argv) JS_FreeValue(m_context, value);
+    }
+    JS_FreeValue(m_context, notify);
+    JS_FreeValue(m_context, global_object);
 }
 
 } // namespace wallpaper

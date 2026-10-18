@@ -1,6 +1,6 @@
 # Licensing, Supporter model and distribution status
 
-Recorded: 2026-09-26 (first recorded 2026-09-14).
+Recorded: 2026-10-16 (first recorded 2026-09-14).
 Status: source policy decided (GPL-2.0-only); Supporter model decided (a free
 signed download, and a one-time Supporter purchase for a sponsor place and
 priority support); **binary distribution still blocked** by the Apache-2.0
@@ -17,7 +17,7 @@ source is linked.
 |---|---|
 | Under which license is this repository's source offered? | GNU GPL version 2 only, the text in the root [`LICENSE`](LICENSE). See [Source license](#source-license-gpl-20-only). |
 | Is anything sold? | Only the Supporter purchase: a one-time payment for a sponsor place and priority support. The signed download is free and no copy of the software is sold. See [Supporter model](#supporter-model-free-signed-download-paid-sponsorship-and-support). |
-| Can it be distributed today? | No. Homebrew's GPLv3 FFmpeg was replaced, but Apache-2.0 components remain in the link closure of every build. See [Remaining blockers](#remaining-blockers). |
+| Can it be distributed today? | No. Homebrew's GPLv3 FFmpeg was replaced, but Apache-2.0 components, both Khronos/Vulkan libraries and Rust crates, remain in the link closure of every build. See [Remaining blockers](#remaining-blockers). |
 | Is a Developer ID signed, notarized build available? | No. `scripts/package.py` signs ad hoc, or with a self-signed project certificate for releases. Signing is a platform mechanism, not a license grant. See [Signing and notarization](#signing-and-notarization). |
 | Can it be listed on the Mac App Store? | Not as the app is built today, and not without first settling the GPLv2 question. See [Mac App Store](#mac-app-store). |
 | Does publishing this source resolve the blockers? | No. Distribution of the combined program is what the licenses govern; posting the repository changes nothing about it. |
@@ -44,11 +44,11 @@ contributions so that the whole is under one license.
 What the root `LICENSE` does and does not do:
 
 - It states the terms under which this project's own code (`App/`, `Extension/`,
-  `Shared/`, `WebUI/`, `Tests/`, `scripts/`, `project.yml`, `Formula/`) is
+  `Shared/`, `Tests/`, `scripts/`, `project.yml`, `Formula/`) is
   offered, and it is the same license the vendored GPL code is already under.
 - It does not transfer, merge or relicense anyone's copyright. The
   bigsaltyfishes projects, the FFmpeg authors, the mediaremote-adapter authors,
-  Lucide, Phosphene and every other holder named in `upstream/provenance.json`
+  Phosphene and every other holder named in `upstream/provenance.json`
   and in the notices under `upstream/` keep their copyright and their own
   license terms. Third-party notices are retained where they were found and are
   bundled by `scripts/package.py` (see [Notice payload](#notice-payload)).
@@ -202,14 +202,14 @@ compatibility.
 Checked 2026-09-21 against the Homebrew formulae installed on the development
 machine, the vendored license files, and the dynamic link closure reported by
 `otool -L` on a built `WallpaperMachine` binary. Versions are the installed
-ones on that date, not pins.
+ones on that date, not pins. The Rust crates and glad were checked 2026-10-16;
+see [Rust crates](#rust-crates) for how.
 
 | Component | Where | License | GPL-2.0-only combination |
 |---|---|---|---|
 | Renderer (`wallpaper-core`, `shader`, `wallpaper-bridge`) | `upstream/renderer`, revision in `provenance.json` | GPL-2.0-only | Same license |
 | Scene engine (open-wallpaper-engine) | `upstream/renderer/external/open-wallpaper-engine` | GPL-2.0-only (vendored under the renderer) | Same license |
-| Application shell, extension, Workshop browser, control panel, scripts | `App/`, `Extension/`, `Shared/`, `WebUI/`, `scripts/` | GPL-2.0-only (this project) | Same license |
-| Lucide icons | `WebUI/icons.js` | ISC | Compatible |
+| Application shell, extension, Workshop browser, control panel, scripts | `App/`, `Extension/`, `Shared/`, `scripts/` | GPL-2.0-only (this project) | Same license |
 | Phosphene ABI reference | notice in `Extension/Phosphene-LICENSE.txt` | MIT | Compatible |
 | ungive/mediaremote-adapter | `upstream/mediaremote-adapter` | BSD-3-Clause | Compatible; embedded as an unlinked framework |
 | miniaudio | `upstream/renderer/external/open-wallpaper-engine/third_party/miniaudio` | Public domain or MIT-0 (choice) | Compatible |
@@ -228,12 +228,73 @@ ones on that date, not pins.
 | **MoltenVK** (`libMoltenVK`, loaded as the Vulkan ICD) | Homebrew `molten-vk` 1.4.2 | Apache-2.0 | **Incompatible with GPLv2** |
 | vulkan-headers, spirv-headers | Homebrew, build-time headers | Apache-2.0 / MIT | Build-time only; whether header inclusion alone creates a covered combination is part of the open review |
 | shaderc | Homebrew `shaderc`, in `build_environment()` | Apache-2.0 | Not present in the app's dynamic link closure; its role is limited to the build environment list and is to be confirmed |
-| Rust crate dependencies | `upstream/renderer/Cargo.lock` | Various | Not audited. The crates this project writes are GPL-2.0-only; their dependency tree has not been reviewed license by license |
+| **codespan-reporting** 0.13.1 | Rust crate, a required dependency of naga 29, which the `shader` crate uses for every shader | Apache-2.0 | **Incompatible with GPLv2** |
+| **spirv** 0.4.0 | Rust crate, from naga's `spv-out` feature (the Compatibility path's SPIR-V output) | Apache-2.0 | **Incompatible with GPLv2** |
+| **miette** 7.6.0, **supports-color** 3.0.2, **supports-hyperlinks** 3.2.0, **supports-unicode** 3.0.0 | Rust crates, from the `shader` crate's `miette` dependency with the `fancy` feature | Apache-2.0 | **Incompatible with GPLv2** |
+| **unicode-linebreak** 0.1.5 | Rust crate, from textwrap's `unicode-linebreak` feature, which miette's `fancy` turns on | Apache-2.0 | **Incompatible with GPLv2** |
+| **shadow-rs** 2.0.0, **is_debug** 1.1.0 | Rust crates, a dependency of `wallpaper-bridge` | MIT AND Apache-2.0 as declared; the `LICENSE` file each crate ships holds only the MIT text | **Blocked** by the Apache-2.0 half of the declared expression |
+| uniffi 0.28.3 (`uniffi`, `uniffi_core`, `uniffi_bindgen`, `uniffi_meta`, `uniffi_udl`, `uniffi_testing`), option-ext 0.2.0 | Rust crates: the Swift bridge, and `dirs` | MPL-2.0 | Compatible through MPL-2.0 section 3.3, which names GPL-2.0 as a Secondary License; none of their source files carries the "Incompatible With Secondary Licenses" notice |
+| ffmpeg-next, ffmpeg-sys-next 8.1.0 | Rust crates, the FFmpeg bindings in `wallpaper-core` | WTFPL | Compatible |
+| The other 158 linked Rust crates | `upstream/renderer/Cargo.lock` | 150 offer MIT, alone or as a choice; the rest are Zlib (const_format, konst, konst_macro_rules, foldhash), ISC (is_ci), BSD-3-Clause (pp-rs) or BSD-3-Clause OR Apache-2.0 (moxcms, pxfm) | Compatible under the MIT, Zlib, ISC or BSD-3-Clause terms |
+| glad (an OpenGL loader generated by glad 0.1.33, with `KHR/khrplatform.h`) | `upstream/renderer/external/open-wallpaper-engine/third_party/glad`, added to the scene engine's CMake project by `add_subdirectory(glad)` in `third_party/CMakeLists.txt` | Not checked | Not part of the app as built; see [glad](#glad) |
 | Valve SteamCMD | installed at runtime into the app's support directory, never bundled | Valve's terms | Outside the GPL entirely; see [Rights outside software licenses](#rights-outside-software-licenses) |
 
 "Compatible" in this table means compatible with GPLv2 according to the FSF's
 license list (https://www.gnu.org/licenses/license-list.html) or the license's
 own text; it is not an audit of every file.
+
+### Rust crates
+
+Checked 2026-10-16 against `upstream/renderer/Cargo.lock` with `cargo tree
+--offline --workspace -e normal,no-proc-macro --target aarch64-apple-darwin`.
+That resolves features the way `scripts/build.py`'s `cargo build --workspace
+--release` does. Each crate's license is the one its manifest declares; no
+crate was reviewed file by file. The result is 176 third-party crates, all
+compiled into `libwallpaper_bridge.a`, which the app links
+(`-lwallpaper_bridge` in `project.yml`). A plain `cargo metadata` walk lists
+more crates (git2, url and the ICU crates), because it merges the features of
+shadow-rs's build-script use into its normal one. Those crates are not part of
+the build.
+
+The table below says which renderer path needs each blocked crate. "Native
+Metal" and "Compatibility" (Vulkan through MoltenVK) are the two scene
+renderers described in [docs/features/scene-rendering.md](docs/features/scene-rendering.md#scene-renderer):
+
+| Crate | Pulled in by | Needed by |
+|---|---|---|
+| codespan-reporting | naga 29, as a dependency naga cannot be built without | Every shader compile, for Native Metal (MSL) and for Compatibility (SPIR-V) |
+| spirv | naga's `spv-out` feature, enabled in `upstream/renderer/crates/shader/Cargo.toml` | Only Compatibility's SPIR-V output (`ShaderTarget::VulkanSpirv`) |
+| miette, supports-color, supports-hyperlinks, supports-unicode | `miette = { features = ["fancy"] }` in `upstream/renderer/crates/shader/Cargo.toml`; the shader crate formats its diagnostics with miette's `GraphicalReportHandler` | Both paths' shader error reports. The three `supports-*` crates come from the `fancy` feature, not from miette's core |
+| unicode-linebreak | textwrap 0.16's `unicode-linebreak` feature, which miette's `fancy` turns on (uniffi also uses textwrap, without that feature) | Both paths, through miette |
+| shadow-rs, is_debug | `wallpaper-bridge`'s dependency on shadow-rs (`default-features = false`) and its build script | Neither path: the bridge uses only the generated `SHORT_COMMIT` constant, as a fallback for the commit hash it reports |
+
+A Release executable built 2026-10-16 contains code from codespan-reporting,
+spirv, miette, the three `supports-*` crates and unicode-linebreak (by their
+names in its symbol table). It contains none from shadow-rs or is_debug: their
+objects are in `libwallpaper_bridge.a`, and the linker drops them. That
+describes one build and clears nothing; both stay in the dependency closure and
+are counted as blockers until they are removed or reviewed.
+
+uniffi's `cli` feature is enabled in `wallpaper-bridge`'s normal dependencies
+because the package's `uniffi-bindgen` binary needs it. As a result
+`uniffi_bindgen` (MPL-2.0) is compiled into the app executable as well.
+
+Not covered: build-dependencies and proc-macros, which run inside the compiler
+and are not linked (among them `miette-derive`, Apache-2.0); and the contents
+of each crate beyond its declared license.
+
+### glad
+
+`third_party/glad` holds an OpenGL loader generated by glad 0.1.33. It is
+added to the scene engine's CMake project without `EXCLUDE_FROM_ALL`, so a full
+CMake build of that project would compile it. Nothing in the scene engine's
+`src/` includes or links it. `upstream/renderer/crates/core/build.rs` builds
+only the `wescene-renderer` target, which does not depend on it, so the
+renderer build leaves it uncompiled. No glad object was found in the build
+trees and no glad symbol in a Release executable built 2026-10-16. Its license
+has not been checked: the generated files carry no license notice of their
+own, and `KHR/khrplatform.h` carries a Khronos notice. It has no entry in the
+[notice payload](#notice-payload).
 
 ## FFmpeg
 
@@ -265,7 +326,7 @@ How this project follows FFmpeg's LGPL checklist (https://ffmpeg.org/legal.html)
 | Dynamic linking | Yes: the app links `libav*.dylib` and `scripts/package.py` relocates them into `Contents/Frameworks` |
 | Corresponding FFmpeg source with the exact configure line | Policy above: the formula records URL, checksum and configure arguments; the tarball is to be mirrored beside each signed download |
 | No GPL libraries such as libx264 | None are enabled; `scripts/package.py` refuses libraries whose embedded configuration shows a forbidden flag ([Tooling that enforces this record](#tooling-that-enforces-this-record)) |
-| Attribution in the program's about box | Not yet shown. Settings -> About names the renderer and links the GPLv2 text (`WebUI/settings.js`); an FFmpeg/LGPL line there is an open item and is not part of this record |
+| Attribution in the program's about box | Not yet shown. Settings -> About names the renderer and links the GPLv2 text (`App/Views/ControlPanel/Settings/Sections/AboutSettingsSection.swift`); an FFmpeg/LGPL line there is an open item and is not part of this record |
 | Do not rename the libraries to obscure names | They keep their upstream names |
 
 FFmpeg's page also notes that companies making money from products that use
@@ -277,14 +338,25 @@ separate from copyright, and is recorded here rather than resolved.
 
 The FSF's position is that the Apache License 2.0 is not compatible with GPL
 version 2 because of its patent-termination and indemnification terms
-(https://www.gnu.org/licenses/license-list.html#apache2). Four things in every
-current build are under Apache-2.0 and are loaded into, or compiled into, the
-same process as the GPL-2.0-only renderer:
+(https://www.gnu.org/licenses/license-list.html#apache2). These parts of every
+current build are under Apache-2.0, in whole or in part, and are loaded into,
+or compiled into, the same process as the GPL-2.0-only renderer:
 
 - `libvulkan` (Vulkan loader) and `libMoltenVK` (the ICD the loader opens);
 - `libSPIRV-Tools` / `libSPIRV-Tools-opt`, loaded by glslang's `libSPIRV`;
 - the Apache-2.0 portion of glslang proper;
-- `spirv_reflect`, vendored and statically linked into the scene engine.
+- `spirv_reflect`, vendored and statically linked into the scene engine;
+- the Rust crates `codespan-reporting`, `spirv`, `miette`, `supports-color`,
+  `supports-hyperlinks`, `supports-unicode` and `unicode-linebreak`
+  (Apache-2.0), and `shadow-rs` and `is_debug` (declared "MIT AND
+  Apache-2.0"), all compiled into `libwallpaper_bridge.a`
+  ([Rust crates](#rust-crates)).
+
+Retiring the Compatibility (Vulkan) path does not clear the Rust crates on its
+own. `spirv` leaves only if naga's `spv-out` feature is dropped as well.
+`codespan-reporting` stays, because naga requires it for every shader,
+Native Metal's included. The `miette` group and `shadow-rs`/`is_debug` serve
+neither renderer path and stay until their dependencies are changed.
 
 Until each of these is resolved, no binary of this program may be distributed,
 sold or given away. Resolution means one of:
@@ -293,7 +365,10 @@ sold or given away. Resolution means one of:
    code written for this project, and remove the Apache-2.0 code from the link
    closure. For the Vulkan path this is a large engineering change (the
    renderer's native Metal backend exists but does not cover every scene; see
-   [docs/features/performance.md](docs/features/performance.md)).
+   [docs/features/performance.md](docs/features/performance.md)). For a Rust
+   crate it means dropping the feature or dependency that pulls it in, or
+   replacing the crate that needs it: naga cannot be built without
+   `codespan-reporting`.
 2. **Obtain compatible license grants** covering the Apache-2.0 code, or obtain
    a sufficient linking exception or GPLv3-compatible relicense from the
    copyright holders of the GPLv2-only code. A generic endorsement is not enough.
@@ -318,8 +393,9 @@ distribute. Private use and private builds are unaffected
 (https://www.gnu.org/licenses/gpl-faq.html#WhatDoesCompatMean).
 
 Also still open, independent of the Apache-2.0 question: the file-by-file
-review of Eigen, the Rust dependency tree, and the exact set of glslang files
-under each of its licenses.
+review of Eigen; the exact set of glslang files under each of its licenses;
+the Rust crates beyond their declared licenses, including build-dependencies
+and proc-macros; and the license of the unused [glad](#glad) loader.
 
 ## Rights outside software licenses
 
@@ -384,6 +460,10 @@ not of a string in a library.
 Xcode separately bundles `Contents/Resources/LICENSE` (mediaremote-adapter's
 BSD-3-Clause notice) and the extension's `Phosphene-LICENSE.txt`.
 
+No notice from the [Rust crates](#rust-crates) is bundled yet, although the
+MIT, ISC and BSD-3-Clause terms of the linked crates ask for their notices to
+go with binary copies.
+
 ## Implementation record
 
 The native application is named **WallpaperMachine**; its bundle identifier
@@ -408,9 +488,9 @@ prefix is `app.wallpapermachine`.
   under `upstream/mediaremote-adapter` with the `src/adapter/stream.m` changes
   recorded in `upstream/provenance.json`, and built as an embedded, unlinked
   framework.
-- The web control panel's icons are copied from [Lucide](https://lucide.dev)
-  (ISC License, Copyright (c) Lucide Icons and Contributors); the notice
-  travels in the header of `WebUI/icons.js`.
+- The control panel's icons are SF Symbols, drawn by macOS at run time; no
+  icon artwork is copied into the app or the repository, so no icon notice
+  ships.
 - FFmpeg comes from `Formula/mwe-ffmpeg.rb` via `python3
   scripts/install_ffmpeg.py`, replacing Homebrew's `ffmpeg@8`.
 
@@ -419,7 +499,10 @@ prefix is `app.wallpapermachine`.
 - Resolve every entry under [Remaining blockers](#remaining-blockers) by
   replacement or by written permission from the actual copyright holders, and
   record the outcome here with the evidence.
-- Complete the file-level review of Eigen, glslang and the Rust dependency tree.
+- Complete the file-level review of Eigen and glslang, review the Rust crates
+  beyond their declared licenses, and check glad's license or take it out of
+  the scene engine's CMake project.
+- Bundle the notices of the Rust crates the app links.
 - Implement Developer ID signing and notarization in the release pipeline, and
   remove the unconditional failure from `.github/workflows/build.yml` only
   after the blockers are recorded as resolved.

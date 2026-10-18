@@ -989,6 +989,23 @@ extern "C" bool owe_scene_on_demand_enabled(void)
     return wallpaper::SceneOnDemandEnabled();
 }
 
+extern "C" void owe_set_scene_resolution(int resolution)
+{
+    // An unrecognised value keeps the canvas rather than being stored: it is
+    // the size a scene has always been rasterized at, so a host built against a
+    // newer enum degrades to the behaviour it had before the choice existed.
+    wallpaper::SetSceneResolution(resolution == OWE_SCENE_RESOLUTION_DISPLAY
+                                      ? wallpaper::SceneResolution::Display
+                                      : wallpaper::SceneResolution::Canvas);
+}
+
+extern "C" int owe_current_scene_resolution(void)
+{
+    return wallpaper::CurrentSceneResolution() == wallpaper::SceneResolution::Display
+               ? OWE_SCENE_RESOLUTION_DISPLAY
+               : OWE_SCENE_RESOLUTION_CANVAS;
+}
+
 extern "C" int owe_scene_wallpaper_update_mode(void* scene)
 {
     auto* wallpaper_scene = static_cast<wallpaper::SceneWallpaper*>(scene);

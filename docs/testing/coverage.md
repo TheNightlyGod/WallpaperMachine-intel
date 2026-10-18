@@ -16,17 +16,19 @@ is linked from the domain; the shared limits are collected at the end.
 - `AppThemeTests` — a chosen theme survives recreation and reset leaves other
   preferences alone; an invalid change cannot overwrite saved values; a damaged
   saved accent or an unknown icon does not discard the rest.
-- Offscreen `ControlPanelShellTests` commit the real Appearance controls through
-  the native bridge (mode, accent, tone), reset them and check the saved
-  preferences.
+- `AppearanceSettingsTests` and `PanelShellActionsTests` (Panel) save every
+  Appearance choice (mode, accent, tone, icon) in the store's format, refuse an
+  invalid accent, round-trip accents through the colour well and reset without
+  touching unrelated preferences; `PanelThemeTests` derive the palettes from the
+  preferences and the resolved appearance.
 
 ## Automation
 
 `AutomationCommandTests`, `AppAutomationTests`, `HotKeyPreferencesTests`,
 `GlobalHotKeysTests`, `WallpaperAutomationPlannerTests`,
 `WallpaperAutomationStoreTests`, `WallpaperAutomationSchedulerTests`,
-`WallpaperFocusFilterTests`, `StatusMenuModelTests` and offscreen
-`ControlPanelAutomationTests`: rules,
+`WallpaperFocusFilterTests`, `StatusMenuModelTests`, and `PanelAutomationActionsTests`
+and `DisplaysSettingsModelTests` (Panel): rules,
 solar and DST boundaries, appearance selection, Focus recovery and manual
 precedence, editor round trips and preference validation, and the menu bar menu's
 layout (flat for one display, a submenu per display with every command naming its
@@ -69,7 +71,10 @@ unattached `CAMetalLayer`s and injected notification and encoding services:
 - Originals and quit: inherited (pathless) selections resolve through the public
   API before any poster write and are never replaced by an unresolved poster;
   independent per-Space originals survive; a user's own wallpaper change is not
-  overwritten on restore; quit waits for the native reload, every read-back and
+  overwritten on restore; an original whose file is gone gives way to another
+  display's original and then macOS's default picture (when its display stops playing,
+  at quit and in the launch repair), while one the app may not look at is still put
+  back; quit waits for the native reload, every read-back and
   in-flight writes, keeps the original when restoration fails persistently, and
   cannot be blocked forever by an unreachable reference; cancelling a restoration
   that is waiting (a logout's deadline) stops it and leaves the journal entry and the
@@ -80,7 +85,7 @@ unattached `CAMetalLayer`s and injected notification and encoding services:
   follows; a fresh sync over a journal left behind restores it, the launch repair.
   `PlaybackPreferencesTests` (on until turned off, one change notification),
   `LockScreenWallpaperServiceTests` (when the lock screen claims the picture and locks
-  the choice) and `WebPanelGeneralSettingsTests` (the action stores the choice or is
+  the choice) and `PanelGeneralSettingsTests` (the setter stores the choice or is
   refused while the lock screen is requested; the row, its disabled five-minute
   neighbor and its lock reason) cover the rest. The `AppDelegate` wiring that decides
   when to restore is not unit-tested.
@@ -124,13 +129,13 @@ newer command in the same slot replaces a waiting one, a playlist, rule or
 update reload never replaces a user command waiting in its slot (it returns at
 once and leaves the slot revision alone), and a choice noted without a command
 counts once in each slot named and replaces nothing that waits.
-`WallpaperReapplyTests` and `WallpaperReapplyPanelTests` — the inspector's
+`WallpaperReapplyTests`, and `PanelLibraryActionsTests` and `InspectorPolicyTests` (Panel) — the inspector's
 **Reapply wallpaper** takes the wallpaper off its display once and applies it
 again from an empty display, as the user's choice but not as a first apply
 (history and the support prompt stay as they were); it refuses before any
 eject when the wallpaper's files, the display or an unfinished edit would make
 the apply fail; a wallpaper the display does not show is simply applied; and
-through the real panel only that button restarts, while a tile's double-click
+through the panel's actions only that button restarts, while a tile's double-click
 leaves the shown wallpaper running. Not covered: whether a scene reload flashes
 on the desktop ([manual-smoke.md](manual-smoke.md)).
 
@@ -203,7 +208,8 @@ picture shows between a window closing and the web page's window opening.
   every suspended surface, and the resume announcement (`onResumed`) after a global
   or per-display resume, but not after a suspend, a refused delivery or teardown. A
   display the user is not using is one more hidden reason: suspended after the settle
-  delay, resumed at once, joined to coverage, never darkening every display, untouched
+  delay, resumed at once, joined to coverage, never darkening every display, playing
+  while the display in use is covered or under a full-screen app, untouched
   by a sleep and wake, and not counted as hidden for the update alert's gate.
 - `SystemWakeRevalidatorTests` — against a private notification center and
   injected delays, idle wait and bridge call: a wake's two notifications are one
@@ -230,9 +236,9 @@ picture shows between a window closing and the web page's window opening.
   the app delegate's closure are thin forwarders and are not tested on their own. The user's
   mute of every wallpaper is one more source of the single audio-suppression flag: delivered at launch, silent without touching presentation, still held
   by a mute rule or other-app audio when lifted, and released at teardown; its preference
-  defaults off, persists and announces one change. Its Settings switch (stored, reported,
-  boolean only, the first Playback row following the preference) is in
-  `WebPanelGeneralSettingsTests`. Whether sound really stops is not covered
+  defaults off, persists and announces one change. Its Settings switch (stored, reported and
+  kept across a relaunch, the first Playback row following the preference whoever changes it)
+  is in `PanelPerformanceSettingsTests` and `SettingsEditingModelTests`. Whether sound really stops is not covered
   (see [manual smoke](manual-smoke.md#audio-responsiveness)).
 - `SystemConditionMonitorTests` use injected Low Power Mode and thermal readings
   and a private notification center: Low Power Mode acts only once an action is
@@ -246,7 +252,11 @@ picture shows between a window closing and the web page's window opening.
   read nor observed until an action is chosen, engages at the level and releases five
   points above it, follows a changed level and a plug-in at any charge, never engages
   without an internal battery, joins the other conditions, and a wake-time refresh
-  reads a change nobody announced. `LowBatteryTests` pin the gate sequence, the margin
+  reads a change nobody announced. The engaged conditions it publishes for the panel
+  name each condition with what its own rule does (heat on Reduced quality reads as a
+  pause at critical, a Focus filter is not listed), follow the low-battery margin, change
+  the state without asking the policy again when a second condition adds the same
+  action, and clear on `stop()`. `LowBatteryTests` pin the gate sequence, the margin
   and the parse of IOKit's power-source description (internal battery only, no UPS, no
   zero maximum) with synthetic dictionaries; the real source is only started and
   stopped to prove it releases itself.
@@ -322,7 +332,7 @@ a desktop run).
 
 `WallpaperSpaceMonitorTests`, the Space scenarios in
 `WallpaperAutomationSchedulerTests`, store and backup migration checks, and
-offscreen `ControlPanelSpaceWallpaperTests`. `DesktopWallpaperTests` covers
+`PanelAutomationActionsTests` and `DisplaysSettingsModelTests` (Panel). `DesktopWallpaperTests` covers
 Space-scoped writes, late frames and encodes, replacement gaps and restoration.
 Not covered: real Space transitions and installed desktop behavior; see
 [Spaces](../features/spaces.md).
@@ -344,11 +354,14 @@ the apply passed to the bridge as the user's, a held wallpaper opened on every d
 with copy and swap leaving the hold alone, rollback after a failure on the second display,
 pending edits refused before any write) and the link
 parser (`apply?…&display=all`).
-`WallpaperDisplayLayoutStoreTests` (Library) covers bounded persistence, and
-offscreen `ControlPanelDisplayLayoutTests` covers save, rename, apply, delete,
-copy/swap failure feedback, keyboard focus, missing screens, compact locales and the
-inspector's Apply to all displays (offered only with two eligible displays, applies
-both, shows a failure).
+`WallpaperDisplayLayoutStoreTests` (Library) covers bounded persistence.
+`PanelDisplayLayoutActionsTests` (Panel) covers save, rename, apply, delete, copy and
+swap, a failed swap putting both displays back, a layout whose display is gone and the
+limit; `DisplaysSettingsModelTests` the page's status lines and keyboard focus;
+`SettingsBRenderTests` the page in every language at the smallest window; and
+`InspectorPolicyTests` and `PanelLibraryActionsTests` the inspector's Apply to all
+displays (offered only with two displays that can take a wallpaper; a failure restores
+them).
 Not covered: real WindowServer transitions, visible appearance and separate
 per-Space assignments; see
 [display layouts](../features/display-layouts.md#code-and-verification).
@@ -421,8 +434,8 @@ running app.
   without following the `Applications` link, a foreign bundle is refused, the
   image is detached either way, and an app that cannot install in place opens
   the downloaded image.
-- The offscreen About flow (`ControlPanelShellTests`) checks again from the
-  no-release state before downloading a fixture update.
+- `UpdatePresentationTests` and `AboutSettingsTests` (Panel) walk the About card
+  from no release through the download to an install that needs a yes.
 - `UpdatePromptGateTests`: when the unattended alert is held (suspended
   presentation, a covered display, What's New open, quitting), that the control
   panel in front overrides the presentation holds, and that a held prompt is
@@ -501,9 +514,9 @@ on [manual-smoke.md](manual-smoke.md).
 - `WallpaperBackupTests` — real package export, preview, staged next-launch
   restore, conflict policy (Keep existing, Replace), parser and schema rejection,
   authorization, rollback and interrupted recovery, persistent-only preferences,
-  full-size preset archives and manifest preflight. Offscreen
-  `ControlPanelBackupFlowTests` drive the real controls against isolated package
-  writes and open no file panels.
+  full-size preset archives and manifest preflight. `PanelStorageActionsTests` and
+  `StorageSettingsModelTests` (Panel) turn the Storage page's choices into the
+  requested pending restore and open no file panels.
 - `WallpaperCompatibilityTests` — target, content and configuration generations
   and truthful unknown states. They do not establish complete scene or on-screen
   compatibility.
@@ -915,151 +928,194 @@ volume.
 
 ## Panel
 
-Offscreen `WKWebView` suites share `ControlPanelTestCase` (`PanelFixture`) and
-never order a window on screen. Tests that read rendered labels must pass
-`appLanguage: .english()` (`Tests/Unit/Support/TestAppLanguage.swift`) or a store
-built with explicit `systemLanguages`: the default `AppLanguageStore.shared`
-follows the developer's in-app language choice.
+`Tests/Unit/Panel/` covers the SwiftUI control panel. Model tests build the controller through
+`PanelTestCase.makeController(...)` or `withPanel(...)` (`PanelFixture`: a temporary
+`WALLPAPER_MACHINE_HOME`, a `TemporaryDefaults` suite, a snapshot-only bridge, English, the
+first-run guide already seen, `RecordingDialogs` that answer no unless told otherwise) and call
+the typed actions. Render tests host the real views in an unordered window from
+`ControlPanelWindow.make` or an `NSHostingView`, never order a window front, set the appearance on
+the window or the hosting view and never on `NSApp`, and assert sizes, model state or the toolbar,
+not pixels. A test
+that reads rendered words passes a language (`appLanguage: .english()` from
+`Tests/Unit/Support/TestAppLanguage.swift`, or a store with explicit `systemLanguages`): the shared
+`AppLanguageStore` follows the developer's own choice. The shared panel language that `L()`
+reads follows `AppLanguageStore.testHost` (English): the test bundle binds it before every test,
+so a test that binds another language cannot leak it into the next one; restore to `.testHost`,
+never to `.shared`.
 
-- `ControlPanelShellTests` — the bundled interface loads under its custom scheme,
-  routes `navigate` to Settings and denies a non-allowlisted external URL; the
-  `NSHostingController` accepts 760×560, 960×640 and 1240×800 proposals in every
-  shipped language without forcing a taller window; the panel renders in the
-  controller's language and switches in place, offering every shipped language
-  and refusing an unshipped tag; About/update actions; the top bar stays centered
-  and does not overlap at the minimum width; the first-run guide, background
-  focus isolation, Steam prompt focus, ownership notices and a revealed password
-  that never reaches the HTML; settings keep drafts, disclosure and scroll across
-  snapshots; the Performance profile rows follow any of the four Reduced quality choices
-  (not a low-battery choice on a Mac with no battery) and the Reduced quality line and
-  Effective now name the cause (heat, then Low Power Mode, a low battery, the battery),
-  the three condition menus offer Reduced quality and the battery mode and display
-  sleep do not, and a display's frame-rate note follows the engine's ceiling; the
-  Downloads-at-once choice reaches the queue; tabs stay usable
-  after a render throws mid-send; Installed's filters and scroll offset return in a
-  second page built over the same navigation, with a stale required tag dropped,
-  and the `viewState` report is stored without a snapshot reply or push and an
-  invalid one is ignored. `PanelViewStateTests` cover its limits.
-- `ControlPanelLibraryTests` — sorting, tile marks, filter sidebar, hold-and-drag
-  selection, the inspector report link, download setup, a rejected download
-  account staying visible, and error dismissal (library and download failures
-  stay suppressed until they recur), Installed tiles showing cached covers and
-  animating only the pointed-at tile (dwell, sweep, drag, blur, hide, tab change),
-  the snapshot offering animation only to gif/webp/apng previews, a tile showing
-  no image while its cover's stamp is read, a rescan that replaced no preview
-  leaving every cover address and page node alone while a replaced preview
-  redoes only its own tile, and a tile falling back to the preview file when its
-  cover cannot be made. Not covered:
-  WebKit's own `:focus-visible` verdict for real keyboard input (the test states
-  it), and how the animation looks or what it saves in power.
-- `ControlPanelDiscoverTests` — pagination does not navigate with the page number
-  and clamps to Steam's page limit, the grid keeps square tiles in at least three
-  columns, download rings and telemetry, the search field's handling of a pasted
-  link (looked up at once) against a bare id (only on Return) and words (after
-  their pause), the sort menu (one entry for each `WorkshopSort`, each searching by
-  its own key), and previews that play without canvas
-  readback and release offscreen images. This does not reproduce a GPU-process
-  hang or prove on-screen smoothness.
-- `ControlPanelSyncTests` (hidden-panel pushes, option fetches, display titles),
-  `ControlPanelSnapshotDeliveryTests` (library reuse during download progress,
-  full fallback for an unknown delta revision), `ControlPanelHostStateTests`
-  (the inspector's per-display host states and exact retry) and
-  `ControlPanelRemediationTests` (crash budget, favorites, placement queue).
-- `ControlPanelRestoreAllTests` — Restore all defaults through the live panel: the
-  click reaches the native action, the page shows the defaults the bridge staged
-  with Apply changes offered, and text typed but not sent is dropped.
-- `WebPanelDisplayPositionTests` — the inspector's Position sliders. The requests: one axis reaches
-  the bridge alone and the other keeps its saved value, a request naming no axis is refused, so
-  is a value outside 0 to 1, a boolean, text, `NaN`, an infinity or `null` (the bridge sees no call
-  and no position moves), only a scene or video with a row for that display can be moved, **Center**
-  sends 50% on both axes, a committed move reports `onDisplayFramingChanged` once and a move the bridge
-  refused does not, and a move waits behind the command that is running. The snapshot: each display's
-  `panX` and `panY`, and `nativePlayer` only for a display whose backend report for that wallpaper
-  names the native player. The page, offscreen: a scene draws the two sliders and **Center** at the
-  saved percentages, a change event posts the moved axis alone and the page follows the bridge's
-  answer, a web wallpaper draws none, and a video drawn by the native player shows its note beside
-  sliders that stay enabled. The drag: `displayPositionPreview` reaches the bridge's preview alone
-  (never the move, never `onDisplayFramingChanged`), is refused for what the move is refused for,
-  does not wait behind a running command and passes a refusal to the page; in the page, five quick
-  steps of a pointer drag show the first at once and the newest after the interval, the release saves
-  the newest once and cancels a step still waiting, it waits for the step already on its way, a drag
-  that ends on its starting value or a cancelled pointer still saves the last value shown, and a key
-  press saves without showing a step. Not covered: that the wallpaper visibly moves on a display, the
-  slider's feel and the 100 ms interval under load, the layout at the narrowest width, VoiceOver and the
-  Mission Control picture being retaken (all on [manual-smoke.md](manual-smoke.md)).
-- `ControlPanelWindowSizingTests` — size floor, key-view loop, full-screen layout
-  keeping navigation reachable and restoring windowed bounds, WebKit's color
-  picker anchor following its control, the move-to-active-Space collection
-  behavior (existing full-screen and cycle flags kept, all-Spaces dropped) and
-  fronting that restores only a minimized window. Not covered: opening the
-  picker, entering a full-screen Space, the live Split View transition, real Space
-  switching and Dock restore, or that What's New, preview and sign-in windows call
-  the helper; those are on [manual-smoke.md](manual-smoke.md).
-- Feature pages that live here and are described under their domain:
-  `ControlPanelAutomationTests`, `ControlPanelBackupFlowTests`,
-  `ControlPanelDisplayLayoutTests`, `ControlPanelLetterboxTests` (the Black bars
-  card drawn in the real page for an installed video only, with its Set scale factor
-  button sending one scale-factor edit), `ControlPanelPixivTests`,
-  `ControlPanelPlaybackToolsTests`, `ControlPanelPreviewTests`,
-  `ControlPanelSpaceWallpaperTests`.
-- Controller-level suites without a web view: `WebPanelAssetsTests` (thumbnail
-  routes serve only announced previews; the listed core modules and non-English
-  locale catalogs are served, unknown names and traversal refused),
-  `WebPanelAssetPropertiesTests`, `WebPanelCompatibilityTests`,
-  `WebPanelLetterboxTests` (the Black bars snapshot never starts a probe, only an
-  installed video on an enabled independent display can be checked, the suggested
-  factor follows the target display without a second probe, results read as idle
-  after a library refresh; staging records exactly the factor recomputed from the
-  stored bars and the display's size whatever the request carries, whichever video
-  backend plays the clip, and refuses, with no call, a stale selection or display, a
-  mirror, a mode other than Fill, a result without bars or from before a refresh, a
-  factor already set or larger, a replaced file, which also drops the result, and a
-  selection that moves while the file is confirmed; the line about unsaved changes
-  follows only the factor the card set, so a saved factor with an unrelated dirty
-  draft stays quiet, as does one that was applied and then followed by another edit,
-  reverted, retyped, or left and returned to),
-  `WebPanelDeliveryStatusTests`,
-  `WebPanelEnergyUsageTests` (sampling only while Settings is visible),
-  `WebPanelExternalLinkTests` (every fixed link in `WebUI/*.js` passes the allowlist),
-  `WebPanelGeneralSettingsTests` (the Login Items note and button, that returning
-  to the panel re-reads the status only while approval is pending, the
-  desktop-picture switch with its lock, and the Mute all wallpapers switch),
-  `WebPanelHiddenPropertyTests` (a property a visibility rule hides is not given
-  to the page, its folder is not measured and its pending text is dropped),
-  `WebPanelPerformanceSettingsTests` and `WebPanelSceneSettingsTests` (unknown,
-  non-boolean or non-numeric values are refused, out-of-range ones clamped; the
-  Reduced quality choice is accepted for Low Power Mode, heat and a low battery only, and
-  the battery mode's `reducedQuality` is refused for them; the snapshot carries the
-  frame-rate ceiling in force and the throttle causes; the
-  Retry on a stopped scene refuses an id that names no enabled display, is
-  disabled while it runs, and reloads that display (or, for a mirror, the display
-  it mirrors) from a click on the real page),
-  `WebPanelPropertyLabelTests` (author markup is reduced to text; built-in
-  `ui_` tokens become readable words in labels and combo choices, a curated
-  phrase wins, option values stay untouched, and a catalog phrase is translated;
-  a group record reaches the page as a heading in its place among the controls and
-  a group with no words is dropped; Restore all defaults is offered when a listed
-  value, a hidden one or text not yet sent differs from the default, but not for a
-  chosen file alone or a wallpaper that cannot be rendered),
-  `WebPanelSupportPromptTests` (including the performance data question for
-  someone who finished the guide earlier, answered from the page),
-  `WebPanelTelemetryTests` (the performance data switch round-trips, **Show in
-  Finder** writes the report it would send, and the guide answers the question only
-  if its switch was shown), `WebPanelSharingTests` (a Workshop wallpaper and the app
-  are shared through the injected share menu with links built in Swift, and a
-  non-Workshop id is refused), `WebPanelWorkshopSourceTests`,
-  `WebPanelWorkshopUpdateTests`, `WebPanelImagePlacementRaceTests` and
-  `WebPanelAssetProvenanceTests`. `WallpaperEditorStateTests` cover locale
-  scaling, invalid raw text and independent drafts; `PropertyImageCacheTests`
-  cover bounded transfers and that author images cannot become a network proxy.
+- Controller and actions: `PanelControllerTests` (persisted flags restored and the legacy
+  inspector-width key removed, each area model created once, `start()` wires the stores and
+  `stop()` undoes it, the window closing stops the panel, energy sampling only while Settings is
+  visible, returning to the window re-reads the bridge only while a Login Items approval is pending
+  and looks for scene assets installed meanwhile, a closed panel ignores its old window);
+  `PanelActionCoordinatorTests` (a key is busy while its action runs, a repeat is dropped and hands
+  back the original task, latest-wins runs every value in order past a failure, keys are
+  independent, unkeyed work is untracked, every error reaches the reporter);
+  `PanelActionRoutingTests` and `PanelMediaActionRoutingTests` (which actions clear the banner
+  first and which leave it, queued work waits behind a running command and direct work does not, a
+  newer command in the same slot replaces one still waiting, a failure reaches the banner and frees
+  the key, success reconciles the dismissals, the id resolvers refuse what is gone);
+  `PanelErrorStateTests` (precedence, a cancellation is not shown, a bridge error dismissed by
+  revision returns when it happens again, library and download failures stay dismissed until they
+  recur, a cleared source re-arms its dismissal); `PanelPresentationTests` (injected and real
+  window visibility, the key and close hooks, a view losing its window counts as closing);
+  `PanelStoreRevisionsTests` (each store's notification bumps only its own counter, posts from
+  another instance or a background thread, nothing counted outside `start()`/`stop()`, a reader is
+  told); `PanelInspectorObservationTests`; `PanelPreferencesTests` (the keys earlier builds wrote,
+  favorites as the JSON of the sorted array, unreadable favorites read as none);
+  `ExternalLinkTests` (every fixed and built link passes the allowlist, https to an exact host
+  without credentials or a port only, the opener reached only for an allowed link);
+  `TransferFormatTests`, `DragStepPumpTests` (the first value at once, later ones after 100 ms,
+  never two steps in flight, the release waits for the step on its way and always saves, a
+  deferred first step for a colour), `DisplayOptionsLoaderTests` (fetched only while Settings is
+  visible, a failure falls back without looping, a stale or cancelled read never overwrites a newer
+  one), `EnergyReadoutTests` and `PanelEnergyRestartTests` (each rendering setting restarts the
+  comparison once, other settings and refused changes do not).
+- Window and shell: `ControlPanelLaunchTests` (a login launch keeps the panel closed once set up),
+  `ControlPanelViewTests` (the hosted root starts its controller and stops it when the window
+  closes), `ControlPanelWindowSizingTests` (the 760×560 floor in a hosted window, the key-view
+  loop, moving to the active Space while keeping full-screen capability, fronting that
+  deminiaturizes only a minimized window), `PanelViewStateTests` (the reopen state's limits),
+  `PanelRootRenderTests` (small window proposals with a long display title in every language, the
+  guide over the split view, the toolbar and title following the page, an app reveal of a Settings
+  section shown once), `PanelPageTransitionTests` (every page change with the inspector open or
+  closed leaves the window whole), `ShellModelTests` (quick clicks end on the last page, Back to
+  library, the typed target display, Recently used per display, one popover at a time, the import
+  pill's memory, the Escape order, the inspector open with room and closed below 960 points until
+  the person chooses, what the split view writes back not counted as a choice, notices announced
+  and expiring, the support prompt waiting behind the guide, a popover or a running apply),
+  `ShellRenderTests` (the shell takes any window size in every language and appearance, full
+  screen, Split View and minimum sizes, the window title and subtitle, the target menu and
+  inspector toggle on library pages only, a banner never widening the layout, shrinking step by
+  step with the inspector open, Command-F reaching the Settings search, the tabs in the toolbar,
+  the Now Playing bar's height and its details popover), `ShellBannersTests`,
+  `ShellSearchFocusTests`, `PanelTitleTests`,
+  `CollectionEditorModelTests` (create, rename and delete with the inline name field and the
+  confirmation sheet), `PanelShellTests` (choosing a Settings section ends the search, a reveal is
+  adopted once, disclosures, the inspector choice and the library page remembered, the guide open
+  until the flag is set) and `PanelShellActionsTests` (navigation, the first visit's Workshop and
+  pixiv loads, the reopen report, the first-run flags, appearance and language choices, which tell
+  the bridge and re-read the open wallpaper's options).
+- Language and theme: `PanelLocaleTests` (every shipped language resolved from its own bundle,
+  integer and text arguments, reordered and repeated placeholders, a literal percent, English
+  fallback, unformatted runtime lookups, the system region kept, the bound store driving the
+  language), `SettingsSectionsLocalizationTests`, `PanelThemeTests`, `AccentPaletteTests` (every
+  token equal to the original algorithm's, readable fills, links and rings for every accent) and
+  `SurfacePaletteTests`.
+- Images: `PanelImagePipelineTests` (covers scaled and read only inside the library, a symlink out
+  and a non-image refused, a replaced preview under a new stamp is another image, a cover that
+  cannot be made falls back once to the downsampled preview, stills decoded to the view's size
+  and cached, only https Steam previews and only pixiv's image host and the fixed property hosts
+  read, a view that goes away stops waiting without cancelling the shared fetch, animations only
+  from sources that fit the budget), `PanelImageViewTests`, `AnimatedPreviewTests` (GIF, APNG and
+  WebP frames and delays, no timer until asked and never without a window),
+  `PropertyImageCacheTests` (bounded transfers, author images cannot become a network proxy) and
+  `LivePreviewSchedulerTests`.
+- Installed and the library: `PanelLibraryActionsTests` (favorites, Show in Finder, selection
+  slots, only Reapply restarting what the target shows, the target display taken when the user
+  asked, hiding after an apply, Apply to all displays and its rollback, previous and next,
+  playback, refresh, the held-wallpaper sentence and **Try again**, per-display host states and
+  their exact retry), `PanelLibraryImportTests`, `PanelLibraryRemovalTests` (confirmation, no
+  window means no deletion, one question for a batch, partial failures named),
+  `PanelLibraryRowsTests` (rows joined with measured facts, covers only once stamped, a rescan that
+  replaced no preview leaves every row alone, 10,000 rows built once whatever else changes),
+  `PanelLibraryStateTests` (Now Playing, the target menu, display names, history, library counts,
+  the update dot, the issue report's facts), `PanelCollectionActionsTests`, `LibrarySortTests`,
+  `LibraryFilterTests`, `LibrarySelectionTests` (ticks, ranges and the hold-and-sweep gesture),
+  `LibraryGridGeometryTests`, `LibraryTileRulesTests`, `TileGridLayoutTests` (at least three
+  columns, arrow keys held at the ends), `InstalledBrowserModelTests` (the reopen state and its
+  cadence, Favorites and collections as views, a 10,000-wallpaper library filtered as the user
+  types, covers, the selection's life, clicks, keys, Delete, batch actions and notices, the sweep
+  and edge scrolling, the one animated tile, the import popover and pill) and
+  `InstalledPageRenderTests` (the page, footer, empty states and popovers in every language and
+  appearance at the narrowest column, the scroll offset restored).
+- Inspector: `InspectorPolicyTests`, `InspectorWordingTests`, `InspectorInputTests`,
+  `InspectorFlowTests` (Preview with unsent text, Restore all defaults, sections, the app's words
+  against an author's markup, host states as text, file and folder notes, every symbol drawn
+  exists), `InspectorSliderTests` (VoiceOver, keys and the pointer each reach the saved edit; a
+  drag previews and the release saves once; colours saved after a quiet period),
+  `InspectorRenderTests` (the inspector and the whole panel with it open at 760×560 in every
+  language; a slider's VoiceOver, key and pointer changes reach the bridge),
+  `PropertyLabelDocumentTests` (the label allowlist: entities, emphasis, colours, lists, broken
+  markup, scripts and controls dropped, links only to allowed hosts, registered images only,
+  limits), `PlacementGeometryTests`, `PlacementDraftsTests`, `PresetsBarStateTests` and, on the
+  controller, `PanelPropertyRowsTests` (author markup reduced to words, engine tokens as readable
+  and translated words, the curated phrases, modified marks, Restore all and Apply availability,
+  display cards, measured folders, relabelling in a new language, audio and media delivery status),
+  `PanelPropertyDraftTests`, `PanelPropertyFilesTests`, `PanelPropertyPreviewTests` (described
+  under Preview), `PanelDisplayPositionTests` (one axis at a time, refused values reach no bridge
+  call, scene and video only, Center, a preview step that neither saves nor waits),
+  `PanelPresetsTests`, `PanelImagePlacementTests`, `PanelLetterboxTests` (the Black bars card for
+  an installed video only, the suggestion following the target display without a second probe,
+  staging the recomputed factor and refusing a stale card, file or selection),
+  `PanelCompatibilityTests`, `PanelWallpaperSettingsTests`, `PanelSceneRetryTests`,
+  `SceneReportsTests` and `WallpaperEditorStateTests` (locale scaling, invalid raw text,
+  independent drafts, held drag steps).
+- Steam Workshop and downloads: `PanelWorkshopActionsTests`, `PanelWorkshopSubscriptionsTests`,
+  `PanelWorkshopTileTests`, `PanelWorkshopUpdateTests`, `PanelDownloadActionsTests` (Download and
+  apply and the display it targets, retained requests, the account stage, secrets reaching only
+  the job that asks, pause, cancel, retry, clearing, logging out, locating a copy, reinstalling),
+  `PanelDownloadQueueTests` (the toolbar button's ring, speed, percent and time left, pixiv saves
+  in the shared list), `WorkshopSearchTriggerTests`, `WorkshopFilterCatalogTests`,
+  `WorkshopListStateTests`, `WorkshopBrowserModelTests` (the search pause, pasted links and bare ids,
+  sorts and filters, lists and authors, pagination that never navigates and clamps to Steam's page
+  limit, double clicks, the remembered scroll offset), `WorkshopPreviewCoordinatorTests` (stills
+  first, animations only for tiles on screen, released when hidden), `WorkshopInspectorTests`,
+  `WorkshopItemDownloadTests`, `TileDownloadStateTests`, `ResultPagerTests`, `DownloadsModelTests`
+  and `DownloadDialogResolutionTests` (the download dialog's stages, Not now, the hand-off card, a
+  rejected account, late failures, the first-run guide keeping its own sign-in), and
+  `WorkshopBrowserRenderTests` (the page, inspector, empty states, dialog stages and Downloads list
+  in every language at both sizes, shrinking with the inspector open, a tile's VoiceOver label, a
+  download that resumes or pauses with the Downloads list open redrawn in place).
+- Lazy lists: `scripts/tests/test_panel_lazy_lists.py` fails for a `LazyVStack`, `LazyHStack`,
+  `LazyVGrid`, `LazyHGrid` or `List` that draws more than one top-level `ForEach`, the shape that
+  kept a resumed download's row stale; a `ForEach` inside a separate subview is not seen by it.
+- pixiv: `PanelPixivActionsTests`, `PixivPanelStateTests`, `PixivBrowserModelTests`,
+  `PixivListSummaryTests` and `PixivBrowserRenderTests`; see [Pixiv](#pixiv).
+- Settings: `SettingsSearchTests` (matches, counts, folding disclosures, the panel's language, the
+  first-sentence note), `SettingsEditingModelTests` (a control shows its draft until its change
+  has run, a refusal snaps back and reaches the banner, controls wait while the Mac is busy except
+  the one whose change runs, appearance and language never wait, a new snapshot keeps disclosures
+  and the scroll position), `SettingsEntryControlsTests`, `QuickSettingsTileTests`,
+  `AppearanceSettingsTests`, `PanelGeneralSettingsTests`, `PanelPerformanceSettingsTests` (values
+  refused or clamped as their controls are, the condition choices, app rules, a mute from the menu
+  bar reaching the open panel), `PanelSettingsValuesTests`, `QualityPresetTests`,
+  `QualityReportTests`, `ConditionOverrideTests` (On battery names the strongest rule that
+  pauses or stops wallpapers on battery and nothing plugged in or already done by the choice,
+  each rule's row says In effect now, the published state reaches the panel's readers),
+  `PanelStorageActionsTests`, `StorageSettingsModelTests`,
+  `AboutSettingsTests`, `UpdatePresentationTests`, `PanelSupportPromptTests`,
+  `DisplaysSettingsModelTests`, `DisplaysSettingsDraftsTests`, `DisplaysRowLayoutTests`,
+  `PanelDisplayActionsTests`, `PanelDisplayLayoutActionsTests`, `PanelAutomationActionsTests`,
+  `PanelPlaylistActionsTests`, `PanelPlanActionsTests`, `PlaylistEditTests`,
+  `PanelHotKeyActionsTests`, `ShortcutsRecorderModelTests` (only the recording row takes a press, a
+  registered shortcut's press is read as its combination and never runs its action),
+  `LibrarySettingsPresentationTests`, `SettingsSectionsRenderTests` and `SettingsBRenderTests`
+  (every section in the narrowest and widest column, light and dark, in every language).
+- First-run guide and the one-time prompts: `FirstRunModelTests`, `FirstRunDraftTests`,
+  `SteamSignInPhaseTests`, `SupportPromptPresenterTests`, `WelcomeRenderTests` and
+  `PanelPerformanceDataTests` (the Settings switch round-trips and **Show in Finder** writes the
+  report it would send, the performance data question asked once of someone who finished the
+  guide earlier and answered from the presenter, the guide answering it only once its
+  Preferences page was shown and committing its switch as a draft); see
+  [first run](../features/first-run.md).
+- Sharing: `PanelSharingTests` (a Workshop wallpaper shares its Workshop page with the website,
+  any other id has no Share, the app is shared with the website in the panel's language, **Star on
+  GitHub** in About and in the star prompt open the repository and answer the star prompt).
 
-These checks are windowless; they do not prove desktop presentation or animation
-smoothness.
+Not covered: the Settings section list's selection highlight, the toolbar's glass and the tabs
+on it, popover placement, sheets on a real window, hover,
+pressed and focus rings, real pointer gestures (double clicks, modifier clicks, the hold-and-sweep
+and edge scrolling, slider drags; the logic behind each is tested through the models with a
+manual clock), the colour panel, Command-F in a real window, VoiceOver speech and reading order,
+Reduce Motion, animation smoothness and full-screen or Split View transitions. Those need an
+on-screen window and are on [manual-smoke.md](manual-smoke.md).
 
 ## Pixiv
 
-`Tests/Unit/Pixiv/`, `WebPanelPixivTests` and offscreen `ControlPanelPixivTests`
-cover decoding of pixiv's answer shapes, search and ranking addresses, ratings
+`Tests/Unit/Pixiv/` and the panel's pixiv classes (`PanelPixivActionsTests`,
+`PixivPanelStateTests`, `PixivBrowserModelTests`, `PixivListSummaryTests`,
+`PixivBrowserRenderTests`) cover decoding of pixiv's answer shapes, search and ranking addresses, ratings
 including R-18 and R-18G, request pacing, the session cookie reaching
 `https://www.pixiv.net` only, sign-in, log out, a keychain refusal and expiry
 against an in-memory store, resumable thumbnail and download transport, the
@@ -1083,10 +1139,14 @@ due rotation, a display the user emptied staying empty until a wallpaper, Change
 a relaunch finishing its shuffle round without a repeat, an unlock changing an
 unlock rotation once, waiting for a display that cannot play yet for 30 seconds at
 most, and leaving timed rotations, cleared displays and a hand-chosen wallpaper alone),
-`WebPanelPlaylistTests` and offscreen
-`ControlPanelPlaybackToolsTests` (drag and button sorting, keyboard focus,
-stale-drag rejection, escaped history titles, clearing only the target display, the
-Resume row in two languages, the How often menu's unlock choice).
+and in Panel `PanelPlaylistActionsTests` and `PanelPlanActionsTests` (settings reach the
+named display's playlist, values no control offers are refused, button and drag sorting
+with a stale drag refused, Resume, Change now, clearing only the named display's history,
+saved playlists), `PanelLibraryActionsTests` (Now Playing's Next wallpaper: a rotating
+playlist moves along, a display without one takes the library's next wallpaper),
+`DisplaysSettingsModelTests` (the Custom interval field, the Resume row, announced moves),
+`PlaylistEditTests` (the How often menu's unlock choice and named times) and
+`ShellModelTests` (Recently used clearing only the target display).
 What each covers: [playlists](../features/playlists.md#verification).
 
 ## Preview
@@ -1114,7 +1174,7 @@ its wallpaper after the change is stored, and a failed call announces nothing
 (`WallpaperPresetStoreTests` checks a preset's edits and apply do too).
 `LivePropertyEditingTests` — the desktop switch: off until chosen, either explicit value
 kept, kept per preference domain, announced on each write and out of backups.
-`WebPanelPropertyPreviewTests` — the panel's edits reaching the bridge's property preview
+`PanelPropertyPreviewTests` — the panel's edits reaching the bridge's property preview
 through a double bridge and a wait the test ends by hand: one update per burst and none with
 the switch off, every kind of draft edit followed, a wait that outlives the switch dropped,
 Apply and Revert dropping the waiting update (and Apply's own text commits starting none),
@@ -1124,7 +1184,7 @@ left alone, and a refused update logged rather than shown. The displays that may
 an edit (the ones showing the wallpaper and its mirrors, none while the update waits or the
 switch is off) are known until Revert, Apply, the switch or a deletion ends it, which also tells
 the app to take the desktop's picture again, and a wallpaper that could not be put back keeps
-them. The drags, `propertyPreview`:
+them. The drags (`previewProperty`):
 a step reaches the displays at once with its value and the other steps still on show, in a
 fixed order, and saves, flags and announces nothing as an edit; with the switch off it reaches
 only what follows the draft; it is refused for the values an edit is refused for (range,
@@ -1133,16 +1193,16 @@ slider or colour, a disabled or unknown property and a wallpaper the library lac
 bridge call and nothing held; it does not wait behind the running command; the edit that
 ends the drag, taken or refused, a restore of the property or of every default, Revert,
 Apply, another wallpaper's inspector and an Apply in progress each end the step so no update
-keeps showing it; and a refusal that repeats is logged once. `WebPanelPropertyDragPageTests`
-drives the page offscreen: five quick steps of a pointer drag show the first at once and the
-newest after the interval, the release saves the newest once and cancels a step still waiting,
-waits for the step already on its way, a drag that ends on its starting value or a cancelled
-pointer still saves the last value shown, a key press saves without showing a step, a
-colour's input events show steps that its change event saves while a single pick shows none,
-and another kind of control shows none. `WallpaperEditorStateTests` also covers the held
+keeps showing it; and a refusal that repeats is logged once. `DragStepPumpTests` and
+`InspectorSliderTests` cover the controls: quick steps of a pointer drag show the first at
+once and the newest after the interval, the release saves the newest once and drops a step
+still waiting, waits for the step already on its way, a drag that ends on its starting value
+or is cut off still saves the last value shown, a key press or a VoiceOver step saves
+without showing a step, a burst of colours is one drag that saves only the last while a
+single pick is saved after a quiet period without a step, and a switch saves without one. `WallpaperEditorStateTests` also covers the held
 steps: newest per property, one wallpaper's, never a draft, ended by a discard.
-`WebPanelGeneralSettingsTests`
-holds the setting action and snapshot key. The bridge's own bookkeeping is in the Rust
+`PanelGeneralSettingsTests`
+holds the setting (off by default, kept). The bridge's own bookkeeping is in the Rust
 `property_preview` tests ([renderer](renderer.md)).
 `WallpaperPreviewRequestTests` — installed-path bounds, symlink escape, stale
 manifests, resource checks, copying unapplied values without changing bridge
@@ -1150,8 +1210,8 @@ state, asking the bridge for the steps of a drag until it ends, and naming the p
 and files a preview holds. `WebWallpaperPreviewSurfaceTests`
 use real offscreen WebKit for typed properties, a second delivery changing only the
 edited property, a staged file keeping its value, isolated temporary storage and
-mute. `ControlPanelPreviewTests` drive
-the inspector action without opening a window, and `WallpaperPreviewLayoutTests`
+mute. `InspectorFlowTests` and `PanelLibraryActionsTests` drive
+the inspector's Preview action without opening a window, and `WallpaperPreviewLayoutTests`
 check the 480-point content view in English, Chinese and Japanese, the window size
 for 16:9, ultrawide, 4:3 and portrait displays on ordinary and tiny screens, and
 the stage (shape, centring, bars and the surface following it) without an
@@ -1161,7 +1221,7 @@ real window on a portrait or ultrawide display, scene or video first frames in
 that window, OS visibility events, and a real renderer taking the document in the
 preview window (the renderer's side is in
 [scene regressions](scene-regressions.md)); the visible follow, the feel and the rate of a
-drag under load, whether WebKit's colour picker sends input events while it is open, and a
+drag under load, whether the system colour panel's changes arrive as a drag while it is open, and a
 desktop following an edit on one or several displays, a mirror, after Revert and with the switch
 turned off, are in the [manual smoke](manual-smoke.md) and have not been run.
 
@@ -1193,25 +1253,14 @@ install and a no-login smoke run (see [README.md](README.md#opt-in-layers)).
 
 `SupportPromptStoreTests` — a downloaded wallpaper qualifies only after a
 successful activation, a pending prompt survives relaunch and further downloads,
-and a presented prompt never returns. Across the three prompts: one a day in
+and a presented prompt never returns. Across the four prompts: one a day in
 priority order, the performance data question only for someone who finished the
-guide without it, the star prompt after 14 days and 5 days of use (one day counts
+guide without it, the subscriptions offer only for someone signed in to Steam who
+finished the guide without meeting the import (spent by the guide's card or a Steam
+Community sign-in), the star prompt after 14 days and 5 days of use (one day counts
 once) and not after the star was chosen, and state saved by earlier builds still
 loads. `Support/` also holds the shared fixtures
 (`TemporaryDefaults`, `TestAppLanguage`, bridge snapshots).
-
-## SystemMedia
-
-`AdapterSystemMediaProviderTests`, `SystemMediaTransportTests`,
-`FallbackSystemMediaProviderTests`, `AppleScriptMediaProviderTests`,
-`MediaArtworkTests`, `SceneMediaSinkTests` and `SystemMediaEventCodecTests` run
-against fake streams, injected script results and a manual timer scheduler. They
-cover fragmented messages and timeline
-interpolation, consumer lifetime and late callbacks, unexpected exit without a
-restart loop, the adapter-to-AppleScript fallback, artwork caching and
-downscaling, the cleared cover reaching scenes before metadata, and the wire
-format. Not covered: a real player or OS version publishing every field
-([media integration](../features/media-integration.md#verification)).
 
 ## Telemetry
 
@@ -1234,6 +1283,19 @@ temporary spool folder. They cover:
 
 Not covered: the live website endpoint, and the energy cost of a frame window
 ([telemetry](../features/telemetry.md#frame-windows)).
+
+## SystemMedia
+
+`AdapterSystemMediaProviderTests`, `SystemMediaTransportTests`,
+`FallbackSystemMediaProviderTests`, `AppleScriptMediaProviderTests`,
+`MediaArtworkTests`, `SceneMediaSinkTests` and `SystemMediaEventCodecTests` run
+against fake streams, injected script results and a manual timer scheduler. They
+cover fragmented messages and timeline
+interpolation, consumer lifetime and late callbacks, unexpected exit without a
+restart loop, the adapter-to-AppleScript fallback, artwork caching and
+downscaling, the cleared cover reaching scenes before metadata, and the wire
+format. Not covered: a real player or OS version publishing every field
+([media integration](../features/media-integration.md#verification)).
 
 ## UserAssets
 
@@ -1273,7 +1335,9 @@ following (`WebWallpaperRenderScaleTests`, plus the render-scale cases of
 (`WebWallpaperMoveThrottleTests`, and the interval a page asks for in
 `WebWallpaperPageTests`), the opt-in Web Inspector switch
 (`WebWallpaperInspectionTests`, plus the running and new page cases of
-`WebWallpaperHostLifecycleTests`) and the screen-saver surface
+`WebWallpaperHostLifecycleTests`), `requestIdleCallback` where WebKit lacks it
+(`WebWallpaperIdleCallbackTests`), the Windows font names a page asks for drawn in macOS
+faces (`WebWallpaperFontAliasTests`) and the screen-saver surface
 (`ScreenSaverWebSurfaceTests`). Detail and limits:
 [web wallpapers](../features/web-wallpapers.md#verification).
 
@@ -1306,23 +1370,27 @@ following (`WebWallpaperRenderScaleTests`, plus the render-scale cases of
   unfiltered pages, age-rating sampling of collections, every subscription page
   read with the session, a page whose entries cannot be read failing instead of
   passing for empty, the store's back history, sign-in, ended session and
-  sign-out, and a pasted link or id: one tile that no sidebar filter hides, no
+  sign-out, the session saved for the next launch and removed with it, an expired
+  cookie renewed with Steam's renewal token before a read (and a refused renewal
+  ending the session; `SteamWebSessionTests` covers which token is kept and when a
+  cookie needs renewing), and a pasted link or id: one tile that no sidebar filter hides, no
   browse page read, failures on the normal retry path, other sources ignoring the
   id, and a browse page whose markup changed: listed from its links or the ids in
   its renamed data, an id Steam does not serve left out, paging estimates, the
   original failure when no item can be listed or Steam failed its own query, and
-  collections left alone. `WebPanelWorkshopSourceTests` (Panel) cover the panel's source
-  actions, sign-in through an injected window, refusing to download a
-  collection and the snapshot's `lookup` and `degraded` flags. Steam's real sign-in
+  collections left alone. `PanelWorkshopActionsTests` (Panel) cover the panel's source
+  actions, sign-in through an injected window, opening a collection rather than
+  downloading it, and the state's flags for an item looked up from a pasted link and a
+  list found on a page Steam changed. Steam's real sign-in
   window, a real lookup against Steam and a real changed page (the markup is
   fixture-built) are not covered.
 - `WorkshopThumbnailCacheTests` — one download per URL under concurrent requests,
   disk hits across instances, no cache entry after a failed fetch, the concurrency
   cap, oldest-first pruning, still-frame extraction from animated previews
   (skipping a black fade-in), animations relayed on their own lane, a cache that
-  keeps no animation writing stills only, and the source size limit. The scheme
-  handler refuses ids it has not announced and answers library covers as small
-  JPEGs only for images inside the library (`WebPanelAssetsTests`).
+  keeps no animation writing stills only, and the source size limit.
+  `PanelImagePipelineTests` (Panel) read library covers only for images inside the
+  library and fetch only https Steam previews.
 - `LibraryPreviewFetcherTests` — which files an Installed cover may be made from
   (inside the library, no symlink out, images only, size limit), a replaced
   preview getting a new cover, and the stamp in a cover's address changing with
@@ -1388,7 +1456,7 @@ and `WorkshopDownloadPersistenceTests`:
   left only after four seconds of history and not at the 99% cap, on an injected
   clock. `TransferEstimatorTests` cover the pace itself (smoothing, the stall
   floor, counters that start over, the 99-hour cap); the panel's wording of the
-  estimate is in `ControlPanelDiscoverTests`.
+  estimate is in `PanelDownloadQueueTests` and `DownloadsModelTests`.
 - Backup exclusion (`ClientPathsBackupTests`, `DownloaderSessionTests`,
   `WorkshopDownloadPersistenceTests`, `WallpaperImportStagingTests`): the saved
   sign-in folder, the staging of a running download or import, the folder of kept
@@ -1418,9 +1486,9 @@ and `WorkshopDownloadPersistenceTests`:
   getting a plain download; a scene waiting for its shared assets and being
   dropped with a note when their job ends without them; cancel and dismiss; a
   failed download; and a relaunch restoring the downloads but not the choice.
-  `WorkshopDownloadAndApplyPanelTests` covers what the panel accepts, and
-  `ControlPanelDiscoverTests` where the inspector offers the button and what it
-  says. Not covered: a real download followed by the apply (needs a Steam
+  `PanelDownloadActionsTests` covers what the panel accepts, and
+  `WorkshopInspectorTests` and `WorkshopItemDownloadTests` where the inspector offers
+  the button and what it says. Not covered: a real download followed by the apply (needs a Steam
   sign-in and a display), and the assets job's completion calling the same
   settle step (needs a finished SteamCMD job).
 
@@ -1430,13 +1498,13 @@ and `WorkshopDownloadPersistenceTests`:
 imports against `project.json` dates, non-Workshop ids never sent, results kept
 across a relaunch, a download making an item current, the daily limit and its
 switch, a failed check keeping what was known, and forgetting deleted items;
-`WebPanelWorkshopUpdateTests` — only an outdated wallpaper is marked and can be
+`PanelWorkshopUpdateTests` — only an outdated wallpaper is marked and can be
 updated, and a reinstall needs an installed wallpaper and the user's yes before
 Steam is asked; `ImportTests` covers the swap that replaces an installed tree,
 including a copy missing its entry file or with a manifest that does not parse,
 and a folder whose `project.json` is a link left alone;
-`ControlPanelLibraryTests` covers where the inspector and the Compatibility check
-offer Reinstall from Workshop. Not covered: the reload of a wallpaper on screen
+`InspectorPolicyTests` and `InspectorWordingTests` cover where the inspector and the
+Compatibility check offer Reinstall from Workshop. Not covered: the reload of a wallpaper on screen
 after its update or reinstall (needs a renderer), and a real reinstall (needs a
 Steam sign-in).
 

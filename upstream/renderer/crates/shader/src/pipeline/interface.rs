@@ -2,7 +2,7 @@ use smol_str::SmolStr;
 
 use crate::{
     ShaderDiagnostic, ShaderError, ShaderResult, ShaderStageKind, SourceSpan,
-    codegen::interface_array_size,
+    codegen::{declarations::builtins, interface_array_size},
     legalize::{
         InterfaceDirection, LegacyTypeName, StageInterfaceInitializer, StageInterfaceLayout,
         StageInterfaceLayoutBinding, SynthesizedStageInterface,
@@ -361,6 +361,10 @@ impl StageInterfaceBinding {
                 }
                 let ty = SmolStr::new(declaration.declaration_type()?.as_str());
                 let name = SmolStr::new(declaration.declaration_name()?.as_str());
+                // A redeclared builtin crosses no stage boundary of its own.
+                if builtins::is_restated(&name, &ty) {
+                    return None;
+                }
                 let size = declaration
                     .array_suffix()
                     .map(|suffix| interface_array_size(module, suffix.as_str(), declaration.span()))

@@ -2,9 +2,10 @@
 //
 // One TEST_P per category (pkg / texv / texi / texb / texture format /
 // mdlv / mdls / mdla). The parameter list comes from the corpus
-// singleton which walks workshop/* and harvests every version stamp
-// observed in the wild. Each test slices the corpus to entries
-// matching its parameter and asserts:
+// singleton which walks the workshop corpus (WorkshopRoot()) and harvests
+// every version stamp observed in the wild. Without a corpus no instance is
+// generated and CorpusSmoke skips, saying where it looked. Each test slices
+// the corpus to entries matching its parameter and asserts:
 //   * the slice is non-empty (otherwise the parameter wouldn't have
 //     been generated)
 //   * every matching asset satisfies category-specific structural
@@ -15,6 +16,7 @@
 // allow-list bumps required, but the new instance must still satisfy
 // the invariants below or it fails immediately.
 
+#include <filesystem>
 #include <set>
 #include <string>
 #include <vector>
@@ -125,6 +127,7 @@ TEST_P(ScenePkgVersionTest, AllWorkshopsParseAndExposeSaneScene) {
 INSTANTIATE_TEST_SUITE_P(
     All, ScenePkgVersionTest, ::testing::ValuesIn(AllPkgVersions()),
     [](const ::testing::TestParamInfo<std::string>& info) { return info.param; });
+GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(ScenePkgVersionTest);
 
 // ============================================================================
 // .tex header version stamps
@@ -192,6 +195,10 @@ INSTANTIATE_TEST_SUITE_P(
 INSTANTIATE_TEST_SUITE_P(
     All, TextureFormatTest, ::testing::ValuesIn(AllTexFormats()),
     [](const ::testing::TestParamInfo<int>& i) { return "F" + std::to_string(i.param); });
+GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(TextureTexvTest);
+GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(TextureTexiTest);
+GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(TextureTexbTest);
+GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(TextureFormatTest);
 
 // ============================================================================
 // .mdl header version stamps
@@ -211,8 +218,11 @@ static void CheckMdlInvariants(const Corpus::MdlRef& ref) {
     EXPECT_GE(m.value("mdlv", -1), 0);
     EXPECT_GE(m.value("mdls", -1), 0);
     EXPECT_GE(m.value("mdla", -1), 0);
+    // A parsed model has geometry. Its skeleton may be empty (a model
+    // without bones is drawn as a static mesh), but animations need bones.
     if (m.value("ok", false)) {
-        EXPECT_GT(m.value("bones", 0), 0);
+        EXPECT_GT(m.value("vertex_count", 0), 0);
+        if (m.value("anims", 0) > 0) EXPECT_GT(m.value("bones", 0), 0);
     }
 }
 
@@ -250,6 +260,9 @@ INSTANTIATE_TEST_SUITE_P(
 INSTANTIATE_TEST_SUITE_P(
     All, MdlMdlaTest, ::testing::ValuesIn(AllMdlaVersions()),
     [](const ::testing::TestParamInfo<int>& i) { return "Mdla" + std::to_string(i.param); });
+GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(MdlMdlvTest);
+GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(MdlMdlsTest);
+GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(MdlMdlaTest);
 
 // ============================================================================
 // Smoke: corpus must contain at least one workshop with at least one of
@@ -257,6 +270,11 @@ INSTANTIATE_TEST_SUITE_P(
 // ============================================================================
 
 TEST(CorpusSmoke, NonEmpty) {
+    const auto root = wallpaper::testing::WorkshopRoot();
+    if (! std::filesystem::is_directory(root)) {
+        GTEST_SKIP() << "no workshop corpus at " << root
+                     << "; set WALLPAPER_MACHINE_WORKSHOP_ROOT to a folder of <id>/scene.pkg";
+    }
     const auto& c = Corpus::instance();
     EXPECT_FALSE(c.entries().empty());
     EXPECT_FALSE(c.pkg_versions().empty());

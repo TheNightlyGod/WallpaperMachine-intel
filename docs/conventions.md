@@ -10,8 +10,10 @@ raise the conflict rather than reformatting someone else's code in passing.
   `ViewModels/`, `Views/ControlPanel/`, `Bridge/`, `Logging/`). Lock-screen
   extension code goes in `Extension/`, and only types both targets compile go in
   `Shared/`.
-- The web control panel lives in `WebUI/` and is bundled verbatim as the app
-  resource folder `WebUI`.
+- The control panel is SwiftUI in `App/Views/ControlPanel/`: one folder per area
+  (`Shell/`, `Library/`, `Inspector/`, `Discover/`, `Downloads/`, `Pixiv/`,
+  `Settings/`, `Welcome/`) beside the shared `Model/`, `Components/`, `Theme/`,
+  `Localization/` and `Images/`.
 - Third-party renderer sources stay under `upstream/renderer/`. Do not add
   first-party app code there, and do not change vendored sources without
   recording the revision in `upstream/provenance.json`.
@@ -59,17 +61,24 @@ Adding a new target, source directory, resource or build setting means editing
 - **Errors are typed values, not strings**: a small struct conforming to
   `LocalizedError`, or a coded issue such as `AppUpdateIssue(code:detail:)`.
   Report failures; never swallow them into a silent no-op.
-- **User-facing text is localized**: native strings use `String(localized:)` and
-  `App/Resources/Localizable.xcstrings` / `InfoPlist.xcstrings`. WebUI strings use
-  `t(source, params)` and one catalog module per language in `WebUI/locales/`,
-  registered in `WebUI/i18n.js`; static HTML uses `data-i18n` / `data-i18n-label`.
-  A new string goes into every shipped catalog in the same change; a new
-  language follows [localization.md](localization.md) and is declared in
-  `AppLanguage.supported`. Translate labels, never action identifiers, option
-  values, paths or third-party content. Escape translated text and interpolated
-  values at the HTML boundary; use named placeholders instead of assembling
-  sentences from English fragments. Missing keys fall back to their English
-  source. No hardcoded English in new UI strings.
+- **User-facing text is localized** through `App/Resources/Localizable.xcstrings`
+  (keys are the English source). AppKit menus, alerts and windows use
+  `String(localized:)`, which follows the language fixed at launch. Control-panel
+  strings follow the panel's live language instead: views write literals that
+  localize themselves (`Text("…")`, `Button("…")`, `Toggle("…")`,
+  `Label("…", systemImage:)`, `Section("…")`, `Picker("…")`, `Menu("…")`); APIs
+  that take a `String` (`.help`, `.navigationTitle`, `TextField` prompts,
+  `.accessibilityLabel`, alert text) and strings a model hands to a view use
+  `L("…")`; a phrase known only at run time (an author's combo label, a Steam
+  prompt) uses `PanelLocale.shared.catalogString(_:)`. A literal must equal its
+  catalog key exactly, interpolations included (`"\(count) wallpapers"` with an
+  `Int` is the key `%lld wallpapers`), or it renders English; a ternary of two
+  literals is a `String`, not a key. A new string goes into every shipped catalog
+  in the same change; a new language follows [localization.md](localization.md)
+  and is declared in `AppLanguage.supported`. Translate labels, never identifiers,
+  option values, paths or third-party content; write whole phrases with
+  placeholders instead of assembling sentences from English fragments. Missing
+  keys fall back to their English source. No hardcoded English in new UI strings.
 - **Log through `AppLog`** (`trace`/`debug`/`info`/`warn`/`error`), which routes
   into the in-app log view. Do not add `print` to app code.
 - **Paths come from `ClientPaths`.** Never hardcode `~/Library/Application
@@ -83,32 +92,84 @@ Adding a new target, source directory, resource or build setting means editing
   comments state a type's responsibility in one line. No commentary that restates
   the next statement.
 
-## Web control panel (`WebUI/`)
+## SwiftUI control panel
 
-- Plain ES modules, no bundler, no npm dependency, no build step: the files ship
-  exactly as written. Two-space indentation, single-quoted JavaScript strings.
-- The panel is served from the custom `mwe-ui:` scheme out of the bundled
-  resource folder, under a strict `Content-Security-Policy`
-  (`default-src 'none'; script-src 'self'; style-src 'self'`). That means no
-  inline `<script>`, no remote fonts or CDNs, and no network access from the
-  page. Fetching belongs in Swift.
-- Every value interpolated into markup goes through the module's `escapeHTML`
-  helper. Building HTML from unescaped model data is a defect, not a style
-  preference.
-- The page never calls native APIs directly: controls carry `data-action`
-  attributes, actions are dispatched to Swift over the reply-based script message
-  handler, and the panel re-renders from the snapshot it gets back. Swift
-  validates the message origin.
-- Colors, radii and surfaces come from the CSS custom properties defined in
-  `:root`; `theme.js` sets `data-theme`, `data-theme-mode` and `data-tone` on
-  `<html>` and injects contrast-fitted accent tokens. Never hardcode a hex value
-  in a component rule.
-- Icons are Lucide glyphs vendored in `WebUI/icons.js` (ISC, version noted in the
-  file header) and rendered through `panel.js`'s `icon(name)` helper. To add one, copy
-  its node list from the Lucide package under the panel's name; never hand-draw SVG
-  paths or load an icon font.
-- Keep the accessibility scaffolding: `aria-label` on landmarks, `role="alert"`
-  and `aria-live` on status regions, real `<button>`/`<dialog>` elements.
+How the panel runs (controller, actions, observation, window hosting) is in
+[architecture.md](architecture.md#control-panel-swiftui). The rules for code in
+`App/Views/ControlPanel/`:
+
+- **Typed actions only.** A view never writes to a store and never names an action
+  by string. It starts the controller's typed method through
+  `controller.launch(key, policy:) { try await controller.action(...) }`, which
+  reports a thrown error to the banner and lets the control disable itself while
+  `controller.isBusy(key)`; build keys with `PanelActionCoordinator.key(...)`. Use
+  `.latestWins` where a newer value must replace one still running (a search, a
+  property, a navigation), `.dropDuplicates` otherwise. A new action is an
+  `async throws` method in `Model/PanelController+<Group>.swift` that picks its
+  disposition with `run(_:slot:...)`; confirmations and file panels go through
+  `controller.dialogs`, never a direct `NSAlert` or `NSOpenPanel`.
+- **Typed state only.** What a view shows is a typed computed property or a small
+  value type with a `make(...)` factory on the controller or an area model, never a
+  dictionary. A getter that reads a store which is not `@Observable` reads its
+  `controller.revisions` counter first, or its view stops updating.
+- **Area views take no arguments.** A page, an inspector or a toolbar item reads
+  `@Environment(PanelController.self)`; its state lives in the controller or its area
+  model, which outlive a view that SwiftUI rebuilds.
+- **One `ForEach` per lazy list.** A `LazyVStack`, `LazyHStack`, `LazyVGrid`,
+  `LazyHGrid` or `List` draws its rows through a single `ForEach` over one ordered
+  list of stable ids (`DownloadQueue.entries`), never one `ForEach` per state or
+  section: an item that moves from one sibling `ForEach` to another under the same id
+  keeps the row drawn before, until the view is rebuilt. Build the order and the
+  sections in the model; a `ForEach` nested in another one's rows is fine.
+  `scripts/tests/test_panel_lazy_lists.py` enforces this.
+- **A choice says when something overrides it.** Where another setting or condition
+  can change what a choice does (a Reduced quality rule holding frames to 30 under a
+  **No limit** slider or a **Keep running** battery mode), every place that shows the
+  choice (its Quick Settings module, its full row, the Displays and inspector notes)
+  says so while it happens, names the setting that does it and opens that setting's
+  page. Never put an effect down to a setting that did not cause it. Work the reading
+  out once in the model from what the engine reports (`QualityReport`,
+  `FrameRateCeiling`), and test each surface with the overriding setting on.
+- **Untrusted text stays text.** Titles, descriptions, author and creator names,
+  Steam and pixiv data and error details are `Text(verbatim:)`. An author's property
+  label passes through the allowlist parser (`PropertyLabelDocument`) and never
+  becomes markup the panel does not draw itself. Every link goes through
+  `ExternalLink` and every image through a `PanelImageSource`.
+- **Strings** follow the panel's live language ([Swift](#swift), above, and
+  [localization.md](localization.md#the-panels-live-language)).
+- **Symbols are SF Symbols** (`Image(systemName:)`, `Label(_:systemImage:)`). The
+  Settings sections and the Quick Settings tiles draw a white filled symbol on a
+  coloured rounded square (`SymbolTile`), as System Settings does. Never copy
+  Apple's symbol artwork, or another icon set, into the repository.
+- **Colours** come from `\.panelTheme` (`AccentPalette`, `SurfacePalette`) or the
+  system's semantic colours; a view never hardcodes a colour value.
+- **Accessibility.** Every icon-only control has an accessibility label
+  (`L("…")`); an error or a status change is announced; the keyboard paths stay
+  (grid arrows, Home and End, Return and Space, the Escape chain, Command-F for the
+  page's search); controls the UI tests find carry a stable
+  `accessibilityIdentifier`. A composite control in a Settings row is
+  `.accessibilityElement(children: .contain)`, or the row's label lands on every
+  child.
+- **Selectable text** where people copy from it: the error banner, the inspectors,
+  the download dialog and the first-run guide. Put `.textSelection(.enabled)` on the
+  static text, not on a container, where it can swallow button clicks. The tabs,
+  the toolbar, tiles and Settings are not selectable.
+- **No per-frame or idle work.** Anything that animates on its own reads
+  `\.panelIsVisible` and Reduce Motion and stops when either says so; no timer runs
+  while the window is hidden; grids are lazy; nothing walks the library on a
+  download tick. A grid tile builds only what it shows: a control hidden with
+  `.opacity(0)` still costs its whole view tree in every tile, and scrolling builds
+  a row of tiles at every step, so it drops frames (keep it only while an assistive
+  technology needs to reach it, as the Installed tile's check and heart do). Model work that only a visible window needs is gated on
+  `controller.presentation.isVisible`.
+- **Layout in the detail column.** A page or an inspector takes the width it is
+  offered: wrap a page's root in a `GeometryReader` that hands its size back, end
+  padded flexible content with `.frame(minWidth: 0)`, use `PanelEmptyState` (not
+  `ContentUnavailableView`, which asks for about 260 points), and never put
+  `.fixedSize(horizontal: false, vertical: true)` on wrapping text there. Any
+  minimum width beside the open inspector makes AppKit throw "needing another
+  Update Constraints in Window pass" when the window shrinks to its floor; the
+  render tests that shrink the window catch it.
 
 ## Python scripts
 
@@ -152,6 +213,22 @@ The rules that bind every change:
 - Routine verification never controls the desktop, captures the screen, opens app
   windows, or changes the user's wallpapers. Desktop runs
   (`python3 scripts/test.py --ui`) happen only when explicitly requested.
+- Unit tests run inside the Debug app, which macOS treats as a new app after every
+  rebuild: a test never reads or writes under `~/Documents` (this repository, its
+  worktrees, `artifacts/`), because each access asks the user for Documents access.
+  Fixtures come from the test bundle or a temporary directory; probe output and
+  snapshots go to `FileManager.default.temporaryDirectory`. Nothing a test does may
+  reach the desktop either: opening an address, revealing in Finder, opening System
+  Settings and hiding the app go through `DesktopActions.current`, which the test
+  bundle's principal class (`Tests/Unit/Support/TestBundle.swift`) replaces with a
+  recorder before any test runs. New code that opens, reveals or hides uses it, never
+  `NSWorkspace.shared` or `NSApp.hide` directly.
+- Panel tests build the controller with `PanelTestCase.makeController(...)` or
+  `withPanel(...)` (temporary home, `TemporaryDefaults`, English, the welcome guide
+  already seen) and call the typed actions. Render tests host a view in an unordered
+  window from `ControlPanelWindow.make` or an `NSHostingView`, never order it front,
+  never set `NSApp.appearance`, and assert model state, sizes or the accessibility
+  tree rather than pixels.
 - A test that only pins wording, an implementation detail or an incidental
   default must be deleted, not re-pinned to the new text — regardless of who
   wrote it.

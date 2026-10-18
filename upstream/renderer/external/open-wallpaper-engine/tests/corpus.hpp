@@ -1,10 +1,10 @@
 // Test corpus index.
 //
-// Walks workshop/* once, dumps every entry that has a scene.pkg via
-// DumpWorkshop, and exposes lookup-by-version slices that the gtest
-// fixtures parameterise on. The corpus is built lazily on first access
-// (Meyer's singleton) so it's safe to call from INSTANTIATE_TEST_SUITE_P
-// at static-init time.
+// Walks the workshop corpus (WorkshopRoot()) once, dumps every entry that
+// has a scene.pkg via DumpWorkshop, and exposes lookup-by-version slices
+// that the gtest fixtures parameterise on. The corpus is built lazily on
+// first access (Meyer's singleton) so it's safe to call from
+// INSTANTIATE_TEST_SUITE_P at static-init time.
 //
 // Skipped workshops (e.g. ones that hang WPMdlParser::Parse) are listed
 // in corpus.cpp's kSkipIds and never parsed.
@@ -18,6 +18,11 @@
 #include <nlohmann/json.hpp>
 
 namespace wallpaper::testing {
+
+// Folder of workshop items, one <id>/scene.pkg each:
+// WALLPAPER_MACHINE_WORKSHOP_ROOT, or workshop/ beside the renderer sources.
+// Neither ships with the repository, so tests skip when it is missing.
+std::string WorkshopRoot();
 
 struct WorkshopEntry {
     std::string    id;

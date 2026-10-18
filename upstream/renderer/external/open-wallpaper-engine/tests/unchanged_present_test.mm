@@ -9,6 +9,7 @@
 // playback timeline is the one the unskipped path produces.
 
 #include "Core/RendererCounters.hpp"
+#include "Scene/SceneResolution.hpp"
 #include "Scene/SceneWallpaper.hpp"
 #include "Scene/SceneWallpaperSurface.hpp"
 #include "VulkanRender/StaticSubgraphCache.hpp"
@@ -30,6 +31,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -103,11 +105,23 @@ struct PosterProbe
     bool                    requested { false };
     int                     delivered { 0 };
     std::vector<uint8_t>    pixels;
+    /// What the renderer bound for the host to poke it with. A renderer that
+    /// can only answer from inside a frame never needs it; the native one
+    /// answers an idle wallpaper's request from the request itself.
+    std::function<void()>   wake;
 
-    void Request()
+    /// Asks for a poster. `wake_renderer` also pokes the renderer the way the
+    /// host's mailbox does, which a request that wants an answer from a scene
+    /// that is not drawing has to do; without it the request waits for a frame.
+    void Request(bool wake_renderer = false)
     {
-        std::scoped_lock lock(mutex);
-        requested = true;
+        std::function<void()> poke;
+        {
+            std::scoped_lock lock(mutex);
+            requested = true;
+            if (wake_renderer) poke = wake;
+        }
+        if (poke) poke();
     }
     bool WaitDelivered(int count)
     {
@@ -208,6 +222,24 @@ std::filesystem::path WriteSliderScene(const std::filesystem::path& root)
               R"("objects":[{"id":1,"name":"card","image":"models/card.json",)"
               R"("origin":[192,128,0],"scale":[1,1,1],"angles":[0,0,0],"visible":true,)"
               R"("alpha":{"user":"opacity","value":1.0}}]})");
+    return project;
+}
+
+/// The static card grown to the whole 384 x 256 canvas, in a colour that spells
+/// out the raster it was drawn into: the shader reads the texel size the
+/// renderer reports, which is the raster's. Canvas-sized, the texel size times
+/// the canvas is exactly 1 on both axes.
+std::filesystem::path WriteRasterProbeScene(const std::filesystem::path& root)
+{
+    const auto project = WriteStaticScene(root);
+    WriteText(root / "models/card.json",
+              R"({"width":384,"height":256,"material":"materials/card.json"})");
+    WriteText(root / "shaders/card.frag",
+              "uniform vec2 g_TexelSize;\n"
+              "varying vec2 v_TexCoord;\n"
+              "void main() {\n"
+              "gl_FragColor = vec4(g_TexelSize.x * 384.0, g_TexelSize.y * 256.0, 0.0, 1.0);\n"
+              "}\n");
     return project;
 }
 
@@ -398,6 +430,10 @@ private:
             return create(instance, &create_info, nullptr, surface);
         };
         auto poster       = m_poster;
+        info.bind_poster_wake = [poster](std::function<void()> wake) {
+            std::scoped_lock lock(poster->mutex);
+            poster->wake = std::move(wake);
+        };
         info.wants_poster = [poster] {
             std::scoped_lock lock(poster->mutex);
             const bool wanted = poster->requested;
@@ -780,6 +816,68 @@ TEST_F(UnchangedPresent, AHistoryLoopKeepsTheClockRunningWithoutATimeUniform)
     }
 }
 
+// The 2D scene resolution is a process-wide choice with no message of its own:
+// the host sets it and re-sends the render scale every open scene already has,
+// and a running scene resizes its targets in place, on either renderer, with
+// nothing reloaded. The scene's own shader reports the raster it was drawn
+// into, so the poster says what was rasterized rather than what was asked for.
+TEST_F(UnchangedPresent, ARunningSceneTakesTheResolutionTheHostChoosesOnBothRenderers)
+{
+    struct Restore
+    {
+        ~Restore() { SetSceneResolution(SceneResolution::Canvas); }
+    } restore;
+    const auto project = WriteRasterProbeScene(root_ / "probe");
+
+    for (const bool native : { false, true }) {
+        SCOPED_TRACE(native ? "native Metal" : "compatibility");
+        SetSceneRendererPreference(native ? SceneRendererPreference::NativeMetalPreferred
+                                          : SceneRendererPreference::Compatibility);
+        SetSceneResolution(SceneResolution::Canvas);
+        RunningWallpaper running(project, root_ / (native ? "native" : "compat"));
+        ASSERT_TRUE(running.WaitForFirstFrame());
+        ASSERT_EQ(running.wallpaper().sceneBackendSelection().backend == SceneBackend::NativeMetal,
+                  native)
+            << running.wallpaper().sceneBackendSelection().fallback_reason;
+
+        // The colour at the middle of the 1280 x 720 poster.
+        int delivered = 0;
+        const auto centre = [&]() -> int {
+            running.poster().Request(true);
+            if (! running.poster().WaitDelivered(++delivered)) return -1;
+            std::scoped_lock lock(running.poster().mutex);
+            const auto&      pixels = running.poster().pixels;
+            if (pixels.size() != 1280u * 720u * 4u) return -2;
+            const auto* middle = pixels.data() + (360u * 1280u + 640u) * 4u;
+            // Blue is 0 in either byte order, red and green are equal.
+            return std::max({ int(middle[0]), int(middle[1]), int(middle[2]) });
+        };
+        // The host's push: the choice, then the render scale it already had.
+        const auto choose = [&](SceneResolution resolution, float scale, int expected) {
+            SetSceneResolution(resolution);
+            running.wallpaper().setPropertyFloat(PROPERTY_RENDER_SCALE, scale);
+            int seen = -1;
+            for (int attempt = 0; attempt < 40; ++attempt) {
+                std::this_thread::sleep_for(100ms);
+                seen = centre();
+                if (std::abs(seen - expected) <= 2) break;
+            }
+            return seen;
+        };
+
+        EXPECT_EQ(centre(), 255) << "a scene starts at the canvas it was authored at";
+        // 1280 x 720 filled with a 384 x 256 canvas is 1280 x 853 pixels, and the
+        // texel size times the canvas is then 0.3 on both axes.
+        EXPECT_NEAR(choose(SceneResolution::Display, 1.0f, 76), 76, 2);
+        // The render scale divides the display raster: 640 x 427, and 0.6.
+        EXPECT_NEAR(choose(SceneResolution::Display, 0.5f, 153), 153, 2);
+        EXPECT_NEAR(choose(SceneResolution::Canvas, 0.5f, 255), 255, 2)
+            << "the canvas at half scale is 192 x 128, which saturates";
+        EXPECT_NEAR(choose(SceneResolution::Canvas, 1.0f, 255), 255, 2);
+        EXPECT_EQ(running.wallpaper().surfaceHealth().failed_frames, 0u);
+    }
+}
+
 // A property edit shown on the running scene, with nothing reloaded, reaches the
 // surface through the ordinary frame loop: a still scene whose passes are all
 // reused presents the new picture once and goes back to repeating, and a scene
@@ -1091,6 +1189,12 @@ TEST_F(UnchangedPresent, LocalProjectEnergyIsMeasuredHeadlessly)
         std::getenv("WE_TEST_ENERGY_RENDERER") != nullptr ? std::getenv("WE_TEST_ENERGY_RENDERER")
                                                           : "compatibility";
     const bool native = renderer == "native";
+    // The 2D scene resolution the run draws at, and the backing scale of the
+    // surface it draws on: a 3456 x 2234 surface at 2 is a laptop panel.
+    const char* resolution_name = std::getenv("WE_TEST_ENERGY_RESOLUTION");
+    const bool  display =
+        resolution_name != nullptr && std::string_view(resolution_name) == "display";
+    const double scale_factor = number("WE_TEST_ENERGY_SCALE_FACTOR", 1.0);
     const double warmup  = number("WE_TEST_ENERGY_WARMUP", 5.0);
     const double window  = number("WE_TEST_ENERGY_SECONDS", 20.0);
     const auto   width   = static_cast<uint16_t>(number("WE_TEST_ENERGY_WIDTH", 1920));
@@ -1104,6 +1208,11 @@ TEST_F(UnchangedPresent, LocalProjectEnergyIsMeasuredHeadlessly)
     vulkan::SetSceneOptimizationEnabled(true);
     SetSceneRendererPreference(native ? SceneRendererPreference::NativeMetalPreferred
                                       : SceneRendererPreference::Compatibility);
+    SetSceneResolution(display ? SceneResolution::Display : SceneResolution::Canvas);
+    struct RestoreResolution
+    {
+        ~RestoreResolution() { SetSceneResolution(SceneResolution::Canvas); }
+    } restore_resolution;
 
     std::mutex              mutex;
     std::condition_variable changed;
@@ -1132,6 +1241,7 @@ TEST_F(UnchangedPresent, LocalProjectEnergyIsMeasuredHeadlessly)
     info.height           = height;
     info.render_width     = width;
     info.render_height    = height;
+    info.display_scale_factor = scale_factor;
     info.surface_info.instanceExts = { VK_KHR_SURFACE_EXTENSION_NAME,
                                        VK_EXT_METAL_SURFACE_EXTENSION_NAME };
     info.surface_info.createSurfaceOp = [handle](VkInstance instance, VkSurfaceKHR* surface) {
@@ -1170,7 +1280,8 @@ TEST_F(UnchangedPresent, LocalProjectEnergyIsMeasuredHeadlessly)
     const double seconds = std::chrono::duration<double>(after.at - before.at).count();
     const uint64_t completed = after.health.frames_completed - before.health.frames_completed;
     const uint64_t presented = after.health.frames_presented - before.health.frames_presented;
-    std::cout << "ENERGY {\"renderer\":\"" << renderer << "\",\"backend\":\""
+    std::cout << "ENERGY {\"renderer\":\"" << renderer << "\",\"resolution\":\""
+              << (display ? "display" : "canvas") << "\",\"backend\":\""
               << (selection.backend == SceneBackend::NativeMetal ? "native" : "compatibility")
               << "\",\"seconds\":" << seconds
               << ",\"cpu_seconds\":" << (after.cpu_seconds - before.cpu_seconds)

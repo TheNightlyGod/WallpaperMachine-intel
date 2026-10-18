@@ -77,14 +77,32 @@ public:
     void configure(id<MTLDevice> device);
 
     /// Graph compile time. One source per key; keys that are not video
-    /// textures are ignored. False with an error means the whole scene falls
+    /// textures are ignored. A key whose source `hold` set aside is not opened
+    /// again, nor is its media read again: the source is given the scene's clock
+    /// as it is and carries on. False with an error means the whole scene falls
     /// back to the compatibility backend.
     bool prepare(Scene& scene, const std::vector<std::string>& texture_keys, std::string* error);
 
-    /// Drops the sources and the textures. Frames a command buffer may still be
-    /// reading are kept alive by that command buffer's completion handler, not
-    /// by this object, so calling this mid-flight is safe.
+    /// Drops the open sources and the textures. Frames a command buffer may still
+    /// be reading are kept alive by that command buffer's completion handler, not
+    /// by this object, so calling this mid-flight is safe. Sources set aside by
+    /// `hold` are not touched: `closeHeld` ends them.
     void release();
+
+    /// The first half of a graph rebuilt under a playing scene: sets the open
+    /// sources aside, with the textures and the demand released as `release`
+    /// does, so that the next `prepare` takes back the ones its keys name. A
+    /// source is the decoder's open file, its thread and the frames it has
+    /// decoded ahead, which is what a video costs to open and why its clip
+    /// would otherwise start again at the head. Only for a graph that the same
+    /// scene is about to compile again: a key names the same media there.
+    void hold();
+
+    /// Closes the sources `hold` set aside and `prepare` did not take back, which
+    /// are the videos the new graph no longer uses. The compile that follows a
+    /// `hold` ends with it, however it ends, and the renderer calls it itself
+    /// when it refuses the compile before it begins.
+    void closeHeld();
 
     [[nodiscard]] bool owns(const std::string& key) const;
     [[nodiscard]] bool empty() const;

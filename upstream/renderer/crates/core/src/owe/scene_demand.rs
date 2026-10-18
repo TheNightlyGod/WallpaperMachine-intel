@@ -246,6 +246,46 @@ impl SceneRendererPreference {
     }
 }
 
+/// How many pixels a 2D scene is rasterized with, before the internal render
+/// scale divides them.
+///
+/// A scene with an authored canvas has the choice; a perspective scene already
+/// rasterizes at the output size and a plain video keeps its frame's own size,
+/// so neither reads it. Either way the canvas stays the source of layout,
+/// cursor mapping and every coordinate a script sees: only the render targets'
+/// pixel sizes differ.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum SceneResolution {
+    /// The authored canvas, whatever the display is. The picture is stretched
+    /// to the display when it is presented, which is the cheapest choice and
+    /// the softest on a display with more pixels than the canvas.
+    #[default]
+    Canvas,
+    /// The size the canvas is presented at on the display, which is what
+    /// Wallpaper Engine rasterizes.
+    Display,
+}
+
+impl SceneResolution {
+    /// Raw value for `owe_set_scene_resolution`.
+    #[must_use]
+    pub const fn as_raw(self) -> i32 {
+        match self {
+            Self::Canvas => 0,
+            Self::Display => 1,
+        }
+    }
+
+    /// Stable lowercase name used by config and the panel.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Canvas => "canvas",
+            Self::Display => "display",
+        }
+    }
+}
+
 /// One running scene's live update state and backend.
 ///
 /// `update_mode` and `backend` are `Option` because "running but not readable"
@@ -417,6 +457,20 @@ impl SceneVideoPath {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_resolution_values_are_the_ones_the_renderer_header_declares() {
+        use crate::owe::sys;
+        assert_eq!(
+            SceneResolution::Canvas.as_raw(),
+            sys::owe_scene_resolution_OWE_SCENE_RESOLUTION_CANVAS as i32
+        );
+        assert_eq!(
+            SceneResolution::Display.as_raw(),
+            sys::owe_scene_resolution_OWE_SCENE_RESOLUTION_DISPLAY as i32
+        );
+        assert_eq!(SceneResolution::default(), SceneResolution::Canvas);
+    }
 
     #[test]
     fn an_unrecognised_reason_bit_is_kept_and_named() {

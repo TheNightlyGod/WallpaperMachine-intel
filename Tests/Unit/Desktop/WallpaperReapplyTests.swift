@@ -165,61 +165,6 @@ final class WallpaperReapplyTests: XCTestCase {
     }
 }
 
-/// The inspector's play button, driven through the real panel: its Reapply restarts the
-/// wallpaper, and everything else that chooses the shown wallpaper again leaves it running.
-@MainActor
-final class WallpaperReapplyPanelTests: ControlPanelTestCase {
-    private func withTransferPanel(
-        _ body: (PanelFixture, DisplayTransferTestBridge, ReapplyLog) async throws -> Void
-    ) async throws {
-        let bridge = DisplayTransferTestBridge(noPointer: .init())
-        let store = BridgeStore(bridge: bridge)
-        let log = ReapplyLog()
-        store.activationLogWriter = { line, isFailure in log.add(line, isFailure: isFailure) }
-        let panel = try PanelFixture(store: store, bridge: bridge, displayTitles: .renderer)
-        do {
-            try bridge.installProjects(in: panel.library)
-            try await store.refreshAllAsync()
-            try await panel.start()
-            try await panel.finishWelcome()
-            panel.navigation.selection = .wallpaper
-            panel.show()
-            try await body(panel, bridge, log)
-        } catch { await panel.shutdown(); throw error }
-        await panel.shutdown()
-    }
-
-    func testOnlyTheInspectorsReapplyRestartsTheShownWallpaper() async throws {
-        try await withTransferPanel { panel, bridge, log in
-            try await panel.waitJS("document.querySelector('#inspector [data-action=\"reapplyWallpaper\"][data-id=\"a\"]')")
-            // Wallpaper "a" is shown on the target display, so the button restarts it.
-            try await panel.expectJS("return document.querySelector('#inspector [data-action=\"activate\"]') === null", equals: true)
-
-            _ = try await panel.js("document.querySelector('#inspector [data-action=\"reapplyWallpaper\"]').click()")
-            try await panel.waitUntil(timeout: 5) { bridge.applications.contains { $0 == ("primary", "a") } }
-            XCTAssertEqual(bridge.ejections.map { "\($0.0)/\($0.1)" }, ["primary/a"])
-            XCTAssertEqual(bridge.assignments["primary"], "a")
-
-            // A wallpaper the display does not show is applied, not restarted.
-            _ = try await panel.js("document.querySelector('#wallpaper-grid [data-action=\"select\"][data-id=\"c\"]').click()")
-            try await panel.waitJS("document.querySelector('#inspector [data-action=\"activate\"][data-id=\"c\"]')")
-            _ = try await panel.js("document.querySelector('#inspector [data-action=\"activate\"]').click()")
-            try await panel.waitUntil(timeout: 5) { bridge.assignments["primary"] == "c" }
-            XCTAssertEqual(bridge.ejections.count, 1)
-
-            // A double-click on the tile of the shown wallpaper keeps it running.
-            log.entries.removeAll()
-            _ = try await panel.js("""
-              document.querySelector('#wallpaper-grid [data-action="select"][data-id="c"]')
-                .dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 2 }));
-              """)
-            try await panel.waitUntil(timeout: 5) { log.entries.contains { $0.text.contains("wallpaper c display primary origin user noOp") } }
-            XCTAssertEqual(bridge.ejections.count, 1, "Only Reapply restarts a wallpaper")
-            XCTAssertEqual(bridge.applications.filter { $0 == ("primary", "c") }.count, 1)
-        }
-    }
-}
-
 final class ReapplyLog {
     struct Entry {
         let text: String

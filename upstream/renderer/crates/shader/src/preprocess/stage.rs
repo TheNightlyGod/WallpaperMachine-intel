@@ -5,6 +5,7 @@ use std::fmt::Write as _;
 use super::{
     ConditionalError, ConditionalExpression, ConditionalMode, ConditionalStack, DirectiveLocation,
     MacroName, MacroTable,
+    lighting::{LIGHTING_V1, lighting_v1_source},
 };
 use crate::{
     IncludePath, ShaderDiagnostic, ShaderError, ShaderResult, ShaderSourceProvider,
@@ -257,7 +258,17 @@ where
             } else {
                 self.handle_conditional_boundary(directive, conditionals, context, line_number)?;
             }
-        } else if !directive.is_require() && conditionals.is_active() {
+        } else if directive.is_require() {
+            // Wallpaper Engine writes what a `#require` names in at its line;
+            // anything it names that is not generated here is dropped.
+            if conditionals.is_active()
+                && self.conditional_mode == ConditionalMode::Evaluate
+                && directive.body_text().trim() == LIGHTING_V1
+                && let Some(lighting) = lighting_v1_source(&self.macros)
+            {
+                output.push_str(&lighting);
+            }
+        } else if conditionals.is_active() {
             writeln!(output, "#{}", directive.raw_text()).map_err(|error| {
                 self.parse_error(format!("failed to write preprocessed source: {error}"))
             })?;

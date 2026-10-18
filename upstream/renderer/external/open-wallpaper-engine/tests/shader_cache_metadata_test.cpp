@@ -14,13 +14,18 @@
 #include <string_view>
 #include <vector>
 
+#include <unistd.h>
+
 namespace wallpaper
 {
 namespace
 {
 
 std::filesystem::path MakeTempDir() {
-    auto root = std::filesystem::temp_directory_path() / "wpe-shader-cache-metadata-test";
+    // Per process: concurrent runs share the temporary directory, and this
+    // folder is deleted before and after use.
+    auto root = std::filesystem::temp_directory_path() /
+                ("wpe-shader-cache-metadata-test-" + std::to_string(::getpid()));
     std::error_code ec;
     std::filesystem::remove_all(root, ec);
     std::filesystem::create_directories(root / "cache", ec);
@@ -104,6 +109,13 @@ TEST(ShaderCacheMetadataTest, CacheHitStillPopulatesActiveTextureSlots) {
     GTEST_SKIP() << "Rust shader staticlib was not linked";
 #else
     const auto temp = MakeTempDir();
+    struct RemoveOnExit {
+        std::filesystem::path path;
+        ~RemoveOnExit() {
+            std::error_code ec;
+            std::filesystem::remove_all(path, ec);
+        }
+    } remove_on_exit { temp };
     WPShaderParser::ClearProgramCache();
     WPShaderParser::ResetStartupMetrics();
 

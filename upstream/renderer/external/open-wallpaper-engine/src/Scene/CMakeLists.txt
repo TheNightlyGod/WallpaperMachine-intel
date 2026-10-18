@@ -6,6 +6,7 @@ STATIC
 Scene.cpp
 SceneBackendSelection.cpp
 SceneUpdateDemand.cpp
+SceneResolution.cpp
 SceneCamera.cpp
 SceneImageEffectLayer.cpp
 SceneIndexArray.cpp

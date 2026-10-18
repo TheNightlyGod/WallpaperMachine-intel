@@ -1,8 +1,9 @@
 #pragma once
 #include "WPJson.hpp"
+#include "WPMiscObject.hpp"
 #include <nlohmann/json.hpp>
-#include <vector>
-#include "WPPuppet.hpp"
+#include <array>
+#include <string>
 
 namespace wallpaper
 {
@@ -14,39 +15,29 @@ class VFS;
 namespace wpscene
 {
 
-class WPLightObject {
+/// A scene light. Transform, parent, visibility and their bindings are read as
+/// for any other object; `color`, `intensity`, `radius` and `exponent` may be
+/// bound to a user property, a script or (intensity) a timeline, so their raw
+/// settings are kept beside the authored values.
+class WPLightObject : public WPMiscObjectBase {
 public:
     bool                 FromJson(const nlohmann::json&, fs::VFS&);
-    int32_t              id { 0 };
-    std::string          name;
-    std::array<float, 3> origin { 0.0f, 0.0f, 0.0f };
-    std::array<float, 3> scale { 1.0f, 1.0f, 1.0f };
-    std::array<float, 3> angles { 0.0f, 0.0f, 0.0f };
-    std::array<float, 2> parallaxDepth { 0.0f, 0.0f };
     std::array<float, 3> color { 1.0f, 1.0f, 1.0f };
     std::string          light;
     float                radius { 1000.0f };
     float                intensity { 1.0f };
-    bool                 visible { true };
-    std::vector<int32_t> dependencies;
-    nlohmann::json       field_bindings;
+    float                exponent { 2.0f };
+    float                innercone { 20.0f };
+    float                outercone { 30.0f };
+    std::array<float, 3> controlpoint { 2.0f, 0.0f, 0.0f };
+    bool                 castshadow { false };
+    bool                 usecookie { false };
+    bool                 castvolumetrics { false };
+    nlohmann::json       color_setting;
+    nlohmann::json       radius_setting;
+    nlohmann::json       intensity_setting;
+    nlohmann::json       exponent_setting;
 };
 
 } // namespace wpscene
 } // namespace wallpaper
-  /*
-          {
-              "angles" : "0.00000 0.00000 0.00000",
-              "color" : "1.00000 0.95686 0.87451",
-              "id" : 237,
-              "intensity" : 0.5,
-              "light" : "point",
-              "locktransforms" : false,
-              "name" : "",
-              "origin" : "611.30676 302.13736 2000.00000",
-              "parallaxDepth" : "0.00000 0.00000",
-              "radius" : 3000.0,
-              "scale" : "1.00000 1.00000 1.00000",
-              "visible" : true
-          },
-  */

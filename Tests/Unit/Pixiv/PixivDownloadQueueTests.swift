@@ -244,46 +244,6 @@ final class LockedFlag: @unchecked Sendable {
     }
 }
 
-/// Holds every image request until opened, optionally retaining cancellation cleanup too.
-final class PixivGate: @unchecked Sendable {
-    private let lock = NSLock()
-    private let finishesOnCancellation: Bool
-    private var isOpen = false
-    private var held: [UUID: CheckedContinuation<Void, Error>] = [:]
-    var waiting: Int { lock.withLock { held.count } }
-
-    init(finishesOnCancellation: Bool = true) {
-        self.finishesOnCancellation = finishesOnCancellation
-    }
-
-    func pass() async throws {
-        let id = UUID()
-        try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                let resume: Bool = lock.withLock {
-                    if isOpen || Task.isCancelled { return true }
-                    held[id] = continuation
-                    return false
-                }
-                if resume { continuation.resume() }
-            }
-        } onCancel: {
-            guard finishesOnCancellation else { return }
-            lock.withLock { held.removeValue(forKey: id) }?.resume(throwing: CancellationError())
-        }
-        try Task.checkCancellation()
-    }
-
-    func open() {
-        let released: [CheckedContinuation<Void, Error>] = lock.withLock {
-            isOpen = true
-            defer { held.removeAll() }
-            return Array(held.values)
-        }
-        for continuation in released { continuation.resume() }
-    }
-}
-
 struct PixivGatedTransport: PixivTransport {
     let gate: PixivGate
 

@@ -9,8 +9,9 @@ namespace wallpaper
 ScriptedDynamicValue::ScriptedDynamicValue(
     SceneRuntimeContext& runtime, std::string script_source, std::string current_layer_name,
     std::map<std::string, DynamicValueUniquePtr> script_properties, DynamicValue base_value,
-    ScriptedValueSemantic semantic)
+    ScriptedValueSemantic semantic, int animation_layer_index)
     : m_runtime(&runtime),
+      m_registry(runtime.ScriptedValueRegistryToken()),
       m_current_layer_name(std::move(current_layer_name)),
       m_script_properties(std::move(script_properties)),
       m_semantic(semantic) {
@@ -31,7 +32,8 @@ ScriptedDynamicValue::ScriptedDynamicValue(
                                                                       std::move(raw_properties),
                                                                       std::move(base_value),
                                                                       m_runtime->hostContext(),
-                                                                      program_semantic);
+                                                                      program_semantic,
+                                                                      animation_layer_index);
 
     for (auto& [name, property] : m_script_properties) {
         (void)name;
@@ -42,14 +44,27 @@ ScriptedDynamicValue::ScriptedDynamicValue(
     }
 }
 
-ScriptedDynamicValue::~ScriptedDynamicValue() = default;
+ScriptedDynamicValue::~ScriptedDynamicValue() {
+    // The runtime lists every scripted value it should tick and tear down; one
+    // that is destroyed first takes itself off the list.
+    if (! m_registry.expired()) m_runtime->UnregisterScriptedValue(this);
+}
 
 void ScriptedDynamicValue::reevaluate() {
     if (m_runtime->ProjectPropertiesChanging() || m_program == nullptr || ! m_program->Valid()) return;
 
     // update(value) continues from the previous result, including explicit property writes.
+    SceneRuntimeContext::OwnTextWrite own_text_write(*m_runtime, *this);
     auto result = m_program->Evaluate(m_runtime->hostContext(), *this);
-    if (m_program->Capabilities().update && result != nullptr) DynamicValue::update(*result);
+    if (! m_program->Capabilities().update || result == nullptr) return;
+    // The text script that writes its own layer's text and returns nothing has
+    // decided the text: the current value would put the string it started with
+    // back over the write.
+    if (own_text_write.Written().has_value() && ! m_program->UpdateReturnedValue()) {
+        DynamicValue::update(*own_text_write.Written());
+    } else {
+        DynamicValue::update(*result);
+    }
 }
 
 void ScriptedDynamicValue::ApplyProjectProperties(const ProjectProperties& project_properties,
@@ -101,6 +116,18 @@ void ScriptedDynamicValue::DispatchMediaEventJson(std::string_view event_json) {
     if (m_program != nullptr) {
         m_program->DispatchMediaEventJson(event_json);
     }
+}
+
+void ScriptedDynamicValue::DispatchResizeScreen(const ScriptHostContext& host_context) {
+    if (m_program != nullptr) m_program->DispatchResizeScreen(host_context);
+}
+
+void ScriptedDynamicValue::DispatchGeneralSettings(const ScriptHostContext& host_context) {
+    if (m_program != nullptr) m_program->DispatchGeneralSettings(host_context);
+}
+
+void ScriptedDynamicValue::Destroy() {
+    if (m_program != nullptr) m_program->Destroy();
 }
 
 } // namespace wallpaper

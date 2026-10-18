@@ -18,6 +18,16 @@ namespace wallpaper
 namespace
 {
 
+// Removes a MakeTempDir folder when the test is done with it, so repeated runs
+// do not leave one folder per test in the shared temporary directory.
+struct RemoveOnExit {
+    std::filesystem::path path;
+    ~RemoveOnExit() {
+        std::error_code ec;
+        std::filesystem::remove_all(path, ec);
+    }
+};
+
 std::filesystem::path MakeTempDir() {
     const auto* test_info = ::testing::UnitTest::GetInstance()->current_test_info();
     std::string test_name = "unknown";
@@ -54,6 +64,7 @@ bool CompileFragmentShader(std::string fragment_source, Combos combos = {}) {
     return false;
 #else
     const auto temp = MakeTempDir();
+    RemoveOnExit remove_on_exit { temp };
     fs::VFS    vfs;
     MountAssets(vfs, temp);
 
@@ -202,6 +213,7 @@ TEST(RustShaderBridgeCompat, InPlaceIncludeOrderingPreservesMacroVisibility) {
     GTEST_SKIP() << "Rust shader staticlib was not linked";
 #else
     const auto temp = MakeTempDir();
+    RemoveOnExit remove_on_exit { temp };
     WriteText(temp / "assets" / "shaders" / "compat_defs.h", "#define INCLUDED_TINT vec4(0.2, 0.4, 0.6, 1.0)\n");
     fs::VFS vfs;
     MountAssets(vfs, temp);
@@ -410,6 +422,7 @@ TEST(RustShaderBridgeCompat, GenericRopeParticleGeometrySourceDiscoveryRemainsDi
     GTEST_SKIP() << "Rust shader staticlib was not linked";
 #else
     const auto temp = MakeTempDir();
+    RemoveOnExit remove_on_exit { temp };
     WriteText(temp / "assets" / "shaders" / "genericropeparticle.vert", R"(
 in vec3 a_Position;
 varying vec2 v_TexCoord;

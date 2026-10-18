@@ -5,6 +5,7 @@
 #include "Video/VideoDecodePump.hpp"
 #include "Video/VideoFramePacing.hpp"
 #include "Video/VideoMetadata.hpp"
+#include "Video/VideoSeekPolicy.hpp"
 #include "Platform/Apple/FfmpegVideoInterop.hpp"
 #include "Utils/Logging.h"
 #include "Utils/Sha.hpp"
@@ -244,6 +245,37 @@ bool ProbeStreamDimensions(AVStream* stream, uint32_t* width, uint32_t* height, 
 }
 
 #if defined(__APPLE__)
+AVPixelFormat AppleHardwarePixelFormat(const AVCodec* codec)
+{
+    for (int index = 0;; ++index) {
+        const AVCodecHWConfig* config = avcodec_get_hw_config(codec, index);
+        if (config == nullptr) return AV_PIX_FMT_NONE;
+        if ((config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX) != 0 &&
+            config->device_type == AV_HWDEVICE_TYPE_VIDEOTOOLBOX) {
+            return config->pix_fmt;
+        }
+    }
+}
+
+const AVCodec* SelectAppleHardwareDecoder(const AVCodec* preferred, AVPixelFormat* pixel_format)
+{
+    *pixel_format = AppleHardwarePixelFormat(preferred);
+    if (*pixel_format != AV_PIX_FMT_NONE) return preferred;
+
+    // FFmpeg's default can be software-only even when another decoder for the
+    // same codec supports VideoToolbox (libdav1d versus native AV1, for example).
+    // Search only at open, and keep the same hardware capability requirement.
+    void* iterator = nullptr;
+    while (const AVCodec* candidate = av_codec_iterate(&iterator)) {
+        if (candidate->id != preferred->id || !av_codec_is_decoder(candidate)) continue;
+        const auto format = AppleHardwarePixelFormat(candidate);
+        if (format == AV_PIX_FMT_NONE) continue;
+        *pixel_format = format;
+        return candidate;
+    }
+    return nullptr;
+}
+
 AVPixelFormat SelectAppleHardwareFormat(AVCodecContext* context, const AVPixelFormat* formats)
 {
     if (context == nullptr || formats == nullptr) return AV_PIX_FMT_NONE;
@@ -444,10 +476,13 @@ public:
             requestSeekLocked(desired_absolute_seconds);
         }
 
-        const double forward_resync_threshold =
-            std::max(1.0, m_frame_duration_seconds * static_cast<double>(kDecodedFrameQueueCapacity) * 2.0);
-        if (!m_display_frame_ready ||
-            desired_absolute_seconds > latestBufferedAbsoluteLocked() + forward_resync_threshold) {
+        const double forward_resync_threshold = ForwardResyncSeconds(
+            m_frame_duration_seconds, static_cast<double>(kDecodedFrameQueueCapacity),
+            m_seek_landing_lag_seconds);
+        if (!seekInFlightCoversLocked(desired_absolute_seconds, backward_threshold,
+                                      forward_resync_threshold) &&
+            (!m_display_frame_ready ||
+             desired_absolute_seconds > latestBufferedAbsoluteLocked() + forward_resync_threshold)) {
             requestSeekLocked(desired_absolute_seconds);
         }
         // A seek requested above, or a display frame just cleared, is work the
@@ -734,6 +769,13 @@ private:
             avformat_close_input(&format_context);
             return SetError(error, "failed to find FFmpeg decoder for video stream");
         }
+#if defined(__APPLE__)
+        codec = SelectAppleHardwareDecoder(codec, &m_hw_pixel_format);
+        if (codec == nullptr) {
+            avformat_close_input(&format_context);
+            return SetError(error, "FFmpeg decoder does not advertise VideoToolbox hardware decode");
+        }
+#endif
 
         AVCodecContext* codec_context = avcodec_alloc_context3(codec);
         if (codec_context == nullptr) {
@@ -749,22 +791,6 @@ private:
         }
 
 #if defined(__APPLE__)
-        m_hw_pixel_format = AV_PIX_FMT_NONE;
-        for (int index = 0;; ++index) {
-            const AVCodecHWConfig* config = avcodec_get_hw_config(codec, index);
-            if (config == nullptr) break;
-            if ((config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX) != 0 &&
-                config->device_type == AV_HWDEVICE_TYPE_VIDEOTOOLBOX) {
-                m_hw_pixel_format = config->pix_fmt;
-                break;
-            }
-        }
-        if (m_hw_pixel_format == AV_PIX_FMT_NONE) {
-            avcodec_free_context(&codec_context);
-            avformat_close_input(&format_context);
-            return SetError(error, "FFmpeg decoder does not advertise VideoToolbox hardware decode");
-        }
-
         codec_context->get_format = SelectAppleHardwareFormat;
         codec_context->opaque = &m_hw_pixel_format;
         if (!CreateVideoToolboxDeviceContext(&m_hw_device_context, error)) {
@@ -900,9 +926,32 @@ private:
     {
         m_requested_seek_absolute_seconds = std::max(0.0, absolute_seconds);
         m_seek_requested = true;
+        m_seek_awaiting_frame = true;
+        m_seek_requested_at = std::chrono::steady_clock::now();
         ++m_seek_ticket;
         ++m_seek_request_count;
         clearPendingFramesLocked();
+    }
+
+    [[nodiscard]] double secondsSinceSeekRequestedLocked() const
+    {
+        return std::chrono::duration<double>(std::chrono::steady_clock::now() - m_seek_requested_at).count();
+    }
+
+    /// Whether a seek that has been asked for and has not yet delivered a frame
+    /// is still fetching what the clock wants (`SeekOnItsWayCoversClock`).
+    ///
+    /// Asked for on every call of a draw, a seek that takes longer than the time
+    /// between two draws, as one of a large clip does, would never land, and the
+    /// display would stay on the frame it had.
+    [[nodiscard]] bool seekInFlightCoversLocked(double desired_absolute_seconds,
+                                                double backward_slack,
+                                                double forward_slack) const
+    {
+        if (!m_seek_awaiting_frame) return false;
+        return SeekOnItsWayCoversClock(m_requested_seek_absolute_seconds, desired_absolute_seconds,
+                                       secondsSinceSeekRequestedLocked(), m_playback_state.rate,
+                                       backward_slack, forward_slack);
     }
 
     [[nodiscard]] bool displayFrameCoversDesiredLocked(double desired_absolute_seconds) const
@@ -1059,6 +1108,11 @@ private:
             return;
         }
 
+        if (m_seek_awaiting_frame) {
+            m_seek_awaiting_frame = false;
+            m_seek_landing_lag_seconds =
+                ClockRunOnSeconds(secondsSinceSeekRequestedLocked(), m_playback_state.rate);
+        }
         frame_slot.frame.generation = m_next_generation++;
         ++m_decoded_frame_count;
         // Evidence for pacing comes from here, where a real decoded timestamp
@@ -1170,6 +1224,12 @@ private:
     DecodedFrameSlot                 m_display_frame {};
     bool                             m_display_frame_ready { false };
     bool                             m_seek_requested { false };
+    /// Set by a seek request and cleared by the first frame decoded for it.
+    bool                             m_seek_awaiting_frame { false };
+    std::chrono::steady_clock::time_point m_seek_requested_at {};
+    /// How far behind the clock the last seek that landed left its first frame:
+    /// the clip's time that passed while it was being fetched.
+    double                           m_seek_landing_lag_seconds { 0.0 };
     double                           m_requested_seek_absolute_seconds { 0.0 };
     uint64_t                         m_seek_ticket { 0 };
     bool                             m_running { false };

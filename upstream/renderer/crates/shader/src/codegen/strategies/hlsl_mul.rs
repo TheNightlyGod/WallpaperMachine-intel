@@ -26,6 +26,11 @@ static HLSL_MUL_POLICY: CodegenStrategy = CodegenStrategy {
 
 impl Emitable for HlslMulStrategy {
     fn emit(&self, context: &mut StrategyContext<'_, '_, '_>) -> ShaderResult<()> {
+        // Source-defined helpers take precedence over compatibility builtins.
+        // Call-like token facts include their declarations and prototypes too.
+        if context.context().declarations.has_user_function("mul") {
+            return Ok(());
+        }
         let tokens = context.context().module.token_stream().cursor();
         let facts = context.context().module.token_facts();
         let mut fixups = Vec::new();

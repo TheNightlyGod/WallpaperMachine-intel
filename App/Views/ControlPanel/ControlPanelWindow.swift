@@ -5,10 +5,13 @@ import AppKit
 /// `contentMinSize` alone does not hold: once the SwiftUI hosting controller attaches, it
 /// resets the window's content minimum to zero even with `sizingOptions = []`, so the
 /// window delegate clamps every user resize through `clampedFrameSize` instead.
+///
+/// The window carries no chrome of its own. The hosted page's `.toolbar` (the tabs and the
+/// trailing tools) and `.navigationTitle` reach the window through the hosting controller's
+/// `sceneBridgingOptions`; a manually assigned `NSToolbar` would fight them.
 @MainActor
 enum ControlPanelWindow {
-    /// Smallest content area the bundled panel lays out without overflow; the web page's
-    /// `body` min-width and the panel layout tests use the same figure.
+    /// Smallest content area the panel lays out without clipping; the layout tests use it too.
     static let minimumContentSize = NSSize(width: 760, height: 560)
     static let initialContentSize = NSSize(width: 1240, height: 800)
     static let frameAutosaveName = "WallpaperMachineMainWindow"
@@ -21,18 +24,12 @@ enum ControlPanelWindow {
             defer: false
         )
         window.title = "WallpaperMachine"
-        // In windowed mode, the page draws its top bar in the title-bar strip. An empty
-        // unified toolbar aligns the traffic lights with the tabs; the page reads their
-        // inset from the snapshot and handles dragging itself.
-        window.titleVisibility = .hidden
-        window.titlebarAppearsTransparent = true
-        window.toolbarStyle = .unified
-        let titlebarSpacer = NSToolbar(identifier: "WallpaperMachineTitlebar")
-        titlebarSpacer.showsBaselineSeparator = false
-        window.toolbar = titlebarSpacer
         window.delegate = delegate
         window.isReleasedWhenClosed = false
-        window.contentViewController = PanelContentController(hosted: contentViewController)
+        window.contentViewController = contentViewController
+        // Attaching a controller sizes the window to its view, which a hosting controller with
+        // `sizingOptions = []` has not laid out yet.
+        window.setContentSize(initialContentSize)
         window.contentMinSize = minimumContentSize
         moveToActiveSpace(window)
         return window
@@ -44,9 +41,8 @@ enum ControlPanelWindow {
     /// their all-Spaces behavior.
     ///
     /// Flags are inserted and removed, never assigned, so the full-screen capability and the
-    /// window-cycle flags a window already has survive (`windowDidEnterFullScreen` relies on
-    /// them). `.canJoinAllSpaces` leaves because AppKit raises when it meets
-    /// `.moveToActiveSpace`.
+    /// window-cycle flags a window already has survive. `.canJoinAllSpaces` leaves because AppKit
+    /// raises when it meets `.moveToActiveSpace`.
     static func moveToActiveSpace(_ window: NSWindow) {
         var behavior = window.collectionBehavior
         behavior.subtract([.managed, .canJoinAllSpaces])
@@ -59,23 +55,6 @@ enum ControlPanelWindow {
     static func bringForward(_ window: NSWindow) {
         if window.isMiniaturized { window.deminiaturize(nil) }
         window.makeKeyAndOrderFront(nil)
-    }
-
-    /// Keeps the web navigation out from under AppKit's opaque full-screen title bar,
-    /// including in Split View. Apply after a completed transition so cancellation
-    /// leaves the previous layout intact.
-    static func setFullScreenLayout(_ isFullScreen: Bool, for window: NSWindow) {
-        let frame = window.frame
-        if isFullScreen {
-            window.toolbar?.isVisible = false
-            window.styleMask.remove(.fullSizeContentView)
-        } else {
-            window.styleMask.insert(.fullSizeContentView)
-            window.toolbar?.isVisible = true
-        }
-        // Changing fullSizeContentView otherwise resizes the frame to preserve content
-        // height, which would move it outside its full-screen tile or restored bounds.
-        if window.frame != frame { window.setFrame(frame, display: false) }
     }
 
     /// The frame size the window may not shrink below: the minimum content size plus
@@ -110,27 +89,4 @@ enum ControlPanelWindow {
     private static func visibleFrame(for window: NSWindow) -> NSRect? {
         (window.screen ?? NSScreen.main ?? NSScreen.screens.first)?.visibleFrame
     }
-}
-
-/// Keep the window's content coordinates unflipped while SwiftUI and WebKit retain
-/// their own coordinate systems. WebKit's native color popover uses a window-space
-/// rect as a content-view frame (https://bugs.webkit.org/show_bug.cgi?id=300025).
-@MainActor
-private final class PanelContentController: NSViewController {
-    init(hosted: NSViewController) {
-        super.init(nibName: nil, bundle: nil)
-        view = NSView(frame: NSRect(origin: .zero, size: ControlPanelWindow.initialContentSize))
-        addChild(hosted)
-        let hostedView = hosted.view
-        hostedView.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(hostedView)
-        NSLayoutConstraint.activate([
-            hostedView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            hostedView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            hostedView.topAnchor.constraint(equalTo: view.topAnchor),
-            hostedView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-        ])
-    }
-
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 }

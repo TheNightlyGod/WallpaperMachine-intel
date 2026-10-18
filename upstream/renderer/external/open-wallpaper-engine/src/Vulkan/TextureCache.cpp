@@ -62,6 +62,14 @@ VkFilter ToVkType(wallpaper::TextureFilter sam) {
     }
 }
 
+// Only a texture whose file asks for point sampling picks its mip level by
+// point; see `TextureSample::mipFilter`.
+VkSamplerMipmapMode ToVkMipmapMode(const wallpaper::TextureSample& sam) {
+    using namespace wallpaper;
+    return sam.mipFilter == TextureFilter::NEAREST ? VK_SAMPLER_MIPMAP_MODE_NEAREST
+                                                   : VK_SAMPLER_MIPMAP_MODE_LINEAR;
+}
+
 VkSamplerCreateInfo GenRenderTargetSamplerInfo() {
     return VkSamplerCreateInfo {
         .sType                   = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
@@ -141,7 +149,7 @@ VkSamplerCreateInfo GenSamplerInfo(TextureKey key) {
                                        .pNext            = nullptr,
                                        .magFilter        = ToVkType(sam.magFilter),
                                        .minFilter        = (ToVkType(sam.minFilter)),
-                                       .mipmapMode       = VK_SAMPLER_MIPMAP_MODE_LINEAR,
+                                       .mipmapMode       = ToVkMipmapMode(sam),
                                        .addressModeU     = (ToVkType(sam.wrapS)),
                                        .addressModeV     = (ToVkType(sam.wrapT)),
                                        .addressModeW     = (ToVkType(sam.wrapT)),
@@ -156,9 +164,14 @@ VkSamplerCreateInfo GenSamplerInfo(TextureKey key) {
     return sampler_info;
 }
 
+/// Moves a new image out of UNDEFINED into `layout`. With `zero`, a colour
+/// image is cleared to transparent black on the way: a new image holds
+/// whatever its memory last held, which is neither black nor the same on
+/// every GPU, and a target read before anything writes it would start from
+/// that.
 VkResult TransImgLayout(const vvk::Queue& queue, vvk::CommandBuffer& cmd,
                         const ImageParameters& image, VkImageLayout layout,
-                        VkFence fence = VK_NULL_HANDLE) {
+                        VkFence fence = VK_NULL_HANDLE, bool zero = false) {
     VkResult result;
     do {
         result = cmd.Begin(VkCommandBufferBeginInfo {
@@ -177,18 +190,39 @@ VkResult TransImgLayout(const vvk::Queue& queue, vvk::CommandBuffer& cmd,
             .baseArrayLayer = 0,
             .layerCount     = VK_REMAINING_ARRAY_LAYERS,
         };
-        {
-            VkImageMemoryBarrier out_bar {
+        if (zero) {
+            VkImageMemoryBarrier clear_bar {
                 .sType            = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
                 .pNext            = nullptr,
                 .srcAccessMask    = 0,
-                .dstAccessMask    = VK_ACCESS_MEMORY_READ_BIT,
+                .dstAccessMask    = VK_ACCESS_TRANSFER_WRITE_BIT,
                 .oldLayout        = VK_IMAGE_LAYOUT_UNDEFINED,
-                .newLayout        = layout,
+                .newLayout        = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                 .image            = image.handle,
                 .subresourceRange = subresourceRange,
             };
             cmd.PipelineBarrier(VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                0,
+                                clear_bar);
+            const VkClearColorValue transparent {};
+            cmd.ClearColorImage(
+                image.handle, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &transparent, subresourceRange);
+        }
+        {
+            VkImageMemoryBarrier out_bar {
+                .sType            = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                .pNext            = nullptr,
+                .srcAccessMask    = zero ? VkAccessFlags(VK_ACCESS_TRANSFER_WRITE_BIT) : 0,
+                .dstAccessMask    = VK_ACCESS_MEMORY_READ_BIT,
+                .oldLayout        = zero ? VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
+                                         : VK_IMAGE_LAYOUT_UNDEFINED,
+                .newLayout        = layout,
+                .image            = image.handle,
+                .subresourceRange = subresourceRange,
+            };
+            cmd.PipelineBarrier(zero ? VK_PIPELINE_STAGE_TRANSFER_BIT
+                                     : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                                 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                                 VK_DEPENDENCY_BY_REGION_BIT,
                                 out_bar);
@@ -753,6 +787,7 @@ std::size_t TextureKey::HashValue(const TextureKey& k) {
     utils::hash_combine(seed, (int)k.sample.wrapT);
     utils::hash_combine(seed, (int)k.sample.magFilter);
     utils::hash_combine(seed, (int)k.sample.minFilter);
+    utils::hash_combine(seed, (int)k.sample.mipFilter);
     return seed;
 }
 
@@ -783,26 +818,22 @@ ImageSlotsRef TextureCache::CreateTex(Image& image) {
     return CreateTex(image, TextureUploadSynchronization::Blocking);
 }
 
-ImageSlotsRef TextureCache::CreateTex(Image& image, TextureUploadSynchronization synchronization) {
+ImageSlotsRef TextureCache::CreateTex(Image& image, const video::VideoPlaybackState& video_state) {
+    return CreateTex(image, TextureUploadSynchronization::Blocking, video_state);
+}
+
+ImageSlotsRef TextureCache::CreateTex(Image& image, TextureUploadSynchronization synchronization,
+                                      const video::VideoPlaybackState& video_state) {
     if (m_device_lost) {
         LOG_ERROR("cannot create texture after device loss");
         return {};
     }
     if (image.header.isVideo) {
-        if (exists(m_video_tex_map, image.key)) {
-            ImageSlotsRef ref;
-            if (auto* current = m_video_tex_map.at(image.key)->current_frame; current != nullptr) {
-                ref.slots  = { ImageParameters(current->image) };
-                for (const auto& owner : m_video_tex_map.at(image.key)->imported_frames) {
-                    if (owner.get() == current) {
-                        ref.video_frame_owner = owner;
-                        break;
-                    }
-                }
-                ref.active = 0;
-            }
-            return ref;
-        }
+        // Open already, or set aside by the rebuild that this is the compile of.
+        // A pass that asked `FindVideoTex` first never gets here for one: this is
+        // for an image that was read before the cache was asked, or under a name
+        // other than the one it is bound by.
+        if (auto open = FindVideoTex(image.key, video_state)) return std::move(*open);
 
         std::string error;
         // Goes through the registry rather than straight to the factory: when
@@ -817,7 +848,7 @@ ImageSlotsRef TextureCache::CreateTex(Image& image, TextureUploadSynchronization
                       error.c_str());
             return {};
         }
-        return CreateVideoTex(image, std::move(source));
+        return CreateVideoTex(image, std::move(source), video_state);
     }
 
     if (auto cached = m_tex_map.find(image.key); cached != m_tex_map.end()) {
@@ -857,7 +888,7 @@ ImageSlotsRef TextureCache::CreateTex(Image& image, TextureUploadSynchronization
             .pNext                   = nullptr,
             .magFilter               = ToVkType(sam.magFilter),
             .minFilter               = (ToVkType(sam.minFilter)),
-            .mipmapMode              = VK_SAMPLER_MIPMAP_MODE_LINEAR,
+            .mipmapMode              = ToVkMipmapMode(sam),
             .addressModeU            = (ToVkType(sam.wrapS)),
             .addressModeV            = (ToVkType(sam.wrapT)),
             .addressModeW            = (ToVkType(sam.wrapT)),
@@ -948,8 +979,50 @@ std::optional<ImageSlotsRef> TextureCache::FindTex(std::string_view key) const {
     return ImageSlotsRef(cached->second);
 }
 
+ImageSlotsRef TextureCache::currentVideoSlots(const VideoTex& video_tex) const {
+    ImageSlotsRef ref;
+    if (auto* current = video_tex.current_frame; current != nullptr) {
+        ref.slots = { ImageParameters(current->image) };
+        for (const auto& owner : video_tex.imported_frames) {
+            if (owner.get() == current) {
+                ref.video_frame_owner = owner;
+                break;
+            }
+        }
+        ref.active = 0;
+    }
+    return ref;
+}
+
+std::optional<ImageSlotsRef> TextureCache::FindVideoTex(
+    std::string_view key, const video::VideoPlaybackState& video_state) {
+    if (m_device_lost) return std::nullopt;
+    if (const auto open = m_video_tex_map.find(key); open != m_video_tex_map.end()) {
+        return currentVideoSlots(*open->second);
+    }
+    const auto held = m_held_video_tex_map.find(key);
+    if (held == m_held_video_tex_map.end()) return std::nullopt;
+
+    // The decoder carries on from the frame it had, given the scene's clock as it is
+    // now; it is not opened again, so it has no seek to the clock to make when the
+    // rebuild took less than the second a frame is let to lag.
+    const std::string name(key);
+    m_video_tex_map[name] = std::move(held->second);
+    m_held_video_tex_map.erase(held);
+    ImageSlotsRef ref;
+    std::string   error;
+    if (! UpdateVideoFrame(name, video_state, &ref, &error)) {
+        LOG_ERROR("video texture \"%s\" did not survive the rebuild, opening it again: %s",
+                  name.c_str(), error.c_str());
+        m_video_tex_map.erase(name);
+        return std::nullopt;
+    }
+    return ref;
+}
+
 ImageSlotsRef TextureCache::CreateVideoTex(
-    Image& image, std::shared_ptr<video::VideoTextureSource> source) {
+    Image& image, std::shared_ptr<video::VideoTextureSource> source,
+    const video::VideoPlaybackState& video_state) {
     if (m_device_lost || !source || exists(m_video_tex_map, image.key)) {
         LOG_ERROR("cannot register video texture \"%s\"", image.key.c_str());
         return {};
@@ -965,7 +1038,10 @@ ImageSlotsRef TextureCache::CreateVideoTex(
     video_tex->source = std::move(source);
     m_video_tex_map[image.key] = std::move(video_tex);
     ImageSlotsRef ref;
-    if (!UpdateVideoFrame(image.key, video::VideoPlaybackState {}, &ref, &error)) {
+    // The first update gives the source the scene's clock, which is not the head
+    // of the clip when the graph is built again under a playing video: the seek to
+    // it starts now, and the head of the clip is on offer until it lands.
+    if (!UpdateVideoFrame(image.key, video_state, &ref, &error)) {
         LOG_ERROR("failed to import initial video frame for \"%s\": %s",
                   image.key.c_str(), error.c_str());
         m_video_tex_map.erase(image.key);
@@ -1222,11 +1298,20 @@ std::optional<VmaImageParameters> TextureCache::CreateTex(TextureKey tex_key) {
                             ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
                             : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 
+        // A target starts empty, as on the Metal backend: an effect's history
+        // buffer that the frame reads before it draws, or an input nothing
+        // draws, must read as nothing on its first frame. Only single-sample
+        // colour images are sampled; depth and multisampled colour are not.
+        // Once, here, where the allocation already waits for the GPU: no
+        // frame pays for it.
+        const bool zero = ! is_depth && planned_samples == VK_SAMPLE_COUNT_1_BIT;
         if (! m_tex_cmd) allocateCmd();
         TransImgLayout(m_device.graphics_queue().handle,
                        m_tex_cmd,
                        image_paras,
-                       final_layout);
+                       final_layout,
+                       VK_NULL_HANDLE,
+                       zero);
         image_paras.layout = final_layout;
 
         VVK_CHECK_ACT(break, m_device.handle().WaitIdle());
@@ -1521,6 +1606,7 @@ void TextureCache::DiscardAfterDeviceLoss() noexcept {
     m_video_frame_pins.clear();
     m_video_frame_state = VideoFrameState::Idle;
     m_video_tex_map.clear();
+    m_held_video_tex_map.clear();
     m_tex_map.clear();
     m_retired_runtime_textures.clear();
     m_query_map.clear();
@@ -1528,7 +1614,18 @@ void TextureCache::DiscardAfterDeviceLoss() noexcept {
     m_sampler_cache.clear();
 }
 
-bool TextureCache::Clear(std::string* error) {
+bool TextureCache::Clear(std::string* error) { return clearCache(false, error); }
+
+bool TextureCache::ClearForRebuild(std::string* error) { return clearCache(true, error); }
+
+void TextureCache::CloseHeldVideos() {
+    m_held_video_tex_map.clear();
+    // The last word on which videos the new graph has open, for a rebuild that left
+    // the last of them out as much as for one that kept it.
+    publishVideoSourceIdentity();
+}
+
+bool TextureCache::clearCache(bool hold_videos, std::string* error) {
     if (m_device_lost) return SetError(error, "cannot clear texture cache after device loss");
     if (m_video_frame_state != VideoFrameState::Idle) {
         LOG_ERROR("cannot clear texture cache before video frame retirement");
@@ -1538,6 +1635,18 @@ bool TextureCache::Clear(std::string* error) {
     // Weak deleters attached to old owners cannot reach a newly created pool.
     m_video_destination_pool.reset();
     m_tex_map.clear();
+    if (hold_videos) {
+        // The decoder, and what is counted of it. The frames imported from it are
+        // images of the device this graph drew with and go with the graph.
+        for (auto& [key, video_tex] : m_video_tex_map) {
+            if (video_tex == nullptr || video_tex->source == nullptr) continue;
+            video_tex->current_frame = nullptr;
+            video_tex->imported_frames.clear();
+            m_held_video_tex_map.insert_or_assign(key, std::move(video_tex));
+        }
+    } else {
+        m_held_video_tex_map.clear();
+    }
     m_video_tex_map.clear();
     m_query_texs.clear();
     m_query_map.clear();

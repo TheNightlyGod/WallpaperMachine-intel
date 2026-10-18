@@ -268,14 +268,14 @@ final class WorkshopSourceTests: XCTestCase {
     try await store.signInToSteamWeb { nil }
     XCTAssertNil(store.steamWebSession)
     do {
-      try await store.signInToSteamWeb { "not-a-session" }
+      try await store.signInToSteamWeb { WebSignInCookies(session: "not-a-session") }
       XCTFail("A cookie that is not a Steam session must be refused")
     } catch {}
     XCTAssertNil(store.steamWebSession)
 
     fixture.subscriptionPages = [1: subscriptionsHTML(ids: ["1"], total: "1")]
     fixture.details = ["1": detailsRow("1", tags: ["Scene", "Everyone"])]
-    try await store.signInToSteamWeb { "\(Self.author)||0123456789abcdef0123" }
+    try await store.signInToSteamWeb { WebSignInCookies(session: "\(Self.author)||0123456789abcdef0123") }
     try await finished(store)
     XCTAssertEqual(store.items.map(\.id), ["1"])
     XCTAssertNil(store.errorMessage)
@@ -293,12 +293,88 @@ final class WorkshopSourceTests: XCTestCase {
     XCTAssertFalse(store.hasLoaded)
 
     fixture.subscriptionPages = [1: subscriptionsHTML(ids: ["1"], total: "1")]
-    try await store.signInToSteamWeb { "\(Self.author)||0123456789abcdef0123" }
+    try await store.signInToSteamWeb { WebSignInCookies(session: "\(Self.author)||0123456789abcdef0123") }
     try await finished(store)
     store.signOutOfSteamWeb()
     XCTAssertNil(store.steamWebSession)
     XCTAssertEqual(store.items, [])
     XCTAssertFalse(store.hasLoaded)
+  }
+
+  /// The Steam Community session outlives the app: a sign-in is saved, the next launch takes it
+  /// back and reads subscriptions with it, and signing out, or Steam ending it, forgets it there too.
+  func testTheSteamCommunitySessionIsSavedForTheNextLaunchAndForgottenWithIt() async throws {
+    let access = SteamWebFixtures.cookie(SteamWebFixtures.token(expiresIn: 3600))
+    let refresh = SteamWebFixtures.cookie(SteamWebFixtures.token(expiresIn: 86_400, salt: "r"))
+    try await fixture.store.signInToSteamWeb { WebSignInCookies(session: access, companion: refresh) }
+    XCTAssertEqual(fixture.webSessions.session?.cookie, access)
+    XCTAssertNotNil(fixture.webSessions.session?.refreshToken)
+
+    let relaunched = fixture.relaunchedStore()
+    defer { relaunched.cancelSearch() }
+    XCTAssertNil(relaunched.steamWebSession, "nothing is read before the launch asks for it")
+    fixture.subscriptionPages = [1: subscriptionsHTML(ids: ["1"], total: "1")]
+    fixture.details = ["1": detailsRow("1", tags: ["Scene", "Everyone"])]
+    relaunched.open(.subscriptions)
+    relaunched.restoreSteamWebSession()
+    // The list asked first; it waits for the keychain and then reads with the saved session.
+    try await finished(relaunched)
+    XCTAssertEqual(relaunched.steamWebSession?.cookie, access)
+    XCTAssertEqual(relaunched.items.map(\.id), ["1"])
+    XCTAssertEqual(fixture.cookies.last, "steamLoginSecure=\(access)")
+    XCTAssertTrue(fixture.renewalForms.isEmpty, "a fresh cookie is not renewed")
+
+    relaunched.signOutOfSteamWeb()
+    XCTAssertNil(fixture.webSessions.session)
+
+    try await fixture.store.signInToSteamWeb { WebSignInCookies(session: access, companion: refresh) }
+    fixture.subscriptionPages = [1: Data("<html><head><title>Sign In</title></head></html>".utf8)]
+    fixture.store.open(.subscriptions)
+    try await finished(fixture.store)
+    XCTAssertNil(fixture.store.steamWebSession)
+    XCTAssertNil(fixture.webSessions.session, "a session Steam ended is not taken back next launch")
+  }
+
+  /// The cookie lasts about a day and the renewal token months: an expired cookie is traded for a
+  /// new one before subscriptions are read, and the new one is saved. Steam refusing the token
+  /// ends the session.
+  func testAnExpiredCookieIsRenewedBeforeSubscriptionsAreRead() async throws {
+    let refreshToken = SteamWebFixtures.token(expiresIn: 86_400, salt: "r")
+    let expired = SteamWebFixtures.cookie(SteamWebFixtures.token(expiresIn: -60))
+    let fresh = SteamWebFixtures.token(expiresIn: 3600, salt: "n")
+    fixture.renewal = Data(#"{"response":{"access_token":"\#(fresh)"}}"#.utf8)
+    fixture.subscriptionPages = [1: subscriptionsHTML(ids: ["1"], total: "1")]
+    fixture.details = ["1": detailsRow("1", tags: ["Scene", "Everyone"])]
+    let store = fixture.store
+    try await store.signInToSteamWeb {
+      WebSignInCookies(session: expired, companion: SteamWebFixtures.cookie(refreshToken))
+    }
+    store.open(.subscriptions)
+    try await finished(store)
+
+    XCTAssertEqual(store.items.map(\.id), ["1"])
+    XCTAssertEqual(fixture.renewalForms.count, 1)
+    let form = try XCTUnwrap(fixture.renewalForms.first)
+    XCTAssertTrue(form.contains("refresh_token=\(refreshToken)"))
+    XCTAssertTrue(form.contains("steamid=\(SteamWebFixtures.account)"))
+    let renewedCookie = SteamWebFixtures.cookie(fresh)
+    XCTAssertEqual(fixture.cookies.last, "steamLoginSecure=\(renewedCookie)")
+    XCTAssertFalse(fixture.cookies.contains("steamLoginSecure=\(expired)"), "the expired cookie is never sent")
+    XCTAssertEqual(store.steamWebSession?.cookie, renewedCookie)
+    XCTAssertEqual(fixture.webSessions.session?.cookie, renewedCookie)
+    XCTAssertEqual(fixture.webSessions.session?.refreshToken, refreshToken)
+
+    // Steam refuses the token: the session ends, here and on this Mac.
+    try await store.signInToSteamWeb {
+      WebSignInCookies(session: expired, companion: SteamWebFixtures.cookie(refreshToken))
+    }
+    fixture.renewal = Data(#"{"response":{}}"#.utf8)
+    do {
+      _ = try await store.missingSubscriptions(installed: [])
+      XCTFail("A refused renewal must ask for a new sign-in")
+    } catch is SteamSignInRequired {}
+    XCTAssertNil(store.steamWebSession)
+    XCTAssertNil(fixture.webSessions.session)
   }
 
   /// Issue #27: choosing subscriptions without a Steam Community session, while another list
@@ -777,6 +853,8 @@ private final class SourceFixture {
   let session: URLSession
   let service: WorkshopService
   let store: WorkshopStore
+  /// Where the store keeps the Steam Community session between "launches".
+  let webSessions = SteamWebMemorySessionStore()
   private let root: URL
   private let defaults: UserDefaults
   private let answers = SourceAnswers()
@@ -810,6 +888,13 @@ private final class SourceFixture {
   var browsePagesRequested: [Int] { answers.read { $0.browsePagesRequested } }
   var detailsRequests: Int { answers.read { $0.detailsRequests } }
   var cookies: [String?] { answers.read { $0.cookies } }
+  /// What Steam's token service answers a renewal with; empty refuses it, as Steam does.
+  var renewal: Data {
+    get { answers.read { $0.renewal } }
+    set { answers.write { $0.renewal = newValue } }
+  }
+  /// The form of each renewal request.
+  var renewalForms: [String] { answers.read { $0.renewalForms } }
 
   init() throws {
     root = FileManager.default.temporaryDirectory.appendingPathComponent(
@@ -827,7 +912,15 @@ private final class SourceFixture {
     store = WorkshopStore(
       service: service,
       downloader: WorkshopDownloadManager(sessionDirectory: root.appendingPathComponent("SteamSession")),
-      supportDirectory: root, defaults: defaults)
+      supportDirectory: root, defaults: defaults, webSessions: webSessions)
+  }
+
+  /// Another store over the same Steam answers and saved session: the app's next launch.
+  func relaunchedStore() -> WorkshopStore {
+    WorkshopStore(
+      service: service,
+      downloader: WorkshopDownloadManager(sessionDirectory: root.appendingPathComponent("SteamSession")),
+      supportDirectory: root, defaults: defaults, webSessions: webSessions)
   }
 
   func remove() {
@@ -850,6 +943,8 @@ private final class SourceAnswers: @unchecked Sendable {
     var browsePagesRequested: [Int] = []
     var detailsRequests = 0
     var cookies: [String?] = []
+    var renewal = Data(#"{"response":{}}"#.utf8)
+    var renewalForms: [String] = []
   }
   private let lock = NSLock()
   private var state = State()
@@ -871,6 +966,9 @@ private final class SourceAnswers: @unchecked Sendable {
         let page = Int(value("p") ?? "1") ?? 1
         state.browsePagesRequested.append(page)
         return (200, state.browsePages[page] ?? state.browse)
+      case ("api.steampowered.com", "/IAuthenticationService/GenerateAccessTokenForApp/v1"):
+        state.renewalForms.append(String(decoding: body, as: UTF8.self))
+        return (200, state.renewal)
       case ("api.steampowered.com", "/ISteamRemoteStorage/GetCollectionDetails/v1"):
         return (200, state.collection)
       case ("api.steampowered.com", "/ISteamRemoteStorage/GetPublishedFileDetails/v1"):

@@ -103,6 +103,88 @@ final class WhatsNewTests: XCTestCase {
         }
     }
 
+    func testEachTranslationShowsItsOwnBannerForTheAnnouncedVersionOnly() throws {
+        let markdown = ["1.0.0", "1.1.0", "1.2.0"].map { version in
+            entry(version)
+                .replacingOccurrences(of: "### English\n", with: """
+                ### English
+                ![WallpaperMachine \(version)](Resources/ReleaseBanners/\(version).jpg)
+
+                """)
+                .replacingOccurrences(of: "### 简体中文\n", with: """
+                ### 简体中文
+                ![WallpaperMachine \(version) 中文](Resources/ReleaseBanners/\(version).zh-Hans.jpg)
+
+                """)
+        }.joined()
+        let history = try AppReleaseHistory(markdown: markdown)
+        let current = try XCTUnwrap(history.entries.first)
+        XCTAssertEqual(current.englishBanner,
+                       AppReleaseHistory.Banner(fileName: "1.2.0.jpg", description: "WallpaperMachine 1.2.0"))
+        XCTAssertEqual(current.chineseBanner?.fileName, "1.2.0.zh-Hans.jpg")
+        XCTAssertEqual(current.english.sections.first?.items, ["Added a library filter."],
+                       "The banner line is not release prose")
+        XCTAssertEqual(current.english.sections.first?.isList, true)
+        _ = store("1.0.0").announcement(history: history, existingUser: false)
+        let announcement = try XCTUnwrap(store("1.2.0").announcement(history: history, existingUser: true))
+        var requested: [String] = []
+        let wide = NSImage(size: NSSize(width: 30, height: 10))
+        let tall = NSImage(size: NSSize(width: 20, height: 10))
+        let controller = WhatsNewViewController(
+            announcement: announcement, preferences: store("1.2.0"), initialLanguage: .english,
+            bannerImage: { banner in
+                requested.append(banner.fileName)
+                return banner.fileName.contains("zh-Hans") ? tall : wide
+            }, close: {})
+        controller.view.layoutSubtreeIfNeeded()
+        XCTAssertEqual(requested, ["1.2.0.jpg", "1.2.0.zh-Hans.jpg"], "Skipped versions keep their banners to themselves")
+        let bannerView = try XCTUnwrap(controller.bannerView)
+        XCTAssertIdentical(bannerView.image, wide)
+        XCTAssertEqual(bannerView.accessibilityLabel(), "WallpaperMachine 1.2.0")
+        XCTAssertEqual(bannerView.frame.width / bannerView.frame.height, 3, accuracy: 0.01)
+        XCTAssertFalse(controller.notesView.string.contains("!["))
+
+        controller.languageControl.selectedSegment = 1
+        controller.languageControl.sendAction(controller.languageControl.action, to: controller.languageControl.target)
+        controller.view.layoutSubtreeIfNeeded()
+        XCTAssertIdentical(bannerView.image, tall)
+        XCTAssertEqual(bannerView.accessibilityLabel(), "WallpaperMachine 1.2.0 中文")
+        XCTAssertEqual(bannerView.frame.width / bannerView.frame.height, 2, accuracy: 0.01)
+
+        let missing = WhatsNewViewController(
+            announcement: announcement, preferences: store("1.2.0"), initialLanguage: .english,
+            bannerImage: { _ in nil }, close: {})
+        _ = missing.view
+        XCTAssertNil(missing.bannerView, "A banner the bundle lacks leaves the window as it was")
+    }
+
+    func testListsAreBulletedAndHighlightsStandOut() throws {
+        let history = try AppReleaseHistory(markdown: entry("1.2.0").replacingOccurrences(of: "#### New\n", with: """
+        A release about filters.
+        #### Highlights
+        - Filters are faster.
+        #### New
+
+        """))
+        _ = store("1.0.0").announcement(history: history, existingUser: false)
+        let announcement = try XCTUnwrap(store("1.2.0").announcement(history: history, existingUser: true))
+        let controller = WhatsNewViewController(
+            announcement: announcement, preferences: store("1.2.0"), initialLanguage: .english, close: {})
+        _ = controller.view
+        let notes = controller.notesView.string
+        XCTAssertTrue(notes.contains("A release about filters.\n"), "A summary is a paragraph, not a list entry")
+        XCTAssertFalse(notes.contains("\tA release about filters."))
+        XCTAssertTrue(notes.contains("\u{2726}\tFilters are faster."))
+        XCTAssertTrue(notes.contains("\u{2022}\tAdded a library filter."))
+        let storage = try XCTUnwrap(controller.notesView.textStorage)
+        let heading = (notes as NSString).range(of: "Highlights")
+        XCTAssertEqual(storage.attribute(.foregroundColor, at: heading.location, effectiveRange: nil) as? NSColor,
+                       .controlAccentColor)
+        let entry = (notes as NSString).range(of: "Added a library filter.")
+        let style = try XCTUnwrap(storage.attribute(.paragraphStyle, at: entry.location, effectiveRange: nil) as? NSParagraphStyle)
+        XCTAssertGreaterThan(style.headIndent, 0, "Wrapped lines hang under the text, not the bullet")
+    }
+
     func testDowngradeAndReturnDoNotRepeatAnAnnouncement() throws {
         let history = try history()
         _ = store("1.2.0").announcement(history: history, existingUser: false)

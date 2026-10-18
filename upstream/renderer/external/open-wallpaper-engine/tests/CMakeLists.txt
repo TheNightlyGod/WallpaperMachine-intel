@@ -39,8 +39,7 @@ target_include_directories(wpdump_lib PUBLIC .)
 target_compile_features(wpdump_lib PUBLIC cxx_std_20)
 target_compile_definitions(
     wpdump_lib PUBLIC
-    "WAYWALLEN_WORKSHOP_DIR=\"${CMAKE_SOURCE_DIR}/workshop\""
-    "WAYWALLEN_FIXTURE_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/fixtures\"")
+    "WAYWALLEN_WORKSHOP_DIR=\"${CMAKE_SOURCE_DIR}/workshop\"")
 
 add_executable(version_tests version_tests.cpp)
 target_link_libraries(version_tests PRIVATE wpdump_lib GTest::gtest_main)
@@ -59,7 +58,7 @@ gtest_discover_tests(
 )
 
 add_executable(scene_schema_tests scene_schema_tests.cpp)
-target_link_libraries(scene_schema_tests PRIVATE ${PROJECT_NAME} wpAudio wpFs wpScene nlohmann_json::nlohmann_json GTest::gtest_main)
+target_link_libraries(scene_schema_tests PRIVATE ${PROJECT_NAME} wpAudio wpFs wpScene wpParticle nlohmann_json::nlohmann_json GTest::gtest_main)
 target_include_directories(scene_schema_tests PRIVATE .)
 target_compile_features(scene_schema_tests PRIVATE cxx_std_20)
 gtest_discover_tests(
@@ -94,19 +93,9 @@ target_include_directories(sprite_animation_test PRIVATE ${CMAKE_SOURCE_DIR}/src
 target_compile_features(sprite_animation_test PRIVATE cxx_std_20)
 gtest_discover_tests(sprite_animation_test PROPERTIES TIMEOUT 30 DISCOVERY_TIMEOUT 60)
 
-# CLI for fixture authoring: dumps a single workshop to a JSON file.
+# CLI for inspecting one workshop: dumps its DumpWorkshop snapshot to JSON.
 add_executable(wpdump wpdump_main.cpp)
 target_link_libraries(wpdump PRIVATE wpdump_lib)
-
-# Per-version deep tests live in tests/version/<category>_<version>_test.cpp.
-# Each is a tiny gtest TU built into the same binary so the corpus + gtest
-# fixture machinery is amortised across them.
-file(GLOB version_test_srcs CONFIGURE_DEPENDS "version/*_test.cpp")
-if(version_test_srcs)
-    add_executable(deep_version_tests ${version_test_srcs})
-    target_link_libraries(deep_version_tests PRIVATE wpdump_lib GTest::gtest_main)
-    target_include_directories(deep_version_tests PRIVATE .)
-endif()
 
 # Use gtest_discover_tests so each TEST_P instance becomes its own ctest
 # entry, runnable individually with `ctest -R ScenePkgVersionTest`.
@@ -196,12 +185,12 @@ gtest_discover_tests(
 )
 
 add_executable(unpack_shader_compile_smoke unpack_shader_compile_smoke.cpp)
-set(UNPACK_SHADER_COMPILE_SMOKE_CORPUS_ROOT
-    "/Users/molyuu/Workspace/WallpaperEngine/unpack"
-    CACHE PATH "Root directory containing unpacked Wallpaper Engine workshop scenes for shader smoke tests")
-set(UNPACK_SHADER_COMPILE_SMOKE_COMMON_ASSETS
-    "/Users/molyuu/Library/Application Support/Steam/steamapps/common/wallpaper_engine/assets"
-    CACHE PATH "Wallpaper Engine common assets directory for shader smoke tests")
+# The corpus test reads WALLPAPER_MACHINE_UNPACK_ROOT and
+# WALLPAPER_MACHINE_ASSETS_ROOT at run time; without them it looks in
+# upstream/renderer/unpack, as the shader crate's tests do, and skips when that
+# is missing.
+get_filename_component(UNPACK_SHADER_COMPILE_SMOKE_DEFAULT_CORPUS_ROOT
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../unpack" ABSOLUTE)
 target_link_libraries(
     unpack_shader_compile_smoke
     PRIVATE ${PROJECT_NAME} wpFs wpScene wpVulkan nlohmann_json::nlohmann_json GTest::gtest_main)
@@ -210,8 +199,7 @@ target_compile_features(unpack_shader_compile_smoke PRIVATE cxx_std_20)
 target_compile_definitions(
     unpack_shader_compile_smoke
     PRIVATE
-        "UNPACK_SHADER_COMPILE_SMOKE_CORPUS_ROOT=\"${UNPACK_SHADER_COMPILE_SMOKE_CORPUS_ROOT}\""
-        "UNPACK_SHADER_COMPILE_SMOKE_COMMON_ASSETS=\"${UNPACK_SHADER_COMPILE_SMOKE_COMMON_ASSETS}\"")
+        "UNPACK_SHADER_COMPILE_SMOKE_DEFAULT_CORPUS_ROOT=\"${UNPACK_SHADER_COMPILE_SMOKE_DEFAULT_CORPUS_ROOT}\"")
 if(TARGET wescene_rust_shader)
     target_link_libraries(unpack_shader_compile_smoke PRIVATE wescene_rust_shader)
 else()
@@ -293,8 +281,11 @@ target_link_libraries(scene_reload_cycle_probe PRIVATE ${PROJECT_NAME} wpAudio w
 target_include_directories(scene_reload_cycle_probe PRIVATE . ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/src/Scene/VulkanRender)
 target_compile_features(scene_reload_cycle_probe PRIVATE cxx_std_20)
 
+# The text tests measure a font with FreeType itself, as the reference for the
+# size the layout requests.
+find_package(Freetype REQUIRED)
 add_executable(text_object_runtime_test text_object_runtime_test.cpp)
-target_link_libraries(text_object_runtime_test PRIVATE ${PROJECT_NAME} wpAudio wpScene wpFs wpVulkan wpVulkanRender wpRGraph nlohmann_json::nlohmann_json GTest::gtest_main)
+target_link_libraries(text_object_runtime_test PRIVATE ${PROJECT_NAME} wpAudio wpScene wpFs wpVulkan wpVulkanRender wpRGraph Freetype::Freetype nlohmann_json::nlohmann_json GTest::gtest_main)
 target_include_directories(text_object_runtime_test PRIVATE . ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/src/Scene/VulkanRender)
 target_compile_features(text_object_runtime_test PRIVATE cxx_std_20)
 gtest_discover_tests(
@@ -337,6 +328,15 @@ target_compile_features(particle_rope_geometry_test PRIVATE cxx_std_20)
 gtest_discover_tests(
     particle_rope_geometry_test
     PROPERTIES TIMEOUT 30
+    DISCOVERY_TIMEOUT 60
+)
+add_executable(particle_parity_test particle_parity_test.cpp)
+target_link_libraries(particle_parity_test PRIVATE ${PROJECT_NAME} wpScene wpParticle wpAudio wpFs nlohmann_json::nlohmann_json GTest::gtest_main)
+target_include_directories(particle_parity_test PRIVATE .)
+target_compile_features(particle_parity_test PRIVATE cxx_std_20)
+gtest_discover_tests(
+    particle_parity_test
+    PROPERTIES TIMEOUT 60
     DISCOVERY_TIMEOUT 60
 )
 add_executable(layer_texture_reference_test layer_texture_reference_test.cpp)
@@ -466,7 +466,8 @@ pkg_check_modules(TEST_AVCODEC REQUIRED IMPORTED_TARGET libavcodec)
 pkg_check_modules(TEST_AVUTIL REQUIRED IMPORTED_TARGET libavutil)
 if(APPLE)
     target_sources(playback_gpu_test PRIVATE apple_video_frame_test.mm)
-    target_link_libraries(playback_gpu_test PRIVATE PkgConfig::TEST_AVUTIL)
+    target_link_libraries(playback_gpu_test PRIVATE
+        PkgConfig::TEST_AVFORMAT PkgConfig::TEST_AVCODEC PkgConfig::TEST_AVUTIL)
     wescene_prefer_ffmpeg_headers(playback_gpu_test "TEST_")
 endif()
 add_executable(video_source_input_test video_source_input_test.cpp)
@@ -573,13 +574,6 @@ gtest_discover_tests(
 #    PROPERTIES TIMEOUT 30
 #    DISCOVERY_TIMEOUT 60
 #)
-if(TARGET deep_version_tests)
-    gtest_discover_tests(
-        deep_version_tests
-        PROPERTIES TIMEOUT 30
-        DISCOVERY_TIMEOUT 60
-    )
-endif()
 
 # Native Metal backend: capability gate, blend mapping, clip-space derivation
 # and pipeline cache keys. No device needed for any of it; the one

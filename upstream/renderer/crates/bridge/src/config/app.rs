@@ -103,6 +103,22 @@ pub enum SceneRendererModeCfg {
     NativeMetalPreferred,
 }
 
+/// How many pixels a 2D scene is rasterized with, before the internal render
+/// scale divides them.
+///
+/// `Display`, the default, rasterizes the canvas at the size it is presented at
+/// on the display, which is what Wallpaper Engine does and what keeps a
+/// high-resolution display sharp. `Canvas` rasterizes at the size the author
+/// made it and stretches the result, which costs the least. A perspective
+/// scene and a plain video are unaffected by either.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SceneResolutionCfg {
+    Canvas,
+    #[default]
+    Display,
+}
+
 /// Internal rasterization size and frame rate the renderer targets.
 ///
 /// This is the reduced-quality profile. The battery mode applies it while the
@@ -159,6 +175,10 @@ pub struct QualityCfg {
     /// it is opted into rather than taken away.
     #[serde(default)]
     pub scene_on_demand_enabled: bool,
+    /// How many pixels a 2D scene is rasterized with before `render_scale`
+    /// divides them. A preference over every scene, applied live.
+    #[serde(default)]
+    pub scene_resolution: SceneResolutionCfg,
 }
 
 impl Default for QualityCfg {
@@ -170,6 +190,7 @@ impl Default for QualityCfg {
             battery: QualityProfileCfg::default(),
             scene_optimization_enabled: default_true(),
             scene_on_demand_enabled: false,
+            scene_resolution: SceneResolutionCfg::default(),
         }
     }
 }

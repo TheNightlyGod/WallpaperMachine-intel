@@ -97,6 +97,15 @@ final class DesktopWallpaperLedger {
 
     private static let journalName = "originals.json"
 
+    /// What macOS shows a new user, through a link to the current release's
+    /// picture. It is put back on a desktop whose original no longer exists
+    /// when no other original does either.
+    nonisolated static let systemDefaultPictureURL = URL(fileURLWithPath: "/System/Library/CoreServices/DefaultDesktop.heic")
+    private let systemDefaultPicture: URL
+    /// What each desktop last got in place of a missing original, so a
+    /// restoration that is retried logs it once.
+    private var reportedStandIns: [DesktopPictureTarget: URL] = [:]
+
     private struct Entry: Codable {
         var original: DesktopPicture
         // nil for the previous alternating-file journal, which remains readable.
@@ -108,11 +117,13 @@ final class DesktopWallpaperLedger {
     private let workspace: any DesktopPictureWorkspace
 
     init(folder: URL, workspace: any DesktopPictureWorkspace,
-         confirmationWindow: Duration = DesktopWallpaperLedger.confirmationWindow) throws {
+         confirmationWindow: Duration = DesktopWallpaperLedger.confirmationWindow,
+         systemDefaultPicture: URL = DesktopWallpaperLedger.systemDefaultPictureURL) throws {
         self.folder = folder
         self.journal = folder.appendingPathComponent(Self.journalName)
         self.workspace = workspace
         self.confirmationWindow = confirmationWindow
+        self.systemDefaultPicture = systemDefaultPicture
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         if FileManager.default.fileExists(atPath: journal.path) {
             entries = try JSONDecoder().decode([String: Entry].self, from: Data(contentsOf: journal))
@@ -139,6 +150,8 @@ final class DesktopWallpaperLedger {
         // be detected on the next refresh. Retain no extra image buffers.
         var comparisons: [URL: Bool] = [:]
         let fallbacks = userWallpapers(targets: targets)
+        // Found only once a desktop is put back, since it looks at the user's files.
+        var restorable: [String: DesktopPicture]?
         let digests = posters.mapValues { Data(SHA256.hash(data: $0)) }
         var applied = Set<DesktopPictureTarget>(), restoring = Set<DesktopPictureTarget>()
         for target in targets {
@@ -151,7 +164,12 @@ final class DesktopWallpaperLedger {
                     try apply(image: image, digest: digests[target.display]!, target: target,
                               comparisons: &comparisons, fallbacks: fallbacks)
                 } else if !liveDisplays.contains(target.display) {
-                    try restore(target: target, fallbacks: fallbacks)
+                    try restore(target: target) {
+                        if let restorable { return restorable }
+                        let found = userWallpapers(targets: targets, existing: true)
+                        restorable = found
+                        return found
+                    }
                 }
             } catch is DesktopPictureUnconfirmed {
                 // `apply` handles its own unconfirmed writes, so this is a
@@ -301,19 +319,52 @@ final class DesktopWallpaperLedger {
     /// Puts back the wallpaper a desktop showed before its first poster. A
     /// desktop showing anything but a poster was changed outside this app and
     /// keeps that choice.
-    private func restore(target: DesktopPictureTarget, fallbacks: [String: DesktopPicture]) throws {
+    ///
+    /// Another app can delete a picture it set, and macOS refuses a file that
+    /// does not exist, so writing such an original would fail on every attempt
+    /// and refuse every quit. It gives way to the display's fallback and, when
+    /// no original is left at all, to macOS's default picture.
+    private func restore(target: DesktopPictureTarget, fallbacks: () -> [String: DesktopPicture]) throws {
         guard let current = try workspace.currentPicture(target: target),
               Self.isPoster(current.url, folder: folder) else { return }
         // A poster whose journal entry is gone is still ours, never the user's.
-        var original = entry(for: current.url)?.original
-        if original.map({ Self.isUserWallpaper($0, folder: folder) }) != true,
-           let chosen = fallbacks[target.display] {
-            original = chosen
+        let journaled = entry(for: current.url)?.original
+        let named = journaled.flatMap { Self.isUserWallpaper($0, folder: folder) ? $0 : nil }
+        if let named, Self.fileMayExist(named.url) {
+            try workspace.setPicture(named, target: target)
+            return
         }
-        guard let original, Self.isUserWallpaper(original, folder: folder) else {
+        let original: DesktopPicture
+        let standIn: String
+        if let chosen = fallbacks()[target.display] {
+            (original, standIn) = (chosen, "another desktop's original")
+        } else if named != nil, let systemDefault = systemDefault() {
+            (original, standIn) = (systemDefault, "macOS's default picture")
+        } else {
             throw Failure.originalUnavailable
         }
+        if let named, reportedStandIns[target] != original.url {
+            reportedStandIns[target] = original.url
+            AppLog.warn("Desktop picture: the original of display \(target.display), desktop \(target.space ?? "current") no longer exists (\(named.url.path)); putting back \(standIn) \(original.url.path) instead")
+        }
         try workspace.setPicture(original, target: target)
+    }
+
+    /// macOS's default picture, as the file its link points to: a write is
+    /// confirmed by reading its path back, which then names the same file
+    /// whether or not macOS follows the link.
+    private func systemDefault() -> DesktopPicture? {
+        let url = systemDefaultPicture.resolvingSymlinksInPath()
+        guard Self.fileMayExist(url) else { return nil }
+        return DesktopPicture(url: url, scaling: Int(NSImageScaling.scaleProportionallyUpOrDown.rawValue),
+                              allowClipping: true, fill: [0, 0, 0, 1])
+    }
+
+    /// Whether a picture's file may still be there. Only a definite "no such
+    /// file" counts as gone: one the app may not look at, such as a file in a
+    /// folder macOS's privacy protection covers, is still put back.
+    private static func fileMayExist(_ url: URL) -> Bool {
+        access(url.path, F_OK) == 0 || (errno != ENOENT && errno != ENOTDIR)
     }
 
     private func entry(for url: URL) -> Entry? {
@@ -336,23 +387,28 @@ final class DesktopWallpaperLedger {
     /// Snapshot every display's effective wallpaper before the first write:
     /// setting a poster can also replace macOS's inherited/default selection.
     /// The public API can resolve an image even when the per-Space API is empty.
-    private func userWallpapers(targets: [DesktopPictureTarget]) -> [String: DesktopPicture] {
+    /// `existing` also passes over pictures whose files are gone; only putting a
+    /// desktop back needs that, so posters never look at the user's files.
+    private func userWallpapers(targets: [DesktopPictureTarget], existing: Bool = false) -> [String: DesktopPicture] {
+        let usable = { [folder] (picture: DesktopPicture) in
+            Self.isUserWallpaper(picture, folder: folder) && (!existing || Self.fileMayExist(picture.url))
+        }
         var originals: [String: DesktopPicture] = [:]
         for target in targets where originals[target.display] == nil {
             guard let current = try? workspace.currentPicture(target: target) else { continue }
             let candidate = entry(for: current.url)?.original ?? current
-            if Self.isUserWallpaper(candidate, folder: folder) {
+            if usable(candidate) {
                 originals[target.display] = candidate
             }
         }
         let displays = Set(targets.map(\.display)).sorted()
         let journaled = entries.sorted { $0.key < $1.key }.map(\.value)
-            .filter { Self.isUserWallpaper($0.original, folder: folder) }
+            .filter { usable($0.original) }
         for display in displays where originals[display] == nil {
             let visible = DesktopPictureTarget(display: display, space: nil)
             if let current = try? workspace.currentPicture(target: visible) {
                 let candidate = entry(for: current.url)?.original ?? current
-                if Self.isUserWallpaper(candidate, folder: folder) {
+                if usable(candidate) {
                     originals[display] = candidate
                 }
             }

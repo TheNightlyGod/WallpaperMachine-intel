@@ -19,11 +19,22 @@ namespace wallpaper
 class SceneRuntimeContext;
 class SceneNode;
 
-// Binds scripts/properties as before, or an authored absolute/relative origin
-// timeline. Static settings allocate no per-tick binding.
-void RegisterNodeOriginSetting(SceneRuntimeContext& context, SceneNode* node,
-                               std::string_view layer_name, const nlohmann::json& setting,
-                               bool animate = true);
+// Binds a layer's origin, scale and angles as each setting asks: a script or a
+// user property writes it, else its authored absolute/relative timeline plays
+// it, else it stays the scene file's value and allocates no per-tick binding.
+// Settings the editor keyed together (`options.parent`) are one animation and
+// share the clock of the first, so holding or playing it moves them all.
+// `animate` false leaves timelines to the object that owns them.
+void RegisterNodeTransformSettings(SceneRuntimeContext& context, SceneNode* node,
+                                   std::string_view layer_name, const nlohmann::json& origin,
+                                   const nlohmann::json& scale, const nlohmann::json& angles,
+                                   bool animate = true);
+
+// A vec3 setting's own timeline on a clock of its own, for a setting that is
+// not part of a transform (an image layer's colour); null when it has none.
+std::shared_ptr<const NodeVec3Animation>
+ResolveVec3Animation(SceneRuntimeContext& context, std::string_view layer_name,
+                     const nlohmann::json& setting);
 
 enum class Vec3SettingSemantic
 {
@@ -31,14 +42,19 @@ enum class Vec3SettingSemantic
     AnglesDegrees,
 };
 
+// `animation_layer_index` is the animation layer of the layer a setting belongs
+// to when it is one of that animation layer's own (`animationlayers[i]`): its
+// script's `thisObject` is that animation layer. -1 for a setting of the layer.
 std::unique_ptr<DynamicValue> ResolveBoolSetting(
     SceneRuntimeContext& context,
     const nlohmann::json& value,
-    std::string_view current_layer_name = {});
+    std::string_view current_layer_name = {},
+    int animation_layer_index = -1);
 std::unique_ptr<DynamicValue> ResolveFloatSetting(
     SceneRuntimeContext& context,
     const nlohmann::json& value,
-    std::string_view current_layer_name = {});
+    std::string_view current_layer_name = {},
+    int animation_layer_index = -1);
 std::unique_ptr<DynamicValue> ResolveVec3Setting(
     SceneRuntimeContext& context,
     const nlohmann::json& value,
@@ -57,6 +73,10 @@ std::unique_ptr<DynamicValue> ResolveStringSetting(
     const nlohmann::json& value,
     std::string_view current_layer_name = {});
 std::vector<CameraPath> ParseCameraPaths(const nlohmann::json& json);
+
+// What a bool setting reads before anything runs: its authored value, which a script's first
+// run replaces (the value `ResolveBoolSetting` starts from).
+bool InitialBoolSetting(const nlohmann::json& setting);
 
 // The wallpaper property a setting is bound to, in either authored form
 // (`{"user": "name"}` or `{"user": {"name": ..., "condition": ...}}`), or empty

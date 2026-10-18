@@ -12,7 +12,7 @@ use kameo::{
 };
 use wallpaper_core::{
     DisplayIdentity, DisplaySelector, DisplaySnapshotEntry, PropertyPreview,
-    SceneRendererPreference, WallpaperAssignment,
+    SceneRendererPreference, SceneResolution, WallpaperAssignment,
     media::audio::AudioVolume,
     project::{ScalingMode, SceneDesc, SceneFraming, SceneHandle, SerdeValudeExt},
     render::{
@@ -52,8 +52,8 @@ use crate::{
             SetRenderScale,
             SetRendererCountersEnabled, SetScalingFactor, SetScalingMode,
             SetSceneOnDemandEnabled, SetSceneOptimizationEnabled, SetSceneRenderer,
-            SetSceneVideoPlaneSamplingEnabled, SetSharedVideoDecodeEnabled, SetTargetFps,
-            SetVerboseLogging, SetVideoBackend, SetVolume, SetWebAudioSubscribed,
+            SetSceneResolution, SetSceneVideoPlaneSamplingEnabled, SetSharedVideoDecodeEnabled,
+            SetTargetFps, SetVerboseLogging, SetVideoBackend, SetVolume, SetWebAudioSubscribed,
             Shutdown,
         },
         state::BridgeActorState,
@@ -68,8 +68,8 @@ use crate::{
         BridgeWallpaperMutationBundle, BridgeWallpaperPreview, BridgeWebWallpaper, MousePollingControl,
     },
     config::{
-        AppConfig, ConfigStore, FramingCfg, SceneRendererModeCfg, SerializedSelector,
-        VideoBackendModeCfg, WallpaperConfig,
+        AppConfig, ConfigStore, FramingCfg, SceneRendererModeCfg, SceneResolutionCfg,
+        SerializedSelector, VideoBackendModeCfg, WallpaperConfig,
     },
     display::{DisplaySelectorExt, DisplaySnapshotExt},
     engine::{
@@ -1154,6 +1154,7 @@ impl<E: EngineFacade + Clone> BridgeActor<E> {
             return Ok(());
         }
         if let Some(scenes) = self.unchanged_configured_scenes(&displays)? {
+            self.sync_reconciled_pause().await?;
             self.state.set_active_ids_from_scenes(&scenes);
             self.refresh_mouse_polling_policy();
             return Ok(());
@@ -1856,7 +1857,7 @@ impl<E: EngineFacade + Clone> BridgeActor<E> {
         force_shader_refresh: bool,
     ) -> Result<Vec<SceneDesc>, BridgeError> {
         let project_models = self.state.configured_project_models(&app_config);
-        let result = reconcile_with(
+        let scenes = reconcile_with(
             self.engine.clone(),
             app_config,
             wallpaper_configs,
@@ -1872,8 +1873,30 @@ impl<E: EngineFacade + Clone> BridgeActor<E> {
             self.state.audio_suppressed,
             self.load_guard(),
         )
-        .await;
-        result
+        .await?;
+        self.sync_reconciled_pause().await?;
+        Ok(scenes)
+    }
+
+    /// Reasserts the current presentation policy after the core has reused or
+    /// reopened its windows. The core preserves live pause overrides across
+    /// those operations, so a scene's initial descriptor alone cannot release
+    /// a pause retained from an older display assignment.
+    ///
+    /// Runs in the actor, after a delegated reconcile's generation is checked:
+    /// a worker's captured policy must never undo a newer pause or resume.
+    async fn sync_reconciled_pause(&self) -> Result<(), BridgeError> {
+        let global_pause = self.playback_paused();
+        for display in self.engine.display_snapshot() {
+            if display.handle.is_none() { continue; }
+            let paused = global_pause
+                || self.state.suspended_displays.contains(&display.desc.display_id);
+            if display.paused != paused {
+                self.engine.set_display_paused(display.desc.display_id, paused).await
+                    .map_err(|error| BridgeError::engine(error.to_string()))?;
+            }
+        }
+        Ok(())
     }
 
     fn delegate_display(
@@ -2414,6 +2437,14 @@ impl<E: EngineFacade + Clone> Message<Bootstrap> for BridgeActor<E> {
         {
             self.state.errors.push(error.to_string());
         }
+        // Before any scene opens: a scene sizes its render targets from this
+        // when its graph is built, and the engine's own default is the canvas.
+        if let Err(error) = self
+            .engine
+            .set_scene_resolution(scene_resolution(self.state.app_config.quality.scene_resolution))
+        {
+            self.state.errors.push(error.to_string());
+        }
         if let Err(error) = self
             .engine
             .set_scene_video_plane_sampling_enabled(experimental.scene_video_plane_sampling)
@@ -2590,24 +2621,7 @@ impl<E: EngineFacade + Clone> Message<ClearShaderCache> for BridgeActor<E> {
         self.load_wallpapers()?;
         let app_config = self.state.app_config.clone();
         let wallpaper_configs = self.state.wallpaper_configs.clone();
-        let project_models = self.state.configured_project_models(&app_config);
-        let result = reconcile_with(
-            self.engine.clone(),
-            app_config,
-            wallpaper_configs,
-            self.state.scanned_library().map(<[_]>::to_vec),
-            project_models,
-            self.playback_paused(),
-            self.state.suspended_displays.clone(),
-            self.paths.clone(),
-            true,
-            self.state.native_video_rejected.clone(),
-            self.quality_runtime(),
-            self.state.presentation_unloaded,
-            self.state.audio_suppressed,
-            self.load_guard(),
-        )
-        .await;
+        let result = self.reconcile_engine_with(app_config, wallpaper_configs, true).await;
         self.refresh_mouse_polling_policy();
         let scenes = result?;
         self.state.set_active_ids_from_scenes(&scenes);
@@ -3637,6 +3651,43 @@ fn scene_renderer_preference(mode: SceneRendererModeCfg) -> SceneRendererPrefere
     match mode {
         SceneRendererModeCfg::Compatibility => SceneRendererPreference::Compatibility,
         SceneRendererModeCfg::NativeMetalPreferred => SceneRendererPreference::NativeMetalPreferred,
+    }
+}
+
+fn scene_resolution(resolution: SceneResolutionCfg) -> SceneResolution {
+    match resolution {
+        SceneResolutionCfg::Canvas => SceneResolution::Canvas,
+        SceneResolutionCfg::Display => SceneResolution::Display,
+    }
+}
+
+impl<E: EngineFacade + Clone> Message<SetSceneResolution> for BridgeActor<E> {
+    type Reply = messages::SetSceneResolutionReply;
+
+    async fn handle(
+        &mut self,
+        msg: SetSceneResolution,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        if self.state.app_config.quality.scene_resolution == msg.resolution {
+            return Ok(self.all_snapshots());
+        }
+        self.state.app_config.quality.scene_resolution = msg.resolution;
+        if let Some(store) = &self.config_store {
+            store.save_app_config(&self.state.app_config)?;
+        }
+        // The size the canvas is rasterized at, not what a scene is: the
+        // process switch is set, and every open scene is then handed the render
+        // scale it already has, which is when a running scene reads the switch
+        // and resizes its targets in place. Going through a reconcile instead
+        // would reparse every project and reopen every video for a quality
+        // choice.
+        self.engine
+            .set_scene_resolution(scene_resolution(msg.resolution))
+            .map_err(|error| BridgeError::engine(error.to_string()))?;
+        self.apply_effective_render_scale().await?;
+        self.bump_generation();
+        Ok(self.all_snapshots())
     }
 }
 
@@ -5164,6 +5215,7 @@ impl<E: EngineFacade + Clone> Message<ApplyWallpaperOptions> for BridgeActor<E> 
             });
         }
 
+        reply_try!(self.sync_reconciled_pause().await);
         reply_try!(self.save_configs(&candidates.app_config, &candidates.wallpaper_config,));
         reply_try!(
             self.state
@@ -5195,6 +5247,10 @@ impl<E: EngineFacade + Clone> Message<CommitApplyAfterReconcile> for BridgeActor
         if !self.reconcile_current(msg.generation) {
             self.stale_reconcile(msg.generation, ctx.actor_ref().clone());
             return self.wallpaper_bundle(msg.wallpaper_id);
+        }
+        if let Err(error) = self.sync_reconciled_pause().await {
+            self.reconcile_failure(msg.generation, duplicate_error(&error), ctx.actor_ref().clone());
+            return Err(error);
         }
 
         // The wallpaper's scenes were opened again from the configuration that
@@ -5234,6 +5290,10 @@ impl<E: EngineFacade + Clone> Message<CommitDisplayAfterReconcile> for BridgeAct
             self.stale_reconcile(msg.generation, ctx.actor_ref().clone());
             return Ok(self.display_bundle());
         }
+        if let Err(error) = self.sync_reconciled_pause().await {
+            self.reconcile_failure(msg.generation, duplicate_error(&error), ctx.actor_ref().clone());
+            return Err(error);
+        }
 
         let generation = msg.generation;
         self.commit_display_settings(msg.app_config, msg.display_settings, msg.scenes)?;
@@ -5255,7 +5315,11 @@ impl<E: EngineFacade + Clone> Message<CompleteRestoreAfterReconcile> for BridgeA
             return Ok(());
         }
 
-        match msg.result {
+        let result = match msg.result {
+            Ok(scenes) => self.sync_reconciled_pause().await.map(|()| scenes),
+            Err(error) => Err(error),
+        };
+        match result {
             Ok(scenes) => {
                 self.state.set_active_ids_from_scenes(&scenes);
                 self.finish_reconcile(msg.generation, ctx.actor_ref().clone());

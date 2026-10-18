@@ -158,8 +158,9 @@ final class EnergyUsageMonitor {
   private let source: EnergyUsageSource?
   private let interval: Duration
   private let batteryWattHours: @MainActor () -> Double?
-  /// Read once per activation; a battery's full charge moves over months, not minutes.
-  private var batteryCapacity: Double?
+  /// Read once per activation; a battery's full charge moves over months, not minutes. Watt-hours,
+  /// nil on a Mac without a battery. Readable so the panel's typed readout can word the battery share.
+  private(set) var batteryCapacity: Double?
   private var samples: [Recorded] = []
   private var task: Task<Void, Never>?
 

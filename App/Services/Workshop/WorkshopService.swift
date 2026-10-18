@@ -219,6 +219,41 @@ actor WorkshopService {
         return request
     }
 
+    /// Where Steam trades a session's renewal token for a new `steamLoginSecure` token.
+    static let renewalURL = URL(string: "https://api.steampowered.com/IAuthenticationService/GenerateAccessTokenForApp/v1/")!
+
+    /// The session with a new cookie, from Steam's token service. The renewal token goes there
+    /// alone, in the body of a request that follows no redirect. Steam refusing it, or a session
+    /// without one, throws `SteamSignInRequired`; a connection failure throws its own error.
+    func renew(_ account: SteamWebSession) async throws -> SteamWebSession {
+        guard let refreshToken = account.refreshToken else { throw SteamSignInRequired() }
+        var request = URLRequest(url: Self.renewalURL)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 35
+        request.httpShouldHandleCookies = false
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        var form = URLComponents()
+        form.queryItems = [
+            URLQueryItem(name: "refresh_token", value: refreshToken),
+            URLQueryItem(name: "steamid", value: account.steamID),
+        ]
+        request.httpBody = Data((form.percentEncodedQuery ?? "").utf8)
+        let (data, response) = try await session.data(for: request, delegate: SteamNoRedirects())
+        try Task.checkCancellation()
+        guard let http = response as? HTTPURLResponse else { throw SteamSignInRequired() }
+        if http.statusCode == 401 || http.statusCode == 403 { throw SteamSignInRequired() }
+        guard (200..<300).contains(http.statusCode) else {
+            throw WorkshopFailure(message: String(localized: "Steam could not load the Workshop. Check your connection or open Steam in your browser, then retry."))
+        }
+        // Steam answers a refused token with an empty response and the reason in a header.
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let body = root["response"] as? [String: Any],
+              let token = body["access_token"] as? String,
+              let renewed = account.renewed(accessToken: token)
+        else { throw SteamSignInRequired() }
+        return renewed
+    }
+
     /// Steam's public details endpoint answers up to this many items per request without a key.
     static let detailsBatchSize = 100
 
@@ -738,5 +773,15 @@ private final class SteamCookieRedirectGuard: NSObject, URLSessionTaskDelegate, 
         newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void
     ) {
         completionHandler(WorkshopService.redirected(request))
+    }
+}
+
+/// Follows no redirect: the renewal token is for Steam's token service and nowhere else.
+private final class SteamNoRedirects: NSObject, URLSessionTaskDelegate, Sendable {
+    func urlSession(
+        _ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        completionHandler(nil)
     }
 }

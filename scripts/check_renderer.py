@@ -27,8 +27,12 @@ REGRESSION_BINARIES = {
     "shared_video_session_test": False, "render_scale_test": False,
     "static_subgraph_cache_test": False, "texture_prefetch_test": False,
     "scene_mesh_tests": False, "particle_rope_geometry_test": False,
-    "particle_mouse_controlpoint_test": False, "layer_texture_reference_test": False,
-    "project_property_preview_test": False,
+    "particle_mouse_controlpoint_test": False, "particle_parity_test": False,
+    "layer_texture_reference_test": False,
+    "project_property_preview_test": False, "scenescript_sound_layer_smoke": False,
+    "scenescript_media_event_smoke": False, "media_thumbnail_texture_smoke": False,
+    "scene_schema_tests": False, "script_runtime_compat_test": False,
+    "mouse_input_test": False, "mdl_schema_tests": False, "tex_schema_tests": False,
     "timer_tests": False, "playback_gpu_test": True, "metal_backend_test": False,
     "metal_scene_draw_smoke": True, "metal_poster_capture_test": True,
     "metal_video_texture_test": True, "unchanged_present_test": True,
@@ -36,6 +40,14 @@ REGRESSION_BINARIES = {
     "vulkan_sample_count_smoke": False, "rendergraph_smoke": False,
     "rust_shader_bridge_test": False, "stb_image_regression_test": False,
     "surface_health_test": False, "wallpaper_scaling_test": False,
+    "shader_preprocessor_compat_test": False, "unpack_shader_compile_smoke": False,
+    "video_texture_submission_smoke": False, "vulkan_render_batch_planner_smoke": False,
+    "version_tests": False,
+}
+# Executables in tests/CMakeLists.txt that the check neither builds nor runs, and
+# why. Every other one is registered above or is one of the two probes below.
+MANUAL_BINARIES = {
+    "wpdump": "inspection tool, not a test: dumps one workshop item's parse to JSON",
 }
 OFFSCREEN_PROBE = "offscreen_scene_probe"
 RELOAD_PROBE = "scene_reload_cycle_probe"
@@ -58,6 +70,7 @@ REALTIME_TESTS = {
         "UnchangedPresent.OutputChangesOnAHeldVideoFramePresentOnceEach",
         "UnchangedPresent.APropertyPreviewShowsOnAStillSceneAndWakesAnIdleOneForOneFrame",
         "UnchangedPresent.AHistoryLoopKeepsTheClockRunningWithoutATimeUniform",
+        "UnchangedPresent.ADrawFailureAfterTheFirstFrameIsReportedOnceAndASurfaceRebuildHealsIt",
     ),
     "audio_tests": (
         "AudioResponseMonoTest.PartialSubmissionsExtendExpiryUntilACompleteBlockArrives",
@@ -65,6 +78,8 @@ REALTIME_TESTS = {
 }
 # The median of 31 condition-variable waits of 10 ms, the frame clock's own
 # primitive. More than one whole period late means cadence tests cannot hold.
+# A Mac coalesces a 10 ms wait to about 12 ms. A hosted VM has measured 18 to 27 ms, and its
+# cadence tests failed at 18 ms, so anything above 15 ms counts as imprecise.
 TIMER_PROBE_SOURCE = """#include <algorithm>
 #include <chrono>
 #include <condition_variable>
@@ -85,7 +100,7 @@ int main() {
     }
     std::nth_element(waits.begin(), waits.begin() + 15, waits.end());
     std::printf("median 10 ms wait: %.2f ms\\n", waits[15]);
-    return waits[15] > 20.0 ? 77 : 0;
+    return waits[15] > 15.0 ? 77 : 0;
 }
 """
 
@@ -220,8 +235,10 @@ def fixtures(root):
             objects.extend([inner, tile(301, "grandchild", [0,0,0], 300)])
         if index == 7:
             objects.reverse()  # Declaration order/ID is not a resource identity.
+        # Bloom is off in every generated scene: it is Wallpaper Engine's
+        # default, and these fixtures carry no bloom materials.
         scene = {"camera": {"center":[0,0,0], "eye":[0,0,1], "up":[0,1,0]},
-                 "general": {"ambientcolor":[0,0,0], "skylightcolor":[0,0,0], "clearcolor":[0.02,0.05,0.08], "cameraparallax":False, "orthogonalprojection":{"width":384,"height":256}}, "objects": objects}
+                 "general": {"ambientcolor":[0,0,0], "skylightcolor":[0,0,0], "clearcolor":[0.02,0.05,0.08], "cameraparallax":False, "bloom":False, "orthogonalprojection":{"width":384,"height":256}}, "objects": objects}
         files["layout.json"] = json.dumps(scene)
         for name, contents in files.items():
             path = folder / name
@@ -274,7 +291,7 @@ void main() {
         files[f"shaders/{name}.frag"] = fragment
     files["layout.json"] = {
         "camera": {"center": [0, 0, 0], "eye": [0, 0, 1], "up": [0, 1, 0]},
-        "general": {"clearcolor": [0.1, 0.2, 0.3], "cameraparallax": False, "orthogonalprojection": {"width": 384, "height": 256}},
+        "general": {"clearcolor": [0.1, 0.2, 0.3], "cameraparallax": False, "bloom": False, "orthogonalprojection": {"width": 384, "height": 256}},
         "objects": [
             {"id": 1, "name": "coverage container", "image": "models/util/composelayer.json", "size": [288, 144], "origin": [192, 128, 0], "copybackground": False, "effects": [{"file": "effects/coverage.json", "visible": True}]},
             {"id": 2, "name": "destination", "parent": 1, "image": "models/under.json", "origin": [0, 0, 0]},
@@ -366,7 +383,7 @@ void main() {
         "shaders/page.frag": fragment,
         "layout.json": {
             "camera": {"center": [0, 0, 0], "eye": [0, 0, 1], "up": [0, 1, 0]},
-            "general": {"clearcolor": [0.1, 0.2, 0.3], "cameraparallax": False,
+            "general": {"clearcolor": [0.1, 0.2, 0.3], "cameraparallax": False, "bloom": False,
                         "orthogonalprojection": {"width": 384, "height": 256}},
             "objects": [{"id": 1, "name": "page", "image": "models/page.json",
                          "origin": [192, 128, 0], "scale": [1, 1, 1], "angles": [0, 0, 0],
@@ -399,7 +416,7 @@ void main() {
         "shaders/card.frag": "void main() {\n    gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);\n}\n",
         "layout.json": {
             "camera": {"center": [0, 0, 0], "eye": [0, 0, 1], "up": [0, 1, 0]},
-            "general": {"clearcolor": [0.2, 0.4, 0.6], "cameraparallax": False,
+            "general": {"clearcolor": [0.2, 0.4, 0.6], "cameraparallax": False, "bloom": False,
                         "orthogonalprojection": {"width": 384, "height": 256}},
             "objects": [{"id": 1, "name": "curtain", "image": "models/card.json",
                          "alignment": "left", "origin": {"value": [192, 128, 0], "animation": {

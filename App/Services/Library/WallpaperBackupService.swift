@@ -11,6 +11,9 @@ struct WallpaperBackupService: Sendable {
     private var manager: FileManager { .default }
     private var files: WallpaperBackupFiles { .init(limits: limits) }
     private let managedRoots = ["config.toml", "wallpapers", "Library", "UserAssets"]
+    private static let solarLocationKey = "WallpaperMachine.solarLocation"
+    private static let solarSettingsKey = "WallpaperMachine.solarSettings"
+    private static let solarKeys: Set<String> = [solarLocationKey, solarSettingsKey]
 
     init(supportRoot: URL = ClientPaths.supportURL, limits: WallpaperBackupLimits = .init()) {
         self.supportRoot = supportRoot.standardizedFileURL.resolvingSymlinksInPath()
@@ -87,7 +90,13 @@ struct WallpaperBackupService: Sendable {
         var conflicts = try resourceUnits(manifest.entries).filter {
             manager.fileExists(atPath: supportRoot.appendingPathComponent($0).path)
         }
-        conflicts += manifest.preferences.keys.filter { preferences.values[$0] != nil }.map { "Preferences/" + $0 }
+        conflicts += manifest.preferences.keys.filter {
+            !Self.solarKeys.contains($0) && preferences.values[$0] != nil
+        }.map { "Preferences/" + $0 }
+        if !Self.solarKeys.isDisjoint(with: manifest.preferences.keys),
+           !Self.solarKeys.isDisjoint(with: preferences.values.keys) {
+            conflicts.append("Preferences/" + Self.solarSettingsKey)
+        }
         let warnings = try diagnose(manifest: manifest, package: package)
         return WallpaperBackupPreview(name: package.lastPathComponent, createdAt: manifest.createdAt,
             wallpaperCount: wallpaperIDs(manifest.entries).count,
@@ -206,15 +215,16 @@ struct WallpaperBackupService: Sendable {
             }
             let nextPreferences = try mergedPreferences(manifest.preferences, existing: current.values,
                 policy: pendingState.policy, context: context)
-            try validatePreferences(nextPreferences)
+            try validatePreferences(nextPreferences.values)
             try validateRendererConfiguration(root: prepared, entries: manifest.entries.filter { entry in
                 selected.contains(where: { entry.path == $0 || entry.path.hasPrefix($0 + "/") })
             })
-            let resetsAutomation = nextPreferences["WallpaperMachine.automaticWallpapers"] != nil
-                || nextPreferences["WallpaperMachine.playlists"] != nil
+            let resetsAutomation = nextPreferences.values["WallpaperMachine.automaticWallpapers"] != nil
+                || nextPreferences.values["WallpaperMachine.playlists"] != nil
                 || selected.contains(where: { $0 == "config.toml" || $0.hasPrefix("wallpapers/") })
             let transientKeys = resetsAutomation ? WallpaperBackupPreferences.localRecoveryKeys : []
-            let changedKeys = Set(nextPreferences.keys).union(transientKeys).sorted()
+            let removedKeys = nextPreferences.removedKeys.union(transientKeys)
+            let changedKeys = Set(nextPreferences.values.keys).union(removedKeys).sorted()
             var previousValues = current.values
             let domain = defaults.persistentDomain(forName: domainName) ?? [:]
             for key in transientKeys {
@@ -240,8 +250,8 @@ struct WallpaperBackupService: Sendable {
                 }
                 // Preferences are last, after every referenced file is safely in place.
                 try beforePublish?("Preferences")
-                for (key, data) in nextPreferences { defaults.set(try WallpaperBackupPreferences.decode(data), forKey: key) }
-                for key in transientKeys { defaults.removeObject(forKey: key) }
+                for (key, data) in nextPreferences.values { defaults.set(try WallpaperBackupPreferences.decode(data), forKey: key) }
+                for key in removedKeys { defaults.removeObject(forKey: key) }
                 guard defaults.synchronize() else {
                     throw WallpaperBackupFailure(message: String(localized: "Restored preferences could not be saved. The previous state has been retained."))
                 }
@@ -528,11 +538,18 @@ struct WallpaperBackupService: Sendable {
         try manager.removeItem(at: transaction)
     }
 
+    private struct PreferenceChanges {
+        var values: [String: Data] = [:]
+        var removedKeys: Set<String> = []
+    }
+
     private func mergedPreferences(_ incoming: [String: Data], existing: [String: Data],
-                                   policy: WallpaperBackupConflictPolicy, context: ReferenceContext) throws -> [String: Data] {
-        var result: [String: Data] = [:]
+                                   policy: WallpaperBackupConflictPolicy, context: ReferenceContext) throws -> PreferenceChanges {
+        let solar = try mergedSolarPreferences(incoming, existing: existing, policy: policy)
+        var result = solar.values
         let existingDisplays = try playlistDisplays(existing["WallpaperMachine.playlists"])
         for (key, value) in incoming {
+            if Self.solarKeys.contains(key) { continue }
             // Scene asset-directory authority is local. A backup never selects a new
             // external root, even if it names an existing directory on this Mac.
             if key == "WallpaperMachineAssetsPath" { continue }
@@ -574,6 +591,38 @@ struct WallpaperBackupService: Sendable {
             for display in incomingDisplays.subtracting(existingDisplays) { merged[display] = new[display] }
             for (display, date) in new where !existingDisplays.contains(display) { merged[display] = date }
             result[deadlineKey] = try WallpaperBackupPreferences.encode(merged)
+        }
+        return PreferenceChanges(values: result, removedKeys: solar.removedKeys)
+    }
+
+    private func mergedSolarPreferences(_ incoming: [String: Data], existing: [String: Data],
+                                        policy: WallpaperBackupConflictPolicy) throws -> PreferenceChanges {
+        guard !Self.solarKeys.isDisjoint(with: incoming.keys),
+              policy != .keepExisting || Self.solarKeys.isDisjoint(with: existing.keys) else {
+            return PreferenceChanges()
+        }
+        func json(_ key: String) throws -> Data {
+            guard let encoded = incoming[key], let data = try WallpaperBackupPreferences.decode(encoded) as? Data else {
+                throw files.changed()
+            }
+            return data
+        }
+        // Both keys describe one setting. New records take precedence, as they do in the store;
+        // a legacy backup must replace the current record, rather than leave it masking the import.
+        let settings: WallpaperSolarSettings
+        if incoming[Self.solarSettingsKey] != nil {
+            settings = try JSONDecoder().decode(WallpaperSolarSettings.self, from: json(Self.solarSettingsKey))
+        } else {
+            let location = try JSONDecoder().decode(WallpaperSolarLocation.self, from: json(Self.solarLocationKey))
+            settings = WallpaperSolarSettings(location: location)
+        }
+        var result = PreferenceChanges(values: [
+            Self.solarSettingsKey: try WallpaperBackupPreferences.encode(JSONEncoder().encode(settings)),
+        ])
+        if let location = settings.location {
+            result.values[Self.solarLocationKey] = try WallpaperBackupPreferences.encode(JSONEncoder().encode(location))
+        } else {
+            result.removedKeys.insert(Self.solarLocationKey)
         }
         return result
     }

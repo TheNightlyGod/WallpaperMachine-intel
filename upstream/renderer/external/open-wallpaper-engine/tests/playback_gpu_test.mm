@@ -2060,6 +2060,162 @@ TEST_F(PlaybackGPU, ClearInvalidatesOldPoolWithoutInvalidatingOwners) {
     }, ::testing::ExitedWithCode(73), "");
 }
 
+// A graph built again for the scene that is drawing it clears the cache, which used to
+// close every video and have the passes open them again at the head of their clips.
+TEST_F(PlaybackGPU, AVideoSetAsideByARebuildIsGivenBackToThePassThatBindsItNotOpenedAgain) {
+    auto source = std::make_shared<SyntheticVideo>(); source->Set(1, 90, 80, 180);
+    auto first = Register("rebuilt", source);
+    auto& cache = device.tex_cache();
+    first = {};
+    ASSERT_TRUE(cache.ClearForRebuild());
+    // Set aside is not open: nothing of the old graph is bound or paced by it.
+    EXPECT_EQ(cache.ShortestVideoFramePeriod(), 0.0);
+    EXPECT_EQ(cache.GetVideoDuration("rebuilt"), 0.0);
+    EXPECT_FALSE(cache.FindTex("rebuilt").has_value());
+
+    // The decoder carried on while the graph was built.
+    source->Set(2, 150, 160, 80);
+    const video::VideoPlaybackState clock {.scene_elapsed_seconds = 9.0};
+    auto back = cache.FindVideoTex("rebuilt", clock);
+    ASSERT_TRUE(back.has_value());
+    ASSERT_FALSE(back->slots.empty());
+    EXPECT_NEAR(source->playback.scene_elapsed_seconds, 9.0, 1e-9)
+        << "the source was not given the scene's clock";
+    ASSERT_TRUE(cache.WaitForPendingUploads());
+    EXPECT_EQ(Read(back->getActive()), Reference(*source, false))
+        << "the frame is not the one the decoder that was playing is on";
+    EXPECT_GT(cache.ShortestVideoFramePeriod(), 0.0);
+
+    // A second pass that binds the same video is given the frame the first has.
+    auto again = cache.FindVideoTex("rebuilt", clock);
+    ASSERT_TRUE(again.has_value());
+    EXPECT_EQ(again->video_frame_owner.get(), back->video_frame_owner.get());
+
+    // The compile that took it back ends without closing it.
+    const std::weak_ptr<SyntheticVideo> watcher = source;
+    source.reset();
+    cache.CloseHeldVideos();
+    EXPECT_FALSE(watcher.expired());
+    EXPECT_GT(cache.GetVideoDuration("rebuilt"), 0.0);
+}
+
+TEST_F(PlaybackGPU, AVideoTheRebuiltGraphDoesNotBindIsClosedWithItsCompile) {
+    auto kept = std::make_shared<SyntheticVideo>(); kept->Set(1, 90, 80, 180);
+    auto dropped = std::make_shared<SyntheticVideo>(); dropped->Set(1, 40, 60, 100);
+    auto kept_ref = Register("kept", kept);
+    auto dropped_ref = Register("dropped", dropped);
+    kept_ref = {}; dropped_ref = {};
+    const std::weak_ptr<SyntheticVideo> kept_watch = kept, dropped_watch = dropped;
+    kept.reset(); dropped.reset();
+    auto& cache = device.tex_cache();
+    ASSERT_TRUE(cache.ClearForRebuild());
+    EXPECT_FALSE(kept_watch.expired());
+    EXPECT_FALSE(dropped_watch.expired());
+
+    const video::VideoPlaybackState clock {.scene_elapsed_seconds = 1.0};
+    ASSERT_TRUE(cache.FindVideoTex("kept", clock).has_value());
+    EXPECT_FALSE(dropped_watch.expired()) << "closed before the compile had finished";
+    cache.CloseHeldVideos();
+    EXPECT_TRUE(dropped_watch.expired()) << "a video the new graph does not bind is still open";
+    EXPECT_FALSE(kept_watch.expired());
+    EXPECT_FALSE(cache.FindVideoTex("dropped", clock).has_value());
+}
+
+TEST_F(PlaybackGPU, AClearThatIsNotARebuildClosesEveryVideoAndSetAsideOnesToo) {
+    auto& cache = device.tex_cache();
+    auto source = std::make_shared<SyntheticVideo>(); source->Set(1, 90, 80, 180);
+    auto ref = Register("gone", source);
+    ref = {};
+    const std::weak_ptr<SyntheticVideo> watcher = source;
+    source.reset();
+    ASSERT_TRUE(cache.Clear());
+    EXPECT_TRUE(watcher.expired());
+
+    // One set aside by a rebuild goes with a clear that follows it, as when the
+    // surface is released between the two.
+    auto other = std::make_shared<SyntheticVideo>(); other->Set(1, 90, 80, 180);
+    ref = Register("gone-too", other);
+    ref = {};
+    const std::weak_ptr<SyntheticVideo> other_watch = other;
+    other.reset();
+    ASSERT_TRUE(cache.ClearForRebuild());
+    EXPECT_FALSE(other_watch.expired());
+    ASSERT_TRUE(cache.Clear());
+    EXPECT_TRUE(other_watch.expired());
+    EXPECT_FALSE(cache.FindVideoTex("gone-too", {}).has_value());
+}
+
+TEST_F(PlaybackGPU, AVideoSetAsideThatFailsWhenAskedForItsFrameIsLeftToBeOpenedAgain) {
+    auto source = std::make_shared<SyntheticVideo>(); source->Set(1, 90, 80, 180);
+    auto ref = Register("failing", source);
+    ref = {};
+    auto& cache = device.tex_cache();
+    ASSERT_TRUE(cache.ClearForRebuild());
+    source->fail_refresh = true;
+    const std::weak_ptr<SyntheticVideo> watcher = source;
+    source.reset();
+    // Nothing is found, so the pass reads the video and opens it as it would any;
+    // the decoder that failed is not kept.
+    EXPECT_FALSE(cache.FindVideoTex("failing", {}).has_value());
+    EXPECT_TRUE(watcher.expired());
+    EXPECT_FALSE(cache.FindVideoTex("failing", {}).has_value());
+}
+
+namespace {
+/// A scene's parser that is not to be asked for anything: reading a video that is packaged in
+/// the scene copies and hashes its whole file, and nothing here has a file to read.
+class CountingImageParser final : public IImageParser {
+public:
+    std::shared_ptr<Image> Parse(const std::string&) override { ++parses; return nullptr; }
+    ImageHeader ParseHeader(const std::string&) override { return {}; }
+    int parses { 0 };
+};
+} // namespace
+
+// The pass is what asks, so it is the pass that has to ask the cache before it asks the scene:
+// the cache-level tests above hold whichever way a pass goes about it.
+TEST_F(PlaybackGPU, APassBindingAVideoSetAsideByARebuildIsGivenItAndTheSceneIsNotReadForIt) {
+    auto source = std::make_shared<SyntheticVideo>(); source->Set(1, 90, 80, 180);
+    auto ref = Register("packaged", source);
+    ref = {};
+    auto& cache = device.tex_cache();
+    ASSERT_TRUE(cache.ClearForRebuild());
+    const std::weak_ptr<SyntheticVideo> watcher = source;
+
+    auto parser = std::make_unique<CountingImageParser>();
+    auto* parses = parser.get();
+    scene.imageParser = std::move(parser);
+    scene.textures["packaged"] = SceneTexture {.url = "packaged", .isVideo = true};
+    scene.elapsingTime = 6.0;
+    // The decoder carried on while the graph was built.
+    source->Set(2, 150, 160, 80);
+
+    const auto binds_it = [](CustomShaderPass::Desc& desc) { desc.textures = { "packaged" }; };
+    auto& first = Pass(true, false, {}, false, VK_SAMPLE_COUNT_1_BIT, {}, binds_it);
+    EXPECT_EQ(parses->parses, 0) << "a video the cache had set aside was read from the scene";
+    EXPECT_TRUE(first.desc().video_textures.at(0));
+    ASSERT_FALSE(first.desc().vk_textures.at(0).slots.empty());
+    EXPECT_NEAR(source->playback.scene_elapsed_seconds, 6.0, 1e-9)
+        << "the video was not given the scene's clock";
+    ASSERT_TRUE(cache.WaitForPendingUploads());
+    EXPECT_EQ(Read(first.desc().vk_textures.at(0).getActive()), Reference(*source, false))
+        << "the pass is not on the frame of the decoder that was playing";
+
+    // A second pass that binds the same video finds it open, and reads nothing either.
+    auto& second = Pass(true, false, {}, false, VK_SAMPLE_COUNT_1_BIT, {}, binds_it);
+    EXPECT_EQ(parses->parses, 0) << "a video a pass had bound was read again for another pass";
+    EXPECT_TRUE(second.desc().video_textures.at(0));
+    ASSERT_FALSE(second.desc().vk_textures.at(0).slots.empty());
+    EXPECT_EQ(second.desc().vk_textures.at(0).video_frame_owner.get(),
+              first.desc().vk_textures.at(0).video_frame_owner.get());
+
+    // Both passes took the one decoder: nothing is left to close with the compile.
+    source.reset();
+    cache.CloseHeldVideos();
+    EXPECT_FALSE(watcher.expired());
+    EXPECT_EQ(parses->parses, 0);
+}
+
 TEST_F(PlaybackGPU, PartialUploadsPreserveUntouchedBytes) {
     StagingBuffer staging(device, 256, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
     ASSERT_TRUE(staging.allocate()); StagingBufferRef ref; ASSERT_TRUE(staging.allocateSubRef(256, ref));

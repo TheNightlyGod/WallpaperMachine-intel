@@ -158,9 +158,9 @@ separate live renderer instances. Actual OS transitions still need desktop verif
 | Records, bounded persistence and backup validation | `App/Services/Library/WallpaperDisplayLayoutStore.swift` |
 | Capture, planning, preflight and verified recovery | `App/Services/Desktop/WallpaperDisplayTransfer.swift` |
 | Bridge queue, clean-option checks and final history | `App/ViewModels/BridgeStoreDisplayLayouts.swift` |
-| Panel actions/snapshot | `App/Views/ControlPanel/WebPanelDisplayLayouts.swift` |
-| Settings UI | `WebUI/display-layouts.js`, integrated in `WebUI/settings.js` |
-| Apply to all displays button | `WebUI/panel.js` (inspector), `activateAll` in `WebPanelActions.swift` |
+| Panel actions and state | `saveDisplayLayout`, `renameDisplayLayout`, `deleteDisplayLayout`, `applyDisplayLayout`, `copyWallpaper`, `swapWallpapers` in `App/Views/ControlPanel/Model/PanelController+DisplayLayouts.swift` |
+| Settings UI | The Display layouts group in `App/Views/ControlPanel/Settings/Sections/DisplaysGroups.swift`, Copy or swap in `DisplaysSettingsCard.swift`, the page state in `Settings/DisplaysSettingsModel.swift` |
+| Apply to all displays | The inspector's **More actions** menu (`Inspector/InspectorHeader.swift`), `activateAll` in `Model/PanelController+Library.swift` |
 | Shortcuts and links | `App/Services/Automation/WallpaperConfigurationIntents.swift`, `WallpaperIntents.swift` (Apply Wallpaper's **On all displays**), `AutomationCommand.swift`, `AppDelegate.performAutomation` |
 
 The store, transfer and BridgeStore integration suites (`WallpaperDisplayLayoutStoreTests`,
@@ -170,10 +170,12 @@ mutation, recovery of empty destinations, external-choice preservation, cancella
 manual-choice callbacks, clean-edit preflight, paused playback, a newer queued manual
 action and applying one wallpaper to every display (plan order, displays that already show
 it, a display set that changed while preparing, one history entry per display, rollback).
-`ControlPanelDisplayLayoutTests` drives an offscreen WKWebView through save, rename,
-apply, delete, copy, swap, Apply to all displays (offered only with two eligible displays),
-failed-recovery feedback, focus return, escaped names, unavailable
-displays and the compact English/Chinese/Japanese layout; `WallpaperBackupTests`,
+`PanelDisplayLayoutActionsTests` covers the panel's save, rename, apply, delete, copy,
+swap, a failed swap putting both displays back, unavailable displays and the limit;
+`DisplaysSettingsModelTests` the page's status lines, failed-recovery feedback and focus
+return; `SettingsBRenderTests` the page in every shipped language at the smallest window;
+`InspectorPolicyTests` and `PanelLibraryActionsTests` Apply to all displays (offered only
+with two eligible displays, rollback after a failure); `WallpaperBackupTests`,
 `AutomationCommandTests` and `AppAutomationTests` cover backup merging and link validation.
 These tests create no desktop wallpaper windows and do not prove real multi-monitor
 compositor transitions, visible appearance, VoiceOver, Siri or Shortcuts registration.

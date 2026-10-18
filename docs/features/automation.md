@@ -44,14 +44,29 @@ applied afterwards; it counts as handled, like a manual choice. Saving changed r
 and may apply it immediately. A failed event is reported in the display's section
 and waits for **Retry automatic change** or a later event.
 
-**Sunrise and sunset**, at the bottom of Displays, accepts manual latitude and
-longitude: north/east positive, south/west negative. Calculation is local, requires
-no location permission or network request, and follows the approximate
+**Sunrise and sunset**, at the bottom of Displays, offers three time sources. With
+**Coordinates** it accepts manual latitude and longitude: north/east positive,
+south/west negative. Calculation is local, requires no location permission or
+network request, and follows the approximate
 [NOAA solar equations](https://www.gml.noaa.gov/grad/solcalc/solareqns.PDF).
-It uses the Mac's time zone even when coordinates describe another region. Weekdays
-refer to the solar event's civil day before applying the offset; offsets may cross
-midnight. Days without a sunrise/sunset near the poles are skipped. A solar rule
-without saved coordinates has no event until a location is supplied.
+It uses the Mac's time zone even when coordinates describe another region.
+
+With **Fixed times** it uses the two clock times entered there instead of
+calculating anything, so no coordinates are needed. Rules keep their offsets, so a
+rule at sunset − 15 minutes fires 15 minutes before the fixed sunset time.
+
+Choosing **Automatic** asks for location access and keeps the Mac's approximate
+position up to date, then calculates like **Coordinates**. Location updates stop
+when another source is selected, and the last position keeps planning while a new
+fix is unavailable. Relaunching resumes already-authorized updates without asking
+for permission. If Location Services is off or access was refused, the panel says
+so and links to System Settings; allowing access there resumes updates while
+**Automatic** remains selected.
+
+Weekdays refer to the solar event's civil day before applying the offset; offsets
+may cross midnight. Days without a sunrise/sunset near the poles are skipped. A
+coordinate-based or automatic solar rule without a location has no event until one
+is supplied.
 
 ## Focus selection and restoration
 
@@ -91,7 +106,7 @@ and retained if restore rolls back.
 | Apply saved playlist | Copies a saved plan to the chosen display and starts it when playback can run. |
 | Apply wallpaper property preset | Applies a saved preset to its owning wallpaper on every display using it; rejects unapplied editor drafts. |
 | Apply display layout | Restores the saved wallpaper arrangement across its named displays, with full preflight and verified failure recovery. |
-| Open | Brings up the control panel, on Installed, Discover, pixiv or Settings when named. |
+| Open | Brings up the control panel, on Installed, Steam Workshop (`page=discover`), pixiv or Settings when named. |
 | Remove from display | Menu bar only, with no link: takes whatever the named display shows off it and leaves it empty, so its playlist waits ([a display you cleared](playlists.md#a-display-you-cleared)). It takes the display's turn in the command queue and removes what the display shows then; an empty display is left as it is. |
 
 Previous, Next, Random Wallpaper, Apply Wallpaper and Apply Saved Playlist act on the panel's target display unless a display is named, and
@@ -107,16 +122,17 @@ the foot of the menu bar menu; the Shortcuts app shows its own.
 
 ## Keyboard shortcuts
 
-**Settings → General → Keyboard shortcuts** records one shortcut each for
+**Settings → Keyboard shortcuts** records one shortcut each for
 **Play or pause wallpapers**, **Mute or unmute wallpapers**, **Previous wallpaper**, **Next wallpaper**, **Random wallpaper** (from every
 wallpaper, on the target display) and **Open the control panel**.
 None is set until recorded, so the app never takes a combination another app
 expects. **Record…** takes the next key pressed in that row (Escape alone, or
 moving focus away, gives up); the key must be held with ⌘, ⌥ or ⌃, except F13
-to F20, which type nothing and may stand alone. The page sends the key's position
-(`KeyboardEvent.code`), which `GlobalHotKeys` maps to Carbon's virtual key code,
-so a shortcut stays on the same key whatever the keyboard layout. One combination
-serves one action.
+to F20, which type nothing and may stand alone. The recorder takes the key's
+position (`NSEvent.keyCode`, which is Carbon's virtual key code), which
+`GlobalHotKeys.hotKey(keyCode:modifierFlags:)` checks against the keys a shortcut
+may use, so a shortcut stays on the same key whatever the keyboard layout. One
+combination serves one action.
 
 `GlobalHotKeys` registers them with `RegisterEventHotKey`, which works whichever
 app is in front, needs no Accessibility permission and delivers only those
@@ -193,7 +209,7 @@ any case; any other value, or a name given twice, is refused rather than guessed
 
 A link with an unknown command, a query value the command does not take, a value
 given twice, or a path is ignored and logged rather than guessed at. A browser
-asks before it opens the app. **Settings → General → Shortcuts app and links**
+asks before it opens the app. **Settings → Keyboard shortcuts → Shortcuts app and links**
 lists the links. Plan and preset IDs are the IDs in their saved records, not their
 display names; Shortcuts supplies name-based pickers without requiring these IDs.
 
@@ -215,14 +231,16 @@ leaving the round alone, the pick made when the display's turn comes), waiting f
 reaching the caller (`AppAutomationTests`), hotkey preferences and the key-code and
 modifier mapping (`HotKeyPreferencesTests`, `GlobalHotKeysTests`), the mute preference and how it
 joins the audio suppression the bridge receives (`PlaybackPreferencesTests`,
-`PlaybackPolicyCompositionTests`; the Settings switch is in `WebPanelGeneralSettingsTests`), the planner, store and
+`PlaybackPolicyCompositionTests`; the Settings switch is in `PanelPerformanceSettingsTests`), the planner, store and
 scheduler (`WallpaperAutomationPlannerTests`, `WallpaperAutomationStoreTests`,
 `WallpaperAutomationSchedulerTests`: weekday rules, simultaneous events, appearance
 choices, DST, solar offsets crossing midnight, absent polar events, catch-up and retry
 against a fake clock and the real command queue, manual precedence including a rule
 giving way to a waiting or running manual command, Focus exit and
-interrupted recovery), native validation and queued manual playlist edits
-(`WebPanelPlaylistTests`), the offscreen rule editor (`ControlPanelAutomationTests`) and
+interrupted recovery), the panel's validation and queued manual playlist edits
+(`PanelPlaylistActionsTests`), the rule actions and editor (`PanelAutomationActionsTests`,
+`DisplaysSettingsModelTests`, `DisplaysSettingsDraftsTests`), the shortcut recorder
+(`PanelHotKeyActionsTests`, `ShortcutsRecorderModelTests`) and
 rule merging and rollback in backups (`WallpaperBackupTests`) each have their own suite;
 the Space tests are listed in [Spaces verification](spaces.md#storage-and-verification).
 The domain inventory is in [coverage](../testing/coverage.md).

@@ -31,17 +31,18 @@ namespace
 constexpr std::string_view kBonesUniform { "g_Bones" };
 
 /// Whether this per-frame mesh is the four-corner card a text layer's relayout
-/// rewrites.
+/// or a pass-through layer's move rewrites.
 ///
 /// A positive statement about the geometry, not about who owns it: one submesh
 /// holding one vertex array of exactly a float3 position and a float2 texture
 /// coordinate, four vertices of fixed capacity and no index array. That is what
 /// `ResizeCardMesh` writes when the runtime re-lays out a text layer -- for the
 /// layer's own card, for an effect chain's final card and for the node an
-/// effect chain resolves its last pass onto -- and it is exactly the upload the
-/// native backend's dynamic path performs. Anything with a second stream, a
-/// different attribute set or a growing vertex count is not this shape and is
-/// judged by the particle rules below.
+/// effect chain resolves its last pass onto -- and what `PassthroughCard`
+/// writes when a pass-through layer is drawn somewhere else, and it is exactly
+/// the upload the native backend's dynamic path performs. Anything with a
+/// second stream, a different attribute set or a growing vertex count is not
+/// this shape and is judged by the particle rules below.
 bool IsDynamicCardMesh(const SceneMesh& mesh)
 {
     if (mesh.MaterialSlots().size() != 1 || mesh.Submeshes().size() != 1) return false;
@@ -237,12 +238,8 @@ std::string RejectNodes(const Scene& scene, const SceneNode* node)
         }
         for (const auto& slot : mesh->MaterialSlots()) {
             if (slot == nullptr) continue;
-            const auto& material = *slot;
-            const auto* shader   = material.customShader.shader.get();
+            const auto* shader = slot->customShader.shader.get();
             if (shader == nullptr) return "a layer has no shader";
-            if (material.depth_compare_unsupported) {
-                return "a material uses a depth compare the native renderer does not support";
-            }
         }
     }
 

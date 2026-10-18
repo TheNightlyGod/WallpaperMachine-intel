@@ -11,7 +11,9 @@
 # The other languages need no build. C/C++ is left out on purpose: the only C/C++
 # CodeQL can see is vendored third-party code under upstream/renderer/external/,
 # and CodeQL does not analyze Objective-C. Ruby is left out because its only file
-# is the FFmpeg Homebrew formula.
+# is the FFmpeg Homebrew formula. JavaScript/TypeScript is left out because the
+# repository has none since the control panel became SwiftUI, and CodeQL fails a
+# language it finds no code for.
 #
 # Default setup must be off (Settings -> Code security -> CodeQL analysis), or
 # GitHub rejects this workflow's uploads (docs/release.md).
@@ -41,11 +43,10 @@ jobs:
       matrix:
         include:
           - { language: actions, build-mode: none, runner: ubuntu-latest }
-          - { language: javascript-typescript, build-mode: none, runner: ubuntu-latest }
           - { language: python, build-mode: none, runner: ubuntu-latest }
           - { language: rust, build-mode: none, runner: ubuntu-latest }
-          # macOS 26 for the same reason as Build's test job: actool compiles the
-          # Debug app's icon there.
+          # macOS 26 for the same reason as the Test workflow's native job: actool
+          # compiles the Debug app's icon there.
           - { language: swift, build-mode: manual, runner: macos-26 }
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120

@@ -3,6 +3,7 @@
 #include "Core/RendererCounters.hpp"
 #include "Presentation/WallpaperScaling.hpp"
 #include "MetalRender/MetalVideoSupport.hpp"
+#include "Scene/include/Scene/SceneResolution.hpp"
 #include "Type.hpp"
 
 #include <cstdint>
@@ -113,12 +114,25 @@ public:
     bool releaseSurface();
     bool resetSurface(const MetalRenderInitInfo& info);
 
+    /// Releases the compiled graph and everything that belongs to it: the scene's
+    /// videos are closed.
     bool clearLastRenderGraph();
+    /// The first half of building the same scene's graph again, as the host does
+    /// whenever something the graph is made of changes under a scene that is
+    /// playing. The scene's videos are not closed: they are kept open for the
+    /// `compileRenderGraph` that follows, which takes back the ones its graph
+    /// still uses and closes the rest with it. The video then does not start
+    /// over at the head of its clip, and a video packaged in the scene is not read
+    /// again. Only for a compile of the scene that was drawing, which must follow.
+    bool clearLastRenderGraphForRebuild();
     bool compileRenderGraph(Scene& scene, rg::RenderGraph& graph);
-    /// Applies a new internal rasterization scale to an already compiled graph.
-    /// Render targets and the pipelines attached to them are rebuilt; the
-    /// parsed scene, uploaded images and shader libraries are not.
-    bool ApplyRenderScale(Scene& scene, rg::RenderGraph& graph, double scale);
+    /// Applies a new internal rasterization scale, and the resolution the scene
+    /// is rasterized at, to an already compiled graph. Render targets and the
+    /// pipelines attached to them are rebuilt, and only when one of the two
+    /// changes what this scene rasterizes; the parsed scene, uploaded images and
+    /// shader libraries are not.
+    bool ApplyRenderScale(Scene& scene, rg::RenderGraph& graph, double scale,
+                          SceneResolution resolution);
 
     /// Draws one frame. `presented`, when given, reports whether a frame
     /// actually reached the layer: returning true having presented nothing is

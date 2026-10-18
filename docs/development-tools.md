@@ -81,11 +81,24 @@ poster installed until the next launch. Signals sent while the app is still laun
 are not handled. Discard performance comparisons if another copy starts, foreground
 visibility changes unexpectedly, or the presentation policy suspends playback.
 
-For offscreen WebKit visual checks, use `WKWebView.takeSnapshot`. A hidden native
-host's `NSView.cacheDisplay` can capture an earlier WebKit frame even after DOM
-geometry has settled; do not treat that cached image as current window output.
-Pair the WebKit snapshot with native content bounds and hit-testing. Neither
-proves a live full-screen or Split View Space transition.
+For an offscreen look at the control panel, a temporary test hosts the real view
+(`ControlPanelView`, `PanelRootView` over a test controller, or one page or inspector)
+in an unordered window from `ControlPanelWindow.make`, sets the window's own
+`appearance` for light or dark (never `NSApp.appearance`), lays it out with
+`layoutSubtreeIfNeeded()` and draws it with `bitmapImageRepForCachingDisplay(in:)`
+and `cacheDisplay(in:to:)`. Write the image to `FileManager.default.temporaryDirectory`
+and copy it out with the shell: test code never writes under `~/Documents`
+([conventions](conventions.md#tests)). Delete the test afterwards; screenshots are
+never committed. `ImageRenderer` draws only pure SwiftUI, so AppKit-backed parts
+(lists, text fields, the split view, the toolbar, `AnimatedPreview`) are missing from
+its output. What such a capture cannot show: the inspector column, an
+`NSGlassEffectView` that draws blank (render the inspector alone in an
+`NSHostingView` at its width instead), a list selection (drawn solid black),
+controls in their active colours (an unordered window is inactive, so switches,
+sliders and progress views are grey), sheets and popovers (an unordered window
+attaches none; render their content alone), hover, pressed and focus states, Reduce
+Motion and Reduce Transparency, VoiceOver, and full-screen or Split View
+transitions. Report those as unverified.
 
 ## Asset corpus and manual smoke
 

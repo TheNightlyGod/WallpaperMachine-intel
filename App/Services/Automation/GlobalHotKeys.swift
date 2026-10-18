@@ -1,3 +1,4 @@
+import AppKit
 import Carbon
 import Foundation
 
@@ -92,55 +93,53 @@ final class GlobalHotKeys {
         return noErr
     }
 
-    /// The shortcut a key press in the panel names: `code` is the page's `KeyboardEvent.code`,
-    /// the key's position, as Carbon's key codes are. A key needs ⌘, ⌥ or ⌃ with it, so a
-    /// shortcut never takes a key away from typing; only F13 to F20, which type nothing, may
-    /// stand alone.
-    static func hotKey(code: String, command: Bool, option: Bool, control: Bool, shift: Bool) throws -> HotKey {
-        guard let key = keys[code] else {
+    /// The shortcut a key press in the panel names: `keyCode` is `NSEvent.keyCode`, the key's
+    /// position as Carbon's virtual key codes name it, and only the four modifier flags count. A key
+    /// needs ⌘, ⌥ or ⌃ with it, so a shortcut never takes a key away from typing; only F13 to F20,
+    /// which type nothing, may stand alone.
+    static func hotKey(keyCode: UInt16, modifierFlags: NSEvent.ModifierFlags) throws -> HotKey {
+        guard let label = keyLabels[Int(keyCode)] else {
             throw AutomationError(message: String(localized: "This key can’t be used for a shortcut. Try a letter, a number or a function key."))
         }
-        let bare = ["F13", "F14", "F15", "F16", "F17", "F18", "F19", "F20"].contains(code)
-        guard command || option || control || bare else {
+        let command = modifierFlags.contains(.command), option = modifierFlags.contains(.option)
+        let control = modifierFlags.contains(.control), shift = modifierFlags.contains(.shift)
+        guard command || option || control || standaloneKeys.contains(Int(keyCode)) else {
             throw AutomationError(message: String(localized: "Hold ⌘, ⌥ or ⌃ with the key, so the shortcut doesn’t take it away from typing."))
         }
         var modifiers = 0
-        var label = ""
-        if control { modifiers |= controlKey; label += "⌃" }
-        if option { modifiers |= optionKey; label += "⌥" }
-        if shift { modifiers |= shiftKey; label += "⇧" }
-        if command { modifiers |= cmdKey; label += "⌘" }
-        return HotKey(keyCode: UInt32(key.code), modifiers: UInt32(modifiers), label: label + key.label)
+        var prefix = ""
+        if control { modifiers |= controlKey; prefix += "⌃" }
+        if option { modifiers |= optionKey; prefix += "⌥" }
+        if shift { modifiers |= shiftKey; prefix += "⇧" }
+        if command { modifiers |= cmdKey; prefix += "⌘" }
+        return HotKey(keyCode: UInt32(keyCode), modifiers: UInt32(modifiers), label: prefix + label)
     }
 
-    /// `KeyboardEvent.code` names and the Carbon key codes of the same positions.
-    private static let keys: [String: (code: Int, label: String)] = [
-        "KeyA": (kVK_ANSI_A, "A"), "KeyB": (kVK_ANSI_B, "B"), "KeyC": (kVK_ANSI_C, "C"),
-        "KeyD": (kVK_ANSI_D, "D"), "KeyE": (kVK_ANSI_E, "E"), "KeyF": (kVK_ANSI_F, "F"),
-        "KeyG": (kVK_ANSI_G, "G"), "KeyH": (kVK_ANSI_H, "H"), "KeyI": (kVK_ANSI_I, "I"),
-        "KeyJ": (kVK_ANSI_J, "J"), "KeyK": (kVK_ANSI_K, "K"), "KeyL": (kVK_ANSI_L, "L"),
-        "KeyM": (kVK_ANSI_M, "M"), "KeyN": (kVK_ANSI_N, "N"), "KeyO": (kVK_ANSI_O, "O"),
-        "KeyP": (kVK_ANSI_P, "P"), "KeyQ": (kVK_ANSI_Q, "Q"), "KeyR": (kVK_ANSI_R, "R"),
-        "KeyS": (kVK_ANSI_S, "S"), "KeyT": (kVK_ANSI_T, "T"), "KeyU": (kVK_ANSI_U, "U"),
-        "KeyV": (kVK_ANSI_V, "V"), "KeyW": (kVK_ANSI_W, "W"), "KeyX": (kVK_ANSI_X, "X"),
-        "KeyY": (kVK_ANSI_Y, "Y"), "KeyZ": (kVK_ANSI_Z, "Z"),
-        "Digit0": (kVK_ANSI_0, "0"), "Digit1": (kVK_ANSI_1, "1"), "Digit2": (kVK_ANSI_2, "2"),
-        "Digit3": (kVK_ANSI_3, "3"), "Digit4": (kVK_ANSI_4, "4"), "Digit5": (kVK_ANSI_5, "5"),
-        "Digit6": (kVK_ANSI_6, "6"), "Digit7": (kVK_ANSI_7, "7"), "Digit8": (kVK_ANSI_8, "8"),
-        "Digit9": (kVK_ANSI_9, "9"),
-        "Minus": (kVK_ANSI_Minus, "-"), "Equal": (kVK_ANSI_Equal, "="),
-        "BracketLeft": (kVK_ANSI_LeftBracket, "["), "BracketRight": (kVK_ANSI_RightBracket, "]"),
-        "Backslash": (kVK_ANSI_Backslash, "\\"), "Semicolon": (kVK_ANSI_Semicolon, ";"),
-        "Quote": (kVK_ANSI_Quote, "'"), "Comma": (kVK_ANSI_Comma, ","), "Period": (kVK_ANSI_Period, "."),
-        "Slash": (kVK_ANSI_Slash, "/"), "Backquote": (kVK_ANSI_Grave, "`"),
-        "Space": (kVK_Space, "Space"), "Enter": (kVK_Return, "↩"),
-        "ArrowLeft": (kVK_LeftArrow, "←"), "ArrowRight": (kVK_RightArrow, "→"),
-        "ArrowUp": (kVK_UpArrow, "↑"), "ArrowDown": (kVK_DownArrow, "↓"),
-        "Home": (kVK_Home, "↖"), "End": (kVK_End, "↘"), "PageUp": (kVK_PageUp, "⇞"), "PageDown": (kVK_PageDown, "⇟"),
-        "F1": (kVK_F1, "F1"), "F2": (kVK_F2, "F2"), "F3": (kVK_F3, "F3"), "F4": (kVK_F4, "F4"),
-        "F5": (kVK_F5, "F5"), "F6": (kVK_F6, "F6"), "F7": (kVK_F7, "F7"), "F8": (kVK_F8, "F8"),
-        "F9": (kVK_F9, "F9"), "F10": (kVK_F10, "F10"), "F11": (kVK_F11, "F11"), "F12": (kVK_F12, "F12"),
-        "F13": (kVK_F13, "F13"), "F14": (kVK_F14, "F14"), "F15": (kVK_F15, "F15"), "F16": (kVK_F16, "F16"),
-        "F17": (kVK_F17, "F17"), "F18": (kVK_F18, "F18"), "F19": (kVK_F19, "F19"), "F20": (kVK_F20, "F20"),
+    /// The keys that type nothing, which a shortcut may use without a modifier.
+    private static let standaloneKeys: Set<Int> = [
+        kVK_F13, kVK_F14, kVK_F15, kVK_F16, kVK_F17, kVK_F18, kVK_F19, kVK_F20,
+    ]
+
+    /// The keys a shortcut can use, by Carbon virtual key code, and how its label writes them.
+    /// Escape, Tab, Delete and the numeric keypad are left out, so ⌘Esc and the like are refused.
+    private static let keyLabels: [Int: String] = [
+        kVK_ANSI_A: "A", kVK_ANSI_B: "B", kVK_ANSI_C: "C", kVK_ANSI_D: "D", kVK_ANSI_E: "E",
+        kVK_ANSI_F: "F", kVK_ANSI_G: "G", kVK_ANSI_H: "H", kVK_ANSI_I: "I", kVK_ANSI_J: "J",
+        kVK_ANSI_K: "K", kVK_ANSI_L: "L", kVK_ANSI_M: "M", kVK_ANSI_N: "N", kVK_ANSI_O: "O",
+        kVK_ANSI_P: "P", kVK_ANSI_Q: "Q", kVK_ANSI_R: "R", kVK_ANSI_S: "S", kVK_ANSI_T: "T",
+        kVK_ANSI_U: "U", kVK_ANSI_V: "V", kVK_ANSI_W: "W", kVK_ANSI_X: "X", kVK_ANSI_Y: "Y",
+        kVK_ANSI_Z: "Z",
+        kVK_ANSI_0: "0", kVK_ANSI_1: "1", kVK_ANSI_2: "2", kVK_ANSI_3: "3", kVK_ANSI_4: "4",
+        kVK_ANSI_5: "5", kVK_ANSI_6: "6", kVK_ANSI_7: "7", kVK_ANSI_8: "8", kVK_ANSI_9: "9",
+        kVK_ANSI_Minus: "-", kVK_ANSI_Equal: "=", kVK_ANSI_LeftBracket: "[", kVK_ANSI_RightBracket: "]",
+        kVK_ANSI_Backslash: "\\", kVK_ANSI_Semicolon: ";", kVK_ANSI_Quote: "'", kVK_ANSI_Comma: ",",
+        kVK_ANSI_Period: ".", kVK_ANSI_Slash: "/", kVK_ANSI_Grave: "`",
+        kVK_Space: "Space", kVK_Return: "↩",
+        kVK_LeftArrow: "←", kVK_RightArrow: "→", kVK_UpArrow: "↑", kVK_DownArrow: "↓",
+        kVK_Home: "↖", kVK_End: "↘", kVK_PageUp: "⇞", kVK_PageDown: "⇟",
+        kVK_F1: "F1", kVK_F2: "F2", kVK_F3: "F3", kVK_F4: "F4", kVK_F5: "F5", kVK_F6: "F6",
+        kVK_F7: "F7", kVK_F8: "F8", kVK_F9: "F9", kVK_F10: "F10", kVK_F11: "F11", kVK_F12: "F12",
+        kVK_F13: "F13", kVK_F14: "F14", kVK_F15: "F15", kVK_F16: "F16", kVK_F17: "F17",
+        kVK_F18: "F18", kVK_F19: "F19", kVK_F20: "F20",
     ]
 }

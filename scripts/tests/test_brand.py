@@ -118,6 +118,17 @@ print(String(data: try JSONSerialization.data(withJSONObject: [colors, joins, ed
                         self.assertGreater(max(abs(c - background) for c in color[:3]), 0.2,
                                            'Enlarged screen/frame joins must not expose a background seam')
 
+    def test_dock_icons_are_the_asset_catalog_image_sets_the_app_loads(self):
+        for name in ('minimal', 'day', 'night'):
+            path = brand.dock_icon(name)
+            with self.subTest(icon=name):
+                self.assertEqual(path.parent.name, f'AppIcon{name.capitalize()}.imageset')
+                contents = json.loads((path.parent / 'Contents.json').read_text())
+                self.assertEqual([image['filename'] for image in contents['images']], [path.name])
+                header = path.read_bytes()[:24]
+                self.assertEqual(header[:8], b'\x89PNG\r\n\x1a\n')
+                self.assertEqual(struct.unpack('>II', header[16:24]), (1024, 1024))
+
     def test_dock_variants_preserve_transparent_margin_and_distinct_artwork(self):
         if reason := ictool_skip_reason():
             self.skipTest(reason)

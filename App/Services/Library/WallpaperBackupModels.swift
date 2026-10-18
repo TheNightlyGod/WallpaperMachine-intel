@@ -97,6 +97,7 @@ struct WallpaperBackupPreferences: Sendable {
         "WallpaperMachine.wallpaperPresets", "WallpaperMachine.imagePlacements",
         "WallpaperMachine.playlists", "WallpaperMachine.playlistNextChange",
         "WallpaperMachine.automaticWallpapers", "WallpaperMachine.solarLocation",
+        "WallpaperMachine.solarSettings",
         "WallpaperMachine.displayLayouts",
         "WallpaperMachine.favoriteWallpaperIDs", "WallpaperMachine.appTheme",
         "WallpaperMachine.appLanguage", "AppleLanguages", "WallpaperMachine.hotKeys",
@@ -107,6 +108,8 @@ struct WallpaperBackupPreferences: Sendable {
         "WallpaperMachine.playOnlyOnActiveDisplay",
         "WallpaperMachine.hideAfterActivating", "WallpaperMachine.concurrentDownloads",
         "WallpaperMachine.workshopUpdateChecks", "WallpaperMachineAssetsPath",
+        // No longer read since filters became a popover; still accepted so that backups made
+        // by earlier versions, which carry them, keep restoring.
         "WallpaperMachine.workshopFiltersCollapsed", "WallpaperMachine.installedFiltersCollapsed",
         "WallpaperMachine.pixivFiltersCollapsed",
     ]
@@ -186,6 +189,9 @@ struct WallpaperBackupPreferences: Sendable {
         case "WallpaperMachine.solarLocation":
             let location = try JSONDecoder().decode(WallpaperSolarLocation.self, from: data())
             guard location.isValid else { throw invalid() }
+        case "WallpaperMachine.solarSettings":
+            let solar = try JSONDecoder().decode(WallpaperSolarSettings.self, from: data())
+            guard solar.isValid else { throw invalid() }
         case "WallpaperMachine.wallpaperPresets": try WallpaperPresetStore.validateArchiveData(data())
         case "WallpaperMachine.collections":
             let records = try JSONDecoder().decode([WallpaperCollection].self, from: data())

@@ -13,6 +13,8 @@
 #include <memory>
 #include <string>
 
+#include "Image.hpp"
+#include "Interface/IImageParser.h"
 #include "MetalRender/MetalVideoSupport.hpp"
 #include "Scene/MetalRender/MetalVideoTextures.hpp"
 #include "Scene/Scene.h"
@@ -128,11 +130,19 @@ public:
         m_frame.display_transform = *transform;
     }
 
-    bool syncPlayback(const video::VideoPlaybackState& state, std::string*) override
+    bool syncPlayback(const video::VideoPlaybackState& state, std::string* error) override
     {
         m_playback = state;
-        return true;
+        if (! fail_sync) return true;
+        if (error != nullptr) *error = "synthetic decoder failure";
+        return false;
     }
+
+    /// The clock the consumer last handed this source.
+    const video::VideoPlaybackState& playback() const { return m_playback; }
+
+    /// A decoder that has failed: every later sync reports it.
+    bool fail_sync { false };
 
     bool refreshFrame(std::string*) override
     {
@@ -471,6 +481,151 @@ TEST_F(MetalVideoTexture, ReportsTheShortestFramePeriod)
     EXPECT_FALSE(textures->owns("missing"));
     textures->release();
     EXPECT_TRUE(textures->empty());
+}
+
+/// A parser that is not to be asked for anything: a video a rebuild kept open is
+/// not read again, and reading one packaged in a scene copies and hashes its file.
+class CountingImageParser final : public IImageParser {
+public:
+    std::shared_ptr<Image> Parse(const std::string&) override
+    {
+        ++parses;
+        return nullptr;
+    }
+    ImageHeader ParseHeader(const std::string&) override { return {}; }
+    int         parses { 0 };
+};
+
+/// The scene a rebuild compiles again: a video texture named `key`, a parser that
+/// counts what it is asked for, the clock somewhere into the clip.
+CountingImageParser* DescribeVideos(Scene& scene, std::initializer_list<const char*> keys,
+                                    double elapsed_seconds)
+{
+    for (const char* key : keys) {
+        scene.textures[key] = SceneTexture { .url = key, .isVideo = true };
+    }
+    auto parser          = std::make_unique<CountingImageParser>();
+    auto* counting       = parser.get();
+    scene.imageParser    = std::move(parser);
+    scene.elapsingTime   = elapsed_seconds;
+    return counting;
+}
+
+TEST_F(MetalVideoTexture, AVideoSetAsideByARebuildIsTakenBackAsItIsAndNotReadAgain)
+{
+    auto source = std::make_shared<FakeVideoSource>(16, 16, kCVPixelFormatType_32BGRA);
+    source->produce(20, 140, 220);
+    std::string error;
+    ASSERT_TRUE(textures->prepareForTests("video", source, &error)) << error;
+    ASSERT_TRUE(RunFrame(&error)) << error;
+    auto* parser = DescribeVideos(scene, { "video" }, 4.0);
+
+    textures->hold();
+    EXPECT_FALSE(textures->owns("video")) << "the graph that went still owns its video";
+    EXPECT_TRUE(textures->empty());
+    EXPECT_EQ(textures->texture("video"), nil);
+    EXPECT_FALSE(textures->advancesOnItsOwn());
+
+    ASSERT_TRUE(textures->prepare(scene, { "video" }, &error)) << error;
+    EXPECT_TRUE(textures->owns("video"));
+    EXPECT_EQ(parser->parses, 0) << "a video kept open was read from the scene again";
+    // The source that was playing is the one playing, given the clock it is to be at.
+    EXPECT_NEAR(source->playback().scene_elapsed_seconds, 4.0, 1e-9);
+
+    // And it goes on delivering: its next frame reaches the new graph's texture.
+    source->produce(200, 60, 10);
+    ASSERT_TRUE(RunFrame(&error)) << error;
+    id<MTLTexture> texture = textures->texture("video");
+    ASSERT_NE(texture, nil);
+    const auto pixel = ReadPixel(texture, 8, 8);
+    EXPECT_EQ(pixel[0], 200);
+    EXPECT_EQ(pixel[1], 60);
+    EXPECT_EQ(pixel[2], 10);
+    EXPECT_TRUE(textures->advancesOnItsOwn());
+
+    // Nothing is left to close: the compile that took it back ends without ending it.
+    const std::weak_ptr<FakeVideoSource> watcher = source;
+    source.reset();
+    textures->closeHeld();
+    EXPECT_FALSE(watcher.expired());
+    EXPECT_TRUE(textures->owns("video"));
+}
+
+TEST_F(MetalVideoTexture, AVideoTheNewGraphDoesNotUseIsClosedWithItsCompile)
+{
+    auto kept    = std::make_shared<FakeVideoSource>(16, 16, kCVPixelFormatType_32BGRA);
+    auto dropped = std::make_shared<FakeVideoSource>(16, 16, kCVPixelFormatType_32BGRA);
+    kept->produce(20, 140, 220);
+    dropped->produce(20, 140, 220);
+    std::string error;
+    ASSERT_TRUE(textures->prepareForTests("kept", kept, &error)) << error;
+    ASSERT_TRUE(textures->prepareForTests("dropped", dropped, &error)) << error;
+    auto* parser = DescribeVideos(scene, { "kept", "dropped" }, 1.0);
+    const std::weak_ptr<FakeVideoSource> kept_watch = kept, dropped_watch = dropped;
+    kept.reset();
+    dropped.reset();
+
+    textures->hold();
+    // The graph that went is released as it always was; what was set aside is not
+    // part of it, and stays open until the compile says which videos it still uses.
+    textures->release();
+    EXPECT_FALSE(kept_watch.expired());
+    EXPECT_FALSE(dropped_watch.expired());
+
+    ASSERT_TRUE(textures->prepare(scene, { "kept" }, &error)) << error;
+    EXPECT_FALSE(dropped_watch.expired()) << "closed before the compile had finished";
+    textures->closeHeld();
+    EXPECT_TRUE(dropped_watch.expired()) << "a video the new graph does not use is still open";
+    EXPECT_FALSE(kept_watch.expired());
+    EXPECT_TRUE(textures->owns("kept"));
+    EXPECT_FALSE(textures->owns("dropped"));
+    EXPECT_EQ(parser->parses, 0);
+}
+
+TEST_F(MetalVideoTexture, VideosSetAsideAreClosedByClosingThemAndByTheObjectGoingAway)
+{
+    auto source = std::make_shared<FakeVideoSource>(16, 16, kCVPixelFormatType_32BGRA);
+    source->produce(20, 140, 220);
+    std::string error;
+    ASSERT_TRUE(textures->prepareForTests("video", source, &error)) << error;
+    const std::weak_ptr<FakeVideoSource> watcher = source;
+    source.reset();
+    textures->hold();
+    EXPECT_FALSE(watcher.expired());
+    // A graph that is released for good (the scene is replaced, the renderer is
+    // destroyed) closes what was set aside with it.
+    textures->closeHeld();
+    EXPECT_TRUE(watcher.expired());
+
+    auto again = std::make_shared<FakeVideoSource>(16, 16, kCVPixelFormatType_32BGRA);
+    again->produce(20, 140, 220);
+    ASSERT_TRUE(textures->prepareForTests("video", again, &error)) << error;
+    const std::weak_ptr<FakeVideoSource> other = again;
+    again.reset();
+    textures->hold();
+    EXPECT_FALSE(other.expired());
+    textures.reset();
+    EXPECT_TRUE(other.expired());
+}
+
+TEST_F(MetalVideoTexture, AVideoSetAsideThatFailedWhileItWaitedIsOpenedAgainLikeAnyOther)
+{
+    auto source = std::make_shared<FakeVideoSource>(16, 16, kCVPixelFormatType_32BGRA);
+    source->produce(20, 140, 220);
+    std::string error;
+    ASSERT_TRUE(textures->prepareForTests("video", source, &error)) << error;
+    auto* parser = DescribeVideos(scene, { "video" }, 2.0);
+    textures->hold();
+    source->fail_sync = true;
+    const std::weak_ptr<FakeVideoSource> watcher = source;
+    source.reset();
+
+    // The scene's parser is asked, as it would be for a video never opened; this one
+    // has nothing to give, which is what shows the open was tried.
+    EXPECT_FALSE(textures->prepare(scene, { "video" }, &error));
+    EXPECT_EQ(parser->parses, 1);
+    EXPECT_NE(error.find("failed to parse video texture"), std::string::npos) << error;
+    EXPECT_TRUE(watcher.expired()) << "a decoder that had failed was kept";
 }
 
 TEST(MetalVideoTextureRejection, AcceptsAPlainVideoTextureAndRejectsASpriteSheet)

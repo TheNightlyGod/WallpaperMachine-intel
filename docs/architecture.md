@@ -13,10 +13,9 @@ map and placement rules are in [repository-layout.md](repository-layout.md).
 
 ```mermaid
 flowchart TD
-  WebUI["WebUI/ HTML+JS panel"] -->|"messageHandlers.native"| Panel["WebPanelController (WKWebView)"]
-  Panel -->|"wallpaperUI.receive(snapshot)"| WebUI
-  Shell["AppDelegate / menu bar"] --> Panel
-  Panel --> Store["BridgeStore (@Observable)"]
+  Shell["AppDelegate / menu bar"] --> Panel["SwiftUI control panel (PanelController)"]
+  Panel -->|"typed actions"| Store["BridgeStore (@Observable)"]
+  Store -->|"observation"| Panel
   Shell --> Services["App/Services/* by domain"]
   Services --> Store
   Store --> Generated["App/Bridge/Generated (uniffi Swift)"]
@@ -52,8 +51,13 @@ menu and the screen-parameters observer, opens the control-panel window, and sta
 long-lived services (lock screen, desktop poster sync, presentation policy, playlist and
 automation schedulers, the web and native-video wallpaper hosts, system media).
 
-- **Activation policy.** `.accessory` while no control-panel, What's New or preview window is
-  open, `.regular` while one is.
+- **Activation policy.** `.regular` while one of the four ordinary windows (control panel,
+  What's New, wallpaper preview, web sign-in) is on screen or minimized to the Dock,
+  `.accessory` otherwise. Opening one raises the policy; every place that lowers it (a window
+  closing, the status-item re-assert at launch, a quit) asks `ActivationPolicyRule`
+  (`App/Services/Lifecycle/`) about `NSApp.windows`. Alerts, open and save panels and wallpaper
+  windows never count, sign-in windows are matched through `WebSignInWindowController`'s own
+  list, and the panel and What's New a quit puts away stop counting even when minimized.
 - **Spaces and minimizing.** The four ordinary windows (control panel, What's New, wallpaper
   preview, web sign-in) call `ControlPanelWindow.moveToActiveSpace`, which inserts
   `.moveToActiveSpace` into their collection behavior, so opening one shows it on the Space the
@@ -87,9 +91,10 @@ automation schedulers, the web and native-video wallpaper hosts, system media).
   (Settings…, Check for Updates…, Quit), **File → Close** (Command-W sends `performClose` to the
   key window) and **Edit**. What the navigation actions do is owned by
   [playlists](features/playlists.md) and [automation](features/automation.md).
-- **Closing the panel.** `windowWillClose` releases the page and its WebKit processes; reopening
-  builds a fresh view around the existing stores and navigation, which also keeps Installed's
-  filters and the grid's scroll offset in memory ([control panel](features/control-panel.md#reopening-the-panel)).
+- **Closing the panel.** `windowWillClose` drops the window's hosting controller, which releases
+  the SwiftUI root and its `PanelController`; reopening builds a fresh view around the existing
+  stores and navigation, which also keeps Installed's filters and the grids' scroll offsets in
+  memory ([control panel](features/control-panel.md#reopening-the-panel)).
 - **Shutdown.** `applicationShouldTerminate` returns `.terminateLater` and hands an ordered
   asynchronous teardown to `QuitSupervisor`: lock-screen and desktop-poster restoration first,
   then the services, import, update, SteamCMD, Workshop and pixiv work, and the renderer bridge
@@ -136,73 +141,112 @@ assignment. The bridge's read-only preview export supplies the draft inputs, and
 shutdown precedes renderer shutdown. Playback limits are in
 [live preview](features/wallpaper-properties.md#live-preview).
 
-### Control panel: WKWebView and the JavaScript bridge
+### Control panel: SwiftUI
 
-The control-panel UI is HTML/CSS/JS in `WebUI/`, bundled as the app resource folder `WebUI`.
-Swift hosts it, but the page is app-owned: the renderer never draws into this web view. Coding
-rules for the page (CSP, escaping, icons, no bundler) are in [conventions.md](conventions.md#web-control-panel-webui).
+The control panel is native SwiftUI in `App/Views/ControlPanel/`, hosted in one AppKit window.
+It has no web view, and renderer content is never drawn into it. Coding rules for the panel
+(typed actions, string literals, symbols, accessibility, cost) are in
+[conventions.md](conventions.md#swiftui-control-panel); what it looks like and does is in
+[features/control-panel.md](features/control-panel.md).
 
 | Piece | Responsibility |
 |---|---|
-| `App/Views/ControlPanel/ControlPanelView.swift` | SwiftUI container; `ControlPanelNavigation` (`SidebarSelection`, `targetDisplayID`, Settings section, and the last `PanelViewState` the page reported) shared with native menu commands |
-| `App/Views/ControlPanel/PanelViewState.swift` | Validated copy of Installed's filters and the library grid's scroll offsets that the page reports with the `viewState` action; kept in memory on `ControlPanelNavigation` and handed to the next page in the reply to its first `ready` |
-| `App/Views/ControlPanel/ControlPanelWindow.swift` | Builds the window and owns its size floor |
-| `App/Views/ControlPanel/WebControlPanel.swift` | `NSViewRepresentable` over `WKWebView`; `WebPanelController` coordinator, `WebPanelAssets` scheme handler, message proxy |
-| `App/Views/ControlPanel/WebPanelSnapshot.swift` | Builds the `[String: Any]` state payload handed to the page |
-| `App/Views/ControlPanel/WebPanelActions.swift` | Decodes and executes page-originated actions (`WebPanelRequest`) |
-| `App/Views/ControlPanel/WebPanel<Feature>.swift` | One feature's share of the snapshot and actions (Automation, Backup, Compatibility, DisplayLayouts, DisplayPosition, ImagePlacement, LibraryOrganization, Letterbox, Pixiv, Presets); `WebPanelRecoveryBudget` limits WebContent restarts |
-| `App/Views/ControlPanel/WebSignInWindow.swift` | Separate sign-in window for pixiv and Steam: a private website data store, of which the app reads only the session cookie |
-| `App/Views/ControlPanel/WallpaperPreviewWindow.swift`, `WhatsNewViewController.swift` | Native preview window and release-notes window |
-| `WebUI/index.html`, `panel.js`, `settings.js`, `welcome.js`, `theme.js`, `i18n.js`, `icons.js`, the per-feature modules and the three stylesheets | The page itself; `welcome.js` is the full-window first-run guide; `locales/` holds one catalog per language |
+| `ControlPanelView.swift` | The root `AppDelegate` builds (six store arguments; `defaults` and `appLanguage` are test seams). Creates the window's `PanelController` in `@State`, starts it on appear and stops it on disappear, reports its window to `PanelPresentation`, and sets the image pipeline in the environment. Also declares `ControlPanelNavigation` (selection, target display, Settings section and reveal token, the last `PanelViewState`), shared with native menu commands, the status item and links |
+| `ControlPanelWindow.swift` | Builds the window, owns its 760×560 size floor, `moveToActiveSpace` and `bringForward` |
+| `PanelViewState.swift` | Installed's filters and the grids' scroll offsets as a `Codable` value, kept in memory on `ControlPanelNavigation` for the next window; `normalized()` applies the limits |
+| `Model/` | `PanelController` and its `PanelController+<Group>.swift` extensions (typed actions and derived state), `PanelPresentation`, `PanelStoreRevisions`, `PanelErrorState`, `PanelActionCoordinator`, `PanelDialogs`, `PanelPreferences`, `ExternalLink`, `TransferFormat`, `DisplayOptionsLoader`, `DragStepPump`, and the typed values views read (`LibraryRow`, `UpdatePresentation`, `TileDownloadState`, ...) |
+| `Shell/` | `PanelRootView` (theme, language, the page over the Now Playing bar, the guide overlay), `PanelTabs`, `PanelDetail` (page router, banners, the full-width host of the page, its Filters sidebar and its `InspectorColumn`, title, toolbar), `FilterSidebar`, the Now Playing bar, and `ShellModel` (navigation, inspector state, popovers, Escape, Command-F) |
+| `Library/`, `Inspector/`, `Discover/`, `Downloads/`, `Pixiv/`, `Settings/`, `Welcome/` | One area each: its views and its `@Observable` view model, which hangs off the controller as a lazy property (`library`, `inspector`, `workshopBrowser`, `downloads`, `pixivBrowser`, `settings`, `displaysSettings`, `welcome`, `supportPrompt`, and `shell`) |
+| `Components/`, `Theme/`, `Localization/`, `Images/` | Shared views (`TileGrid`, `WallpaperTile`, `ProgressRing`, `Equalizer`, `FilterPanel`, `InspectorCard`, `PanelEmptyState`, `SymbolTile`, the button styles), the palettes, `PanelLocale` and `L()`, the image pipeline |
+| `WebSignInWindow.swift` | Separate sign-in window for pixiv and Steam: a private website data store, of which the app reads only the session cookie |
+| `WallpaperPreviewWindow.swift`, `WhatsNewViewController.swift` | AppKit preview window and release-notes window |
 
-Protocol, both directions:
-
-- **Assets.** `WebPanelAssets` is a `WKURLSchemeHandler` for the private `mwe-ui` scheme. The
-  page loads from `mwe-ui://app/index.html`. Only an allowlisted set of bundled files is served
-  (plus `locales/<tag>.js` for each language in `AppLanguage.supported`); a new `WebUI/` file
-  must be added to that list. Library and download images are served by id from per-snapshot
-  maps (`mwe-ui://preview/<wallpaperID>`, `library-thumbnail/`, `thumbnail/`, `animated/`,
-  `pixiv-thumbnail/`, `property-image/`), so no library path is exposed to the page. `index.html` carries a
-  restrictive CSP (`default-src 'none'`, `connect-src 'none'`).
-- **Swift to page.** `WebPanelController.snapshot()` produces one dictionary describing the whole
-  UI, delivered by `callAsyncJavaScript("return window.wallpaperUI.receive(state)")`. Updates
-  are coalesced through `scheduleUpdate()` and suppressed while the window is hidden,
-  miniaturized or occluded. Observation is installed with
-  `withObservationTracking { trackSnapshotDependencies() }`, so any observed store property the
-  snapshot reads re-arms an update. Library rows are cached by their own inputs and carry
-  `libraryRevision`: the first delivery and action replies include the complete list, progress
-  pushes omit unchanged rows, and the page reuses only a matching revision, otherwise requesting
-  a full snapshot through the delivery result. Reloading the document resets that agreement.
-  The Settings energy readout is the one separate push, `window.wallpaperUI.energy(reading)`,
-  sampled only while the window is visible on Settings; see
-  [features/performance.md](features/performance.md#energy-use) and
-  [per-wallpaper energy rating](features/performance.md#per-wallpaper-energy-rating).
-- **Page to Swift.** `panel.js` calls `window.webkit.messageHandlers.native` with an `action`
-  string plus arguments. The handler is a `WKScriptMessageHandlerWithReply`, so every action is
-  answered with either a fresh snapshot or an error string, except three that are acknowledged
-  with `nil` at once and build no snapshot: the title-bar gestures `dragWindow` and
-  `titleDoubleClick` (a drag must start on the mouse event that caused it) and `viewState`
-  (Installed's filters and scroll offsets, reported as they change), and one that is
-  acknowledged with `nil` once its bridge call returns: `displayPositionPreview`, a Position
-  slider's step while it is dragged, and `propertyPreview`, the same for a property's slider
-  or colour, which keep nothing, build no snapshot, raise no panel error and reach the bridge
-  outside the user-command queue. The reply to a page's first
-  `ready` can also carry `restoreViewState`, the last stored report
-  ([reopening the panel](features/control-panel.md#reopening-the-panel)).
-  `WebPanelController.receive` rejects any message that is not from the main frame of the
-  `mwe-ui://app` origin. Post actions from event handlers, never from a render path such as
-  `settings.js` `draw()`. `send()` marks an action pending under a key that covers every tab
-  (and every value of one property), and a repeated `navigate`, `property` or similar action
-  waits on the one in flight; anything that can throw between marking the key and posting
-  belongs inside the `try` whose `finally` releases it.
-- **Theme and language.** `theme.js` and `i18n.js` read `window.__appTheme` and
-  `window.__appLanguage`, injected as the panel's only `WKUserScript` at document start so the
-  first paint is already correct; `window.appTheme.apply(theme)` runs on every snapshot.
-- **Recovery.** `webViewWebContentProcessDidTerminate` reloads the page under
-  `WebPanelRecoveryBudget`: three restarts within 120 seconds, and a ready handshake earns the
-  budget back only after 60 seconds of stable operation. Past the budget, or on a load failure,
-  a native `NSAlert` offers Reload. Navigation policy allows only the index URL; external links
-  are filtered by `WebPanelController.allowedExternalURL`.
+- **Window hosting.** `AppDelegate.showControlPanel` wraps `ControlPanelView` (or
+  `BridgeUnavailableView` when the bridge failed to start) in an `NSHostingController` with
+  `sizingOptions = []`, so AppKit owns the window's bounds and no label or ideal column width
+  becomes a window minimum, and `sceneBridgingOptions = [.toolbars, .title]`, so the root's
+  `.toolbar`, `.navigationTitle` and `.navigationSubtitle` become the window's toolbar, title
+  and subtitle. `ControlPanelWindow.make` sets the style mask (with `.fullSizeContentView`: the
+  page scrolls under the title bar's tabs), `isReleasedWhenClosed =
+  false`, a 1240×800 first size and the active-Space behavior; it adds no toolbar or backdrop of
+  its own. The hosting controller resets `contentMinSize` once it attaches, so
+  `windowWillResize` clamps every resize with `ControlPanelWindow.clampedFrameSize`. The app has
+  no SwiftUI `Scene`.
+- **Controller and lifetime.** `PanelController` (`@MainActor @Observable`) is created once per
+  window. It holds the stores (each injectable, the app's own by default) and what the panel
+  owns itself: favorites and the first-run flags (`PanelPreferences`), the error banner, the
+  per-display options, measured property files, letterbox and image-placement staging. Nothing
+  runs until `start()`, which subscribes the store revisions, points the Workshop's and pixiv's
+  prefetch hooks at the image caches, looks for SteamCMD once and starts the error and
+  visibility observations. `stop()` runs when the window closes (`PanelPresentation.onClose`) or
+  the root disappears: it cancels the import picker, energy sampling, the login-item read, the
+  per-display fetch and the letterbox probes, and unsubscribes. Imports, downloads, SteamCMD
+  setup and queued commands belong to app-owned stores and keep running. `windowWillClose`
+  then drops the content view controller, releasing the root and the controller.
+- **Observation.** Views read typed computed properties of the controller and its area models,
+  and SwiftUI tracks the `@Observable` stores behind them. The stores that are not observable
+  (`PlaybackPreferences`, `HotKeyPreferences`, `PlaylistStore`, collections, presets, image
+  placement, automation, display layouts, Spaces, Focus, power and thermal state, energy,
+  library metrics and cover stamps, theme, language, navigation) bump a counter in
+  `PanelStoreRevisions` when they post, call back or publish. A getter that reads one of those
+  stores reads its counter first; without that read its view silently stops updating. The
+  Installed rows, the one derivation that grows with the library, are cached by their inputs
+  (`LibraryRowsCache`), so a selection, a playback change or a download tick does not rebuild
+  them.
+- **Window state.** `PanelPresentation` follows the window's notifications: `isVisible` (on
+  screen, not miniaturized, not occluded) and `isKey`. A hidden panel does no model work: the
+  energy readout samples ([features/performance.md](features/performance.md#energy-use)) and
+  `DisplayOptionsLoader` fetches other displays' options only while the window is visible on
+  Settings, the support prompt waits, and the root publishes `\.panelIsVisible` so a spinner,
+  an equalizer or an animated preview stops. Becoming key re-reads the Workshop's scene
+  resources, a pending Login Items approval and the system readings that post no change.
+- **Actions.** Every panel action is an `async throws` method in
+  `Model/PanelController+<Group>.swift`. Inside, `run(_:slot:subject:...)` gives it its
+  disposition: whether it clears the banner first and whether it waits its turn in
+  `BridgeStore.commands`, in a latest-wins slot when it names one. Views start an action with
+  `controller.launch(key, policy:) { try await controller.action(...) }`.
+  `PanelActionCoordinator` tracks the key so a control can disable itself (`isBusy`):
+  `.dropDuplicates` ignores a repeat while one is pending, and `.latestWins` makes the repeat wait
+  for the pending one and then run, so the newest value lands last (navigation, the target
+  display, properties, wallpaper and display settings, the Workshop and pixiv searches). A thrown
+  error goes to the banner; a cancellation is ignored. Confirmations and file panels go through
+  `PanelDialogs` (an `NSAlert` sheet, `NSOpenPanel` or `NSSavePanel` on the panel window); with no
+  window they answer no, so a gated action does nothing. Live drags of a property or a position
+  go through `DragStepPump`: at most one step every 100 ms, never queued and never shown as an
+  error, and the release waits for the step in flight before it commits. Setters still clamp or
+  refuse out-of-range values (`InvalidControlValue`), because automation and shortcuts reach the
+  same stores.
+- **Error banner.** `PanelErrorState.message` is the first of the last action's error, a failed
+  import, the library failure and the newest bridge error; a Workshop download failure shows when
+  none of those does. **Dismiss** hides exactly the message on show; it can appear again once its
+  source has cleared and failed anew. The controller reconciles it after each successful action and whenever a source
+  changes. The banners sit in the detail column's top inset, with the rows of wallpapers held
+  back after a crash ([crash recovery](features/crash-recovery.md#what-the-user-sees)).
+- **Images.** Views ask for a `PanelImageSource` (an installed wallpaper's cover or preview file,
+  a Steam or pixiv thumbnail, a property label's image), never a free path or URL, and the source
+  is checked again when it loads: a file outside the library or over 32 MiB, a URL that is not
+  https, a pixiv host other than `i.pximg.net` or a property image off the host list is refused.
+  `PanelImagePipeline` reads through the app's caches (`WorkshopThumbnailCache` for Steam, pixiv
+  and installed covers, `PropertyImageCache`), decodes with ImageIO off the main thread at the
+  size the view draws, and keeps decoded stills in a 128 MiB memory cache. `PanelImage` loads in
+  a task tied to the view and never shows the previous source's picture. `AnimatedPreview` plays
+  GIF, APNG and animated WebP one frame at a time at the drawn size, decoding the next frame off
+  the main thread while the current one shows, only while asked and while
+  its window is visible, and shows the first frame under Reduce Motion; nothing reads pixels back.
+- **Language and theme.** `ControlPanelView` binds `PanelLocale.shared` to the controller's
+  `AppLanguageStore`. The root's `.panelTheme(theme:locale:)` puts the panel's language in
+  `\.locale`, so `Text`, `Button`, `Label` and the other views that localize their own literals
+  re-render the moment it changes; `L()` gives the same language to APIs that take a `String`
+  ([localization.md](localization.md#the-panels-live-language)). The same modifier derives
+  `PanelTheme` from `AppThemeStore` and the resolved light or dark appearance: `AccentPalette`
+  (the accent, fitted for contrast, also set as the tint) and `SurfacePalette` (the tone's
+  backgrounds). `AppDelegate` alone sets `NSApp.appearance`; the panel only reads the result
+  ([features/appearance.md](features/appearance.md)).
+- **Reaching the desktop.** Opening an address, revealing files in Finder, opening System
+  Settings → Login Items and hiding the app go through `DesktopActions.current`
+  (`App/Services/Lifecycle/DesktopActions.swift`). Every link goes through `ExternalLink`, whose
+  allowlist takes https only, an exact host from its list, no credentials and no port; a link
+  built from remote data (an author's label, a profile, a work) is checked the same way.
 
 ### Observable state
 
@@ -234,12 +278,12 @@ Services are grouped by domain under `App/Services/`; each domain has a matching
 
 | Domain | Key types | Responsibility |
 |---|---|---|
-| `Appearance/` | `AppThemePreferences`, `AppThemeStore` | Mode/accent/tone preferences shared by AppKit and the page |
+| `Appearance/` | `AppThemePreferences`, `AppThemeStore` | Mode/accent/tone/icon preferences shared by AppKit and the panel |
 | `Automation/` | `AutomationCommand`, `AppAutomation`, `HotKeyPreferences`, `GlobalHotKeys`, `WallpaperFocusFilter`, `WallpaperAutomationStore/Planner/Scheduler/Controller`, `WallpaperSolarTimes`, App Intents in `WallpaperIntents.swift` and `WallpaperConfigurationIntents.swift` | Explicit commands through `AppDelegate.performAutomation`; per-display weekday/solar/appearance rules and temporary Focus choices through the shared command queue; see [features/automation.md](features/automation.md) |
 | `Desktop/` | `DesktopSpaceWallpaperAPI`, `DesktopWallpaperLedger`, `DesktopWallpaperSync`, `WallpaperSpaceMonitor`, `WallpaperPresentationPolicy`, `WallpaperCoverageProbes`, `WallpaperWindowAuditor`, `DesktopWindowObservation`, `SystemWakeRevalidator`, `PlaybackPreferences`, `AppRuleMonitor`, `OtherAudioMonitor`, `ActiveDisplayTracker`, `SystemConditionMonitor`, `SystemBatteryLevel`, `PowerSourceMonitor`, `PowerSourceResampler`, `DisplayConfiguration`, `DisplayGeometry`, `WallpaperDisplayTransfer` | Per-Space desktop picture control, original-wallpaper journal, still-poster sync, playback rules, per-display renderer suspension, display refresh, the screen and shape of a renderer display id, and multi-display copy/swap |
 | `Diagnostics/` | `RuntimeDiagnosticsSession`, `DiagnosticsBundle`, `SessionLedger`, `EnergyUsageMonitor`, `WallpaperEnergyRecorder`, `MemoryPressureMonitor`, `ProcessFootprint` | Runtime counters, the diagnostics report, how the previous session ended, energy readout, per-wallpaper ratings and memory-pressure logging; see [features/diagnostics.md](features/diagnostics.md) |
 | `GitHub/` | `GitHubReleaseClient`, `AppUpdateStore`, `AppUpdateInstaller`, `UpdatePromptGate`, `WhatsNewStore` | GitHub Releases update check, download, in-place install; when the unattended update alert may appear; which what's-new announcements were shown |
-| `Library/` | `ClientPaths`, `WallpaperImportService`, `LibraryImportStore`, `LibraryCoverStamps`, `WallpaperDeletionService`, `StillImageWallpaper`, `WallpaperBackupService`, `WallpaperCollectionStore`, `WallpaperPresetStore`, `WallpaperHistoryStore` | App-support layout, non-destructive import (run for the app, not the panel page, so Finder and Dock drops import too), still pictures packaged as `web` wallpapers, guarded deletion, collections, presets, history, backup and restore |
+| `Library/` | `ClientPaths`, `WallpaperImportService`, `LibraryImportStore`, `LibraryCoverStamps`, `WallpaperDeletionService`, `StillImageWallpaper`, `WallpaperBackupService`, `WallpaperCollectionStore`, `WallpaperPresetStore`, `WallpaperHistoryStore` | App-support layout, non-destructive import (run for the app, not the panel window, so Finder and Dock drops import too), still pictures packaged as `web` wallpapers, guarded deletion, collections, presets, history, backup and restore |
 | `Lifecycle/` | `QuitReason`, `QuitSupervisor`, `QuitTimings`, `TerminationSignalRelay`, `ProcessSignals`, `InstanceLock`, `SingleInstance` | Why the app is quitting, the deadline each quit stage gets, SIGTERM and SIGHUP as a quit, broken pipes as write errors, and the one-copy-per-library lock taken before anything else starts with what a second launch does about the copy that owns it; see [features/crash-recovery.md](features/crash-recovery.md) |
 | `Localization/` | `AppLanguage`, `AppLanguageStore` | Shipped-language registry and the language preference; see [localization.md](localization.md) |
 | `LockScreen/` | `LockScreenWallpaperSelection`, `LockScreenWallpaperService`, `LockScreenExtensionRegistration` | System lock-screen selection overrides and configuration publishing |
@@ -316,7 +360,9 @@ Swift keeps the *system* wallpaper consistent with that window. `DesktopWallpape
 renderer output into JPEG posters and installs them as the static desktop picture that Mission
 Control shows; `DesktopWallpaperLedger` journals the user's original per-Space wallpaper before the
 first write and restores it on quit, or at once when Settings turns poster writing off
-(`PlaybackPreferences.writesDesktopPicture`); `DesktopSpaceWallpaperAPI` reaches the
+(`PlaybackPreferences.writesDesktopPicture`). An original whose file has since been deleted
+gives way to another desktop's original or macOS's default picture, so it cannot block a quit;
+`DesktopSpaceWallpaperAPI` reaches the
 per-Space getter and setter through optional private CoreGraphics and HIServices symbols, falling back to the public
 `NSWorkspace` API. Timing, refusals, macOS 27 behavior and the quit wait are in
 [desktop-picture](features/desktop-picture.md). More behaviors sit above the windows:
@@ -360,10 +406,17 @@ per-Space getter and setter through optional private CoreGraphics and HIServices
   counts as hidden too, once the pointer has been away for 3 s: `ActiveDisplayTracker` follows
   the pointer with event monitors that exist only while the option is on and two displays are
   connected, and reads it on a timer while this app is active, when the monitors miss it; the
-  policy never lets it darken every display. The bridge keeps `suspended_displays`
-  beside the global flag, resolves each scene's and web descriptor's paused state from its own
-  display, and re-applies the still-hidden displays after a global resume. System audio capture
-  follows visible consumers, not the global pause flag.
+  policy never lets it darken every display: while every display in use is hidden anyway (a
+  full-screen app, a covered working area that pauses), it pauses none. The bridge keeps
+  `suspended_displays` beside the global flag, resolves each scene's and web descriptor's paused
+  state from its own display, and re-applies the still-hidden displays after a global resume.
+  A global transition also evaluates per-display visibility in that same pass, so waking or
+  unlocking releases an old per-display pause without waiting for another window event.
+  The bridge also compares live scene pauses with its current policy after a successful
+  reconcile, including an unchanged configuration. Core preserves runtime pause through a
+  rebuild; the bridge corrects any retained pause that no longer applies, on its actor after
+  checking a delegated reconcile's generation. Matching displays receive no extra command.
+  System audio capture follows visible consumers, not the global pause flag.
 - **Display changes.** Screen-parameter changes refresh displays through
   `DisplayRefreshCoalescer`: one refresh runs at a time and a burst that arrives meanwhile gets
   one more. A change that leaves `DisplayConfiguration` (AppKit's in-process copy of what
@@ -470,10 +523,10 @@ manager) and keeps for two seconds. A login item the user switched off in System
 reads `RequiresApproval`: the snapshot reports launch at login as available but not enabled,
 with `launch_at_login_needs_approval` set. Asking to enable it then does not call `register`,
 which leaves that choice in place; only the user can allow it. The panel's
-`openLoginItemsSettings` action calls `SMAppService.openSystemSettingsLoginItems()` through an
-injected closure, so tests never open System Settings. System Settings does not tell the app
-when the user allows the item, so while the approval is pending the panel reads every snapshot
-again each time its window becomes key (`WebPanelController.windowStateChanged`).
+**Open Login Items…** calls `SMAppService.openSystemSettingsLoginItems()` through
+`DesktopActions.current`, so tests never open System Settings. System Settings does not tell the
+app when the user allows the item, so while the approval is pending the panel reads every
+snapshot again each time its window becomes key (`PanelController.windowDidBecomeKey`).
 
 `preview_wallpaper_properties(wallpaper_id, show, pending)` shows a wallpaper's pending property edits on
 every scene that draws it, mirrors included, without applying them (the Revert and drag-follow
@@ -549,6 +602,21 @@ monitor could not be installed, it probes the cursor with `CGEventCreate` every 
 and skips the actor round trip when nothing changed. One sample delivers enter, position and
 ordered button transitions in one actor turn. These are Rust/native runtime contracts, not
 persisted or uniffi snapshot fields.
+
+A button press reaches scenes only when it lands on the desktop, as in Wallpaper Engine,
+which sets its pointer-down flag only while the window under the cursor is the desktop or
+its own wallpaper. `MouseButtonTracker` (`core/src/window.rs`) learns a press from whichever
+sees it first, the global monitor's edge or a sample's level, and asks its injected hit test
+once, on the main thread: `press_lands_on_desktop` takes the window
+`windowNumberAtPoint:belowWindowWithWindowNumber:` names at the cursor and its
+`kCGWindowLayer`. A window below layer 0 (the system wallpaper, Finder's icons, desktop
+widgets, our wallpaper windows), no window, or one gone before its layer is read counts as
+the desktop, the rule `WebWallpaperMouseRouting` routes web wallpapers by; any other
+window, this app's own included, withholds the press, its held level and its release. A
+delivered press is always released, wherever the pointer ends. Motion, held samples and
+releases never hit-test. A button first seen already held after a monitor gap is adopted as
+a level only if the cursor is over the desktop then; a press seen before the gap keeps its
+verdict.
 
 Each renderer also reports whether its committed scene reads system audio through
 `owe_scene_wallpaper_set_audio_requirement_callback`. The report travels like pointer
@@ -677,7 +745,7 @@ therefore still depends on Homebrew until `scripts/package.py` bundles those lib
 
 | Path | Origin |
 |---|---|
-| `App/`, `Extension/`, `Shared/`, `WebUI/`, `Tests/`, `scripts/`, `Formula/`, `project.yml` | This project, GPL-2.0-only (root `LICENSE`); `App/` is a derived work of the renderer's former `app/WallpaperEngine` |
+| `App/`, `Extension/`, `Shared/`, `Tests/`, `scripts/`, `Formula/`, `project.yml` | This project, GPL-2.0-only (root `LICENSE`); `App/` is a derived work of the renderer's former `app/WallpaperEngine` |
 | `App/Bridge/Generated/` | Build output of the vendored bridge crate |
 | `upstream/renderer/` | Fork of `bigsaltyfishes/wallpaper-engine-for-macos`, GPL-2.0-only, modified |
 | `upstream/renderer/external/open-wallpaper-engine/` | Fork of `bigsaltyfishes/open-wallpaper-engine`, modified; vendors Apache-2.0 `spirv_reflect` and public-domain/MIT-0 `miniaudio` under `third_party/` |
@@ -693,7 +761,7 @@ bundles is in [build.md](build.md#packaging-and-installing).
 
 | Target | Type | Sources | Notes |
 |---|---|---|---|
-| `WallpaperMachine` | application | `App/`, `Shared/`, `Resources/StarterWallpaper`, `WebUI` and `CHANGELOG.md` as resources, the MediaRemote adapter's Perl script and license | Embeds the extension and `MediaRemoteAdapter.framework`; uses `App/Resources/Info.plist` verbatim; `App/Resources/InfoPlist.xcstrings` is excluded from the build |
+| `WallpaperMachine` | application | `App/`, `Shared/`, `Resources/StarterWallpaper`, `Resources/ReleaseBanners` and `CHANGELOG.md` as resources, the MediaRemote adapter's Perl script and license | Embeds the extension and `MediaRemoteAdapter.framework`; uses `App/Resources/Info.plist` verbatim; `App/Resources/InfoPlist.xcstrings` is excluded from the build |
 | `MediaRemoteAdapter` | framework | `upstream/mediaremote-adapter/src` and `include` | Embedded in the app but not linked; the app runs its Perl entry point only while a wallpaper has media integration on |
 | `WallpaperMachineExtension` | extensionkit-extension | `Extension/`, `Shared/`, the starter preview image | Sandboxed, `APPLICATION_EXTENSION_API_ONLY`, Objective-C bridging header |
 | `WallpaperMachineTests` | bundle.unit-test | `Tests/Unit/` | Hosted in the app binary (`TEST_HOST`/`BUNDLE_LOADER`) |
@@ -717,9 +785,8 @@ invariants:
   back to the public `NSWorkspace` API.
 - The user's original wallpaper is journalled before replacement, and the lock-screen selection
   edits only explicit per-display overrides.
-- The control panel's web view loads only `mwe-ui://app/index.html` from the bundle; renderer
-  content is never loaded into it, and page messages are accepted only from that origin's main
-  frame.
-- Snapshot updates are suppressed while the panel is not visible, and the page is driven by
-  whole snapshots (unchanged library rows may be omitted by revision; the energy readout is the
-  one separate push).
+- The control panel is native: renderer content is never drawn into it, and untrusted text
+  (titles, descriptions, labels, errors) reaches it only as text.
+- A closed panel holds nothing, and a hidden one does no model work: energy sampling and the
+  per-display options fetch run only while the window is visible on Settings, and nothing in the
+  panel animates or polls while it is hidden.

@@ -9,12 +9,6 @@ double algorism::CalculatePersperctiveDistance(double fov, double height) noexce
     return height / k;
 }
 
-double algorism::CalculatePersperctiveFov(double distence, double height) noexcept {
-    double k     = height / distence / 2.0f;
-    double angle = std::atan(k) * 2;
-    return angle / Radians(180.0f) * 180.0f;
-}
-
 namespace
 {
 constexpr double grad(int hash, double x, double y, double z) noexcept {

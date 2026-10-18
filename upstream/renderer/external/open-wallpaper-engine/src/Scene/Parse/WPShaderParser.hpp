@@ -30,6 +30,13 @@ struct WPShaderInfo {
     ShaderValueMap   baseConstSvs;
     WPAliasValueDict alias;
     WPDefaultTexs    defTexs;
+    /// The pass is drawn somewhere the scene's fog does not belong -- into the
+    /// card of a layer that composites through effects -- so `LoadMaterial`
+    /// leaves the fog out of it, and says through `fog_deferred` that the pass
+    /// would have taken it: its `FOG` combo, the material's or the shader's own
+    /// default, is on in a scene that has fog.
+    bool             defer_fog { false };
+    bool             fog_deferred { false };
 };
 
 struct WPPreprocessorInfo {

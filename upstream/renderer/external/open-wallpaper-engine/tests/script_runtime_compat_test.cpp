@@ -24,8 +24,11 @@
 #include <iterator>
 #include <map>
 #include <memory>
+#include <set>
+#include <string>
 #include <thread>
 #include <unordered_map>
+#include <vector>
 
 namespace wallpaper::audio {
 void SetAudioSpectrumSnapshotForTesting(const AudioSpectrumSnapshot&);
@@ -408,6 +411,63 @@ export function update(value) {
     EXPECT_EQ(runtime->scriptErrorCount(), 0u);
 }
 
+// A script may hand back a bare number for a vector property, as a hover zoom
+// whose `update(value)` returns `value.x + (target - value.x) * speed` does: it
+// is that number on every axis, and the next `update` still receives a vector.
+// Kept as a number, the next call read `.x` off it, and the layer's scale and
+// with it its position went NaN, so the layer was never drawn.
+TEST(ScriptRuntimeCompat, ANumberReturnedForAVectorPropertyFillsEveryAxisAndStaysAVector) {
+    Scene scene;
+    auto runtime = MakeRuntimeWithScene(scene);
+    ASSERT_NE(runtime, nullptr);
+    auto node = std::make_shared<SceneNode>();
+    runtime->RegisterNodeScale("zoom", node.get(), ResolveVec3Setting(*runtime, {
+        {"value", "1 1 1"},
+        {"scriptproperties", {{"target", 2.0}}},
+        {"script", R"JS(
+export var scriptProperties = createScriptProperties()
+    .addSlider({name: 'target', value: 1}).finish();
+export function update(value) {
+    return value.x + (scriptProperties.target - value.x) * 0.5;
+}
+)JS"}}, "zoom"));
+
+    float previous = 1.0f;
+    for (int frame = 1; frame <= 30; ++frame) {
+        runtime->Tick(1.0 / 60.0);
+        const Eigen::Vector3f scale = node->Scale();
+        ASSERT_TRUE(scale.allFinite()) << "frame " << frame;
+        EXPECT_FLOAT_EQ(scale.y(), scale.x());
+        EXPECT_FLOAT_EQ(scale.z(), scale.x());
+        EXPECT_GT(scale.x(), previous - 1.0e-6f) << "frame " << frame;
+        previous = scale.x();
+    }
+    EXPECT_NEAR(previous, 2.0f, 1.0e-4f);
+    EXPECT_EQ(runtime->scriptErrorCount(), 0u);
+}
+
+// The same holds for a shader constant of another width: a number fills both
+// components of a two-component constant, and the script keeps receiving a pair.
+TEST(ScriptRuntimeCompat, ANumberReturnedForAShaderVectorFillsEveryComponent) {
+    auto runtime = CreateSceneRuntimeContext(SceneRuntimeBootstrap {});
+    ASSERT_NE(runtime, nullptr);
+    auto material = std::make_shared<SceneMaterial>();
+    runtime->RegisterMaterialConstant(material, "g_Offset", ResolveVectorSetting(*runtime, {
+        {"value", "0 0"},
+        {"script", R"JS(
+export function update(value) { return value.y + 1; }
+)JS"}}, 2));
+    for (int frame = 1; frame <= 3; ++frame) {
+        runtime->Tick(1.0 / 60.0);
+        const auto& offset = material->customShader.constValues.at("g_Offset");
+        ASSERT_EQ(offset.size(), 2u) << "frame " << frame;
+        ASSERT_TRUE(std::isfinite(offset[0])) << "frame " << frame;
+        EXPECT_GE(offset[0], static_cast<float>(frame));
+        EXPECT_FLOAT_EQ(offset[1], offset[0]);
+    }
+    EXPECT_EQ(runtime->scriptErrorCount(), 0u);
+}
+
 TEST(ScriptRuntimeCompat, PropertyFeedbackResumesFromExplicitUserValueChanges) {
     auto runtime = CreateSceneRuntimeContext(SceneRuntimeBootstrap {
         .project_properties = {{"progress", RuntimeScalarValue::Float(2.0f)}},
@@ -514,6 +574,48 @@ export function update(value) { thisLayer.alpha = 0.25; return value; }
     EXPECT_EQ(runtime->scriptErrorCount(), 0u);
 }
 
+// A layer whose picture is drawn through more than one material -- its own and
+// each effect pass that takes its alpha -- fades them all, and a script that
+// reads the alpha back reads what it wrote, so a fade can step from it. An
+// effect's own alpha, the `g_UserAlpha` of a pass that owns it, is not the
+// layer's and stays as it is.
+TEST(ScriptRuntimeCompat, LayerAlphaWritesReachEveryMaterialOfTheLayer) {
+    auto runtime   = CreateSceneRuntimeContext(SceneRuntimeBootstrap {});
+    auto node      = std::make_shared<SceneNode>();
+    auto own       = std::make_shared<SceneMaterial>();
+    auto first     = std::make_shared<SceneMaterial>();
+    auto second    = std::make_shared<SceneMaterial>();
+    second->own_user_alpha = true;
+    second->customShader.constValues["g_UserAlpha"] = ShaderValue(0.9f);
+    runtime->RegisterNode("icon", node.get());
+    runtime->RegisterNodeAlpha("icon", { own, first, second }, 1.0f);
+    runtime->RegisterNodeVisibility("icon", node.get(), ResolveBoolSetting(*runtime, {
+        {"value", true}, {"script", R"JS(
+export function update(value) {
+  thisLayer.alpha = 0.5;
+  thisLayer.alpha -= 0.125;
+  return value;
+}
+)JS"}}, "icon"));
+
+    runtime->Tick(0.01);
+    for (const auto& material : { own, first, second }) {
+        ASSERT_TRUE(material->customShader.constValues.contains("g_UserAlpha"));
+        EXPECT_FLOAT_EQ(material->customShader.constValues.at("g_UserAlpha")[0],
+                        material == second ? 0.9f : 0.375f);
+        EXPECT_FLOAT_EQ(material->customShader.constValues.at("g_Color4")[3], 0.375f);
+    }
+    EXPECT_FLOAT_EQ(*runtime->NodeAlpha("icon"), 0.375f);
+    EXPECT_EQ(runtime->scriptErrorCount(), 0u);
+
+    // Registering the name again replaces what it reached.
+    auto replacement = std::make_shared<SceneMaterial>();
+    runtime->RegisterNodeAlpha("icon", replacement, 1.0f);
+    EXPECT_TRUE(runtime->SetNodeAlpha("icon", 0.75f));
+    EXPECT_FLOAT_EQ(replacement->customShader.constValues.at("g_UserAlpha")[0], 0.75f);
+    EXPECT_FLOAT_EQ(own->customShader.constValues.at("g_UserAlpha")[0], 0.375f);
+}
+
 // A layer with no material of its own — a sound layer, an empty group — still
 // remembers what a script wrote to it rather than reporting a made-up 1.
 TEST(ScriptRuntimeCompat, LayerAlphaWithoutAMaterialKeepsWhatWasWritten) {
@@ -537,14 +639,14 @@ export function update() {
 namespace
 {
 
-std::shared_ptr<WPPuppet> MakeSingleShotPuppet() {
+std::shared_ptr<WPPuppet> MakePuppet(WPPuppet::PlayMode mode) {
     auto puppet = std::make_shared<WPPuppet>();
     puppet->bones.emplace_back();
     WPPuppet::Animation animation;
     animation.id     = 7;
     animation.fps    = 10.0;
     animation.length = 5;
-    animation.mode   = WPPuppet::PlayMode::Single;
+    animation.mode   = mode;
     animation.name   = "gesture";
     WPPuppet::Animation::BoneTrack track;
     for (int frame = 0; frame <= animation.length; ++frame) {
@@ -559,6 +661,8 @@ std::shared_ptr<WPPuppet> MakeSingleShotPuppet() {
     puppet->prepared();
     return puppet;
 }
+
+std::shared_ptr<WPPuppet> MakeSingleShotPuppet() { return MakePuppet(WPPuppet::PlayMode::Single); }
 
 } // namespace
 
@@ -621,6 +725,43 @@ TEST(ScriptRuntimeCompat, PuppetAnimationLayerVisibilityFollowsUserProperty) {
     EXPECT_FLOAT_EQ(copy.genFrame(0.0)[0].translation().x(), 2.5f);
     runtime->ApplyProjectPropertyOverride({{"outfit", RuntimeScalarValue::String("1")}});
     EXPECT_FLOAT_EQ(copy.genFrame(0.0)[0].translation().x(), 0.0f);
+}
+
+// A script property bound to a combo with a condition is a flag: whether the
+// combo's choice equals the condition. Handing the script the choice itself
+// ("2") made every such flag truthy, so a clock offering three date formats as
+// three flags over one combo always took the first.
+TEST(ScriptRuntimeCompat, AScriptPropertyBoundToAComboChoiceReadsWhetherTheChoiceMatches) {
+    auto runtime = CreateSceneRuntimeContext(SceneRuntimeBootstrap {
+        .project_properties = {{"format", RuntimeScalarValue::String("2")}},
+    });
+    ASSERT_NE(runtime, nullptr);
+    const auto text = ResolveStringSetting(*runtime, {
+        {"value", ""},
+        {"scriptproperties", {
+            {"first", {{"user", {{"name", "format"}, {"condition", "0"}}}, {"value", false}}},
+            {"third", {{"user", {{"name", "format"}, {"condition", "2"}}}, {"value", true}}},
+        }},
+        {"script", R"JS(
+export var scriptProperties = createScriptProperties()
+    .addCheckbox({name: 'first', value: false})
+    .addCheckbox({name: 'third', value: true}).finish();
+export function update(value) {
+    if (scriptProperties.first) return 'first ' + typeof scriptProperties.first;
+    if (scriptProperties.third) return 'third ' + typeof scriptProperties.third;
+    return 'neither ' + typeof scriptProperties.first;
+}
+)JS"},
+    });
+    runtime->Tick(1.0 / 60.0);
+    EXPECT_EQ(text->getString(), "third boolean");
+    runtime->ApplyProjectPropertyOverride({{"format", RuntimeScalarValue::String("0")}});
+    runtime->Tick(1.0 / 60.0);
+    EXPECT_EQ(text->getString(), "first boolean");
+    runtime->ApplyProjectPropertyOverride({{"format", RuntimeScalarValue::String("1")}});
+    runtime->Tick(1.0 / 60.0);
+    EXPECT_EQ(text->getString(), "neither boolean");
+    EXPECT_EQ(runtime->scriptErrorCount(), 0u);
 }
 
 // Two interlocking triangle buttons share a bounding box; the cursor must only
@@ -748,6 +889,226 @@ TEST(ScriptRuntimeCompat, ComposeBackgroundUsesScreenCameraAndParentTransform) {
     ASSERT_EQ(actual.size(), composite_expected.size());
     for (std::size_t i = 0; i < actual.size(); ++i) {
         EXPECT_NEAR(actual[i], composite_expected[i], 1e-5);
+    }
+}
+
+// A compose layer with effects holds what is behind the place its card is
+// drawn: its first pass maps the card onto the screen to read it, and its last
+// pass draws the card there. Camera parallax moves the card, so it has to move
+// what the first pass reads by the same offset. The layer's own node has no
+// depth of its own -- the layer's is on its effect passes -- so the depth could
+// not be taken from the node as it stands. And a layer without children frames
+// its effects with a camera at the origin, not the scene camera, so the centre
+// of the view the offset is measured from could not be taken from the camera
+// that draws the pass either. (A layer with children is drawn through the scene
+// camera already: the render graph overrides the camera of its first pass.)
+// Read at the unshifted place, the layer showed a slab of the scene displaced
+// by its own parallax offset. An ordinary effect layer's first pass draws into
+// the layer's target and stays where it is.
+TEST(ScriptRuntimeCompat, AComposeLayersFirstPassReadsTheScreenWhereParallaxDrawsItsCard) {
+    Scene scene;
+    scene.ortho[0]   = 640;
+    scene.ortho[1]   = 360;
+    scene.sceneGraph = std::make_shared<SceneNode>();
+    auto screen      = std::make_shared<SceneCamera>(640, 360, -1, 1);
+    auto screen_node = std::make_shared<SceneNode>();
+    screen_node->SetTranslate(Eigen::Vector3f(320, 180, 0));
+    screen->AttatchNode(screen_node);
+    scene.activeCamera     = screen.get();
+    scene.cameras["screen"] = screen;
+    auto composite     = std::make_shared<SceneCamera>(64, 32, -1, 1);
+    composite->SetLayerLocal(true);
+    scene.cameras["composite"] = composite;
+    // The camera every layer without children frames its effects with, at the origin.
+    auto effect_camera_node = std::make_shared<SceneNode>();
+    scene.sceneGraph->AppendChild(effect_camera_node);
+
+    WPShaderValueUpdater updater(&scene);
+    updater.SetCameraParallax({ .enable = true, .amount = 0.5f, .delay = 0.0f,
+                                .mouseinfluence = 1.0f, .canvas_scene = true });
+    scene.frameTime = 1.0 / 60.0;
+
+    auto group = std::make_shared<SceneNode>();
+    group->SetTranslate(Eigen::Vector3f(400, 100, 0));
+    scene.sceneGraph->AppendChild(group);
+
+    // A layer drawn through one effect, as the parser builds it: the layer's own
+    // node draws the first pass and holds no depth, a pass node of its own draws
+    // the card on the scene with the layer's depth.
+    struct EffectLayer
+    {
+        std::shared_ptr<SceneNode> node;
+        std::shared_ptr<SceneNode> card;
+        std::string                camera;
+        // The camera the render graph draws the first pass with, when it names one.
+        std::string                first_pass_camera;
+    };
+    const auto add_node = [&](const char* shader) {
+        auto node = std::make_shared<SceneNode>();
+        auto mesh = std::make_shared<SceneMesh>();
+        SceneMaterial material;
+        material.name = shader;
+        mesh->AddMaterial(std::move(material));
+        node->AddMesh(mesh);
+        return node;
+    };
+    const auto exists = [](std::string_view name) {
+        return name == "g_ModelViewProjectionMatrix";
+    };
+    // A compose layer with children frames its effects with a camera attached to
+    // itself and is drawn through the scene camera; any other layer frames them
+    // with the one at the origin and draws its first pass with it.
+    const auto add_layer = [&](const char* name, const char* shader, bool has_children) {
+        EffectLayer layer { add_node(shader), add_node("copy"), std::string(name) + "-camera",
+                            has_children ? "screen" : "" };
+        layer.node->SetTranslate(Eigen::Vector3f(-40, 20, 0));
+        auto camera = std::make_shared<SceneCamera>(64, 32, -1, 1);
+        camera->AttatchNode(has_children ? layer.node : effect_camera_node);
+        scene.cameras[layer.camera] = camera;
+        layer.node->SetCamera(layer.camera);
+        if (! has_children) layer.node->SetRenderTransformOverride(Eigen::Matrix4d::Identity());
+        group->AppendChild(layer.node);
+        layer.node->UpdateTrans();
+        layer.card->SetRenderTransformOverride(layer.node->ModelTrans());
+        updater.SetNodeData(layer.node.get(), WPShaderValueData {});
+        WPShaderValueData pass;
+        pass.effect_owner   = layer.node.get();
+        pass.parallax_layer = layer.node.get();
+        pass.parallaxDepth  = { 2.0f, 2.0f };
+        updater.SetNodeData(layer.card.get(), pass);
+        updater.InitUniforms(layer.node.get(), exists);
+        updater.InitUniforms(layer.card.get(), exists);
+        return layer;
+    };
+    // The matrix a pass is drawn with, through the camera the render graph names
+    // (`camera_override`) or else the node's own, as the passes swap them.
+    const auto mvp = [&](SceneNode& node, const std::string& camera_override = {}) {
+        const std::string own = node.Camera();
+        if (! camera_override.empty()) node.SetCamera(camera_override);
+        sprite_map_t sprites;
+        ShaderValue  actual;
+        updater.UpdateUniforms(&node, sprites, [&](std::string_view name, const ShaderValue& v) {
+            if (name == "g_ModelViewProjectionMatrix") actual = v;
+        });
+        node.SetCamera(own);
+        return actual;
+    };
+    const auto expect_matrix = [](const ShaderValue& actual, const Eigen::Matrix4d& expected,
+                                  const char* what) {
+        const auto wanted = ShaderValue::fromMatrix(expected);
+        ASSERT_EQ(actual.size(), wanted.size()) << what;
+        for (std::size_t i = 0; i < actual.size(); ++i) EXPECT_NEAR(actual[i], wanted[i], 1e-5) << what;
+    };
+    const auto moved = [](const Eigen::Matrix4d& model, const Eigen::Vector2d& by) -> Eigen::Matrix4d {
+        return Eigen::Affine3d(Eigen::Translation3d(by.x(), by.y(), 0.0)).matrix() * model;
+    };
+    const auto follows_cursor = [&](SceneNode& node, const std::string& camera_override) {
+        return (updater.FrameVaryingUniforms(&node, 0, camera_override) &
+                frame_varying_uniform::kParallax) != 0;
+    };
+
+    const auto with_children = add_layer("with-children", "composelayer", true);
+    const auto leaf          = add_layer("leaf", "composelayer", false);
+    const auto plain         = add_layer("plain", "genericimage", false);
+    // A compose layer without effects draws its card itself and holds its own depth.
+    auto bare = add_node("composelayer");
+    bare->SetTranslate(Eigen::Vector3f(-40, 20, 0));
+    group->AppendChild(bare);
+    bare->UpdateTrans();
+    WPShaderValueData bare_data;
+    bare_data.parallaxDepth = { 2.0f, 2.0f };
+    updater.SetNodeData(bare.get(), bare_data);
+    updater.InitUniforms(bare.get(), exists);
+
+    const Eigen::Matrix4d view_projection = screen->GetViewProjectionMatrix();
+    const Eigen::Matrix4d model           = leaf.node->ModelTrans();
+    // The group is the outermost layer: it sits (80, -80) from the view centre, and
+    // the cursor, when it moves, adds its own distance from the centre of the canvas.
+    const Eigen::Vector2d root_offset(80.0, -80.0);
+    const double          depth_and_amount = 2.0 * 0.5;
+
+    struct Cursor
+    {
+        const char*     name;
+        double          x;
+        Eigen::Vector2d pull;
+    };
+    for (const auto& cursor : { Cursor { "cursor centred", 0.5, { 0.0, 0.0 } },
+                                Cursor { "cursor right", 0.75, { -160.0, 0.0 } } }) {
+        SCOPED_TRACE(cursor.name);
+        updater.MouseInput(cursor.x, 0.5);
+        updater.FrameBegin();
+        const Eigen::Vector2d shift = (cursor.pull + root_offset) * depth_and_amount;
+
+        for (const auto* layer : { &with_children, &leaf }) {
+            SCOPED_TRACE(layer == &leaf ? "a layer without children" : "a layer with children");
+            const auto card_mvp  = mvp(*layer->card);
+            const auto first_mvp = mvp(*layer->node, layer->first_pass_camera);
+            expect_matrix(card_mvp, view_projection * moved(model, shift), "the card on the scene");
+            expect_matrix(first_mvp, view_projection * moved(model, shift),
+                          "the screen the first pass reads must be where the card is drawn");
+            ASSERT_EQ(first_mvp.size(), card_mvp.size());
+            for (std::size_t i = 0; i < first_mvp.size(); ++i) {
+                EXPECT_NEAR(first_mvp[i], card_mvp[i], 1e-6);
+            }
+            // The card of a layer another layer samples is drawn through a layer-local
+            // camera, where the layer sits in the scene does not reach the image.
+            expect_matrix(mvp(*layer->node, "composite"), view_projection * model,
+                          "a compose layer drawn into its composite");
+        }
+        // A layer that holds its depth on its own node is moved by it.
+        expect_matrix(mvp(*bare), view_projection * moved(bare->ModelTrans(), shift),
+                      "a compose layer without effects");
+        // An ordinary effect layer draws its first pass into its own target.
+        expect_matrix(mvp(*plain.node), scene.cameras.at(plain.camera)->GetViewProjectionMatrix(),
+                      "the first pass of an ordinary effect layer");
+    }
+
+    // The first pass moves with the cursor, so it is never reused while it moves.
+    for (const auto* layer : { &with_children, &leaf }) {
+        EXPECT_TRUE(follows_cursor(*layer->node, layer->first_pass_camera));
+        EXPECT_TRUE(follows_cursor(*layer->card, ""));
+        EXPECT_FALSE(follows_cursor(*layer->node, "composite"));
+    }
+    EXPECT_TRUE(follows_cursor(*bare, ""));
+    EXPECT_FALSE(follows_cursor(*plain.node, "")) << "an ordinary effect layer's first pass stands still";
+
+    // A depth a script writes reaches the passes the layer's depth is on, so the
+    // first pass keeps reading where the card is drawn, and stops moving with it
+    // when the depth goes to zero. The first pass of an ordinary effect layer
+    // stays where it is whatever the script writes.
+    updater.MouseInput(0.5, 0.5);
+    updater.FrameBegin();
+    for (const auto* layer : { &with_children, &leaf, &plain }) {
+        const bool compose = layer != &plain;
+        SCOPED_TRACE(layer == &leaf ? "a layer without children"
+                                    : compose ? "a layer with children" : "an ordinary effect layer");
+        const auto first_pass = [&] {
+            return mvp(*layer->node, layer->first_pass_camera);
+        };
+        const auto at_rest = [&] {
+            return compose ? view_projection * model
+                           : scene.cameras.at(layer->camera)->GetViewProjectionMatrix();
+        };
+        EXPECT_FALSE(updater.SetNodeParallaxDepth(layer->node.get(), 4.0f, 1.0f))
+            << "it followed the cursor before and still does";
+        EXPECT_EQ(updater.NodeParallaxDepth(layer->node.get()), (std::array<float, 2> { 4.0f, 1.0f }));
+        if (compose) {
+            const Eigen::Vector2d shift(root_offset.x() * 4.0 * 0.5, root_offset.y() * 1.0 * 0.5);
+            expect_matrix(mvp(*layer->card), view_projection * moved(model, shift),
+                          "the card at the depth the script wrote");
+            expect_matrix(first_pass(), view_projection * moved(model, shift),
+                          "the first pass at the depth the script wrote");
+            EXPECT_TRUE(follows_cursor(*layer->node, layer->first_pass_camera));
+        } else {
+            expect_matrix(first_pass(), at_rest(), "the first pass of an ordinary effect layer");
+            EXPECT_FALSE(follows_cursor(*layer->node, layer->first_pass_camera));
+        }
+        EXPECT_TRUE(updater.SetNodeParallaxDepth(layer->node.get(), 0.0f, 0.0f))
+            << "it stopped following the cursor";
+        expect_matrix(first_pass(), at_rest(), "the first pass once the depth is zero");
+        EXPECT_FALSE(follows_cursor(*layer->node, layer->first_pass_camera));
+        EXPECT_FALSE(follows_cursor(*layer->card, ""));
     }
 }
 
@@ -920,7 +1281,9 @@ export function update(value) {
   if (input.cursorPosition.x === 0.25 && input.cursorPosition.y === 0.75) ok += 1;
   if (input.cursorWorldPosition.x === 480 && input.cursorWorldPosition.y === 270) ok += 1;
   if (input.cursorLocalPosition && input.cursorLocalPosition.x === 480) ok += 1;
-  if (input.cursorScreenPosition && input.cursorScreenPosition.y === 270) ok += 1;
+  // Pixels from the display's top-left: 0.25 / 0.75 of the 1920x1080 canvas.
+  if (input.cursorScreenPosition && input.cursorScreenPosition.x === 480 &&
+      input.cursorScreenPosition.y === 810) ok += 1;
   if (input.mouseButtonsDown === 3 && input.mouseButtonsPressed === 1 && input.mouseButtonsReleased === 2) ok += 1;
   if (input.inWindow === true) ok += 1;
   return ok;
@@ -1051,6 +1414,8 @@ export function update(value) {
     EXPECT_FLOAT_EQ(result->getFloat(), 50.0f);
 }
 
+// WEMath exports `deg2rad` and `rad2deg` as the conversion factors themselves
+// (`angle * WEMath.deg2rad`), plus `smoothStep(min, max, v)` and `mix(a, b, v)`.
 TEST(ScriptRuntimeCompat, WEMathProvidesWallpaperEngineAliases) {
     ScriptEngine engine;
     const auto result = EvaluateScalar(
@@ -1060,12 +1425,137 @@ import * as M from 'WEMath';
 export function update(value) {
   return Math.round(M.smoothStep(0, 1, 0.5) * 100) +
          Math.round(M.smoothstep(0, 1, 0.5) * 100) * 100 +
-         Math.round(M.deg2rad(180) * 1000) * 10000 +
-         Math.round(M.rad2deg(Math.PI)) * 1000000000;
+         Math.round(180 * M.deg2rad * 1000) * 10000 +
+         Math.round(Math.PI * M.rad2deg) * 1000000000;
 }
 )JS");
     EXPECT_FLOAT_EQ(result.getFloat(), 50.0f + 50.0f * 100.0f + 3142.0f * 10000.0f +
                                            180.0f * 1000000000.0f);
+}
+
+TEST(ScriptRuntimeCompat, WEMathConstantsAreNumbersAndMixInterpolates) {
+    ScriptEngine engine;
+    const auto result = EvaluateScalar(
+        engine,
+        R"JS(
+import { deg2rad, rad2deg, mix, smoothStep } from 'WEMath';
+export function update(value) {
+  var numbers = typeof deg2rad === 'number' && typeof rad2deg === 'number';
+  var axis = new Vec3(90, 0, 180).multiply(deg2rad);
+  var back = (Math.PI / 2) * rad2deg;
+  var ok = numbers && Math.abs(axis.x - Math.PI / 2) < 1e-9 && Math.abs(axis.z - Math.PI) < 1e-9 &&
+           Math.abs(back - 90) < 1e-9 && mix(10, 20, 0.25) === 12.5 && smoothStep(0, 2, 1) === 0.5;
+  return ok ? 1 : 0;
+}
+)JS");
+    EXPECT_FLOAT_EQ(result.getFloat(), 1.0f);
+}
+
+TEST(ScriptRuntimeCompat, WEColorConvertsBetweenRgbAndHsvAndScales) {
+    ScriptEngine engine;
+    const auto result = EvaluateScalar(
+        engine,
+        R"JS(
+import { rgb2hsv, hsv2rgb, normalizeColor, expandColor } from 'WEColor';
+function near(a, b) { return Math.abs(a - b) < 1e-6; }
+export function update(value) {
+  var green = rgb2hsv(new Vec3(0, 1, 0));
+  var grey = rgb2hsv(new Vec3(0.5, 0.5, 0.5));
+  var black = rgb2hsv(new Vec3(0, 0, 0));
+  var wine = rgb2hsv(new Vec3(0.5, 0.1, 0.3));
+  var round = hsv2rgb(wine);
+  var unit = normalizeColor(new Vec3(255, 51, 0));
+  var bytes = expandColor(new Vec3(1, 0.2, 0));
+  var ok = near(green.x, 1 / 3) && near(green.y, 1) && near(green.z, 1) &&
+           near(grey.x, 0) && near(grey.y, 0) && near(grey.z, 0.5) &&
+           near(black.y, 0) && near(black.z, 0) &&
+           near(round.x, 0.5) && near(round.y, 0.1) && near(round.z, 0.3) &&
+           near(unit.x, 1) && near(unit.y, 0.2) && near(unit.z, 0) &&
+           near(bytes.x, 255) && near(bytes.y, 51) && near(bytes.z, 0) &&
+           unit instanceof Vec3;
+  return ok ? 1 : 0;
+}
+)JS");
+    EXPECT_FLOAT_EQ(result.getFloat(), 1.0f);
+}
+
+TEST(ScriptRuntimeCompat, WEVectorReportsTheAngleOfADirection) {
+    ScriptEngine engine;
+    const auto result = EvaluateScalar(
+        engine,
+        R"JS(
+import { angleVector2, vectorAngle2 } from 'WEVector';
+export function update(value) {
+  var up = vectorAngle2(new Vec2(0, 1));
+  var left = vectorAngle2(new Vec2(-1, 0));
+  var round = vectorAngle2(angleVector2(37));
+  return (Math.abs(up - 90) < 1e-9 && Math.abs(left - 180) < 1e-9 && Math.abs(round - 37) < 1e-9) ? 1 : 0;
+}
+)JS");
+    EXPECT_FLOAT_EQ(result.getFloat(), 1.0f);
+}
+
+TEST(ScriptRuntimeCompat, LocalStorageDeleteRemovesAKeyAndRemoveStaysAnAlias) {
+    ScriptEngine engine;
+    const auto result = EvaluateScalar(
+        engine,
+        R"JS(
+export function update(value) {
+  localStorage.set('a', 1);
+  localStorage.set('b', 2);
+  localStorage.set('c', 3);
+  localStorage.delete('a');
+  localStorage.remove('b');
+  var seen = (localStorage.get('a') === undefined ? 0 : 1) + (localStorage.get('b') === undefined ? 0 : 10) +
+             (localStorage.get('c') === 3 ? 100 : 0);
+  localStorage.clear();
+  return seen + (localStorage.get('c') === undefined ? 1000 : 0);
+}
+)JS");
+    EXPECT_FLOAT_EQ(result.getFloat(), 1100.0f);
+}
+
+// A pointer at a quarter of the way across and three quarters of the way down a
+// 2560x1440 display is at pixel (640, 1080) counted from the top-left, whatever
+// the scene's own coordinates make of it. The primary button is the lowest bit.
+TEST(ScriptRuntimeCompat, CursorScreenPositionIsInDisplayPixelsFromTheTop) {
+    ScriptEngine      engine;
+    ScriptHostContext host {};
+    host.canvas_size                = Eigen::Vector2f(1920.0f, 1080.0f);
+    host.screen_resolution          = Eigen::Vector2f(2560.0f, 1440.0f);
+    host.cursor_normalized_position = Eigen::Vector2f(0.25f, 0.75f);
+    host.cursor_world_position      = Eigen::Vector3f(480.0f, 270.0f, 0.0f);
+    host.mouse_buttons_down         = 0u;
+
+    auto program = engine.CreatePropertyScriptProgram(
+        nullptr,
+        R"JS(
+export function update(value) {
+  var p = input.cursorScreenPosition;
+  // Dividing by the screen resolution gives the fraction back, which is how
+  // scripts turn it into their own layout coordinates.
+  var fractionOk = Math.abs(p.y / engine.screenResolution.y - 0.75) < 1e-6;
+  return p.x + p.y * 10000 + (input.cursorLeftDown === true ? 1e8 : 0) + (fractionOk ? 0 : 5e7);
+}
+)JS",
+        "", {}, DynamicValue(0.0f), host);
+    ASSERT_NE(program, nullptr);
+
+    auto idle = program->Evaluate(host, DynamicValue(0.0f));
+    ASSERT_NE(idle, nullptr);
+    // 640 + 1080 * 10000 = 10800640; floats hold it exactly.
+    EXPECT_FLOAT_EQ(idle->getFloat(), 10800640.0f);
+
+    host.mouse_buttons_down = 1u;
+    auto held = program->Evaluate(host, DynamicValue(0.0f));
+    ASSERT_NE(held, nullptr);
+    EXPECT_FLOAT_EQ(held->getFloat(), 10800640.0f + 1.0e8f);
+
+    // Only the primary button counts; a right-button hold leaves it up.
+    host.mouse_buttons_down = 2u;
+    auto secondary = program->Evaluate(host, DynamicValue(0.0f));
+    ASSERT_NE(secondary, nullptr);
+    EXPECT_FLOAT_EQ(secondary->getFloat(), 10800640.0f);
 }
 
 // `engine.timeOfDay` is the local clock as a fraction of the day, the value
@@ -2419,6 +2909,79 @@ TEST(ScriptRuntimeCompat, ScalarTimelineUsesBezierTimeHandlesAndExactInitialKey)
     EXPECT_FLOAT_EQ(animation->Evaluate(1.0), 1.0f);
 }
 
+// `wraploop` makes a looping curve come back to where it started: it is cut at
+// the timeline's length and closed there with the first key's value. Without it
+// the curve holds its last key to the end of the length and jumps back.
+TEST(ScriptRuntimeCompat, WrapLoopClosesACurveOnItsFirstKeyAtTheTimelinesLength) {
+    const auto resolve = [](bool wrap, const char* keys) {
+        return ResolveScalarAnimation(nlohmann::json::parse(
+            std::string(R"({"value":0,"animation":{"options":{"fps":10,"length":10,"mode":"loop",)") +
+            (wrap ? R"("wraploop":true,)" : R"("wraploop":false,)") + R"("name":"sway"},"c0":)" +
+            keys + "}}"));
+    };
+    const char* const keys = R"([{"frame":0,"value":0},{"frame":5,"value":1}])";
+
+    const auto held = resolve(false, keys);
+    ASSERT_TRUE(held.has_value());
+    EXPECT_FLOAT_EQ(held->Evaluate(0.75), 1.0f);
+    EXPECT_EQ(held->keyframes.size(), 2u);
+
+    const auto closed = resolve(true, keys);
+    ASSERT_TRUE(closed.has_value());
+    ASSERT_EQ(closed->keyframes.size(), 3u);
+    EXPECT_DOUBLE_EQ(closed->keyframes.back().frame, 10.0);
+    EXPECT_FLOAT_EQ(closed->keyframes.back().value, 0.0f);
+    EXPECT_FLOAT_EQ(closed->Evaluate(0.5), 1.0f);
+    EXPECT_FLOAT_EQ(closed->Evaluate(0.75), 0.5f);
+    EXPECT_FLOAT_EQ(closed->Evaluate(0.99), 0.02f);
+    // The lap after the first one starts from the same value it ended on.
+    EXPECT_FLOAT_EQ(closed->Evaluate(1.0), 0.0f);
+    EXPECT_FLOAT_EQ(closed->Evaluate(1.25), 0.5f);
+
+    // A last key on the length gives its value back too; keys past the length
+    // are cut, but never down to fewer than two.
+    const auto landed = resolve(true, R"([{"frame":0,"value":2},{"frame":10,"value":9}])");
+    ASSERT_TRUE(landed.has_value());
+    ASSERT_EQ(landed->keyframes.size(), 2u);
+    EXPECT_FLOAT_EQ(landed->keyframes.back().value, 2.0f);
+    const auto cut = resolve(true, R"([{"frame":0,"value":2},{"frame":5,"value":4},{"frame":12,"value":9}])");
+    ASSERT_TRUE(cut.has_value());
+    ASSERT_EQ(cut->keyframes.size(), 3u);
+    EXPECT_FLOAT_EQ(cut->keyframes.back().value, 2.0f);
+    EXPECT_FLOAT_EQ(cut->Evaluate(0.75), 3.0f);
+    const auto single = resolve(true, R"([{"frame":0,"value":2}])");
+    ASSERT_TRUE(single.has_value());
+    EXPECT_EQ(single->keyframes.size(), 1u);
+}
+
+// The seam is as smooth as the start of the curve: the closing key's incoming
+// handle mirrors the first key's outgoing one.
+TEST(ScriptRuntimeCompat, WrapLoopSeamMirrorsTheFirstKeysHandle) {
+    const auto animation = ResolveScalarAnimation(nlohmann::json::parse(R"({
+        "value":0,"animation":{
+            "options":{"fps":10,"length":10,"mode":"loop","wraploop":true},
+            "c0":[
+                {"frame":0,"value":0,"front":{"enabled":true,"x":2,"y":1}},
+                {"frame":5,"value":3}
+            ]
+        }
+    })"));
+    ASSERT_TRUE(animation.has_value());
+    ASSERT_EQ(animation->keyframes.size(), 3u);
+    const auto& closing = animation->keyframes.back();
+    EXPECT_TRUE(closing.back.enabled);
+    EXPECT_DOUBLE_EQ(closing.back.x, -2.0);
+    EXPECT_DOUBLE_EQ(closing.back.y, -1.0);
+    const auto plain = ResolveScalarAnimation(nlohmann::json::parse(R"({
+        "value":0,"animation":{
+            "options":{"fps":10,"length":10,"mode":"loop","wraploop":true},
+            "c0":[{"frame":0,"value":0},{"frame":5,"value":3}]
+        }
+    })"));
+    ASSERT_TRUE(plain.has_value());
+    EXPECT_FALSE(plain->keyframes.back().back.enabled);
+}
+
 TEST(ScriptRuntimeCompat, AuthoredColorPropertiesStayVectorsAcrossTicksAndPropertyChanges) {
     auto runtime = CreateSceneRuntimeContext(SceneRuntimeBootstrap {
         .project_properties = {{"tint", RuntimeScalarValue::String("0.2 0.4 0.8")}},
@@ -2597,6 +3160,52 @@ TEST(ScriptRuntimeCompat, VisibleOnlyBindingIgnoresObjectReturn) {
     runtime->Tick(1.0 / 60.0);
     EXPECT_FALSE(runtime->NodeVisible("probe"));
     EXPECT_FALSE(node->Visible());
+    EXPECT_EQ(runtime->scriptErrorCount(), 0u);
+}
+
+// A flag reads a string as it reads a combo's choice: `true` in any case or `1` is
+// on, every other string is off. A script that returns the string is read the same
+// way on every tick it runs.
+TEST(ScriptRuntimeCompat, AVisibleScriptThatReturnsAStringIsReadAsAFlag) {
+    auto runtime = CreateSceneRuntimeContext(SceneRuntimeBootstrap {});
+    ASSERT_NE(runtime, nullptr);
+
+    struct Case {
+        const char* name;
+        const char* returned;
+        bool        visible;
+    };
+    const Case cases[] = {
+        { "one", "1", true },
+        { "lower", "true", true },
+        { "upper", "TRUE", true },
+        { "zero", "0", false },
+        { "word", "false", false },
+        { "other", "maybe", false },
+        { "empty", "", false },
+    };
+    std::vector<std::shared_ptr<SceneNode>> nodes;
+    for (const auto& item : cases) {
+        auto node = std::make_shared<SceneNode>();
+        runtime->RegisterNodeVisibility(
+            item.name,
+            node.get(),
+            ResolveBoolSetting(
+                *runtime,
+                nlohmann::json {
+                    { "script", std::string("export function update(value) { return '") +
+                                    item.returned + "'; }" },
+                    { "value", false },
+                },
+                item.name));
+        nodes.push_back(std::move(node));
+    }
+
+    runtime->Tick(1.0 / 60.0);
+    runtime->Tick(1.0 / 60.0);
+    for (const auto& item : cases) {
+        EXPECT_EQ(runtime->NodeVisible(item.name), item.visible) << "returned '" << item.returned << "'";
+    }
     EXPECT_EQ(runtime->scriptErrorCount(), 0u);
 }
 
@@ -3158,10 +3767,16 @@ TEST(ShaderValueUpdaterCompat, DayTimeUniformFollowsLocalClockAndWrapsAtMidnight
     EXPECT_NE(updater.FrameVaryingUniforms(node.get(), 0, "") & frame_varying_uniform::kDayTime, 0u);
 }
 
-TEST(ShaderValueUpdaterCompat, CameraParallaxFollowsTheCursorAndDepthNotThePosition) {
+// Wallpaper Engine moves every layer tree in a 2D scene by its outermost
+// layer's distance from the eased cursor point, times that layer's depth and
+// the scene's amount. The point rests at the centre of the view, so with the
+// cursor centred a layer off the centre is pushed further out; a cursor away
+// from the centre then moves every tree alike, by its depth.
+TEST(ShaderValueUpdaterCompat, CameraParallaxMovesEachLayerTreeByItsRootsDistanceFromTheCursor) {
     Scene scene;
     scene.ortho[0] = 3840;
     scene.ortho[1] = 2160;
+    scene.sceneGraph = std::make_shared<SceneNode>();
     auto camera      = std::make_shared<SceneCamera>(3840, 2160, -1.0f, 1.0f);
     auto camera_node = std::make_shared<SceneNode>();
     camera_node->SetTranslate(Eigen::Vector3f(1920, 1080, 0));
@@ -3177,11 +3792,12 @@ TEST(ShaderValueUpdaterCompat, CameraParallaxFollowsTheCursorAndDepthNotThePosit
     };
     WPShaderValueUpdater updater(&scene);
     updater.SetCameraParallax({ .enable = true, .amount = 0.5f, .delay = 0.5f,
-                                .mouseinfluence = 0.5f });
+                                .mouseinfluence = 0.5f, .canvas_scene = true });
     // How far the drawn layer sits from where its node places it.
-    const auto displacement = [&](SceneNode& node, float depth) {
+    const auto displacement = [&](SceneNode& node, float depth, SceneNode* anchor = nullptr) {
         WPShaderValueData data;
-        data.parallaxDepth = { depth, depth };
+        data.parallaxDepth  = { depth, depth };
+        data.parallax_layer = anchor;
         updater.SetNodeData(&node, data);
         updater.InitUniforms(&node, [](std::string_view name) { return name == "g_ModelMatrix"; });
         sprite_map_t sprites;
@@ -3197,26 +3813,37 @@ TEST(ShaderValueUpdaterCompat, CameraParallaxFollowsTheCursorAndDepthNotThePosit
 
     auto planet = layer();
     planet->SetTranslate(Eigen::Vector3f(1907, 2647, 0));
+    scene.sceneGraph->AppendChild(planet);
     auto group = std::make_shared<SceneNode>();
     group->SetTranslate(Eigen::Vector3f(1000, 500, 0));
+    scene.sceneGraph->AppendChild(group);
     auto nested = layer();
     nested->SetTranslate(Eigen::Vector3f(500, 200, 0));
     group->AppendChild(nested);
     auto centred = layer();
     centred->SetTranslate(Eigen::Vector3f(1920, 1080, 0));
+    scene.sceneGraph->AppendChild(centred);
+    // An effect pass of the planet: a node of its own, outside the tree.
+    auto planet_effect = layer();
 
-    EXPECT_LT(displacement(*planet, 0.5f).norm(), 1e-3f) << "an off-centre layer left its place";
-    EXPECT_LT(displacement(*nested, 0.5f).norm(), 1e-3f) << "a nested layer left its place";
+    // At rest: (origin - view centre) * amount * depth, the root's origin for
+    // the whole tree.
+    const Eigen::Vector2f planet_rest = displacement(*planet, 0.5f);
+    EXPECT_LT((planet_rest - Eigen::Vector2f(-3.25f, 391.75f)).norm(), 1e-2f);
+    EXPECT_LT((displacement(*nested, 0.5f) - Eigen::Vector2f(-230.0f, -145.0f)).norm(), 1e-2f)
+        << "a nested layer is not anchored at its outermost layer";
+    EXPECT_LT((displacement(*planet_effect, 0.5f, planet.get()) - planet_rest).norm(), 1e-2f)
+        << "an effect pass is not anchored at its layer";
+    EXPECT_LT(displacement(*centred, 0.5f).norm(), 1e-3f) << "a centred layer left its place";
 
     updater.MouseInput(1.0, 0.0);
-    scene.frameTime = 0.5; // the whole delay: the smoothed cursor has arrived
+    scene.frameTime = 10.0; // long enough for the eased cursor to arrive
     updater.FrameBegin();
     const Eigen::Vector2f moved = displacement(*centred, 0.5f);
     EXPECT_GT(moved.norm(), 1.0f) << "a cursor away from the centre must move the layer";
-    EXPECT_LT((displacement(*planet, 0.5f) - moved).norm(), 1e-3f);
-    EXPECT_LT((displacement(*nested, 0.5f) - moved).norm(), 1e-3f);
+    EXPECT_LT((displacement(*planet, 0.5f) - planet_rest - moved).norm(), 1e-2f);
     EXPECT_LT((displacement(*centred, 1.0f) - 2.0f * moved).norm(), 1e-3f);
-    EXPECT_LT(displacement(*centred, 0.0f).norm(), 1e-3f) << "depth zero stays put";
+    EXPECT_LT(displacement(*planet, 0.0f).norm(), 1e-3f) << "depth zero stays put";
 }
 
 // A parallax delay of zero is authored as "no smoothing": the cursor is
@@ -3279,6 +3906,49 @@ TEST(ShaderValueUpdaterCompat, ZeroParallaxDelayFollowsTheCursorAtOnce) {
     const auto model = node->ModelTrans();
     EXPECT_GT(std::abs(values["g_ModelMatrix"][12] - static_cast<float>(model(0, 3))), 1.0f)
         << "an off-centre cursor must still move a parallax layer";
+}
+
+// Wallpaper Engine eases only parallax: each frame it closes
+// (1 - delay / 3) * 10 * frametime of the way to the cursor, while shaders read
+// the cursor itself. A delay of 1.5 at 60 FPS closes a twelfth per frame.
+TEST(ShaderValueUpdaterCompat, ParallaxEasesAsWallpaperEngineWhileShadersSeeTheCursor) {
+    Scene scene;
+    auto  camera       = std::make_shared<SceneCamera>(1920, 1080, -1.0f, 1.0f);
+    scene.activeCamera = camera.get();
+    auto node          = std::make_shared<SceneNode>();
+    auto mesh          = std::make_shared<SceneMesh>();
+    mesh->AddMaterial(SceneMaterial {});
+    node->AddMesh(mesh);
+    WPShaderValueUpdater updater(&scene);
+    updater.InitUniforms(node.get(), [](std::string_view name) {
+        return name == "g_PointerPosition" || name == "g_ParallaxPosition";
+    });
+    updater.SetCameraParallax({ .enable = true, .amount = 1.0f, .delay = 1.5f,
+                                .mouseinfluence = 1.0f });
+    scene.frameTime = 1.0 / 60.0;
+    const auto frame = [&] {
+        updater.FrameBegin();
+        std::map<std::string, ShaderValue, std::less<>> values;
+        sprite_map_t                                    sprites;
+        updater.UpdateUniforms(node.get(), sprites,
+                               [&](std::string_view name, const ShaderValue& v) {
+                                   values[std::string(name)] = v;
+                               });
+        return values;
+    };
+    updater.MouseInput(1.0, 0.5);
+    auto values = frame();
+    EXPECT_FLOAT_EQ(values["g_PointerPosition"][0], 1.0f) << "shaders see the cursor at once";
+    const float step = (1.0f - 1.5f / 3.0f) * 10.0f / 60.0f;
+    EXPECT_NEAR(values["g_ParallaxPosition"][0], 0.5f + 0.5f * step, 1e-5f);
+    values = frame();
+    EXPECT_NEAR(values["g_ParallaxPosition"][0],
+                1.0f - 0.5f * (1.0f - step) * (1.0f - step), 1e-5f);
+    // A cursor outside the window is followed only to its edge.
+    updater.MouseInput(3.0, 0.5);
+    scene.frameTime = 10.0;
+    values = frame();
+    EXPECT_FLOAT_EQ(values["g_ParallaxPosition"][0], 1.0f);
 }
 
 // Camera parallax moves a layer through its model matrix, which neither the
@@ -3448,6 +4118,211 @@ TEST(ShaderValueUpdaterCompat, EffectMatricesRetainOwnerScaleAndMapQuadToLayer) 
         EXPECT_NEAR(values.at("g_EffectModelViewProjectionMatrix")[i], final_expected.data()[i], 1e-5);
 }
 
+// Wallpaper Engine's simulation effects (cursor ripple, fluid simulation)
+// step by the frame's duration and by how far the cursor travelled since the
+// last frame, and push harder while the primary button is held; blend and skew
+// divide by the texture reduction scale. Left at zero, a ripple never starts,
+// the fluid never moves and a blend offset divides by zero.
+TEST(ShaderValueUpdaterCompat, SimulationEffectsSeeFrameTimeCursorTravelAndButtons) {
+    Scene scene;
+    auto  camera       = std::make_shared<SceneCamera>(1920, 1080, -1.0f, 1.0f);
+    scene.activeCamera = camera.get();
+    auto node          = std::make_shared<SceneNode>();
+    auto mesh          = std::make_shared<SceneMesh>();
+    mesh->AddMaterial(SceneMaterial {});
+    node->AddMesh(mesh);
+
+    WPShaderValueUpdater updater(&scene);
+    updater.InitUniforms(node.get(), [](std::string_view name) {
+        return name == "g_Frametime" || name == "g_PointerPosition" ||
+               name == "g_PointerPositionLast" || name == "g_PointerState" ||
+               name == "g_TextureReductionScale";
+    });
+    const auto frame = [&] {
+        updater.FrameBegin();
+        std::map<std::string, ShaderValue, std::less<>> values;
+        sprite_map_t                                    sprites;
+        updater.UpdateUniforms(node.get(), sprites,
+                               [&](std::string_view name, const ShaderValue& v) {
+                                   values[std::string(name)] = v;
+                               });
+        return values;
+    };
+
+    scene.frameTime = 1.0 / 30.0;
+    updater.MouseInput(0.25, 0.75);
+    auto values = frame();
+    for (const char* name : { "g_Frametime", "g_TextureReductionScale", "g_PointerPosition",
+                              "g_PointerPositionLast", "g_PointerState" }) {
+        ASSERT_TRUE(values.contains(name)) << name << " was never set";
+    }
+    EXPECT_FLOAT_EQ(values["g_Frametime"][0], 1.0f / 30.0f);
+    EXPECT_FLOAT_EQ(values["g_TextureReductionScale"][0], 1.0f);
+    EXPECT_FLOAT_EQ(values["g_PointerPosition"][0], 0.25f);
+    EXPECT_FLOAT_EQ(values["g_PointerPositionLast"][0], 0.5f) << "where the cursor started";
+    EXPECT_FLOAT_EQ(values["g_PointerPositionLast"][1], 0.5f);
+    for (std::size_t i = 0; i < 4; ++i) EXPECT_FLOAT_EQ(values["g_PointerState"][i], 0.0f);
+
+    updater.MouseInput(0.5, 0.25);
+    updater.MouseButtonsInput(1u);
+    values = frame();
+    EXPECT_FLOAT_EQ(values["g_PointerPosition"][0], 0.5f);
+    EXPECT_FLOAT_EQ(values["g_PointerPosition"][1], 0.25f);
+    EXPECT_FLOAT_EQ(values["g_PointerPositionLast"][0], 0.25f) << "the previous frame's cursor";
+    EXPECT_FLOAT_EQ(values["g_PointerPositionLast"][1], 0.75f);
+    EXPECT_FLOAT_EQ(values["g_PointerState"][0], 1.0f);
+    EXPECT_FLOAT_EQ(values["g_PointerState"][1], 1.0f);
+    EXPECT_FLOAT_EQ(values["g_PointerState"][2], 1.0f) << "the press pushes the simulation";
+    EXPECT_FLOAT_EQ(values["g_PointerState"][3], 0.0f);
+
+    // Still held a frame later: held, but no new push, as in Wallpaper Engine.
+    updater.MouseButtonsInput(1u);
+    values = frame();
+    EXPECT_FLOAT_EQ(values["g_PointerState"][0], 1.0f);
+    EXPECT_FLOAT_EQ(values["g_PointerState"][1], 1.0f);
+    EXPECT_FLOAT_EQ(values["g_PointerState"][2], 0.0f) << "a held button pushed again";
+
+    updater.MouseButtonsInput(2u);
+    values = frame();
+    EXPECT_FLOAT_EQ(values["g_PointerPositionLast"][0], values["g_PointerPosition"][0])
+        << "a still cursor travelled nowhere";
+    EXPECT_FLOAT_EQ(values["g_PointerPositionLast"][1], values["g_PointerPosition"][1]);
+    for (std::size_t i = 0; i < 4; ++i)
+        EXPECT_FLOAT_EQ(values["g_PointerState"][i], 0.0f) << "only the primary button pushes";
+
+    const uint32_t varying = updater.FrameVaryingUniforms(node.get(), 0, "");
+    EXPECT_NE(varying & frame_varying_uniform::kTime, 0u);
+    EXPECT_NE(varying & frame_varying_uniform::kPointer, 0u);
+
+    // Reading only the cursor's travel or the buttons still follows the cursor,
+    // so a still scene wakes for it.
+    auto pressed_only = std::make_shared<SceneNode>();
+    pressed_only->AddMesh(mesh);
+    updater.InitUniforms(pressed_only.get(),
+                         [](std::string_view name) { return name == "g_PointerState"; });
+    EXPECT_NE(updater.FrameVaryingUniforms(pressed_only.get(), 0, "") &
+                  frame_varying_uniform::kPointer,
+              0u);
+}
+
+// A lit effect shades by where its quad lands in the scene and unprojects
+// through the inverse of the effect's projection.
+TEST(ShaderValueUpdaterCompat, EffectModelMatrixAndInverseProjectionMatchTheEffectProjection) {
+    Scene scene;
+    auto  camera            = std::make_shared<SceneCamera>(1920, 1080, -1.0f, 1.0f);
+    scene.activeCamera      = camera.get();
+    scene.cameras["effect"] = std::make_shared<SceneCamera>(2, 2, -1.0f, 1.0f);
+    SceneNode owner;
+    owner.SetScale(Eigen::Vector3f(0.8f, 0.6f, 1.0f));
+    owner.SetTranslate(Eigen::Vector3f(100.0f, 200.0f, 0.0f));
+    owner.UpdateTrans();
+    // Once as the layer sits, once drawn off its place by a screen anchor's offset: the
+    // effect lands where the card is drawn.
+    for (const Eigen::Vector3f offset : { Eigen::Vector3f(0.0f, 0.0f, 0.0f),
+                                          Eigen::Vector3f(-37.0f, 11.0f, 0.0f) }) {
+    SCOPED_TRACE(offset.x());
+    owner.SetDrawOffset(offset);
+    auto node = std::make_shared<SceneNode>();
+    auto mesh = std::make_shared<SceneMesh>();
+    mesh->AddMaterial(SceneMaterial {});
+    node->AddMesh(mesh);
+    node->SetCamera("effect");
+    WPShaderValueData data;
+    data.effect_owner  = &owner;
+    data.effect_extent = Eigen::Vector2f(280, 300);
+    WPShaderValueUpdater updater(&scene);
+    updater.SetNodeData(node.get(), data);
+    updater.InitUniforms(node.get(), [](std::string_view name) {
+        return name == "g_EffectModelMatrix" || name == "g_EffectModelViewProjectionMatrix" ||
+               name == "g_EffectModelViewProjectionMatrixInverse";
+    });
+    sprite_map_t                                 sprites;
+    std::unordered_map<std::string, ShaderValue> values;
+    updater.UpdateUniforms(node.get(), sprites, [&](std::string_view name, const ShaderValue& v) {
+        values[std::string(name)] = v;
+    });
+    ASSERT_TRUE(values.contains("g_EffectModelMatrix"));
+    ASSERT_TRUE(values.contains("g_EffectModelViewProjectionMatrix"));
+    ASSERT_TRUE(values.contains("g_EffectModelViewProjectionMatrixInverse"));
+    const auto matrix = [&](std::string_view name) {
+        Eigen::Matrix4d m;
+        for (int i = 0; i < 16; ++i) m.data()[i] = values.at(std::string(name))[i];
+        return m;
+    };
+    // The unit quad's corner (1, 1) lands on the layer card's corner.
+    const Eigen::Vector4d corner = matrix("g_EffectModelMatrix") * Eigen::Vector4d(1, 1, 0, 1);
+    EXPECT_NEAR(corner.x(), 100.0 + offset.x() + 0.8 * 140.0, 1e-3);
+    EXPECT_NEAR(corner.y(), 200.0 + offset.y() + 0.6 * 150.0, 1e-3);
+    const Eigen::Matrix4d mvp = matrix("g_EffectModelViewProjectionMatrix");
+    EXPECT_TRUE((camera->GetViewProjectionMatrix() * matrix("g_EffectModelMatrix"))
+                    .isApprox(mvp, 1e-5));
+    EXPECT_TRUE((matrix("g_EffectModelViewProjectionMatrixInverse") * mvp)
+                    .isApprox(Eigen::Matrix4d::Identity(), 1e-4));
+    }
+}
+
+// A pointer or direction effect maps the screen back into the layer's own
+// texture space through the inverse of the layer card's projection, wherever the
+// card sits: moved, scaled, turned or flipped, on an intermediate pass and on
+// the final one alike.
+TEST(ShaderValueUpdaterCompat, EffectTextureProjectionMapsTheLayerCardOntoTheScreen) {
+    Scene scene;
+    auto  camera            = std::make_shared<SceneCamera>(1920, 1080, -1.0f, 1.0f);
+    scene.activeCamera      = camera.get();
+    scene.cameras["effect"] = std::make_shared<SceneCamera>(2, 2, -1.0f, 1.0f);
+    SceneNode owner;
+    owner.SetScale(Eigen::Vector3f(-0.8f, 0.6f, 1.0f));
+    owner.SetRotation(Eigen::Vector3f(0.0f, 0.0f, 0.5f));
+    owner.SetTranslate(Eigen::Vector3f(100.0f, 200.0f, 0.0f));
+    owner.UpdateTrans();
+    // Once as the layer sits, once drawn off its place by a screen anchor's offset.
+    for (const bool anchored : { false, true }) {
+    for (const char* pass_camera : { "effect", "" }) {
+        SCOPED_TRACE(std::string(pass_camera) + (anchored ? ", anchored" : ""));
+        owner.SetDrawOffset(anchored ? Eigen::Vector3f(-37.0f, 11.0f, 0.0f) : Eigen::Vector3f::Zero());
+        auto node = std::make_shared<SceneNode>();
+        auto mesh = std::make_shared<SceneMesh>();
+        mesh->AddMaterial(SceneMaterial {});
+        node->AddMesh(mesh);
+        node->SetCamera(pass_camera);
+        WPShaderValueData data;
+        data.effect_owner  = &owner;
+        data.effect_extent = Eigen::Vector2f(280, 300);
+        WPShaderValueUpdater updater(&scene);
+        updater.SetNodeData(node.get(), data);
+        updater.InitUniforms(node.get(), [](std::string_view name) {
+            return name == "g_EffectTextureProjectionMatrix" ||
+                   name == "g_EffectTextureProjectionMatrixInverse";
+        });
+        sprite_map_t                                 sprites;
+        std::unordered_map<std::string, ShaderValue> values;
+        updater.UpdateUniforms(node.get(), sprites,
+                               [&](std::string_view name, const ShaderValue& v) {
+                                   values[std::string(name)] = v;
+                               });
+        ASSERT_TRUE(values.contains("g_EffectTextureProjectionMatrix"));
+        ASSERT_TRUE(values.contains("g_EffectTextureProjectionMatrixInverse"));
+        const auto matrix = [&](std::string_view name) {
+            Eigen::Matrix4d m;
+            for (int i = 0; i < 16; ++i) m.data()[i] = values.at(std::string(name))[i];
+            return m;
+        };
+        // The card's (1, 1) corner, in its own half-extent space, lands where
+        // the layer's transform puts its corner on the screen.
+        // The card is drawn where `RenderTrans` puts it, which carries the draw offset.
+        const Eigen::Vector4d card_corner =
+            owner.RenderTrans() * Eigen::Vector4d(140.0, 150.0, 0.0, 1.0);
+        const Eigen::Vector4d expected = camera->GetViewProjectionMatrix() * card_corner;
+        const Eigen::Vector4d mapped =
+            matrix("g_EffectTextureProjectionMatrix") * Eigen::Vector4d(1, 1, 0, 1);
+        EXPECT_TRUE(mapped.isApprox(expected, 1e-5));
+        EXPECT_TRUE((matrix("g_EffectTextureProjectionMatrixInverse") *
+                     matrix("g_EffectTextureProjectionMatrix"))
+                        .isApprox(Eigen::Matrix4d::Identity(), 1e-4));
+    }
+    }
+}
+
 TEST(ScriptRuntimeCompat, CompiledExportsIgnoreSourceTextAndRecognizePlainFunctions) {
     auto runtime = CreateSceneRuntimeContext(SceneRuntimeBootstrap {});
     auto node = std::make_shared<SceneNode>();
@@ -3595,31 +4470,6 @@ TEST(ScriptRuntimeCompat, TransformBindingsRepairDestinationsAndRefreshIdentityA
     runtime->Tick(0.0);
     EXPECT_TRUE(replacement->Translate().isApprox(Eigen::Vector3f(50, 50, 0)));
     EXPECT_TRUE(replacement->Scale().isApprox(Eigen::Vector3f(2, 3, 1)));
-}
-
-TEST(ScriptRuntimeCompat, TextReflowInvalidatesAnchoredTranslationWithoutSourceChanges) {
-    auto runtime = CreateSceneRuntimeContext(SceneRuntimeBootstrap {});
-    auto node = std::make_shared<SceneNode>();
-    runtime->RegisterNodeTranslate("caption", node.get(),
-        std::make_unique<DynamicValue>(Eigen::Vector3f(10, 20, 0)));
-    runtime->RegisterTextLayer("caption", TextLayerState {
-        .text = "a", .font_key = "Arial", .point_size = 10.0f,
-    });
-    runtime->SetNodeAnchorAlignment("caption", "left top", Eigen::Vector3f(10, 20, 0));
-    runtime->Tick(0.0);
-    const auto before = runtime->NodeSize("caption");
-    ASSERT_TRUE(runtime->SetNodeText("caption", "a substantially longer caption"));
-    for (int attempt = 0; attempt < 200 && runtime->NodeTextDirty("caption"); ++attempt) {
-        runtime->PumpTextLayerCache();
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
-    ASSERT_FALSE(runtime->NodeTextDirty("caption"));
-    const auto size = runtime->NodeSize("caption");
-    ASSERT_GT(size.x(), before.x());
-    EXPECT_TRUE(node->Translate().isApprox(Eigen::Vector3f(10 + size.x() * 0.5f, 20 - size.y() * 0.5f, 0)));
-    node->SetTranslate(Eigen::Vector3f::Zero());
-    runtime->Tick(0.0);
-    EXPECT_TRUE(node->Translate().isApprox(Eigen::Vector3f(10 + size.x() * 0.5f, 20 - size.y() * 0.5f, 0)));
 }
 
 Eigen::Vector3f NodePointInScene(SceneNode& node, float x, float y) {
@@ -4175,6 +5025,2077 @@ TEST(ScriptRuntimeCompat, RollbackDropsNewAnimationsAndAlphaButPreservesReusedPl
     runtime->Tick(0.2);
     EXPECT_DOUBLE_EQ(survivor->frame, 7.0);
     EXPECT_FLOAT_EQ(failed_material->customShader.constValues.at("g_UserAlpha")[0], 91.0f);
+}
+
+// ---------------------------------------------------------------------------
+// SceneScript API parity with Wallpaper Engine 2.8.42.
+// ---------------------------------------------------------------------------
+
+namespace
+{
+
+// What running one property script's `update` produced: its numeric result and
+// every error the runtime recorded. A script reports a failed expectation by
+// throwing, so the message names the expectation.
+struct ScriptRun {
+    float                    value { 0.0f };
+    std::vector<std::string> errors;
+    bool                     evaluated { false };
+};
+
+ScriptRun RunUpdateOnce(const std::string& script) {
+    ScriptRun run;
+    auto runtime = CreateSceneRuntimeContext(SceneRuntimeBootstrap { .canvas_width = 1920, .canvas_height = 1080 });
+    auto program = runtime->scriptEngine().CreatePropertyScriptProgram(
+        runtime.get(), script, "", {}, DynamicValue(0.0f), runtime->hostContext());
+    if (program == nullptr) {
+        run.errors.push_back("script did not compile");
+        return run;
+    }
+    const auto result = program->Evaluate(runtime->hostContext(), DynamicValue(0.0f));
+    run.errors = runtime->scriptErrors();
+    if (result != nullptr) {
+        run.value     = result->getFloat();
+        run.evaluated = true;
+    }
+    return run;
+}
+
+#define EXPECT_SCRIPT_PASSES(run)                                                            \
+    do {                                                                                     \
+        EXPECT_TRUE((run).evaluated);                                                        \
+        EXPECT_TRUE((run).errors.empty()) << (run).errors.front();                           \
+        EXPECT_FLOAT_EQ((run).value, 1.0f);                                                  \
+    } while (false)
+
+const char* const kCheckHelpers = R"JS(
+function check(name, ok) { if (!ok) throw new Error('check failed: ' + name); }
+function near(a, b) { return Math.abs(a - b) < 1e-6; }
+function same(v, other) { return v.equals(other) && v.constructor === other.constructor; }
+)JS";
+
+} // namespace
+
+// A vector is a real class: the operations bounce and orbit scripts rely on
+// (`direction.reflect(normal)` killed two stock movement scripts) exist on every
+// size, and vectors the host hands a script are the same class.
+TEST(ScriptRuntimeCompat, VectorsCarryTheWallpaperEngineMethodSet) {
+    const auto run = RunUpdateOnce(std::string(kCheckHelpers) + R"JS(
+export function update(value) {
+  // geometry
+  check('reflect', same(new Vec3(1, -1, 0).reflect(new Vec3(0, 1, 0)), new Vec3(1, 1, 0)));
+  check('reflect2', same(new Vec2(3, -2).reflect(new Vec2(0, 1)), new Vec2(3, 2)));
+  check('dot', new Vec3(1, 2, 3).dot(new Vec3(4, 5, 6)) === 32);
+  check('dot4', new Vec4(1, 2, 3, 4).dot(new Vec4(1, 1, 1, 1)) === 10);
+  check('cross', same(new Vec3(1, 0, 0).cross(new Vec3(0, 1, 0)), new Vec3(0, 0, 1)));
+  check('distance', new Vec3(0, 0, 0).distance(new Vec3(3, 4, 0)) === 5);
+  check('distanceSqr', new Vec2(1, 1).distanceSqr(new Vec2(4, 5)) === 25);
+  check('lengthSqr', new Vec3(1, 2, 2).lengthSqr() === 9 && new Vec3(1, 2, 2).length() === 3);
+  check('negate', same(new Vec3(1, -2, 3).negate(), new Vec3(-1, 2, -3)));
+  check('project', same(new Vec3(2, 2, 0).project(new Vec3(1, 0, 0)), new Vec3(2, 0, 0)));
+  check('projectZero', same(new Vec3(2, 2, 0).project(new Vec3(0, 0, 0)), new Vec3(0, 0, 0)));
+  check('perpendicular', same(new Vec2(1, 2).perpendicular(), new Vec2(2, -1)));
+  check('normalize', near(new Vec3(0, 3, 4).normalize().length(), 1));
+  // equality is within a tolerance, and only between vectors of one size
+  check('equals', new Vec3(1, 2, 3).equals(new Vec3(1.000001, 2, 3)));
+  check('notEquals', !new Vec3(1, 2, 3).equals(new Vec3(1.01, 2, 3)) && !new Vec3(1, 2, 0).equals(new Vec2(1, 2)));
+  // per component
+  var v = new Vec3(-1.5, 2.5, 0.25);
+  check('abs', same(v.abs(), new Vec3(1.5, 2.5, 0.25)));
+  check('sign', same(v.sign(), new Vec3(-1, 1, 1)));
+  check('round', same(v.round(), new Vec3(-1, 3, 0)));
+  check('floor', same(v.floor(), new Vec3(-2, 2, 0)));
+  check('ceil', same(v.ceil(), new Vec3(-1, 3, 1)));
+  check('fract', same(v.fract(), new Vec3(0.5, 0.5, 0.25)));
+  check('mod', same(v.mod(2), new Vec3(0.5, 0.5, 0.25)));
+  check('step', same(v.step(0), new Vec3(0, 1, 1)));
+  check('smoothStep', same(v.smoothStep(0, 1), new Vec3(0, 1, 0.15625)));
+  check('clamp', same(v.clamp(-1, 1), new Vec3(-1, 1, 0.25)));
+  check('clampVec', same(v.clamp(new Vec3(0, 0, 0), new Vec3(1, 2, 3)), new Vec3(0, 2, 0.25)));
+  check('min', same(v.min(0), new Vec3(-1.5, 0, 0)) && same(v.min(new Vec3(0, 3, 0)), new Vec3(-1.5, 2.5, 0)));
+  check('max', same(v.max(0), new Vec3(0, 2.5, 0.25)));
+  check('mixNumber', same(new Vec2(0, 10).mix(new Vec2(10, 20), 0.5), new Vec2(5, 15)));
+  check('mixVector', same(new Vec2(0, 10).mix(new Vec2(10, 20), new Vec2(1, 0)), new Vec2(10, 10)));
+  // angles, in degrees
+  check('angle', near(new Vec2(0, 2).angle(), 90));
+  check('angleBetween2', near(new Vec2(1, 0).angleBetween(new Vec2(0, 1)), 90));
+  check('angleBetween3', near(new Vec3(1, 0, 0).angleBetween(new Vec3(0, 0, 1)), 90));
+  check('rotate', same(new Vec2(1, 0).rotate(90), new Vec2(0, 1)));
+  check('toSpherical', same(new Vec3(1, 0, 0).toSpherical(), new Vec3(1, 90, 0)));
+  check('fromSpherical', same(Vec3.fromSpherical(1, 90, 0), new Vec3(1, 0, 0)));
+  // arithmetic, with numbers and with a smaller vector standing for its components
+  check('addNumber', same(new Vec3(1, 2, 3).add(1), new Vec3(2, 3, 4)));
+  check('addVec2', same(new Vec3(1, 2, 3).add(new Vec2(1, 1)), new Vec3(2, 3, 3)));
+  check('multiplyVec2', same(new Vec3(2, 3, 4).multiply(new Vec2(2, 2)), new Vec3(4, 6, 4)));
+  check('divide', same(new Vec2(4, 6).divide(new Vec2(2, 3)), new Vec2(2, 2)));
+  check('subtract', same(new Vec4(4, 3, 2, 1).subtract(new Vec4(1, 1, 1, 1)), new Vec4(3, 2, 1, 0)));
+  check('isFinite', new Vec3(1, 2, 3).isFinite() && !new Vec3(1, Infinity, 3).isFinite());
+  return 1;
+}
+)JS");
+    EXPECT_SCRIPT_PASSES(run);
+}
+
+TEST(ScriptRuntimeCompat, VectorsBuildFromStringsAndPrintLikeWallpaperEngine) {
+    const auto run = RunUpdateOnce(std::string(kCheckHelpers) + R"JS(
+export function update(value) {
+  // a scene.json style "x y z" string builds a vector, and prints back the same way
+  check('parse3', same(new Vec3('1 2 3'), new Vec3(1, 2, 3)));
+  check('parse2', same(new Vec2('1.5 -2'), new Vec2(1.5, -2)));
+  check('parse4', same(new Vec4('1 2 3 4'), new Vec4(1, 2, 3, 4)));
+  check('print3', new Vec3(1, 2, 3).toString() === '1 2 3');
+  check('print2', String(new Vec2(1.5, -2)) === '1.5 -2');
+  check('config', new Vec4(1, 2, 3, 4).toConfigString() === '1 2 3 4');
+  // a lone number fills the vector; a Vec2 widens with zero; a Vec3 narrows
+  check('splat', same(new Vec3(7), new Vec3(7, 7, 7)) && same(new Vec2(5), new Vec2(5, 5)));
+  check('widen', same(new Vec3(new Vec2(1, 2)), new Vec3(1, 2, 0)));
+  check('narrow', same(new Vec2(new Vec3(1, 2, 3)), new Vec2(1, 2)));
+  check('empty', same(new Vec3(), new Vec3(0, 0, 0)));
+  check('copyIsIndependent', (function() { var a = new Vec3(1, 2, 3); var b = new Vec3(a); b.x = 9; return a.x === 1; })());
+  // plain objects, as older scripts and the host pass them
+  check('plain', same(new Vec3({ x: 1, y: 2 }), new Vec3(1, 2, 0)));
+  // methods are not enumerable: only the components are
+  var keys = []; for (var key in new Vec3(1, 2, 3)) keys.push(key);
+  check('enumerable', keys.join(',') === 'x,y,z');
+  return 1;
+}
+)JS");
+    EXPECT_SCRIPT_PASSES(run);
+}
+
+TEST(ScriptRuntimeCompat, VectorsTheHostHandsOutAreTheGlobalClasses) {
+    auto runtime = CreateSceneRuntimeContext(SceneRuntimeBootstrap { .canvas_width = 1920, .canvas_height = 1080 });
+    auto node    = std::make_shared<SceneNode>();
+    node->SetTranslate(Eigen::Vector3f(3.0f, 4.0f, 0.0f));
+    runtime->RegisterNode("probe", node.get());
+    auto program = runtime->scriptEngine().CreatePropertyScriptProgram(
+        runtime.get(),
+        std::string(kCheckHelpers) + R"JS(
+export function update(value) {
+  var origin = thisLayer.origin;
+  check('instance3', origin instanceof Vec3 && origin.constructor === Vec3);
+  check('canvasSize', engine.canvasSize instanceof Vec2);
+  check('screenPosition', input.cursorScreenPosition instanceof Vec2);
+  check('methodsOnHostVectors', origin.length() === 5 && origin.distance(new Vec3(0, 0, 0)) === 5);
+  check('frozenAlias', __WEVec3 === Vec3 && __WEVec2 === Vec2 && __WEVec4 === Vec4);
+  thisLayer.origin = origin.add(new Vec3(1, 1, 0)).multiply(2);
+  return 1;
+}
+)JS",
+        "probe", {}, DynamicValue(0.0f), runtime->hostContext());
+    ASSERT_NE(program, nullptr);
+    const auto result = program->Evaluate(runtime->hostContext(), DynamicValue(0.0f));
+    ASSERT_NE(result, nullptr);
+    EXPECT_TRUE(runtime->scriptErrors().empty()) << runtime->scriptErrors().front();
+    EXPECT_FLOAT_EQ(result->getFloat(), 1.0f);
+    EXPECT_NEAR(node->Translate().x(), 8.0f, 1e-5);
+    EXPECT_NEAR(node->Translate().y(), 10.0f, 1e-5);
+}
+
+TEST(ScriptRuntimeCompat, Mat4ComposesTransformsAndInvertsThem) {
+    const auto run = RunUpdateOnce(std::string(kCheckHelpers) + R"JS(
+export function update(value) {
+  check('identity', Mat4.identity().m.length === 16 && Mat4.identity().m[0] === 1 && Mat4.identity().m[5] === 1);
+  var t = Mat4.fromTranslation(new Vec3(1, 2, 3));
+  check('translation', same(t.translation(), new Vec3(1, 2, 3)) && t.m[12] === 1 && t.m[13] === 2 && t.m[14] === 3);
+  check('transformPoint', same(t.transformPoint(new Vec3(1, 1, 1)), new Vec3(2, 3, 4)));
+  check('transformDirection', same(t.transformDirection(new Vec3(1, 1, 1)), new Vec3(1, 1, 1)));
+  var s = Mat4.fromScale(new Vec3(2, 3, 4));
+  check('scale', same(s.transformPoint(new Vec3(1, 1, 1)), new Vec3(2, 3, 4)));
+  var r = Mat4.fromRotation(90, new Vec3(0, 0, 1));
+  check('rotateAboutZ', same(r.transformPoint(new Vec3(1, 0, 0)), new Vec3(0, 1, 0)));
+  var composed = t.multiply(r).multiply(s);
+  check('multiplyOrder', same(composed.transformPoint(new Vec3(1, 0, 0)), new Vec3(1, 4, 3)));
+  check('inverse', composed.multiply(composed.inverse()).equals(Mat4.identity()));
+  check('determinant', near(s.determinant(), 24) && near(Mat4.identity().determinant(), 1));
+  check('transpose', t.transpose().m[3] === 1 && t.transpose().m[7] === 2 && t.transpose().m[11] === 3);
+  var d = Mat4.compose(new Vec3(5, 6, 7), new Vec3(0, 0, 30), new Vec3(2, 2, 2)).decompose();
+  check('decompose', same(d.translation, new Vec3(5, 6, 7)) && near(d.rotation.z, 30) && same(d.scale, new Vec3(2, 2, 2)));
+  check('euler', near(Mat4.fromEuler(10, 20, 30).extractEuler().x, 10) && near(Mat4.fromEuler(10, 20, 30).extractEuler().y, 20) &&
+                 near(Mat4.fromEuler(10, 20, 30).extractEuler().z, 30));
+  var look = Mat4.lookAt(new Vec3(0, 0, 5), new Vec3(0, 0, 0), new Vec3(0, 1, 0));
+  check('lookAt', same(look.transformPoint(new Vec3(0, 0, 0)), new Vec3(0, 0, -5)));
+  check('vec4', near(t.multiply(new Vec4(0, 0, 0, 1)).x, 1));
+  check('copyAndString', t.copy().equals(t) && new Mat4(t.toString()).equals(t) && t.toString().split(' ').length === 16);
+  check('basis', same(Mat4.identity().right(), new Vec3(1, 0, 0)) && same(Mat4.identity().up(), new Vec3(0, 1, 0)) &&
+                 same(Mat4.identity().forward(), new Vec3(0, 0, 1)));
+  check('translateAppends', same(r.translate(new Vec3(1, 0, 0)).translation(), new Vec3(0, 1, 0)));
+  return 1;
+}
+)JS");
+    EXPECT_SCRIPT_PASSES(run);
+}
+
+TEST(ScriptRuntimeCompat, Mat3HandlesTwoDimensionalTransforms) {
+    const auto run = RunUpdateOnce(std::string(kCheckHelpers) + R"JS(
+export function update(value) {
+  var t = Mat3.fromTranslation(new Vec2(4, 5));
+  check('translation', same(t.translation(), new Vec2(4, 5)));
+  check('transformPoint', same(t.transformPoint(new Vec2(1, 1)), new Vec2(5, 6)));
+  check('transformDirection', same(t.transformDirection(new Vec2(1, 1)), new Vec2(1, 1)));
+  var r = Mat3.fromRotation(90);
+  check('rotation', same(r.transformPoint(new Vec2(1, 0)), new Vec2(0, 1)));
+  var composed = Mat3.compose(new Vec2(1, 2), 90, new Vec2(2, 2));
+  check('compose', same(composed.transformPoint(new Vec2(1, 0)), new Vec2(1, 4)));
+  check('inverse', composed.multiply(composed.inverse()).equals(Mat3.identity()));
+  check('determinant', near(Mat3.fromScale(new Vec2(2, 3)).determinant(), 6));
+  var d = composed.decompose();
+  check('decompose', same(d.translation, new Vec2(1, 2)) && near(d.rotation, 90) && same(d.scale, new Vec2(2, 2)));
+  check('fromMat4', Mat3.fromMat4(Mat4.fromScale(new Vec3(2, 3, 4))).m[8] === 4);
+  check('multiplyVec3', same(Mat3.identity().multiply(new Vec3(1, 2, 3)), new Vec3(1, 2, 3)));
+  return 1;
+}
+)JS");
+    EXPECT_SCRIPT_PASSES(run);
+}
+
+// The sway-animation helpers loop `for (i < thisLayer.getAnimationLayerCount())`
+// before they have named a single layer. The count is the puppet's own.
+TEST(ScriptRuntimeCompat, AnimationLayerCountIsThePuppetsNotTheNumberAskedFor) {
+    auto runtime = CreateSceneRuntimeContext(SceneRuntimeBootstrap {});
+    auto node    = std::make_shared<SceneNode>();
+    runtime->RegisterNode("character", node.get());
+    std::vector<WPPuppetLayer::AnimationLayer> authored(3);
+    for (std::size_t i = 0; i < authored.size(); ++i) {
+        authored[i].id   = 7;
+        authored[i].name = "layer" + std::to_string(i);
+    }
+    WPPuppetLayer layer(MakeSingleShotPuppet());
+    layer.prepared(authored);
+    runtime->RegisterPuppetLayer("character", layer);
+
+    auto program = runtime->scriptEngine().CreatePropertyScriptProgram(
+        runtime.get(),
+        R"JS(
+export function update(value) {
+  var count = thisLayer.getAnimationLayerCount();
+  var visited = 0;
+  for (var i = 0; i < count; ++i) {
+    thisLayer.getAnimationLayer(i).rate = 2 + i;
+    ++visited;
+  }
+  return count * 100 + visited;
+}
+)JS",
+        "character", {}, DynamicValue(0.0f), runtime->hostContext());
+    ASSERT_NE(program, nullptr);
+    const auto result = program->Evaluate(runtime->hostContext(), DynamicValue(0.0f));
+    ASSERT_NE(result, nullptr);
+    EXPECT_FLOAT_EQ(result->getFloat(), 303.0f);
+    EXPECT_DOUBLE_EQ(layer.rate(0), 2.0);
+    EXPECT_DOUBLE_EQ(layer.rate(1), 3.0);
+    EXPECT_DOUBLE_EQ(layer.rate(2), 4.0);
+    EXPECT_EQ(runtime->scriptErrorCount(), 0u);
+}
+
+TEST(ScriptRuntimeCompat, AnimationLayerCountIsZeroWithoutAPuppet) {
+    auto runtime = CreateSceneRuntimeContext(SceneRuntimeBootstrap {});
+    auto node    = std::make_shared<SceneNode>();
+    runtime->RegisterNode("plain", node.get());
+    auto program = runtime->scriptEngine().CreatePropertyScriptProgram(
+        runtime.get(), "export function update(value) { return thisLayer.getAnimationLayerCount(); }",
+        "plain", {}, DynamicValue(7.0f), runtime->hostContext());
+    ASSERT_NE(program, nullptr);
+    const auto result = program->Evaluate(runtime->hostContext(), DynamicValue(7.0f));
+    ASSERT_NE(result, nullptr);
+    EXPECT_FLOAT_EQ(result->getFloat(), 0.0f);
+}
+
+namespace
+{
+
+// Runs one `update` of `script` as a property script of layer `layer_name` on an
+// existing runtime and reports what it returned and every error recorded so far.
+ScriptRun RunUpdateOn(SceneRuntimeContext& runtime, const std::string& layer_name,
+                      const std::string& script) {
+    ScriptRun run;
+    auto      program = runtime.scriptEngine().CreatePropertyScriptProgram(
+        &runtime, script, layer_name, {}, DynamicValue(0.0f), runtime.hostContext());
+    if (program == nullptr) {
+        run.errors.push_back("script did not compile");
+        return run;
+    }
+    const auto result = program->Evaluate(runtime.hostContext(), DynamicValue(0.0f));
+    run.errors        = runtime.scriptErrors();
+    if (result != nullptr) {
+        run.value     = result->getFloat();
+        run.evaluated = true;
+    }
+    return run;
+}
+
+// Layers `a`, `b`, `c`, registered in that order, none of them attached to a graph.
+struct ThreeLayers {
+    std::unique_ptr<SceneRuntimeContext> runtime = CreateSceneRuntimeContext(SceneRuntimeBootstrap {});
+    std::shared_ptr<SceneNode>           a = std::make_shared<SceneNode>();
+    std::shared_ptr<SceneNode>           b = std::make_shared<SceneNode>();
+    std::shared_ptr<SceneNode>           c = std::make_shared<SceneNode>();
+
+    ThreeLayers() {
+        runtime->RegisterNode("a", a.get());
+        runtime->RegisterNode("b", b.get());
+        runtime->RegisterNode("c", c.get());
+    }
+};
+
+} // namespace
+
+// IScene.getLayerCount / getLayer(index) / enumerateLayers / getLayerByID: the
+// layers in the order the scene lists them, as the very objects `getLayer(name)`
+// answers with, so identity holds between every way of reaching a layer.
+TEST(ScriptRuntimeCompat, SceneEnumeratesItsLayersInOrderAsTheObjectsGetLayerReturns) {
+    ThreeLayers fixture;
+    auto&       runtime = *fixture.runtime;
+    runtime.RegisterLayerId(11, "a");
+    runtime.RegisterLayerId(22, "b");
+    runtime.RegisterLayerId(33, "c");
+    // A hidden template a script copies from is not one of the scene's layers.
+    auto hidden = std::make_shared<SceneNode>();
+    runtime.RegisterNode("__template:models/line.json", hidden.get());
+
+    const auto run = RunUpdateOn(runtime, "b", std::string(kCheckHelpers) + R"JS(
+export function update(value) {
+  check('count', thisScene.getLayerCount() === 3);
+  check('byIndex', thisScene.getLayer(0).name === 'a' && thisScene.getLayer(1).name === 'b' &&
+                   thisScene.getLayer(2).name === 'c');
+  check('indexIsTheNamedWrapper', thisScene.getLayer(2) === thisScene.getLayer('c'));
+  check('thisLayer', thisScene.getLayer(1) === thisLayer);
+  check('outOfRange', thisScene.getLayer(3) === null && thisScene.getLayer(-1) === null);
+  var layers = thisScene.enumerateLayers();
+  check('enumerate', layers.length === 3 && layers.map(function(l) { return l.name; }).join(',') === 'a,b,c');
+  check('includes', layers.includes(thisScene.getLayer('c')) && layers.includes(thisLayer));
+  check('find', layers.find(function(l) { return l.name === 'a'; }) === thisScene.getLayer(0));
+  check('freshArray', thisScene.enumerateLayers() !== layers);
+  check('byId', thisScene.getLayerByID(22) === thisLayer && thisScene.getLayerByID(33).name === 'c');
+  check('unknownId', thisScene.getLayerByID(999) === null);
+  // a loop over the count reaches every layer
+  var names = [];
+  for (var i = 0; i < thisScene.getLayerCount(); ++i) names.push(thisScene.getLayer(i).name);
+  check('loop', names.join('') === 'abc');
+  return 1;
+}
+)JS");
+    EXPECT_SCRIPT_PASSES(run);
+
+    // The scene file's declaration order wins over registration order.
+    runtime.SetLayerOrder({ "c", "a" });
+    const auto reordered = RunUpdateOn(runtime, "b", std::string(kCheckHelpers) + R"JS(
+export function update(value) {
+  var order = thisScene.enumerateLayers().map(function(l) { return l.name; }).join('');
+  check('declared first, the rest after', order === 'cab');
+  check('index follows', thisScene.getLayer(0).name === 'c');
+  return 1;
+}
+)JS");
+    EXPECT_SCRIPT_PASSES(reordered);
+}
+
+TEST(ScriptRuntimeCompat, LayersAScriptCreatesJoinTheEnumerationAndLeaveItWhenDestroyed) {
+    LineTemplateScene fixture;
+    auto&             runtime = *fixture.runtime;
+    const auto        run = RunUpdateOn(runtime, "owner", std::string(kCheckHelpers) + R"JS(
+export function update(value) {
+  check('before', thisScene.getLayerCount() === 1 && thisScene.getLayer(0) === thisLayer);
+  var made = thisScene.createLayer('models/line.json');
+  check('after', thisScene.getLayerCount() === 2);
+  check('last', thisScene.getLayer(1) === made && thisScene.enumerateLayers()[1] === made);
+  check('byKey', thisScene.getLayerByID(0) === null);
+  thisScene.destroyLayer(made);
+  check('destroyed', thisScene.getLayerCount() === 1 && thisScene.getLayer(1) === null);
+  check('enumerate', thisScene.enumerateLayers().length === 1);
+  return 1;
+}
+)JS");
+    EXPECT_SCRIPT_PASSES(run);
+}
+
+// getInitialLayerConfig(layer) is what the scene file says about the layer, as a
+// plain object a script may take apart (a clock's drop shadow copies `text`).
+TEST(ScriptRuntimeCompat, InitialLayerConfigIsTheSceneFilesObjectForTheLayer) {
+    ThreeLayers fixture;
+    auto&       runtime = *fixture.runtime;
+    runtime.RegisterLayerId(7, "b");
+    runtime.SetInitialLayerConfigProvider([](int32_t id) -> std::string {
+        return id == 7 ? R"({"id":7,"name":"b","text":{"value":"12:00","script":"x"},"size":"100 50","image":"models/b.json"})"
+                       : std::string();
+    });
+    const auto run = RunUpdateOn(runtime, "b", std::string(kCheckHelpers) + R"JS(
+export function update(value) {
+  var config = thisScene.getInitialLayerConfig(thisLayer);
+  check('object', typeof config === 'object' && config !== null);
+  check('keys', config.image === 'models/b.json' && config.size === '100 50' && config.name === 'b');
+  check('nested', config.text.value === '12:00');
+  check('byName', thisScene.getInitialLayerConfig('b').id === 7);
+  check('plain', Object.keys(config).indexOf('size') >= 0);
+  config.size = 'changed';
+  check('fresh', thisScene.getInitialLayerConfig(thisLayer).size === '100 50');
+  check('noConfig', thisScene.getInitialLayerConfig(thisScene.getLayer('a')) === null);
+  return 1;
+}
+)JS");
+    EXPECT_SCRIPT_PASSES(run);
+}
+
+TEST(ScriptRuntimeCompat, ASceneKeepsItsObjectListOnlyWhenAScriptReadsIt) {
+    ThreeLayers quiet;
+    EXPECT_FALSE(quiet.runtime->InitialLayerConfigRequested());
+    RunUpdateOn(*quiet.runtime, "a", "export function update(value) { return 1; }");
+    EXPECT_FALSE(quiet.runtime->InitialLayerConfigRequested());
+
+    ThreeLayers curious;
+    RunUpdateOn(*curious.runtime, "a",
+                "export function update(value) { thisScene.getInitialLayerConfig(thisLayer); return 1; }");
+    EXPECT_TRUE(curious.runtime->InitialLayerConfigRequested());
+}
+
+// applyGeneralSettings({ language }) is called right after init, and again when
+// the interface language changes; the tag is lower-case.
+TEST(ScriptRuntimeCompat, ApplyGeneralSettingsFollowsInitAndTheInterfaceLanguage) {
+    auto runtime = CreateSceneRuntimeContext(SceneRuntimeBootstrap {});
+    auto value   = ResolveFloatSetting(*runtime, { { "value", 0.0f }, { "script", R"JS(
+var log = [];
+export function init(value) { log.push('init'); return value; }
+export function applyGeneralSettings(settings) { log.push('settings:' + settings.language); }
+export function update(value) {
+  var seen = log.join(',');
+  return seen === 'init,settings:en-us' ? 1
+       : seen === 'init,settings:en-us,settings:zh-cn' ? 2
+       : seen === 'init,settings:en-us,settings:zh-cn,settings:pt-br' ? 3 : -1;
+}
+)JS" } });
+    runtime->Tick(0.01);
+    EXPECT_FLOAT_EQ(value->getFloat(), 1.0f) << "defaults to en-us, right after init";
+    runtime->SetLanguage("ZH_cn");
+    EXPECT_EQ(runtime->Language(), "zh-cn");
+    runtime->Tick(0.01);
+    EXPECT_FLOAT_EQ(value->getFloat(), 2.0f);
+    runtime->SetLanguage("zh-CN");  // unchanged: nothing is said
+    runtime->Tick(0.01);
+    EXPECT_FLOAT_EQ(value->getFloat(), 2.0f);
+    runtime->SetLanguage("pt_BR");
+    runtime->Tick(0.01);
+    EXPECT_FLOAT_EQ(value->getFloat(), 3.0f);
+    EXPECT_EQ(runtime->scriptErrorCount(), 0u);
+}
+
+TEST(ScriptRuntimeCompat, ASceneScriptIsToldTheLanguageAfterItsInit) {
+    auto runtime = CreateSceneRuntimeContext(SceneRuntimeBootstrap {});
+    auto probe   = std::make_shared<SceneNode>();
+    probe->SetVisible(false);
+    runtime->RegisterNode("probe", probe.get());
+    runtime->SetLanguage("de-DE");
+    runtime->RegisterSceneScript(R"JS(
+var order = [];
+function init() { order.push('init'); }
+function applyGeneralSettings(settings) {
+  order.push(settings.language);
+  scene.getObject('probe').visible = order.join(',') === 'init,de-de';
+}
+)JS",
+                                 "");
+    EXPECT_TRUE(probe->Visible());
+    EXPECT_EQ(runtime->scriptErrorCount(), 0u);
+}
+
+// resizeScreen(size) reaches a script that has started when the display's size
+// changes, with the new size; an unchanged size says nothing.
+TEST(ScriptRuntimeCompat, ResizeScreenReportsANewDisplaySizeToStartedScripts) {
+    auto runtime = CreateSceneRuntimeContext(SceneRuntimeBootstrap { .canvas_width = 1920, .canvas_height = 1080 });
+    auto value   = ResolveFloatSetting(*runtime, { { "value", 0.0f }, { "script", R"JS(
+var calls = 0;
+var last = null;
+export function resizeScreen(size) { ++calls; last = size; }
+export function update(value) {
+  if (last === null) return calls;
+  return calls * 1e6 + last.x * 1000 + last.y / 1000 + (last instanceof Vec2 ? 0.5 : 0);
+}
+)JS" } });
+    runtime->Tick(0.01);
+    EXPECT_FLOAT_EQ(value->getFloat(), 0.0f);
+    runtime->SetScreenResolution(Eigen::Vector2f(1920.0f, 1080.0f));  // the same size
+    runtime->Tick(0.01);
+    EXPECT_FLOAT_EQ(value->getFloat(), 0.0f);
+    runtime->SetScreenResolution(Eigen::Vector2f(2560.0f, 1440.0f));
+    runtime->Tick(0.01);
+    EXPECT_FLOAT_EQ(value->getFloat(), 1.0f * 1e6f + 2560.0f * 1000.0f + 1.44f + 0.5f);
+    runtime->Tick(0.01);
+    EXPECT_FLOAT_EQ(value->getFloat(), 1.0f * 1e6f + 2560.0f * 1000.0f + 1.44f + 0.5f)
+        << "a size already told is not told again";
+    EXPECT_EQ(runtime->scriptErrorCount(), 0u);
+}
+
+TEST(ScriptRuntimeCompat, ResizeScreenReachesSceneScriptsAndEngineOnListeners) {
+    auto runtime = CreateSceneRuntimeContext(SceneRuntimeBootstrap { .canvas_width = 800, .canvas_height = 600 });
+    auto exported = std::make_shared<SceneNode>();
+    auto listened = std::make_shared<SceneNode>();
+    exported->SetVisible(false);
+    listened->SetVisible(false);
+    runtime->RegisterNode("exported", exported.get());
+    runtime->RegisterNode("listened", listened.get());
+    runtime->RegisterSceneScript(R"JS(
+function resizeScreen(size) { scene.getObject('exported').visible = size.x === 3000 && size.y === 2000; }
+engine.on('resizeScreen', function(size) { scene.getObject('listened').visible = size.y === 2000; });
+)JS",
+                                 "");
+    runtime->SetScreenResolution(Eigen::Vector2f(3000.0f, 2000.0f));
+    EXPECT_FALSE(exported->Visible()) << "nothing runs until the tick";
+    runtime->Tick(0.01);
+    EXPECT_TRUE(exported->Visible());
+    EXPECT_TRUE(listened->Visible());
+    EXPECT_EQ(runtime->scriptErrorCount(), 0u);
+}
+
+// destroy() runs once when a script that started is torn down, while the layers
+// it could still touch exist. A script that never started has nothing to undo.
+TEST(ScriptRuntimeCompat, DestroyRunsOnceForScriptsThatStartedWhenTheSceneIsTornDown) {
+    auto started     = std::make_shared<SceneNode>();
+    auto scene_probe = std::make_shared<SceneNode>();
+    {
+        auto runtime = CreateSceneRuntimeContext(SceneRuntimeBootstrap {});
+        runtime->RegisterNode("started", started.get());
+        runtime->RegisterNode("sceneProbe", scene_probe.get());
+        runtime->RegisterNodeVisibility("started", started.get(),
+                                        ResolveBoolSetting(*runtime, { { "value", true }, { "script", R"JS(
+var runs = 0;
+export function init(value) { return value; }
+export function destroy() {
+  ++runs;
+  // one call only, and the layer is still reachable from here
+  thisLayer.visible = runs === 1;
+  thisLayer.origin = new Vec3(runs, 0, 0);
+}
+)JS" } }, "started"));
+        runtime->RegisterSceneScript(R"JS(
+function destroy() { scene.getObject('sceneProbe').origin = new Vec3(77, 0, 0); }
+)JS", "");
+        runtime->Tick(0.01);
+        EXPECT_FLOAT_EQ(started->Translate().x(), 0.0f) << "nothing ends while the scene runs";
+        EXPECT_FLOAT_EQ(scene_probe->Translate().x(), 0.0f);
+    }
+    EXPECT_FLOAT_EQ(started->Translate().x(), 1.0f) << "destroy ran, once";
+    EXPECT_TRUE(started->Visible());
+    EXPECT_FLOAT_EQ(scene_probe->Translate().x(), 77.0f) << "scene scripts end too";
+}
+
+// A setting resolved only for its first value leaves its scripted value
+// destroyed at once. The runtime must not keep a pointer to it: it would be
+// ticked, and told to end, after it was freed.
+TEST(ScriptRuntimeCompat, AScriptedValueDestroyedBeforeTheRuntimeLeavesItsRegistry) {
+    auto probe = std::make_shared<SceneNode>();
+    {
+        auto runtime = CreateSceneRuntimeContext(SceneRuntimeBootstrap {});
+        runtime->RegisterNode("probe", probe.get());
+        const bool first = ResolveBoolSetting(*runtime, { { "value", true }, { "script", R"JS(
+export function update(value) { thisLayer.origin = new Vec3(9, 0, 0); return value; }
+export function destroy() { thisLayer.origin = new Vec3(10, 0, 0); }
+)JS" } }, "probe")->getBool();
+        EXPECT_TRUE(first);
+        runtime->Tick(0.01);
+        runtime->Tick(0.01);
+        EXPECT_EQ(runtime->scriptErrorCount(), 0u);
+        EXPECT_FLOAT_EQ(probe->Translate().x(), 0.0f) << "the dropped script never ran";
+    }
+    EXPECT_FLOAT_EQ(probe->Translate().x(), 0.0f) << "and was not told to end";
+}
+
+TEST(ScriptRuntimeCompat, DestroyDoesNotRunForAScriptThatNeverStarted) {
+    auto node = std::make_shared<SceneNode>();
+    {
+        auto runtime = CreateSceneRuntimeContext(SceneRuntimeBootstrap {});
+        runtime->RegisterNode("layer", node.get());
+        auto value = ResolveBoolSetting(*runtime, { { "value", true }, { "script", R"JS(
+export function init(value) { return value; }
+export function destroy() { thisLayer.origin = new Vec3(5, 0, 0); }
+)JS" } }, "layer");
+        runtime->RegisterNodeVisibility("layer", node.get(), std::move(value));
+        // No tick: the script has not run `init`.
+    }
+    EXPECT_FLOAT_EQ(node->Translate().x(), 0.0f);
+}
+
+// A script on animationlayers[i] is about that animation layer: thisObject is
+// it (it has addEndedCallback), thisLayer is still the layer that owns it.
+TEST(ScriptRuntimeCompat, ThisObjectIsTheAnimationLayerAScriptIsBoundTo) {
+    auto runtime = CreateSceneRuntimeContext(SceneRuntimeBootstrap {});
+    auto node    = std::make_shared<SceneNode>();
+    runtime->RegisterNode("character", node.get());
+    std::vector<WPPuppetLayer::AnimationLayer> authored(2);
+    for (std::size_t i = 0; i < authored.size(); ++i) {
+        authored[i].id   = 7;
+        authored[i].name = i == 0 ? "idle" : "wave";
+    }
+    WPPuppetLayer layer(MakeSingleShotPuppet());
+    layer.prepared(authored);
+    runtime->RegisterPuppetLayer("character", layer);
+
+    // The "initial progress" script of the Workshop helper library.
+    const std::string script = R"JS(
+export function init(value) {
+  var ani = 'addEndedCallback' in thisObject ? thisObject : thisObject.getAnimation();
+  ani.play();
+  ani.setFrame(ani.frameCount * 0.6);
+  if (thisLayer.name !== 'character') throw new Error('thisLayer changed');
+  return value;
+}
+)JS";
+    runtime->RegisterNodeVisibility("character", node.get(), ResolveBoolSetting(*runtime, {
+        { "value", true }, { "script", script } }, "character", 1));
+    runtime->Tick(0.01);
+    EXPECT_DOUBLE_EQ(layer.frame(1), 3.0) << "the bound animation layer started at its offset";
+    EXPECT_DOUBLE_EQ(layer.frame(0), 0.0) << "its sibling was left alone";
+    EXPECT_EQ(runtime->scriptErrorCount(), 0u);
+}
+
+TEST(ScriptRuntimeCompat, ThisObjectIsTheLayerForAScriptOnTheLayerItself) {
+    auto runtime = CreateSceneRuntimeContext(SceneRuntimeBootstrap {});
+    auto node    = std::make_shared<SceneNode>();
+    runtime->RegisterNode("plain", node.get());
+    const auto run = RunUpdateOn(*runtime, "plain", R"JS(
+export function update(value) { return thisObject === thisLayer ? 1 : 0; }
+)JS");
+    EXPECT_SCRIPT_PASSES(run);
+}
+
+// addEndedCallback listeners are called when a single-play animation layer
+// plays out, once per play, however the layer was asked for.
+TEST(ScriptRuntimeCompat, AnimationLayerEndedCallbacksFireWhenASingleShotFinishes) {
+    auto runtime = CreateSceneRuntimeContext(SceneRuntimeBootstrap {});
+    auto node    = std::make_shared<SceneNode>();
+    auto probe   = std::make_shared<SceneNode>();
+    runtime->RegisterNode("character", node.get());
+    runtime->RegisterNode("probe", probe.get());
+    std::vector<WPPuppetLayer::AnimationLayer> authored(1);
+    authored[0].id   = 7;
+    authored[0].name = "siche";
+    WPPuppetLayer layer(MakeSingleShotPuppet());
+    layer.prepared(authored);
+    WPPuppetLayer render_copy = layer;
+    runtime->RegisterPuppetLayer("character", layer);
+
+    runtime->RegisterNodeVisibility("character", node.get(), ResolveBoolSetting(*runtime, {
+        { "value", true }, { "script", R"JS(
+var ended = 0;
+export function init(value) {
+  thisLayer.getAnimationLayer('siche').addEndedCallback(function() {
+    ++ended;
+    thisScene.getLayer('probe').origin = new Vec3(ended, 0, 0);
+  });
+  // asked for by number, it is the same animation layer with the same listeners
+  thisLayer.getAnimationLayer(0).addEndedCallback(function() { thisScene.getLayer('probe').scale = new Vec3(ended, 1, 1); });
+  return value;
+}
+)JS" } }, "character"));
+    runtime->Tick(0.01);
+
+    render_copy.genFrame(0.0);
+    runtime->Tick(0.01);
+    EXPECT_FLOAT_EQ(probe->Translate().x(), 0.0f) << "still playing";
+
+    render_copy.genFrame(2.0);  // plays out
+    EXPECT_FALSE(render_copy.isPlaying(0));
+    runtime->Tick(0.01);
+    EXPECT_FLOAT_EQ(probe->Translate().x(), 1.0f) << "the listener ran";
+    EXPECT_FLOAT_EQ(probe->Scale().x(), 1.0f) << "and so did the one added by number";
+    runtime->Tick(0.01);
+    runtime->Tick(0.01);
+    EXPECT_FLOAT_EQ(probe->Translate().x(), 1.0f) << "once per finish";
+
+    layer.play(0);
+    render_copy.genFrame(2.0);
+    render_copy.genFrame(4.0);  // plays out again
+    runtime->Tick(0.01);
+    EXPECT_FLOAT_EQ(probe->Translate().x(), 2.0f);
+    EXPECT_EQ(runtime->scriptErrorCount(), 0u);
+}
+
+TEST(ScriptRuntimeCompat, RemovedEndedCallbacksStaySilent) {
+    auto runtime = CreateSceneRuntimeContext(SceneRuntimeBootstrap {});
+    auto node    = std::make_shared<SceneNode>();
+    auto probe   = std::make_shared<SceneNode>();
+    runtime->RegisterNode("character", node.get());
+    runtime->RegisterNode("probe", probe.get());
+    std::vector<WPPuppetLayer::AnimationLayer> authored(1);
+    authored[0].id   = 7;
+    authored[0].name = "siche";
+    WPPuppetLayer layer(MakeSingleShotPuppet());
+    layer.prepared(authored);
+    runtime->RegisterPuppetLayer("character", layer);
+    runtime->RegisterNodeVisibility("character", node.get(), ResolveBoolSetting(*runtime, {
+        { "value", true }, { "script", R"JS(
+export function init(value) {
+  var animation = thisLayer.getAnimationLayer('siche');
+  var heard = function() { thisScene.getLayer('probe').origin = new Vec3(1, 0, 0); };
+  animation.addEndedCallback(heard);
+  animation.removeEndedCallback(heard);
+  return value;
+}
+)JS" } }, "character"));
+    runtime->Tick(0.01);
+    WPPuppetLayer render_copy = layer;
+    render_copy.genFrame(0.0);
+    render_copy.genFrame(2.0);
+    runtime->Tick(0.01);
+    EXPECT_FLOAT_EQ(probe->Translate().x(), 0.0f);
+}
+
+// A layer that loops plays past its last frame over and over without ever
+// ending, so its listener is never called, and it is still playing.
+TEST(ScriptRuntimeCompat, ALoopingAnimationLayerNeverEndsAndItsListenerStaysSilent) {
+    auto runtime = CreateSceneRuntimeContext(SceneRuntimeBootstrap {});
+    auto node    = std::make_shared<SceneNode>();
+    auto probe   = std::make_shared<SceneNode>();
+    runtime->RegisterNode("character", node.get());
+    runtime->RegisterNode("probe", probe.get());
+    std::vector<WPPuppetLayer::AnimationLayer> authored(1);
+    authored[0].id   = 7;
+    authored[0].name = "sway";
+    WPPuppetLayer layer(MakePuppet(WPPuppet::PlayMode::Loop));
+    layer.prepared(authored);
+    runtime->RegisterPuppetLayer("character", layer);
+    runtime->RegisterNodeVisibility("character", node.get(), ResolveBoolSetting(*runtime, {
+        { "value", true }, { "script", R"JS(
+export function init(value) {
+  thisLayer.getAnimationLayer('sway').addEndedCallback(function() {
+    thisScene.getLayer('probe').origin = new Vec3(1, 0, 0);
+  });
+  return value;
+}
+)JS" } }, "character"));
+    runtime->Tick(0.01);
+    WPPuppetLayer render_copy = layer;
+    for (const double seconds : {0.0, 0.7, 1.4, 2.1, 5.0}) {  // the animation is half a second long
+        render_copy.genFrame(seconds);
+        runtime->Tick(0.01);
+    }
+    EXPECT_TRUE(render_copy.isPlaying(0)) << "a looping layer keeps playing";
+    EXPECT_FLOAT_EQ(probe->Translate().x(), 0.0f) << "and never ends";
+    EXPECT_EQ(runtime->scriptErrorCount(), 0u);
+}
+
+// A paused sprite sheet holds its frame, play() resumes it from there, stop()
+// returns to the first frame, and rate scales how fast it runs.
+namespace
+{
+
+struct SpriteSheetScene {
+    Scene                                scene;
+    std::unique_ptr<SceneRuntimeContext> runtime = MakeRuntimeWithScene(scene);
+    std::shared_ptr<SceneNode>           node    = std::make_shared<SceneNode>();
+    std::shared_ptr<SceneCamera>         camera = std::make_shared<SceneCamera>(1920, 1080, -1.0f, 1.0f);
+    WPShaderValueUpdater                 updater { &scene };
+    sprite_map_t                         sprites;
+
+    ~SpriteSheetScene() { scene.activeCamera = nullptr; }
+    SpriteSheetScene() {
+        scene.activeCamera = camera.get();
+        // Four frames of a tenth of a second each.
+        SceneTexture texture;
+        texture.isSprite = true;
+        for (int frame = 0; frame < 4; ++frame) {
+            texture.spriteAnim.AppendFrame(SpriteFrame { .imageId = frame, .frametime = 0.1f });
+        }
+        scene.textures["sheet"] = texture;
+        sprites[0]              = texture.spriteAnim;
+        auto mesh               = std::make_shared<SceneMesh>();
+        SceneMaterial material;
+        material.textures = { "sheet" };
+        mesh->AddMaterial(std::move(material));
+        node->AddMesh(mesh);
+        runtime->RegisterNode("icon", node.get());
+        updater.InitUniforms(node.get(), [](std::string_view) { return false; });
+    }
+
+    // The frame the sheet shows after the renderer draws `seconds` more of it.
+    int Draw(double seconds) {
+        scene.frameTime = seconds;
+        updater.UpdateUniforms(node.get(), sprites, [](std::string_view, const ShaderValue&) {});
+        return sprites.at(0).CurFrameIndex();
+    }
+
+    float Run(const std::string& body) {
+        const auto run = RunUpdateOn(*runtime, "icon", "export function update(value) { var anim = thisLayer.getTextureAnimation(); " +
+                                                          body + " }");
+        EXPECT_TRUE(run.errors.empty()) << run.errors.front();
+        return run.value;
+    }
+};
+
+} // namespace
+
+TEST(ScriptRuntimeCompat, PausedSpriteSheetHoldsItsFrameAndPlayResumesIt) {
+    SpriteSheetScene fixture;
+    fixture.Draw(0.0);
+    const int running = fixture.Draw(0.15);
+    EXPECT_NE(running, 0) << "a sheet runs by itself";
+    EXPECT_EQ(fixture.Run("return anim.isPlaying() ? 1 : 0;"), 1.0f);
+
+    EXPECT_EQ(fixture.Run("anim.pause(); return anim.isPlaying() ? 1 : 0;"), 0.0f);
+    EXPECT_EQ(fixture.Draw(0.5), running) << "paused: half a second changes nothing";
+    EXPECT_EQ(fixture.Draw(0.5), running);
+    EXPECT_EQ(fixture.Run("return anim.getFrame();"), static_cast<float>(running))
+        << "the frame it holds is reported";
+
+    EXPECT_EQ(fixture.Run("anim.play(); return anim.isPlaying() ? 1 : 0;"), 1.0f);
+    EXPECT_NE(fixture.Draw(0.15), running) << "playing again: it moves on from where it was";
+}
+
+TEST(ScriptRuntimeCompat, StoppedSpriteSheetReturnsToItsFirstFrameAndSetFrameStillPins) {
+    SpriteSheetScene fixture;
+    fixture.Draw(0.0);
+    fixture.Draw(0.25);
+    EXPECT_EQ(fixture.Run("anim.stop(); return anim.isPlaying() ? 1 : 0;"), 0.0f);
+    EXPECT_EQ(fixture.Draw(0.3), 0) << "stop shows the first frame";
+    EXPECT_EQ(fixture.Draw(0.3), 0) << "and stays there";
+
+    EXPECT_EQ(fixture.Run("anim.setFrame(2); return anim.getFrame();"), 2.0f);
+    EXPECT_EQ(fixture.Draw(0.3), 2) << "setFrame pins the frame, as it always did";
+    EXPECT_EQ(fixture.node->TextureFrame(), 2.0);
+    EXPECT_EQ(fixture.Run("return anim.isPlaying() ? 1 : 0;"), 0.0f);
+
+    // play() lets the sheet run on from the pinned frame.
+    EXPECT_EQ(fixture.Run("anim.play(); return anim.isPlaying() ? 1 : 0;"), 1.0f);
+    EXPECT_FALSE(fixture.node->TextureFrame().has_value());
+    EXPECT_EQ(fixture.Draw(0.0), 2);
+    EXPECT_EQ(fixture.Draw(0.15), 3);
+}
+
+TEST(ScriptRuntimeCompat, SpriteSheetRateScalesPlaybackAndTheSheetDescribesItself) {
+    SpriteSheetScene fast;
+    SpriteSheetScene reference;
+    fast.Draw(0.0);
+    reference.Draw(0.0);
+    EXPECT_EQ(fast.Run("return anim.rate;"), 1.0f);
+    EXPECT_EQ(fast.Run("anim.rate = 0; return anim.rate;"), 0.0f);
+    EXPECT_EQ(fast.Draw(1.0), 0) << "a rate of zero is a pause";
+    EXPECT_EQ(fast.Run("anim.rate = 2; return anim.rate;"), 2.0f);
+    // 0.1s at twice the rate is 0.2s of the sheet.
+    EXPECT_EQ(fast.Draw(0.1), reference.Draw(0.2));
+    EXPECT_EQ(fast.Draw(0.1), reference.Draw(0.2)) << "and it keeps pace";
+
+    EXPECT_EQ(fast.Run("return anim.frameCount;"), 4.0f);
+    EXPECT_NEAR(fast.Run("return anim.duration;"), 0.4f, 1e-6f);
+    EXPECT_NEAR(fast.Run("return anim.fps;"), 10.0f, 1e-5f);
+    EXPECT_EQ(fast.Run("return anim.name === 'sheet' ? 1 : 0;"), 1.0f);
+}
+
+TEST(ScriptRuntimeCompat, ALayerWithoutASpriteSheetReportsNoFrames) {
+    Scene scene;
+    auto  runtime = MakeRuntimeWithScene(scene);
+    auto  node    = std::make_shared<SceneNode>();
+    runtime->RegisterNode("plain", node.get());
+    const auto run = RunUpdateOn(*runtime, "plain", R"JS(
+export function update(value) {
+  var anim = thisLayer.getTextureAnimation();
+  anim.pause(); anim.play();
+  return anim.frameCount === 0 && anim.fps === 0 && anim.duration === 0 ? 1 : 0;
+}
+)JS");
+    EXPECT_SCRIPT_PASSES(run);
+}
+
+// ---------------------------------------------------------------------------
+// Text layers
+// ---------------------------------------------------------------------------
+
+namespace
+{
+
+void WaitForTextLayout(SceneRuntimeContext& runtime, const std::string& layer) {
+    for (int attempt = 0; attempt < 400 && runtime.NodeTextDirty(layer); ++attempt) {
+        runtime.PumpTextLayerCache();
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+}
+
+} // namespace
+
+// thisLayer.font / pointsize / horizontalalign / verticalalign read what the text
+// layer has and write through to it, and a write lays the text out again.
+TEST(ScriptRuntimeCompat, TextLayerStyleIsReadAndWrittenThroughTheLayer) {
+    auto runtime = CreateSceneRuntimeContext(SceneRuntimeBootstrap {});
+    auto node    = std::make_shared<SceneNode>();
+    node->SetTranslate(Eigen::Vector3f(100, 200, 0));
+    runtime->RegisterNode("clock", node.get());
+    runtime->RegisterTextLayer("clock", TextLayerState {
+        .text = "12:30", .font_key = "Arial", .point_size = 12.0f, .horizontal_align = "center",
+        .vertical_align = "center",
+    });
+    std::vector<std::string> requested_fonts;
+    runtime->SetTextFontResolver([&](TextLayerState& state, const std::string& font_key) {
+        requested_fonts.push_back(font_key);
+        state.resolved_font_kind     = "family";
+        state.resolved_font_identity = "Courier New";
+        state.resolved_font_path.clear();
+    });
+    runtime->Tick(0.0);
+    WaitForTextLayout(*runtime, "clock");
+    const auto before = runtime->NodeSize("clock");
+
+    const auto run = RunUpdateOn(*runtime, "clock", std::string(kCheckHelpers) + R"JS(
+export function update(value) {
+  check('font', thisLayer.font === 'Arial');
+  check('pointsize', thisLayer.pointsize === 12);
+  check('halign', thisLayer.horizontalalign === 'center' && thisLayer.verticalalign === 'center');
+  thisLayer.pointsize = 36;
+  thisLayer.font = 'systemfont_courier';
+  thisLayer.horizontalalign = 'right';
+  thisLayer.verticalalign = 'bottom';
+  check('readBack', thisLayer.pointsize === 36 && thisLayer.font === 'systemfont_courier' &&
+                    thisLayer.horizontalalign === 'right' && thisLayer.verticalalign === 'bottom');
+  check('byName', thisScene.getLayer('clock').pointsize === 36);
+  return 1;
+}
+)JS");
+    EXPECT_SCRIPT_PASSES(run);
+
+    ASSERT_EQ(requested_fonts.size(), 1u);
+    EXPECT_EQ(requested_fonts.front(), "systemfont_courier");
+    const auto state = runtime->NodeTextState("clock");
+    ASSERT_TRUE(state.has_value());
+    EXPECT_FLOAT_EQ(state->point_size, 36.0f);
+    EXPECT_EQ(state->font_key, "systemfont_courier");
+    EXPECT_EQ(state->resolved_font_identity, "Courier New");
+    EXPECT_EQ(state->horizontal_align, "right");
+    EXPECT_EQ(state->vertical_align, "bottom");
+    EXPECT_TRUE(runtime->NodeTextDirty("clock")) << "the text has to be laid out again";
+
+    WaitForTextLayout(*runtime, "clock");
+    ASSERT_FALSE(runtime->NodeTextDirty("clock"));
+    const auto after = runtime->NodeSize("clock");
+    EXPECT_GT(after.y(), before.y()) << "a larger point size makes a taller layer";
+    EXPECT_GT(after.x(), before.x());
+    // Aligned to its right and bottom edges now: the layer's origin stays where it was and
+    // the card hangs up and to the left of it.
+    EXPECT_TRUE(node->Translate().isApprox(Eigen::Vector3f(100, 200, 0)));
+    const auto layout = runtime->NodeTextLayout("clock");
+    ASSERT_TRUE(layout.has_value());
+    EXPECT_NEAR(runtime->NodeBoxCentre("clock").x(), -after.x() * 0.5f, 1e-3f);
+    EXPECT_GT(runtime->NodeBoxCentre("clock").y(), 0.0f);
+    EXPECT_NEAR(runtime->NodeBoxCentre("clock").y() + after.y() * 0.5f,
+                layout->top + layout->descender, 1e-3f);
+}
+
+TEST(ScriptRuntimeCompat, TextStyleOnAnotherKindOfLayerStaysAPlainProperty) {
+    auto runtime = CreateSceneRuntimeContext(SceneRuntimeBootstrap {});
+    auto node    = std::make_shared<SceneNode>();
+    runtime->RegisterNode("image", node.get());
+    const auto run = RunUpdateOn(*runtime, "image", R"JS(
+export function update(value) {
+  thisLayer.font = 'x';
+  thisLayer.pointsize = 5;
+  return thisLayer.font === 'x' && thisLayer.pointsize === 5 ? 1 : 0;
+}
+)JS");
+    EXPECT_SCRIPT_PASSES(run);
+}
+
+TEST(ScriptRuntimeCompat, TextStyleRejectsValuesTheLayerCannotUse) {
+    auto runtime = CreateSceneRuntimeContext(SceneRuntimeBootstrap {});
+    auto node    = std::make_shared<SceneNode>();
+    runtime->RegisterNode("clock", node.get());
+    runtime->RegisterTextLayer("clock", TextLayerState { .text = "x", .font_key = "Arial", .point_size = 20.0f });
+    const auto run = RunUpdateOn(*runtime, "clock", R"JS(
+export function update(value) {
+  thisLayer.pointsize = -3;
+  thisLayer.pointsize = NaN;
+  thisLayer.pointsize = 'big';
+  return thisLayer.pointsize;
+}
+)JS");
+    EXPECT_TRUE(run.errors.empty());
+    EXPECT_FLOAT_EQ(run.value, 20.0f);
+}
+
+// createLayer({ text, font, pointsize, color, alpha, ... }) makes a text layer
+// instead of throwing; the scene's own layer config reaches it as scene.json keys.
+TEST(ScriptRuntimeCompat, CreateLayerMakesATextLayerFromItsConfiguration) {
+    Scene scene;
+    auto  runtime = MakeRuntimeWithScene(scene);
+    auto  owner   = std::make_shared<SceneNode>();
+    runtime->RegisterNode("owner", owner.get());
+    scene.sceneGraph->AppendChild(owner);
+    nlohmann::json received;
+    int32_t        received_id = 0;
+    runtime->SetTextLayerFactory([&](const std::string& config_json, int32_t id) {
+        received    = nlohmann::json::parse(config_json);
+        received_id = id;
+        auto node = std::make_shared<SceneNode>(Eigen::Vector3f::Zero(), Eigen::Vector3f::Ones(),
+                                                Eigen::Vector3f::Zero(), "__we_text_" + std::to_string(id));
+        runtime->RegisterNode(node->Name(), node.get());
+        runtime->RegisterTextLayer(node->Name(), TextLayerState {
+            .text = received.at("text").get<std::string>(), .font_key = received.value("font", ""),
+            .point_size = received.value("pointsize", 12.0f),
+        });
+        return node;
+    });
+    const auto run = RunUpdateOn(*runtime, "owner", std::string(kCheckHelpers) + R"JS(
+export function update(value) {
+  var shadow = thisScene.createLayer({
+    text: { value: '10:45', script: 'ignored' },
+    font: 'systemfont_arial',
+    pointsize: 48,
+    color: new Vec3(0.25, 0.5, 0.75),
+    alpha: 0.4,
+    horizontalalign: 'left',
+    size: '300 80',
+    perspective: true,
+    origin: new Vec3(5, 6, 0),
+    name: 'shadow'
+  });
+  check('a layer came back', shadow && typeof shadow === 'object');
+  check('text', shadow.text === '10:45');
+  check('font', shadow.font === 'systemfont_arial' && shadow.pointsize === 48);
+  check('named', thisScene.getLayer('shadow') === shadow && shadow.name === 'shadow');
+  check('origin', shadow.origin.x === 5 && shadow.origin.y === 6);
+  check('counted', thisScene.getLayerCount() === 2);
+  return 1;
+}
+)JS");
+    EXPECT_SCRIPT_PASSES(run);
+
+    EXPECT_NE(received_id, 0);
+    EXPECT_EQ(received.at("text"), "10:45") << "an object-valued text is its value";
+    EXPECT_EQ(received.at("font"), "systemfont_arial");
+    EXPECT_EQ(received.at("pointsize"), 48);
+    EXPECT_EQ(received.at("color"), "0.25 0.5 0.75") << "colors travel as the scene file writes them";
+    EXPECT_FLOAT_EQ(received.at("alpha").get<float>(), 0.4f);
+    EXPECT_EQ(received.at("horizontalalign"), "left");
+    EXPECT_EQ(received.at("size"), "300 80");
+    EXPECT_EQ(received.at("perspective"), true);
+    // The new layer joined the scene beside the layer that made it.
+    ASSERT_EQ(scene.sceneGraph->GetChildren().size(), 2u);
+    EXPECT_TRUE(runtime->ConsumeSceneGraphMutationFlag());
+}
+
+TEST(ScriptRuntimeCompat, CreateLayerWithoutAnythingToMakeStillThrowsAndWithoutAFactoryReportsIt) {
+    Scene scene;
+    auto  runtime = MakeRuntimeWithScene(scene);
+    auto  owner   = std::make_shared<SceneNode>();
+    runtime->RegisterNode("owner", owner.get());
+    const auto run = RunUpdateOn(*runtime, "owner", R"JS(
+export function update(value) {
+  var errors = 0;
+  try { thisScene.createLayer({ color: '1 1 1' }); } catch (error) { ++errors; }
+  try { thisScene.createLayer({ text: 'no factory is installed' }); } catch (error) { ++errors; }
+  return errors;
+}
+)JS");
+    EXPECT_TRUE(run.errors.empty());
+    EXPECT_FLOAT_EQ(run.value, 2.0f);
+}
+
+namespace
+{
+
+// `models/card.json`: a 20x10 card with positions and texture coordinates, which
+// layers a script makes are copies of.
+struct CardTemplateScene {
+    Scene                                scene;
+    std::unique_ptr<SceneRuntimeContext> runtime = MakeRuntimeWithScene(scene);
+    std::shared_ptr<SceneNode>           owner   = std::make_shared<SceneNode>(
+        Eigen::Vector3f::Zero(), Eigen::Vector3f::Ones(), Eigen::Vector3f::Zero(), "owner");
+
+    CardTemplateScene() {
+        scene.shaderValueUpdater = std::make_unique<WPShaderValueUpdater>(&scene);
+        auto mesh = std::make_shared<SceneMesh>();
+        SceneVertexArray vertices({ { WE_IN_POSITION.data(), VertexType::FLOAT3 },
+                                    { WE_IN_TEXCOORD.data(), VertexType::FLOAT2 } },
+                                  4);
+        const std::array position { -10.0f, -5.0f, 0.0f, -10.0f, 5.0f, 0.0f,
+                                    10.0f,  -5.0f, 0.0f, 10.0f,  5.0f, 0.0f };
+        const std::array coordinate { 0.0f, 0.8f, 0.0f, 0.0f, 0.5f, 0.8f, 0.5f, 0.0f };
+        vertices.SetVertex(WE_IN_POSITION, position);
+        vertices.SetVertex(WE_IN_TEXCOORD, coordinate);
+        mesh->AddVertexArray(std::move(vertices));
+        mesh->AddMaterial(SceneMaterial {});
+        owner->AddMesh(mesh);
+        scene.sceneGraph->AppendChild(owner);
+        runtime->RegisterNode("owner", owner.get());
+        runtime->RegisterNodeSize("owner", Eigen::Vector2f(20, 10));
+        runtime->RegisterLayerTemplate("models/card.json", owner, Eigen::Vector2f(20, 10));
+    }
+
+    // Corner extents of a node's card.
+    static Eigen::Vector2f Extent(SceneNode& node) {
+        const auto& vertices = node.Mesh()->GetVertexArray(0);
+        float       width    = 0.0f;
+        float       height   = 0.0f;
+        for (std::size_t vertex = 0; vertex < vertices.VertexCount(); ++vertex) {
+            width  = std::max(width, std::abs(vertices.Data()[vertex * vertices.OneSize()]) * 2.0f);
+            height = std::max(height, std::abs(vertices.Data()[vertex * vertices.OneSize() + 1]) * 2.0f);
+        }
+        return { width, height };
+    }
+};
+
+} // namespace
+
+// createLayer({ image, size, name, parent, parallaxDepth }): the layer is made
+// that size, reachable by that name, hangs below that parent, and ignores the
+// cursor's parallax by the depth it was given.
+TEST(ScriptRuntimeCompat, CreateLayerHonoursSizeNameParentAndParallaxDepth) {
+    CardTemplateScene fixture;
+    auto&             runtime = *fixture.runtime;
+    const auto        run = RunUpdateOn(runtime, "owner", std::string(kCheckHelpers) + R"JS(
+export function update(value) {
+  var bar = thisScene.createLayer({
+    image: 'models/card.json',
+    size: new Vec2(40, 30),
+    name: 'bar',
+    parent: thisLayer,
+    parallaxDepth: new Vec2(0.5, 0.25)
+  });
+  check('size', bar.size.x === 40 && bar.size.y === 30);
+  check('name', thisScene.getLayer('bar') === bar && bar.name === 'bar');
+  check('parent', bar.getParent() === thisLayer);
+  check('depth', bar.parallaxDepth.x === 0.5 && bar.parallaxDepth.y === 0.25 && bar.parallaxDepth instanceof Vec2);
+  // the property setter works after the fact, as scripts that zero it do
+  bar.parallaxDepth = new Vec2(0, 0);
+  check('zeroed', bar.parallaxDepth.x === 0 && bar.parallaxDepth.y === 0);
+  // a named layer is still destroyed through its object
+  check('destroys', thisScene.destroyLayer(bar) === true && thisScene.getLayerCount() === 1);
+  // a plain path keeps working
+  var plain = thisScene.createLayer('models/card.json');
+  check('plain', plain.size.x === 20 && plain.size.y === 10 && plain.parallaxDepth.x === 0);
+  return 1;
+}
+)JS");
+    EXPECT_SCRIPT_PASSES(run);
+    // The template keeps its own geometry: the stretched copy had a mesh of its own.
+    EXPECT_EQ(CardTemplateScene::Extent(*fixture.owner), Eigen::Vector2f(20, 10));
+}
+
+TEST(ScriptRuntimeCompat, ASizedLayerHasItsOwnStretchedCardAndTheTemplateKeepsItsOwn) {
+    CardTemplateScene fixture;
+    auto&             runtime = *fixture.runtime;
+    const auto        run = RunUpdateOn(runtime, "owner", std::string(kCheckHelpers) + R"JS(
+var wide, tall;
+export function update(value) {
+  wide = thisScene.createLayer({ image: 'models/card.json', size: '60 10' });
+  tall = thisScene.createLayer({ image: 'models/card.json', size: '20 50' });
+  return 1;
+}
+)JS");
+    EXPECT_SCRIPT_PASSES(run);
+    std::vector<SceneNode*> created;
+    for (const auto& child : fixture.scene.sceneGraph->GetChildren()) {
+        if (child.get() != fixture.owner.get()) created.push_back(child.get());
+    }
+    ASSERT_EQ(created.size(), 2u);
+    EXPECT_EQ(CardTemplateScene::Extent(*created[0]), Eigen::Vector2f(60, 10));
+    EXPECT_EQ(CardTemplateScene::Extent(*created[1]), Eigen::Vector2f(20, 50));
+    EXPECT_EQ(CardTemplateScene::Extent(*fixture.owner), Eigen::Vector2f(20, 10));
+    // Texture coordinates are not stretched: a padded texture still maps.
+    const auto& vertices = created[0]->Mesh()->GetVertexArray(0);
+    const auto  offsets  = vertices.GetAttrOffsetMap();
+    const auto  uv       = offsets.at(std::string(WE_IN_TEXCOORD)).offset / sizeof(float);
+    EXPECT_FLOAT_EQ(vertices.Data()[0 * vertices.OneSize() + uv + 1], 0.8f);
+    EXPECT_FLOAT_EQ(vertices.Data()[2 * vertices.OneSize() + uv], 0.5f);
+}
+
+TEST(ScriptRuntimeCompat, ParallaxDepthIsReadAndWrittenThroughTheShaderUpdater) {
+    CardTemplateScene fixture;
+    auto&             runtime = *fixture.runtime;
+    const auto        run = RunUpdateOn(runtime, "owner", std::string(kCheckHelpers) + R"JS(
+export function update(value) {
+  check('default', thisLayer.parallaxDepth.x === 0 && thisLayer.parallaxDepth.y === 0);
+  thisLayer.parallaxDepth = new Vec2(0.75, 1.5);
+  check('read', thisLayer.parallaxDepth.x === 0.75 && thisLayer.parallaxDepth.y === 1.5);
+  return 1;
+}
+)JS");
+    EXPECT_SCRIPT_PASSES(run);
+    const auto depth = fixture.scene.shaderValueUpdater->NodeParallaxDepth(fixture.owner.get());
+    EXPECT_FLOAT_EQ(depth[0], 0.75f);
+    EXPECT_FLOAT_EQ(depth[1], 1.5f);
+}
+
+// A number written to a layer's colour or parallax depth is that number on every
+// component, as a number an `update()` returns for a vector property is; both
+// writes were ignored.
+TEST(ScriptRuntimeCompat, ANumberWrittenToALayersColourOrParallaxDepthFillsEveryComponent) {
+    CardTemplateScene fixture;
+    auto&             runtime = *fixture.runtime;
+    const auto        run = RunUpdateOn(runtime, "owner", std::string(kCheckHelpers) + R"JS(
+export function update(value) {
+  thisLayer.parallaxDepth = 0.75;
+  check('depth', thisLayer.parallaxDepth.x === 0.75 && thisLayer.parallaxDepth.y === 0.75);
+  thisLayer.color = 0.5;
+  return 1;
+}
+)JS");
+    EXPECT_SCRIPT_PASSES(run);
+    const auto depth = fixture.scene.shaderValueUpdater->NodeParallaxDepth(fixture.owner.get());
+    EXPECT_FLOAT_EQ(depth[0], 0.75f);
+    EXPECT_FLOAT_EQ(depth[1], 0.75f);
+    EXPECT_TRUE(runtime.NodeColor("owner").isApprox(Eigen::Vector3f::Constant(0.5f)));
+}
+
+TEST(ScriptRuntimeCompat, ALayerCreatedBelowAParentMovesWithItAndStaysOutOfTheRoot) {
+    CardTemplateScene fixture;
+    auto&             runtime = *fixture.runtime;
+    // A group for the layers to hang from.
+    auto group = std::make_shared<SceneNode>(Eigen::Vector3f(100, 0, 0), Eigen::Vector3f::Ones(),
+                                             Eigen::Vector3f::Zero(), "group");
+    fixture.scene.sceneGraph->AppendChild(group);
+    runtime.RegisterNode("group", group.get());
+    const auto run = RunUpdateOn(runtime, "owner", std::string(kCheckHelpers) + R"JS(
+export function update(value) {
+  var child = thisScene.createLayer({ image: 'models/card.json', parent: 'group' });
+  check('parent', child.getParent() === thisScene.getLayer('group'));
+  return 1;
+}
+)JS");
+    EXPECT_SCRIPT_PASSES(run);
+    ASSERT_EQ(group->GetChildren().size(), 1u);
+    const auto child = group->GetChildren().front();
+    EXPECT_EQ(child->Parent(), group.get());
+    for (const auto& root_child : fixture.scene.sceneGraph->GetChildren()) {
+        EXPECT_EQ(root_child->Name().rfind("__generated_layer_", 0), std::string::npos)
+            << "the created layer is not also in the root";
+    }
+    EXPECT_TRUE(runtime.ConsumeSceneGraphMutationFlag());
+
+    // Below the group it moves with it: its place in the world is the group's.
+    child->UpdateTrans();
+    EXPECT_NEAR(child->ModelTrans()(0, 3), 100.0, 1e-3);
+    group->SetTranslate(Eigen::Vector3f(250, 40, 0));
+    child->UpdateTrans();
+    EXPECT_NEAR(child->ModelTrans()(0, 3), 250.0, 1e-3);
+    EXPECT_NEAR(child->ModelTrans()(1, 3), 40.0, 1e-3);
+}
+
+
+// ---------------------------------------------------------------------------
+// Matrix maths, layer lifetime, layer names and order.
+// ---------------------------------------------------------------------------
+
+// Values worked out by hand in exact rational arithmetic, not by the routines
+// under test, so a slip in one routine cannot hide behind another that shares it.
+TEST(ScriptRuntimeCompat, MatrixDeterminantAndInverseMatchValuesWorkedOutExactly) {
+    const auto run = RunUpdateOnce(std::string(kCheckHelpers) + R"JS(
+function elements(m, expected) {
+  for (var i = 0; i < expected.length; ++i) if (!near(m.m[i], expected[i])) return false;
+  return true;
+}
+export function update(value) {
+  var four = new Mat4([2, 0, 1, 3,  1, 1, 0, 2,  0, 3, 1, 1,  4, 0, 2, 1]);
+  check('det4', near(four.determinant(), -25));
+  check('inverse4', elements(four.inverse(), [-0.44, 0.6, -0.2, 0.32,  -0.36, 0.4, 0.2, 0.08,
+                                              0.68, -1.2, 0.4, -0.04,  0.4, 0, 0, -0.2]));
+  check('product4', four.multiply(four.inverse()).equals(Mat4.identity()) &&
+                    four.inverse().multiply(four).equals(Mat4.identity()));
+  var swapped = new Mat4([1, 1, 0, 2,  2, 0, 1, 3,  0, 3, 1, 1,  4, 0, 2, 1]);
+  check('swapping two columns flips the sign', near(swapped.determinant(), 25));
+  var repeated = new Mat4([2, 0, 1, 3,  2, 0, 1, 3,  0, 3, 1, 1,  4, 0, 2, 1]);
+  check('a repeated column', repeated.determinant() === 0);
+  check('has no inverse', !repeated.inverse().m.some(Number.isFinite));
+  var three = new Mat3([1, 2, 0,  0, 1, 4,  5, 6, 0]);
+  check('det3', near(three.determinant(), 16));
+  check('inverse3', elements(three.inverse(), [-1.5, 0, 0.5,  1.25, 0, -0.25,  -0.3125, 0.25, 0.0625]));
+  check('product3', three.multiply(three.inverse()).equals(Mat3.identity()));
+  return 1;
+}
+)JS");
+    EXPECT_SCRIPT_PASSES(run);
+}
+
+// Euler angles are turns about x, then y, then z, about the fixed axes (the
+// matrix is Rz * Ry * Rx), in degrees; extractEuler gives them back.
+TEST(ScriptRuntimeCompat, EulerAnglesTurnAboutXThenYThenZAndComeBackOut) {
+    const auto run = RunUpdateOnce(std::string(kCheckHelpers) + R"JS(
+function about(axis, degrees) { return Mat4.fromRotation(degrees, axis); }
+export function update(value) {
+  var X = new Vec3(1, 0, 0), Y = new Vec3(0, 1, 0), Z = new Vec3(0, 0, 1);
+  check('order', Mat4.fromEuler(30, 40, 50).equals(about(Z, 50).multiply(about(Y, 40)).multiply(about(X, 30))));
+  check('vector form', Mat4.fromEuler(new Vec3(30, 40, 50)).equals(Mat4.fromEuler(30, 40, 50)));
+  check('z carries x to y', same(Mat4.fromEuler(0, 0, 90).transformDirection(X), Y));
+  check('x carries y to z', same(Mat4.fromEuler(90, 0, 0).transformDirection(Y), Z));
+  check('y carries z to x', same(Mat4.fromEuler(0, 90, 0).transformDirection(Z), X));
+  var samples = [[10, 20, 30], [-170, 45, 120], [0, 0, 0], [90, -60, -45], [179, 80, -179],
+                 [33, -89, 12], [-45, 0, 170]];
+  samples.forEach(function(angles) {
+    var e = Mat4.fromEuler(angles[0], angles[1], angles[2]).extractEuler();
+    check('round trip ' + angles, near(e.x, angles[0]) && near(e.y, angles[1]) && near(e.z, angles[2]));
+    var scaled = Mat4.fromEuler(angles[0], angles[1], angles[2]).scale(3).extractEuler();
+    check('scale leaves the angles ' + angles, near(scaled.x, angles[0]) && near(scaled.y, angles[1]) &&
+                                                near(scaled.z, angles[2]));
+  });
+  // Straight up or down, x and z turn the same way and cannot be told apart:
+  // what comes back builds the very same matrix.
+  [[30, 90, 20], [-80, -90, 15], [0, 90, 0]].forEach(function(angles) {
+    var original = Mat4.fromEuler(angles[0], angles[1], angles[2]);
+    var e = original.extractEuler();
+    check('lock keeps y ' + angles, near(e.y, angles[1]));
+    check('lock rebuilds ' + angles, Mat4.fromEuler(e).equals(original));
+  });
+  return 1;
+}
+)JS");
+    EXPECT_SCRIPT_PASSES(run);
+}
+
+// decompose gives translation, Euler angles and scale that compose back into the
+// matrix, a mirroring showing as a negative x scale; the rest of the geometry
+// (axis-angle, view and normal matrices) follows its definitions.
+TEST(ScriptRuntimeCompat, MatrixDecompositionRebuildsTheMatrixAndMirroringIsANegativeXScale) {
+    const auto run = RunUpdateOnce(std::string(kCheckHelpers) + R"JS(
+export function update(value) {
+  var cases = [
+    [[1, 2, 3], [10, 20, 30], [2, 3, 4]],
+    [[-4, 5, 0.5], [-100, 35, 170], [-2, 3, 4]],
+    [[0, 0, 0], [0, 0, 0], [1, -1, 1]],
+    [[7, 8, 9], [45, -50, 60], [1, 1, -5]],
+  ];
+  cases.forEach(function(c, index) {
+    var t = new Vec3(c[0][0], c[0][1], c[0][2]), r = new Vec3(c[1][0], c[1][1], c[1][2]);
+    var s = new Vec3(c[2][0], c[2][1], c[2][2]);
+    var m = Mat4.compose(t, r, s);
+    var d = m.decompose();
+    check('translation ' + index, same(d.translation, t));
+    check('rebuild ' + index, Mat4.compose(d.translation, d.rotation, d.scale).equals(m));
+    check('mirroring ' + index, (d.scale.x * d.scale.y * d.scale.z < 0) === (s.x * s.y * s.z < 0));
+    check('lengths ' + index, near(Math.abs(d.scale.x), Math.abs(s.x)) && near(Math.abs(d.scale.y), Math.abs(s.y)) &&
+                              near(Math.abs(d.scale.z), Math.abs(s.z)));
+  });
+  var plain = Mat4.compose(new Vec3(0, 0, 0), new Vec3(10, 20, 30), new Vec3(2, 3, 4)).decompose();
+  check('authored', same(plain.rotation, new Vec3(10, 20, 30)) && same(plain.scale, new Vec3(2, 3, 4)));
+  var mirrored = Mat4.compose(new Vec3(0, 0, 0), new Vec3(10, 20, 30), new Vec3(-2, 3, 4)).decompose();
+  check('mirrored in x', same(mirrored.rotation, new Vec3(10, 20, 30)) && same(mirrored.scale, new Vec3(-2, 3, 4)));
+
+  var flat = Mat3.compose(new Vec2(1, 2), 40, new Vec2(-2, 3));
+  var d2 = flat.decompose();
+  check('flat', same(d2.translation, new Vec2(1, 2)) && near(d2.rotation, 40) && same(d2.scale, new Vec2(-2, 3)));
+  check('flat rebuild', Mat3.compose(d2.translation, d2.rotation, d2.scale).equals(flat));
+
+  var X = new Vec3(1, 0, 0), Y = new Vec3(0, 1, 0), Z = new Vec3(0, 0, 1);
+  check('a third of a turn about the diagonal', same(Mat4.fromRotation(120, new Vec3(1, 1, 1)).transformDirection(X), Y));
+  check('right-handed about y', same(Mat4.fromRotation(90, Y).transformDirection(Z), X));
+  check('the axis need not be unit', Mat4.fromRotation(90, new Vec3(0, 0, 5)).equals(Mat4.fromRotation(90, Z)));
+  var eye = new Vec3(1, 2, 3), centre = new Vec3(1, 2, -7);
+  var view = Mat4.lookAt(eye, centre, Y);
+  check('the eye is the origin', same(view.transformPoint(eye), new Vec3(0, 0, 0)));
+  check('what is ahead is down -z', same(view.transformPoint(centre), new Vec3(0, 0, -10)));
+  check('up stays up', same(view.transformDirection(Y), Y));
+  var model = Mat4.compose(new Vec3(0, 0, 0), new Vec3(20, 30, 40), new Vec3(2, 3, 5));
+  check('normals stay perpendicular', near(model.transformDirection(X).dot(model.normalMatrix().multiply(Z)), 0));
+  return 1;
+}
+)JS");
+    EXPECT_SCRIPT_PASSES(run);
+}
+
+// A layer destroyed with layers below it (createLayer({ parent }) makes them)
+// takes them along: none stays registered, counted, named or findable, and the
+// nodes are freed together once the graph no longer draws them.
+TEST(ScriptRuntimeCompat, DestroyLayerRemovesEveryLayerBelowItFromTheRuntime) {
+    LineTemplateScene fixture;
+    auto&             runtime = *fixture.runtime;
+    const auto parent     = runtime.CreateLayerFromTemplate("models/line.json", "owner");
+    const auto child      = runtime.CreateLayerFromTemplate("models/line.json", "owner");
+    const auto grandchild = runtime.CreateLayerFromTemplate("models/line.json", "owner");
+    const auto bystander  = runtime.CreateLayerFromTemplate("models/line.json", "owner");
+    ASSERT_FALSE(parent.empty() || child.empty() || grandchild.empty() || bystander.empty());
+    ASSERT_TRUE(runtime.SetNodeParent(child, parent));
+    ASSERT_TRUE(runtime.SetNodeParent(grandchild, child));
+    ASSERT_TRUE(runtime.NameLayer(child, "kid"));
+    ASSERT_EQ(runtime.LayerCount(), 5u);
+    ASSERT_EQ(runtime.NodeParentName(grandchild), child);
+
+    // The nodes, to see when they are freed: owner and the bystander stay at the root.
+    std::vector<std::weak_ptr<SceneNode>> nodes;
+    for (const auto& top : fixture.scene.sceneGraph->GetChildren()) {
+        if (top->Name() != parent) continue;
+        nodes.push_back(top);
+        nodes.push_back(top->GetChildren().front());
+        nodes.push_back(top->GetChildren().front()->GetChildren().front());
+    }
+    ASSERT_EQ(nodes.size(), 3u);
+    runtime.ConsumeSceneGraphMutationFlag();
+
+    std::vector<std::string> destroyed;
+    EXPECT_TRUE(runtime.DestroyLayer(parent, &destroyed));
+    EXPECT_EQ(std::set<std::string>(destroyed.begin(), destroyed.end()),
+              (std::set<std::string> { parent, child, grandchild }));
+    for (const auto& name : { parent, child, grandchild }) {
+        EXPECT_FALSE(runtime.HasNodeNamed(name)) << name;
+        EXPECT_EQ(runtime.LayerIndex(name), -1) << name;
+        EXPECT_FALSE(runtime.SetNodeVisible(name, true)) << "a script holding it reaches nothing";
+        EXPECT_FALSE(runtime.DestroyLayer(name)) << name;
+    }
+    EXPECT_EQ(runtime.LayerCount(), 2u) << "the owner and the bystander";
+    EXPECT_EQ(runtime.LayerIndex(bystander), 1);
+    EXPECT_EQ(runtime.ResolveLayerName("kid"), "kid") << "the name a script gave goes with the layer";
+    EXPECT_TRUE(runtime.ConsumeSceneGraphMutationFlag());
+    EXPECT_FALSE(runtime.SetNodeVisible(child, true)) << "still unreachable while the nodes wait to be freed";
+    for (const auto& node : nodes) EXPECT_FALSE(node.expired()) << "the compiled graph still points at them";
+
+    runtime.Tick(1.0 / 60.0);
+    for (const auto& node : nodes) EXPECT_TRUE(node.expired()) << "freed together once the graph was rebuilt";
+    EXPECT_EQ(runtime.LayerCount(), 2u);
+}
+
+// The same through the script API: the wrappers a script still holds, the layer
+// count and the enumeration stay safe to use after the layers are gone.
+TEST(ScriptRuntimeCompat, ScriptsCanKeepUsingWrappersOfLayersDestroyedWithTheirParent) {
+    LineTemplateScene fixture;
+    auto&             runtime = *fixture.runtime;
+    runtime.RegisterSceneScript(R"JS(
+var ticks = 0;
+var parent, child, grandchild;
+function update() {
+  ++ticks;
+  if (ticks === 1) {
+    parent = thisScene.createLayer({ image: 'models/line.json', name: 'parent' });
+    child = thisScene.createLayer({ image: 'models/line.json', name: 'child', parent: parent });
+    grandchild = thisScene.createLayer({ image: 'models/line.json', parent: child });
+    if (thisScene.getLayerCount() !== 4) throw new Error('count before: ' + thisScene.getLayerCount());
+    if (grandchild.getParent() !== child || child.getParent() !== parent) throw new Error('not nested');
+  }
+  if (ticks === 2) {
+    if (thisScene.destroyLayer(parent) !== true) throw new Error('not destroyed');
+    if (thisScene.getLayerCount() !== 1) throw new Error('count after: ' + thisScene.getLayerCount());
+    if (thisScene.enumerateLayers().length !== 1) throw new Error('still enumerated');
+  }
+  if (ticks >= 3) {
+    // wrappers of freed layers: nothing to reach, nothing to break
+    child.visible = true;
+    child.origin = new Vec3(1, 2, 3);
+    child.alpha = 0.5;
+    grandchild.scale = new Vec3(2, 2, 2);
+    if (child.getParent() !== null) throw new Error('a destroyed layer still has a parent');
+    if (thisScene.destroyLayer(child) !== false || thisScene.destroyLayer('child') !== false) {
+      throw new Error('destroyed twice');
+    }
+    if (thisScene.getLayerCount() !== 1 || thisScene.getLayerIndex(grandchild) !== -1) throw new Error('counted');
+    if (thisScene.getLayer('child') === child) throw new Error('the name still finds the old layer');
+  }
+}
+)JS", "owner");
+    runtime.Tick(1.0 / 60.0);
+    runtime.ConsumeSceneGraphMutationFlag();
+    runtime.Tick(1.0 / 60.0);
+    EXPECT_TRUE(runtime.ConsumeSceneGraphMutationFlag());
+    runtime.Tick(1.0 / 60.0);  // released at the start of this tick, then the script uses the wrappers
+    runtime.Tick(1.0 / 60.0);
+    for (const auto& error : runtime.scriptErrors()) ADD_FAILURE() << error;
+    EXPECT_EQ(fixture.scene.sceneGraph->GetChildren().size(), 1u);
+}
+
+// A layer asked for by a name that was used before gets the new layer, not the
+// destroyed one, and a layer cannot hang below itself or be given a missing parent.
+TEST(ScriptRuntimeCompat, ANameFreedByDestroyLayerCanBeGivenAgainAndParentsAreChecked) {
+    LineTemplateScene fixture;
+    auto&             runtime = *fixture.runtime;
+    const auto run = RunUpdateOn(runtime, "owner", std::string(kCheckHelpers) + R"JS(
+export function update(value) {
+  var first = thisScene.createLayer({ image: 'models/line.json', name: 'x' });
+  check('first', thisScene.getLayer('x') === first && first.name === 'x');
+  check('destroyed', thisScene.destroyLayer(first) === true);
+  var second = thisScene.createLayer({ image: 'models/line.json', name: 'x' });
+  check('second', thisScene.getLayer('x') === second && second !== first && second.name === 'x');
+  check('counted', thisScene.getLayerCount() === 2);
+  return 1;
+}
+)JS");
+    EXPECT_SCRIPT_PASSES(run);
+
+    const auto a = runtime.CreateLayerFromTemplate("models/line.json", "owner");
+    const auto b = runtime.CreateLayerFromTemplate("models/line.json", "owner");
+    ASSERT_TRUE(runtime.SetNodeParent(b, a));
+    EXPECT_FALSE(runtime.SetNodeParent(a, b)) << "a layer cannot hang below its own child";
+    EXPECT_FALSE(runtime.SetNodeParent(a, a)) << "or below itself";
+    EXPECT_FALSE(runtime.SetNodeParent(a, "no such layer"));
+    EXPECT_EQ(runtime.NodeParentName(a), "") << "and stays where it was";
+    EXPECT_EQ(runtime.NodeParentName(b), a);
+    EXPECT_TRUE(runtime.SetNodeParent(b, ""));
+    EXPECT_EQ(runtime.NodeParentName(b), "") << "an empty parent is the scene root";
+}
+
+// `layer.name` is what the scene file calls the layer. A layer whose name is
+// shared or empty is registered under a generated key, which scripts never see
+// as a name: enumerating, indexing and looking up by id all show the authored one.
+TEST(ScriptRuntimeCompat, LayersShowTheNameTheSceneFileGaveThemWhateverKeyTheyAreRegisteredUnder) {
+    auto runtime = CreateSceneRuntimeContext(SceneRuntimeBootstrap {});
+    auto first   = std::make_shared<SceneNode>();
+    auto second  = std::make_shared<SceneNode>();
+    auto nameless = std::make_shared<SceneNode>();
+    auto solo    = std::make_shared<SceneNode>();
+    runtime->RegisterNode("__we_layer_5", first.get());
+    runtime->RegisterNode("__we_layer_6", second.get());
+    runtime->RegisterNode("__we_layer_7", nameless.get());
+    runtime->RegisterNode("solo", solo.get());
+    runtime->RegisterLayerAlias("twin", "__we_layer_5");
+    runtime->RegisterLayerAuthoredName("__we_layer_5", "twin");
+    runtime->RegisterLayerAuthoredName("__we_layer_6", "twin");
+    runtime->RegisterLayerAuthoredName("__we_layer_7", "");
+    runtime->RegisterLayerId(11, "__we_layer_5");
+    runtime->RegisterLayerId(12, "__we_layer_6");
+    runtime->RegisterLayerId(13, "__we_layer_7");
+    EXPECT_EQ(runtime->LayerAuthoredName("__we_layer_6"), "twin");
+    EXPECT_EQ(runtime->LayerAuthoredName("__we_layer_7"), "");
+    EXPECT_EQ(runtime->LayerAuthoredName("solo"), "solo") << "no name on record: the key is the name";
+
+    const auto run = RunUpdateOn(*runtime, "solo", std::string(kCheckHelpers) + R"JS(
+export function update(value) {
+  var layers = thisScene.enumerateLayers();
+  check('names', layers.map(function(l) { return l.name; }).join('|') === 'twin|twin||solo');
+  check('by index', thisScene.getLayer(1).name === 'twin' && thisScene.getLayer(2).name === '');
+  check('by id', thisScene.getLayerByID(12).name === 'twin' && thisScene.getLayerByID(13).name === '');
+  check('filter by name', layers.filter(function(l) { return l.name === 'twin'; }).length === 2);
+  check('find by name', layers.find(function(l) { return l.name === 'solo'; }) === thisLayer);
+  // Called the same, they are still two layers: every call goes by the registered key.
+  layers[1].visible = false;
+  check('the second twin hid', layers[1].visible === false && layers[0].visible === true);
+  check('by name the first twin', thisScene.getLayer('twin') === layers[0]);
+  check('index of the nameless', thisScene.getLayerIndex(layers[2]) === 2);
+  check('identity', thisScene.getLayer(0) === layers[0] && thisScene.getLayerByID(11) === layers[0]);
+  return 1;
+}
+)JS");
+    EXPECT_SCRIPT_PASSES(run);
+    EXPECT_TRUE(first->Visible());
+    EXPECT_FALSE(second->Visible());
+    EXPECT_TRUE(nameless->Visible());
+}
+
+namespace
+{
+// A group of two layers beside two more at the root, registered in that order.
+struct GroupedLayers {
+    Scene                                scene;
+    std::unique_ptr<SceneRuntimeContext> runtime = MakeRuntimeWithScene(scene);
+    std::shared_ptr<SceneNode>           group = Named("group"), x = Named("x"), y = Named("y"),
+                                         a = Named("a"), b = Named("b");
+
+    static std::shared_ptr<SceneNode> Named(const char* name) {
+        return std::make_shared<SceneNode>(Eigen::Vector3f::Zero(), Eigen::Vector3f::Ones(),
+                                           Eigen::Vector3f::Zero(), name);
+    }
+    GroupedLayers() {
+        scene.sceneGraph->AppendChild(group);
+        group->AppendChild(x);
+        group->AppendChild(y);
+        scene.sceneGraph->AppendChild(a);
+        scene.sceneGraph->AppendChild(b);
+        for (const auto& node : { group, x, y, a, b }) runtime->RegisterNode(node->Name(), node.get());
+    }
+    static std::string Order(const SceneNode& parent) {
+        std::string order;
+        for (const auto& child : parent.GetChildren()) order += (order.empty() ? "" : ",") + child->Name();
+        return order;
+    }
+};
+} // namespace
+
+// getLayer(i), getLayerCount, enumerateLayers, getLayerIndex and sortLayer are
+// one order. A sort moves the layer in it, every view agrees, and the draw order
+// among the layer's siblings follows.
+TEST(ScriptRuntimeCompat, OneLayerOrderServesIndexCountEnumerationAndSorting) {
+    GroupedLayers fixture;
+    auto&         runtime = *fixture.runtime;
+    runtime.ConsumeSceneGraphMutationFlag();
+    const auto run = RunUpdateOn(runtime, "a", std::string(kCheckHelpers) + R"JS(
+function order() { return thisScene.enumerateLayers().map(function(l) { return l.name; }).join(','); }
+function agree() {
+  for (var i = 0; i < thisScene.getLayerCount(); ++i) {
+    var layer = thisScene.getLayer(i);
+    if (thisScene.getLayerIndex(layer) !== i || thisScene.getLayerIndex(layer.name) !== i) return false;
+  }
+  return true;
+}
+export function update(value) {
+  check('declared', order() === 'group,x,y,a,b' && agree());
+  check('unknown', thisScene.getLayerIndex('nowhere') === -1 && thisScene.getLayerIndex(null) === -1);
+  thisScene.sortLayer(thisScene.getLayer('b'), 0);
+  check('to the front', order() === 'b,group,x,y,a' && thisScene.getLayer(0).name === 'b');
+  check('enumerateLayers()[0]', thisScene.enumerateLayers()[0] === thisScene.getLayer('b') && agree());
+  check('index follows', thisScene.getLayerIndex('b') === 0 && thisScene.getLayerIndex('group') === 1);
+  thisScene.sortLayer('y', 0);
+  check('inside a group', order() === 'y,b,group,x,a' && agree());
+  thisScene.sortLayer('y', 3);
+  check('back again', order() === 'b,group,x,y,a' && thisScene.getLayerIndex('y') === 3 && agree());
+  thisScene.sortLayer('b', 99);
+  check('clamped to the end', order() === 'group,x,y,a,b' && thisScene.getLayerIndex('b') === 4 && agree());
+  thisScene.sortLayer('a', -5);
+  check('clamped to the start', order() === 'a,group,x,y,b' && agree());
+  thisScene.sortLayer('nowhere', 1);
+  check('unknown layers are left alone', order() === 'a,group,x,y,b');
+  return 1;
+}
+)JS");
+    EXPECT_SCRIPT_PASSES(run);
+    // Draw order is the order among siblings: the root and the group each keep
+    // their layers in the order the sorts left them.
+    EXPECT_EQ(GroupedLayers::Order(*fixture.scene.sceneGraph), "a,group,b");
+    EXPECT_EQ(GroupedLayers::Order(*fixture.group), "x,y");
+    EXPECT_TRUE(runtime.ConsumeSceneGraphMutationFlag());
+}
+
+TEST(ScriptRuntimeCompat, SortingASiblingWithinItsGroupReordersOnlyThatGroup) {
+    GroupedLayers fixture;
+    auto&         runtime = *fixture.runtime;
+    ASSERT_TRUE(runtime.SortLayer("y", 0));
+    EXPECT_EQ(GroupedLayers::Order(*fixture.group), "y,x");
+    EXPECT_EQ(GroupedLayers::Order(*fixture.scene.sceneGraph), "group,a,b");
+    EXPECT_EQ(runtime.LayerNameAt(0), "y");
+    EXPECT_TRUE(runtime.ConsumeSceneGraphMutationFlag());
+    EXPECT_FALSE(runtime.SortLayer("y", 0)) << "already there: nothing changes";
+    EXPECT_FALSE(runtime.ConsumeSceneGraphMutationFlag());
+    EXPECT_FALSE(runtime.SortLayer("missing", 0));
+}
+
+// createLayer({ parent }) with a parent that names no layer leaves the new layer
+// beside the layer that made it instead of moving it to the scene root.
+TEST(ScriptRuntimeCompat, CreateLayerWithAParentThatNamesNoLayerStaysBesideItsCreator) {
+    LineTemplateScene fixture;
+    auto&             runtime = *fixture.runtime;
+    auto group = std::make_shared<SceneNode>(Eigen::Vector3f::Zero(), Eigen::Vector3f::Ones(),
+                                             Eigen::Vector3f::Zero(), "group");
+    fixture.scene.sceneGraph->AppendChild(group);
+    runtime.RegisterNode("group", group.get());
+    ASSERT_TRUE(runtime.SetNodeParent("owner", "group"));
+    const auto run = RunUpdateOn(runtime, "owner", std::string(kCheckHelpers) + R"JS(
+export function update(value) {
+  var byNumber = thisScene.createLayer({ image: 'models/line.json', parent: 5 });
+  var byObject = thisScene.createLayer({ image: 'models/line.json', parent: {} });
+  var byEmpty = thisScene.createLayer({ image: 'models/line.json', parent: '' });
+  var byMissing = thisScene.createLayer({ image: 'models/line.json', parent: 'no such layer' });
+  var byNull = thisScene.createLayer({ image: 'models/line.json', parent: null });
+  [byNumber, byObject, byEmpty, byMissing, byNull].forEach(function(layer, index) {
+    check('beside the creator ' + index, layer.getParent() === thisScene.getLayer('group'));
+  });
+  return 1;
+}
+)JS");
+    EXPECT_SCRIPT_PASSES(run);
+    EXPECT_EQ(group->GetChildren().size(), 6u) << "the owner and the five new layers";
+    EXPECT_EQ(fixture.scene.sceneGraph->GetChildren().size(), 1u) << "nothing went to the root";
+}
+
+// ---------------------------------------------------------------------------
+// Colour, text style, texture-animation rate, animation-layer identity, parallax.
+// ---------------------------------------------------------------------------
+
+// hsv2rgb does not clamp the saturation or wrap the hue: a saturation above 1
+// gives components outside 0..1, a hue of 1 or more goes round the sextants
+// again, and a negative hue is no sextant at all and gives black.
+TEST(ScriptRuntimeCompat, WEColorHsv2RgbDoesNotClampSaturationOrWrapHue) {
+    ScriptEngine engine;
+    const auto result = EvaluateScalar(
+        engine,
+        R"JS(
+import { hsv2rgb } from 'WEColor';
+function near(a, b) { return Math.abs(a - b) < 1e-6; }
+function is(c, x, y, z) { return near(c.x, x) && near(c.y, y) && near(c.z, z); }
+export function update(value) {
+  var ok = is(hsv2rgb(new Vec3(0.1, 1.5, 1)), 1, 0.4, -0.5) &&
+           is(hsv2rgb(new Vec3(0.1, 0, 0.7)), 0.7, 0.7, 0.7) &&
+           is(hsv2rgb(new Vec3(1.25, 1, 1)), hsv2rgb(new Vec3(0.25, 1, 1)).x,
+                                             hsv2rgb(new Vec3(0.25, 1, 1)).y, hsv2rgb(new Vec3(0.25, 1, 1)).z) &&
+           is(hsv2rgb(new Vec3(-0.25, 1, 1)), 0, 0, 0) &&
+           is(hsv2rgb(new Vec3(0, 1, 1)), 1, 0, 0) && is(hsv2rgb(new Vec3(5 / 6, 1, 1)), 1, 0, 1);
+  return ok ? 1 : 0;
+}
+)JS");
+    EXPECT_FLOAT_EQ(result.getFloat(), 1.0f);
+}
+
+// horizontalalign is left, center or right and verticalalign top, center or
+// bottom, as Wallpaper Engine registers them. Anything else is not an alignment:
+// it changes nothing about the layer, and stays a plain property.
+TEST(ScriptRuntimeCompat, TextAlignmentOnlyTakesTheWordsItIsDefinedFor) {
+    auto runtime = CreateSceneRuntimeContext(SceneRuntimeBootstrap {});
+    auto node    = std::make_shared<SceneNode>();
+    node->SetTranslate(Eigen::Vector3f(10, 20, 0));
+    runtime->RegisterNode("clock", node.get());
+    runtime->RegisterTextLayer("clock", TextLayerState { .text = "x", .font_key = "Arial", .point_size = 20.0f,
+                                                        .horizontal_align = "center", .vertical_align = "center" });
+    const auto run = RunUpdateOn(*runtime, "clock", std::string(kCheckHelpers) + R"JS(
+export function update(value) {
+  ['top', 'Left', 'banana', '', 'LEFT', 'middle'].forEach(function(word) {
+    thisLayer.horizontalalign = word;
+    check('horizontal ' + word, thisLayer.horizontalalign === 'center');
+  });
+  ['left', 'Top', 'banana', '', 'right'].forEach(function(word) {
+    thisLayer.verticalalign = word;
+    check('vertical ' + word, thisLayer.verticalalign === 'center');
+  });
+  thisLayer.horizontalalign = 'right';
+  thisLayer.verticalalign = 'bottom';
+  check('valid', thisLayer.horizontalalign === 'right' && thisLayer.verticalalign === 'bottom');
+  thisLayer.horizontalalign = 'center';
+  thisLayer.verticalalign = 'top';
+  check('center is a word too', thisLayer.horizontalalign === 'center' && thisLayer.verticalalign === 'top');
+  return 1;
+}
+)JS");
+    EXPECT_SCRIPT_PASSES(run);
+    const auto state = runtime->NodeTextState("clock");
+    ASSERT_TRUE(state.has_value());
+    EXPECT_EQ(state->horizontal_align, "center");
+    EXPECT_EQ(state->vertical_align, "top");
+    // The card hangs by the words it ended on, none of them made up: centred across, so
+    // nothing moves it sideways, and below the origin for `top`. The node stays put.
+    EXPECT_TRUE(node->Translate().isApprox(Eigen::Vector3f(10, 20, 0)));
+    WaitForTextLayout(*runtime, "clock");
+    EXPECT_FLOAT_EQ(runtime->NodeBoxCentre("clock").x(), 0.0f);
+    EXPECT_LT(runtime->NodeBoxCentre("clock").y(), 0.0f);
+}
+
+// The size reads back as the float it is, so a script that reads it, adds a
+// little and writes it again keeps moving it.
+TEST(ScriptRuntimeCompat, TextPointSizeSurvivesAReadModifyWriteWithoutLosingPrecision) {
+    auto runtime = CreateSceneRuntimeContext(SceneRuntimeBootstrap {});
+    auto node    = std::make_shared<SceneNode>();
+    runtime->RegisterNode("clock", node.get());
+    runtime->RegisterTextLayer("clock", TextLayerState { .text = "x", .font_key = "Arial", .point_size = 1000.0f });
+    const auto run = RunUpdateOn(*runtime, "clock", std::string(kCheckHelpers) + R"JS(
+export function update(value) {
+  for (var i = 0; i < 100; ++i) thisLayer.pointsize += 0.0004;
+  check('moved', thisLayer.pointsize > 1000.03);
+  thisLayer.pointsize = 0.1;
+  check('short', thisLayer.pointsize === 0.1);
+  thisLayer.pointsize = 24;
+  check('whole', thisLayer.pointsize === 24);
+  thisLayer.pointsize = 12.5;
+  check('exact', thisLayer.pointsize === 12.5);
+  return 1;
+}
+)JS");
+    EXPECT_SCRIPT_PASSES(run);
+}
+
+// `rate` reads back what was written, whatever it was; the sheet advances only
+// at a rate that is a positive speed, and holds its frame at any other.
+TEST(ScriptRuntimeCompat, SpriteSheetRateReadsBackWhatWasWrittenAndOnlyAPositiveRateAdvancesIt) {
+    SpriteSheetScene fixture;
+    fixture.Draw(0.0);
+    EXPECT_EQ(fixture.Run("anim.rate = -1; return anim.rate;"), -1.0f);
+    EXPECT_EQ(fixture.Draw(1.0), 0) << "a negative rate holds the sheet";
+    EXPECT_EQ(fixture.Run("return anim.rate;"), -1.0f) << "and the next read still says so";
+    EXPECT_EQ(fixture.Run("anim.rate = 2000000; return anim.rate;"), 2000000.0f);
+    EXPECT_EQ(fixture.Draw(1.0), 0) << "a rate beyond any speed a sheet shows holds it";
+    EXPECT_EQ(fixture.Run("anim.rate = 0.25; return anim.rate;"), 0.25f);
+    EXPECT_NE(fixture.Draw(0.8), 0) << "a positive rate runs it again from where it was";
+}
+
+// A script on animationlayers[i] gets the same animation-layer object however
+// that layer is asked for, and it carries the layer's own name.
+TEST(ScriptRuntimeCompat, AnimationLayersAreOneObjectPerLayerAndKnowTheirOwnName) {
+    auto runtime = CreateSceneRuntimeContext(SceneRuntimeBootstrap {});
+    auto node    = std::make_shared<SceneNode>();
+    runtime->RegisterNode("character", node.get());
+    std::vector<WPPuppetLayer::AnimationLayer> authored(2);
+    for (std::size_t i = 0; i < authored.size(); ++i) {
+        authored[i].id   = 7;
+        authored[i].name = i == 0 ? "idle" : "wave";
+    }
+    WPPuppetLayer layer(MakeSingleShotPuppet());
+    layer.prepared(authored);
+    runtime->RegisterPuppetLayer("character", layer);
+    runtime->RegisterNodeVisibility("character", node.get(), ResolveBoolSetting(*runtime, {
+        { "value", true }, { "script", std::string(kCheckHelpers) + R"JS(
+export function init(value) {
+  check('bound to the second layer', thisObject.name === 'wave');
+  check('by name', thisLayer.getAnimationLayer('wave') === thisObject);
+  check('by number', thisLayer.getAnimationLayer(1) === thisObject);
+  check('by numeral', thisLayer.getAnimationLayer('1') === thisObject);
+  check('the other one', thisLayer.getAnimationLayer(0) === thisLayer.getAnimationLayer('idle'));
+  check('its name', thisLayer.getAnimationLayer(0).name === 'idle');
+  check('not each other', thisLayer.getAnimationLayer(0) !== thisObject);
+  var ghost = thisLayer.getAnimationLayer('nothing');
+  check('a name no layer has', ghost.name === 'nothing' && ghost === thisLayer.getAnimationLayer('nothing'));
+  return value;
+}
+)JS" } }, "character", 1));
+    runtime->Tick(0.01);
+    for (const auto& error : runtime->scriptErrors()) ADD_FAILURE() << error;
+}
+
+namespace
+{
+// A group at (100, 200) scaled by two with a child at (10, 20) inside it, and
+// a layer beside them for the script under test, on a 1920 by 1080 canvas.
+struct PlacedLayers {
+    Scene                                scene;
+    std::unique_ptr<SceneRuntimeContext> runtime = MakeRuntimeWithScene(scene);
+    std::shared_ptr<SceneNode>           group = Named("group"), child = Named("child"),
+                                         reader = Named("reader");
+
+    static std::shared_ptr<SceneNode> Named(const char* name) {
+        return std::make_shared<SceneNode>(Eigen::Vector3f::Zero(), Eigen::Vector3f::Ones(),
+                                           Eigen::Vector3f::Zero(), name);
+    }
+    PlacedLayers() {
+        group->SetTranslate(Eigen::Vector3f(100, 200, 0));
+        group->SetScale(Eigen::Vector3f(2, 2, 1));
+        child->SetTranslate(Eigen::Vector3f(10, 20, 0));
+        scene.sceneGraph->AppendChild(group);
+        group->AppendChild(child);
+        scene.sceneGraph->AppendChild(reader);
+        for (const auto& node : { group, child, reader }) {
+            runtime->RegisterNode(node->Name(), node.get());
+        }
+    }
+};
+} // namespace
+
+// A script that places one layer by another asks it where it is in the scene:
+// `getTransformMatrix()` answers the layer's world transform, and m[12], m[13]
+// are its x and y in canvas units. Without the method the script threw in init,
+// so the values it set up there were never assigned.
+TEST(ScriptRuntimeCompat, LayerTransformMatrixPlacesAChildWhereItsParentsPutIt) {
+    PlacedLayers fixture;
+    auto&        runtime = *fixture.runtime;
+    runtime.RegisterNodeTranslate("reader", fixture.reader.get(), ResolveVec3Setting(runtime, {
+        {"value", "0 0 0"}, {"script", R"JS(
+export function init() {
+  const m = thisScene.getLayer('child').getTransformMatrix().m;
+  shared.worldX = m[12];
+  shared.worldY = m[13];
+}
+export function update() { return new Vec3(shared.worldX, shared.worldY, 0); }
+)JS"}}, "reader"));
+
+    runtime.Tick(0.01);
+    // (10, 20) scaled by the group's 2, then moved to (100, 200).
+    EXPECT_TRUE(runtime.NodeTranslate("reader").isApprox(Eigen::Vector3f(120, 240, 0)))
+        << runtime.NodeTranslate("reader").transpose();
+    for (const auto& error : runtime.scriptErrors()) ADD_FAILURE() << error;
+}
+
+// The matrix is the layer's world transform as a Mat4: its parents' turns and
+// scales are in it, a layer placed on its own is not affected by them, and a
+// layer drawn through an effect (which draws from an identity of its own) still
+// reports where it stands in the scene.
+TEST(ScriptRuntimeCompat, LayerTransformMatrixCarriesTheTurnAndScaleOfItsParents) {
+    PlacedLayers fixture;
+    auto&        runtime = *fixture.runtime;
+    fixture.group->SetRotation(Eigen::Vector3f(0, 0, static_cast<float>(M_PI) / 2));
+    auto pinned = PlacedLayers::Named("pinned");
+    pinned->SetTranslate(Eigen::Vector3f(50, 60, 0));
+    pinned->SetIgnoreParentTransform(true);
+    fixture.group->AppendChild(pinned);
+    runtime.RegisterNode("pinned", pinned.get());
+    auto drawn = PlacedLayers::Named("drawn");
+    drawn->SetTranslate(Eigen::Vector3f(5, 5, 0));
+    drawn->SetRenderTransformOverride(Eigen::Matrix4d::Identity());
+    fixture.group->AppendChild(drawn);
+    runtime.RegisterNode("drawn", drawn.get());
+
+    const auto run = RunUpdateOn(runtime, "reader", std::string(kCheckHelpers) + R"JS(
+function close(a, b) { return Math.abs(a - b) < 1e-3; }
+function at(matrix, x, y, z) {
+  const t = matrix.translation();
+  return close(t.x, x) && close(t.y, y) && close(t.z, z);
+}
+export function update(value) {
+  const matrix = thisScene.getLayer('child').getTransformMatrix();
+  check('a Mat4', matrix instanceof Mat4 && matrix.m.length === 16);
+  // (10, 20) scaled by 2 is (20, 40); a quarter turn makes it (-40, 20).
+  check('position', at(matrix, 60, 220, 0));
+  // Its own axes are the group's turned and doubled: x points up, y points left.
+  check('x axis', close(matrix.m[0], 0) && close(matrix.m[1], 2) && close(matrix.m[2], 0));
+  check('y axis', close(matrix.m[4], -2) && close(matrix.m[5], 0) && close(matrix.m[6], 0));
+  check('z axis', close(matrix.m[10], 1) && close(matrix.m[15], 1));
+  check('a point of its own', matrix.transformPoint(new Vec3(1, 0, 0)).equals(new Vec3(60, 222, 0)));
+  check('the group', at(thisScene.getLayer('group').getTransformMatrix(), 100, 200, 0));
+  // A layer without a parent transform answers its own placement.
+  check('pinned', at(thisScene.getLayer('pinned').getTransformMatrix(), 50, 60, 0));
+  // A layer with a render transform of its own is still where its parents put it.
+  check('drawn', at(thisScene.getLayer('drawn').getTransformMatrix(), 100 - 10, 200 + 10, 0));
+  // Each call answers a matrix of its own: writing to one changes nothing.
+  matrix.m[12] = 0;
+  check('a copy', at(thisScene.getLayer('child').getTransformMatrix(), 60, 220, 0));
+  // A script that reassigns the global class does not change what the host builds.
+  const real = Mat4;
+  Mat4 = function() { throw new Error('the script replaced Mat4'); };
+  const kept = thisScene.getLayer('child').getTransformMatrix();
+  Mat4 = real;
+  check('a reassigned Mat4', kept instanceof real && at(kept, 60, 220, 0));
+  return 1;
+}
+)JS");
+    EXPECT_SCRIPT_PASSES(run);
+}
+
+// A layer's place in the scene is asked for every frame (is the widget on the
+// right half of the canvas?), so it has to follow the layer: after a move of the
+// layer itself or of what it hangs from, and right after the script wrote it.
+TEST(ScriptRuntimeCompat, LayerTransformMatrixFollowsALayerWhereverItMoves) {
+    PlacedLayers fixture;
+    auto&        runtime = *fixture.runtime;
+    runtime.RegisterNodeTranslate("reader", fixture.reader.get(), ResolveVec3Setting(runtime, {
+        {"value", "0 0 0"}, {"script", R"JS(
+export function update() {
+  const onTheRight = thisScene.getLayer('child').getTransformMatrix().m[12] > engine.canvasSize.x / 2;
+  return new Vec3(onTheRight ? 1 : -1, 0, 0);
+}
+)JS"}}, "reader"));
+
+    runtime.Tick(0.01);
+    EXPECT_FLOAT_EQ(runtime.NodeTranslate("reader").x(), -1.0f) << "the child sits at x = 120";
+    runtime.SetNodeTranslate("group", Eigen::Vector3f(1000, 200, 0));
+    runtime.Tick(0.01);
+    EXPECT_FLOAT_EQ(runtime.NodeTranslate("reader").x(), 1.0f) << "the child sits at x = 1020";
+    for (const auto& error : runtime.scriptErrors()) ADD_FAILURE() << error;
+
+    const auto run = RunUpdateOn(runtime, "reader", std::string(kCheckHelpers) + R"JS(
+export function update(value) {
+  thisLayer.origin = new Vec3(1500, 300, 0);
+  const own = thisLayer.getTransformMatrix();
+  check('after a write', own.m[12] === 1500 && own.m[13] === 300);
+  thisScene.getLayer('group').scale = new Vec3(1, 1, 1);
+  check('after a parent changes', thisScene.getLayer('child').getTransformMatrix().m[12] === 1010);
+  return 1;
+}
+)JS");
+    EXPECT_SCRIPT_PASSES(run);
+}
+
+// A layer the scene has no node for — a sound layer, a name nothing carries —
+// is not anywhere, and asking where it is must not stop the script: it answers
+// the identity, as the matrix of a layer that was never moved.
+TEST(ScriptRuntimeCompat, LayerTransformMatrixOfALayerWithoutANodeIsTheIdentity) {
+    PlacedLayers fixture;
+    const auto   run = RunUpdateOn(*fixture.runtime, "reader", std::string(kCheckHelpers) + R"JS(
+export function update(value) {
+  const matrix = thisScene.getLayer('nowhere').getTransformMatrix();
+  check('a Mat4', matrix instanceof Mat4);
+  check('identity', matrix.m.join(',') === new Mat4().m.join(','));
+  return 1;
+}
+)JS");
+    EXPECT_SCRIPT_PASSES(run);
+}
+
+namespace
+{
+// `owner` draws a card through an effect pass: its own node has no parallax
+// record, the pass has one, and `kid` below it and `beside` next to it have theirs.
+struct EffectLayerScene {
+    CardTemplateScene          card;
+    WPShaderValueUpdater&      updater = *static_cast<WPShaderValueUpdater*>(card.scene.shaderValueUpdater.get());
+    std::shared_ptr<SceneNode> pass    = std::make_shared<SceneNode>();
+    std::shared_ptr<SceneNode> kid     = std::make_shared<SceneNode>();
+    std::shared_ptr<SceneNode> beside  = std::make_shared<SceneNode>();
+
+    EffectLayerScene() {
+        const auto depth = [](SceneNode* layer) {
+            WPShaderValueData data;
+            data.parallaxDepth  = { 0.5f, 0.25f };
+            data.parallax_layer = layer;
+            return data;
+        };
+        updater.SetNodeData(pass.get(), depth(card.owner.get()));
+        card.owner->AppendChild(kid);
+        card.scene.sceneGraph->AppendChild(beside);
+        card.runtime->RegisterNode("kid", kid.get());
+        card.runtime->RegisterNode("beside", beside.get());
+        updater.SetNodeData(kid.get(), depth(nullptr));
+        updater.SetNodeData(beside.get(), depth(nullptr));
+    }
+    std::array<float, 2> Depth(SceneNode& node) const { return updater.NodeParallaxDepth(&node); }
+};
+} // namespace
+
+// parallaxDepth is what is drawn: for a layer drawn through effects that is its
+// passes' depth. A write reaches the layer's passes and the layers below it, and
+// not the layers beside it. A layer that starts or stops following the cursor
+// asks for a new render graph, because the one built before has it standing still.
+TEST(ScriptRuntimeCompat, ParallaxDepthIsTheDepthOfWhatIsDrawnAndAWriteReachesTheLayersBelow) {
+    EffectLayerScene fixture;
+    auto&            runtime = *fixture.card.runtime;
+    runtime.ConsumeSceneGraphMutationFlag();
+    auto run = RunUpdateOn(runtime, "owner", std::string(kCheckHelpers) + R"JS(
+export function update(value) {
+  check('the passes carry it', thisLayer.parallaxDepth.x === 0.5 && thisLayer.parallaxDepth.y === 0.25);
+  thisLayer.parallaxDepth = new Vec2(2, 3);
+  check('read back', thisLayer.parallaxDepth.x === 2 && thisLayer.parallaxDepth.y === 3);
+  check('a layer below', thisScene.getLayer('kid').parallaxDepth.x === 2);
+  check('a layer beside', thisScene.getLayer('beside').parallaxDepth.x === 0.5);
+  return 1;
+}
+)JS");
+    EXPECT_SCRIPT_PASSES(run);
+    EXPECT_EQ(fixture.Depth(*fixture.pass), (std::array<float, 2> { 2.0f, 3.0f }));
+    EXPECT_EQ(fixture.Depth(*fixture.kid), (std::array<float, 2> { 2.0f, 3.0f }));
+    EXPECT_EQ(fixture.Depth(*fixture.beside), (std::array<float, 2> { 0.5f, 0.25f }));
+    EXPECT_FALSE(runtime.ConsumeSceneGraphMutationFlag()) << "following the cursor before and after";
+
+    run = RunUpdateOn(runtime, "owner", "export function update(value) { thisLayer.parallaxDepth = new Vec2(0, 0); return 1; }");
+    EXPECT_SCRIPT_PASSES(run);
+    EXPECT_TRUE(runtime.ConsumeSceneGraphMutationFlag()) << "it stopped following the cursor";
+    run = RunUpdateOn(runtime, "owner", "export function update(value) { thisLayer.parallaxDepth = new Vec2(0, 0); return 1; }");
+    EXPECT_FALSE(runtime.ConsumeSceneGraphMutationFlag()) << "still not following";
+    run = RunUpdateOn(runtime, "owner", "export function update(value) { thisLayer.parallaxDepth = new Vec2(0, 1); return 1; }");
+    EXPECT_TRUE(runtime.ConsumeSceneGraphMutationFlag()) << "and following again, on one axis";
+}
+
+namespace
+{
+// A scene whose parallax follows the cursor, with the card layers scripts make.
+struct ParallaxCardScene {
+    CardTemplateScene          card;
+    WPShaderValueUpdater&      updater = *static_cast<WPShaderValueUpdater*>(card.scene.shaderValueUpdater.get());
+    std::shared_ptr<SceneCamera> camera = std::make_shared<SceneCamera>(1920, 1080, -1.0f, 1.0f);
+    std::shared_ptr<SceneNode>   camera_node = std::make_shared<SceneNode>();
+
+    ParallaxCardScene() {
+        card.scene.ortho[0] = 1920;
+        card.scene.ortho[1] = 1080;
+        camera_node->SetTranslate(Eigen::Vector3f(960, 540, 0));
+        camera->AttatchNode(camera_node);
+        card.scene.activeCamera = camera.get();
+        updater.SetCameraParallax({ .enable = true, .amount = 0.5f, .delay = 0.0f,
+                                    .mouseinfluence = 0.5f, .canvas_scene = true });
+        updater.MouseInput(1.0, 0.0);  // the cursor well away from the centre
+        card.scene.frameTime = 10.0;
+        updater.FrameBegin();
+    }
+    ~ParallaxCardScene() { card.scene.activeCamera = nullptr; }
+
+    // How far the cursor's parallax draws the layer from where its node puts it.
+    float Displacement(SceneNode& node) {
+        updater.InitUniforms(&node, [](std::string_view name) { return name == "g_ModelMatrix"; });
+        sprite_map_t sprites;
+        ShaderValue  value;
+        updater.UpdateUniforms(&node, sprites, [&](std::string_view name, const ShaderValue& v) {
+            if (name == "g_ModelMatrix") value = v;
+        });
+        node.UpdateTrans();
+        const auto model = node.ModelTrans();
+        return Eigen::Vector2f(value[12] - static_cast<float>(model(0, 3)),
+                               value[13] - static_cast<float>(model(1, 3))).norm();
+    }
+    SceneNode* Created(std::size_t index) {
+        std::vector<SceneNode*> made;
+        for (const auto& child : card.scene.sceneGraph->GetChildren()) {
+            if (child.get() != card.owner.get()) made.push_back(child.get());
+        }
+        return index < made.size() ? made[index] : nullptr;
+    }
+};
+} // namespace
+
+// What a script writes to parallaxDepth changes what is drawn: a layer given a
+// depth is displaced by the cursor, one given none or zero is not.
+TEST(ScriptRuntimeCompat, ACreatedLayersParallaxDepthDecidesWhetherTheCursorMovesIt) {
+    ParallaxCardScene fixture;
+    const auto        run = RunUpdateOn(*fixture.card.runtime, "owner", R"JS(
+export function update(value) {
+  thisScene.createLayer({ image: 'models/card.json', parallaxDepth: new Vec2(1, 1) });
+  thisScene.createLayer({ image: 'models/card.json', parallaxDepth: new Vec2(0, 0) });
+  thisScene.createLayer('models/card.json');
+  return 1;
+}
+)JS");
+    EXPECT_SCRIPT_PASSES(run);
+    ASSERT_NE(fixture.Created(2), nullptr);
+    EXPECT_GT(fixture.Displacement(*fixture.Created(0)), 1.0f) << "a depth of one follows the cursor";
+    EXPECT_LT(fixture.Displacement(*fixture.Created(1)), 1e-3f) << "a depth of zero does not";
+    EXPECT_LT(fixture.Displacement(*fixture.Created(2)), 1e-3f) << "no depth asked for, none given";
 }
 
 } // namespace

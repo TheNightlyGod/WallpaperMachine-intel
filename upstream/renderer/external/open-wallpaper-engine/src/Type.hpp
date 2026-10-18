@@ -119,6 +119,12 @@ struct TextureSample {
     TextureWrap   wrapT { TextureWrap::REPEAT };
     TextureFilter magFilter { TextureFilter::NEAREST };
     TextureFilter minFilter { TextureFilter::NEAREST };
+    // How a mip level is picked between the levels of a texture that has them.
+    // Linear unless the texture's file asks for point sampling: the reference
+    // sampler for that flag points the mip level as well as the texel, and a
+    // sample that merely has both filters on NEAREST (the default, or a target
+    // made for one reason or another) is not that request.
+    TextureFilter mipFilter { TextureFilter::LINEAR };
 };
 
 enum class VertexType

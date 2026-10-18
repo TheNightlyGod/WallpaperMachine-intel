@@ -1525,7 +1525,7 @@ TEST(MdlSchema, VersionedSurfaceMeshesPreserveAllVertexAttributes) {
         for (const auto& [name, expected] : std::map<std::string, std::vector<float>> {
                  { "a_Position", { 0.25f, -1.0f, 3.0f } },
                  { "a_Normal", { 0.0f, 1.0f, 0.0f } },
-                 { "a_Tangent", { -1.0f, 0.0f, 0.0f, -1.0f } },
+                 { "a_Tangent4", { -1.0f, 0.0f, 0.0f, -1.0f } },
                  { "a_TexCoord", { 0.0f, 0.75f } } }) {
             const auto attribute = offsets.find(name);
             ASSERT_NE(attribute, offsets.end()) << name;
@@ -1674,7 +1674,10 @@ TEST(MdlSchema, GenMeshIncludesNormals) {
     bool        has_tangent = false;
     for (const auto& attribute : attributes) {
         if (attribute.name == "a_Normal") has_normal = true;
-        if (attribute.name == "a_Tangent") has_tangent = true;
+        // The name Wallpaper Engine's model shaders declare for it
+        // (`attribute vec4 a_Tangent4`); a mesh that names it otherwise leaves
+        // the shader's input unbound.
+        if (attribute.name == "a_Tangent4") has_tangent = true;
     }
     EXPECT_TRUE(has_normal);
     EXPECT_TRUE(has_tangent);

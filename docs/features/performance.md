@@ -1,13 +1,24 @@
 # Performance
 
-**Settings → Performance** is the first settings section and the one Settings
-opens on. It is a playback and quality page. Every engine control is applied
-through the bridge and the page re-renders from the snapshot the engine returns,
-so the page never shows a setting the engine did not accept. Playback choices
-that the app owns (muting everything, other-app audio, display sleep, app rules) are stored in
-`PlaybackPreferences` and published on the same snapshot.
+Two Settings sections hold the playback and quality controls: **Settings →
+Performance** (Energy use, Quality and Advanced) and **Settings → Playback & Power**
+(the [Playback](#playback) rules). Quick Settings, the section Settings opens on,
+repeats a few of them as tiles and segmented controls (the Quality preset, **On
+battery** and **When windows cover the desktop**) that change the same preferences.
+While a condition lowers quality, the Quality module says so under its segments in
+place of its hint, and so does **On battery** while the Mac runs on battery (`The
+battery is low. Reduced quality is in use.`), so **Keep running** that the
+low-battery, Low Power Mode or heat rule overrides never reads as the choice in force.
+On battery also names one of those rules that pauses or stops wallpapers (`The battery
+is low. Wallpapers are paused.`), ahead of any quality cause, since a pause outweighs
+it ([below](#low-battery-low-power-mode-heat-and-focus)).
+Every engine control is applied through the bridge and the page re-renders from the
+snapshot the engine returns, so the page never shows a setting the engine did not
+accept. Playback choices that the app owns (muting everything, other-app audio,
+display sleep, app rules) are stored in `PlaybackPreferences` and published on the
+same snapshot.
 
-Nothing on this page promises a measured power saving. A lower frame rate or
+Nothing in these sections promises a measured power saving. A lower frame rate or
 render scale is a quality tradeoff the user chooses. The **Energy use** readout
 shows what the app draws now and, after a change, what it drew before; it is a
 measurement, not a promise about any setting.
@@ -35,8 +46,8 @@ kernel's resource-coalition accounting (`CoalitionEnergySource`,
 `EnergyUsageMonitor` in `App/Services/Diagnostics/`):
 
 - **What is counted.** The app's own coalition, which macOS also charges for the
-  XPC services the app starts: the panel's WebKit processes, the video decoder
-  service's CPU work and the audio helper. The lock-screen extension runs in a
+  XPC services the app starts: the WebKit processes of web wallpapers and the
+  preview, the video decoder service's CPU work and the audio helper. The lock-screen extension runs in a
   coalition of its own and is added when a process from this bundle's
   `Contents/Extensions` is running.
 - **What is not.** WindowServer compositing the wallpaper, the hardware video
@@ -78,9 +89,9 @@ kernel's resource-coalition accounting (`CoalitionEnergySource`,
   cells from `BatteryData`'s `CellVoltage` or, where macOS 27 no longer lists it,
   from the pack voltage (a 99.6 Wh MacBook Pro reads about 98.5 Wh). A desktop Mac
   has no such entry and shows no line.
-- **Before and after.** A Performance setting that changes rendering work
-  (`WebPanelController.renderingSettings`: presets, frame-rate limit, render scale,
-  battery mode and quality, what to do in Low Power Mode, when the Mac is hot and when
+- **Before and after.** A setting on Performance or Playback & Power that changes rendering work
+  (`RenderingSetting` in `PanelController+Settings.swift`: presets, frame-rate limit, render scale,
+  2D scene resolution, battery mode and quality, what to do in Low Power Mode, when the Mac is hot and when
   the battery is low, video backend, scene renderer and the scene and
   experimental switches) calls `EnergyUsageMonitor.settingChanged()` once the
   engine has accepted it. The window restarts, the row reads **Measuring…** with
@@ -95,13 +106,13 @@ kernel's resource-coalition accounting (`CoalitionEnergySource`,
   of it.
 - **Cost.** One sample is about 3 ms of kernel calls (every coalition on the Mac
   is read for the contention check), taken off the main thread. Sampling runs only
-  while the panel window is visible with Settings open; otherwise no timer exists.
-  Settings tabs switch inside the page without telling native, so the other
-  Settings tabs sample too. Readings reach the page through
-  `window.wallpaperUI.energy(reading)`, not the snapshot, so a two-second update
-  patches one row instead of re-rendering the panel. The object carries `level`,
-  `batteryPercentPerHour` and `comparison` (`beforeMilliwatts`, `afterMilliwatts`)
-  when they apply.
+  while the panel window is visible with Settings open (`PanelController`'s
+  visibility-gated work); otherwise no timer exists. The sampler does not know which
+  Settings section is open, so every section samples. Each reading bumps one counter
+  (`PanelStoreRevisions.energy`), and only the Energy use rows read it, so a two-second
+  update redraws those rows and nothing else. The rows show an `EnergyReadout`: the
+  figure, its grade, the battery share and the before-and-after comparison when they
+  apply.
 - **Unavailable.** The interfaces are private libsystem exports resolved with
   `dlsym`. If a macOS release removes one, the row reads **Unavailable on this
   Mac**.
@@ -194,8 +205,14 @@ display's refresh, the global cap, and the reduced-quality frame rate while redu
 quality is in force, whatever the reason: the battery, Low Power Mode, heat or a low
 battery. Saved per-wallpaper frame rates are never rewritten. When the ceiling the
 engine reports in force (`effectiveFrameRateCap`, which already holds all of that)
-is below the saved rate, the inspector and **Settings → Displays** say so and offer
-**Open Performance**.
+is below the saved rate, the inspector and **Settings → Displays** say so and name
+the setting that set it (`FrameRateCeiling`): `Limited to N fps by Performance
+settings` with **Open Performance** while the saved cap holds it, or `Limited to N fps
+while the battery is low` (`on battery`, `in Low Power Mode`, `while the Mac is hot`)
+with **Open Playback & Power** while a Reduced quality choice does. A ceiling below the
+saved cap, or with none saved, can only be the reduced-quality profile's, so it is put
+down to the cause named first; one equal to the saved cap is the cap's, since the
+profile then lowers nothing.
 
 For Web wallpapers a limit below the rate the page draws at (60, or the display's
 refresh when that is lower) is enforced on the page's `requestAnimationFrame`, so
@@ -210,7 +227,8 @@ measured ([limits](web-wallpapers.md#limits)).
 only. Output size, placement and composition are unchanged; a lower scale
 rasterizes fewer pixels and draws the result into the same area, so detail softens
 as the scale drops. It is a quality tier and is not part of any same-quality
-backend comparison. For 2D scenes the authored canvas defines 100%; perspective
+backend comparison. For 2D scenes 100% is the raster the
+[2D scene resolution](#2d-scene-resolution) below picks; perspective
 scenes with no authored canvas use the physical output size instead of a fixed
 1920×1080 fallback, and the camera aspect follows the surface. This is native
 resolution, not supersampling. For Web wallpapers the scale multiplies the page's
@@ -235,7 +253,79 @@ replaces it. Whenever the effective `renderScale` differs from the saved
 `preferredRenderScale`, **Effective now** shows the scale the engine published. It
 names the cause only while reduced quality is actually in force: heat, Low Power
 Mode, a low battery or the battery, in that order when several hold. Otherwise it
-says only that the saved setting is not in effect.
+says only that the saved setting is not in effect. Above that line it also names a
+frame-rate ceiling that a Reduced quality choice sets (`Limited to 30 fps while the
+battery is low`), which the **Frame rate limit** slider cannot show because it shows
+the saved limit, perhaps **No limit**; a ceiling the saved limit sets gets no line.
+While a cause is in force the row offers **Open Playback & Power**, where those
+choices are made.
+
+### 2D scene resolution
+
+**2D scene resolution** (**Display resolution**, the default, or **Canvas size**) is
+how many pixels a 2D scene is rasterized with before the internal render scale takes
+its share; the scale multiplies whichever is chosen. A 2D scene is one with an authored
+canvas, drawn with an orthographic camera.
+
+- **Display resolution** rasterizes the canvas at the size it is presented at on the
+  display: the Fill layout's scale times the display's backing scale, which is what
+  Wallpaper Engine does. The 1920×1080 canvas of a scene on a 3456×2234 panel is drawn
+  into a 3972×2234 image (Fill crops the part that overhangs the panel, but it is
+  rasterized) instead of 1920×1080 stretched to that size at the last step, so edges
+  and grain keep the panel's own pixels. Text layers are still laid out and
+  rasterized at the canvas's size, so text gains no detail from it. At the Low and Medium presets the render
+  scale then applies to that size (50% is half of it in each direction).
+- **Canvas size** rasterizes at the size the author made the canvas, as the app did
+  before this setting existed, and stretches the picture to the display when it is
+  presented. It costs the least GPU time and memory and is the softest on a display
+  with more pixels than the canvas.
+
+Only the pixel sizes of the images a scene is drawn into change: its own picture, and
+the targets that follow the screen (bloom and the other effects' mip levels
+among them, as the same fraction of it). The canvas stays the source extent of
+everything else: layout, the cursor mapping, `engine.canvasSize` and every other
+coordinate a script sees, parallax and camera zoom. The buffers an effect's author
+sized (ping-pong buffers, fixed-fraction scratch buffers) keep their authored size and
+follow the render scale alone, so a screen-sized effect buffer is not made larger by a
+finer raster. Screen-space shader inputs, the texel size a blur steps by among them,
+describe the image actually drawn, as they do under a lower render scale.
+
+Display resolution does not apply to perspective scenes, which already rasterize at the
+output size, or to video wallpapers, whose frames keep their own size, and is
+capped at the largest texture the GPU can create (16384 pixels on a side on every Mac
+this app runs on), keeping the canvas's aspect. The raster is sized for the placement
+every display starts from, Fill at the display's scale: the **Zoom** slider, which
+moves while it is dragged, does not change it, so a wallpaper zoomed in is magnified
+from that raster, and a display shown with Fit, Stretch or Original size is drawn
+from the same Fill-sized raster. The aspect handling itself is unchanged: a canvas that is not the
+display's shape is filled and cropped.
+
+The choice reaches a running scene as a render-scale change does: the renderer
+resizes its targets in place on both renderers, with no reparse and no timeline
+reset, and a pause is kept; the scene's own video layers stay open and carry on, on Native Metal
+too, where the graph is compiled again but its decoders are kept for it. Every scene opened
+afterwards, a display change that rebuilds a scene's graph included, sizes its targets from the
+choice and the display it is then on. The battery profile and a quality throttle still lower
+the render scale on top of it, and **Effective now** describes that scale only. The
+setting is saved as `scene_resolution` under `[quality]` in `config.toml`.
+
+**Cost** (headless, the production `SceneWallpaper` at 60 fps for 20 seconds on a
+3456×2234 surface backed at 2×, 1920×1080 canvases, alternating Canvas, Display,
+Display, Canvas; [`LocalProjectEnergyIsMeasuredHeadlessly`](../testing/renderer.md#probe-environment-variables)):
+
+| Scene | Renderer | GPU time per frame | Render targets | Process footprint (peak) |
+| --- | --- | --- | --- | --- |
+| Bloom and an effect chain | Native Metal | 1.62 → 3.42 ms | 35 → 94 MB | 380 → 455 MB |
+| Bloom and an effect chain | Compatibility | 1.91 → 3.27 ms | not read | 399 → 480 MB |
+| 26 layers, author-sized effect buffers, no bloom | Native Metal | 1.76 → 2.33 ms | 132 → 160 MB | 515 → 555 MB |
+
+The cost follows how much of a scene is screen-sized, so a scene of mostly
+author-sized buffers pays little and a bloom or full-screen effect chain pays for
+every level. At 60 fps the first scene's extra 1.8 ms is about a tenth of a frame.
+CPU time per frame did not move, and the energy effect has not been measured: the
+whole-GPU energy figures of the probe are not usable on a machine that is also doing
+other work. Peak footprint carries about ±30 MB of run-to-run noise. The Canvas figures
+are what the app drew before the setting; choose **Canvas size** to keep them.
 
 ### Default per-display frame rate
 
@@ -259,9 +349,18 @@ never written again.
 
 ## Playback
 
+These rules are on **Settings → Playback & Power**.
+
 A wallpaper nobody can see — behind a full-screen app, on a hidden Space or under
 windows that leave no pixel of it — pauses automatically, per display. There is no
 control for that part.
+
+Each display follows its own visibility even when both use the same wallpaper.
+Waking or unlocking re-evaluates every display in the same pass: one that is visible
+again resumes without a click or refresh, while one still covered stays paused.
+Reapplying a wallpaper or changing the display arrangement also reconciles the live
+scene's pause with the current playback policy, so a pause retained by a rebuilt
+renderer cannot hold a visible display still. The user's own Pause remains in force.
 
 | Setting | Values | Default |
 | --- | --- | --- |
@@ -315,8 +414,11 @@ skimming across a display, or going back to it, never pauses it. It is one more
 reason a display counts as hidden in `WallpaperPresentationPolicy`, beside occlusion
 and a covered working area: it never changes **Play** and **Pause**, nothing has to be
 restored when it ends, and the usual one-second settle applies before a display
-pauses. The policy never darkens every display for it, and a pointer on a screen the
-app has no wallpaper on pauses nothing. `ActiveDisplayTracker` follows the pointer
+pauses. The policy never darkens every display for it: while the display in use cannot
+show its wallpaper (a full-screen app on it or, with **Pause**, windows covering its
+working area), that display pauses on its own and the others keep playing, and they
+pause again once it shows its wallpaper. A pointer on a screen the app has no wallpaper
+on pauses nothing. `ActiveDisplayTracker` follows the pointer
 with one global and one local event monitor, installed only while the option is on and
 two displays are connected; the global monitor needs no Accessibility or Input
 Monitoring grant, and a pointer event that stays on one display costs one rectangle
@@ -388,7 +490,11 @@ whether the reconfigure restores it, is not established here: the tests drive th
 with scripted frame counters.
 
 **On battery** is one choice. **Keep running** leaves quality alone. **Pause**
-stops wallpapers until the Mac is plugged in. **Reduced quality** is the choice
+stops wallpapers until the Mac is plugged in. The low-battery, Low Power Mode and heat
+rules below apply on top of it whatever it says, so with **Keep running** here a low
+battery set to Reduced quality still holds wallpapers to the reduced frame rate; the
+On battery module in Quick Settings and the frame-rate notes say when that happens, and the
+module says so too when one of them pauses or stops wallpapers. **Reduced quality** is the choice
 that makes the page show **Render scale when reduced** (100% / 75% / 50%, default
 75%) and **Frame rate when reduced** (1–240 fps, default 30) underneath, plus a
 **Reduced quality** line that says why quality is lower right now. This is one
@@ -418,7 +524,8 @@ exercised by unplugging a Mac in a test.
 (`ProcessInfo.isLowPowerModeEnabled`), and **When the Mac is hot** while it reports
 the thermal state as serious or critical, the states in which macOS starts
 throttling itself. Both are off until chosen. Each row's note says whether the
-condition holds right now.
+condition holds right now, and adds a line while its rule is engaged: `In effect now.
+Wallpapers are paused.` (or stopped, or `Reduced quality is in use.`).
 
 **When the battery is low** applies while the Mac runs on its internal battery at or
 below the **Low battery level** (10%, 20% or 30%; 20% unless you choose another). The
@@ -429,7 +536,27 @@ that hovers around it does not pause and resume the wallpapers over and over, an
 ends at once when you plug in, whatever the charge. Only the internal battery counts,
 never a UPS, and a reading that fails counts as not low. Like the other conditions it
 pauses or stops wallpapers without touching your own Play/Pause; **Stop** frees
-renderer memory and reloads the wallpapers when the rule ends.
+renderer memory and reloads the wallpapers when the rule ends. Because the rule ends
+only above its margin, the charge in the note cannot tell whether it is engaged; the
+**In effect now** line can.
+
+Whether a rule is engaged comes from `SystemConditionMonitor`, the one place that
+evaluates the conditions (the low-battery margin included). It publishes which
+condition holds and what its rule does (`EngagedSystemConditions`) to
+`SystemConditionState`, which the control panel reads; the panel never works the
+conditions out again. While the Mac runs on battery, Quick Settings' **On battery**
+module names the strongest of them that pauses or stops wallpapers: a stop before a
+pause, and heat, then Low Power Mode, then a low battery among equals, for example
+`Low Power Mode is on. Wallpapers are stopped.` What the choice already does is not an
+override, so **Pause** beside a rule that pauses says nothing, while one that stops is
+named. Plugged in, the choice does nothing and nothing is said. Heat on Reduced quality
+reads as a pause once it is critical.
+
+Focus filters and app rules stay on their own rows and are not named under **On
+battery**: they act whatever the power source, so they override every choice on the
+page alike, and they are things the user turned on for the moment (a Focus, an app
+in use) rather than a state of the Mac's power. The **Focus** row says which filter is
+in effect now; the **App rules** rows do not yet say which rule is engaged.
 
 All three conditions also offer **Reduced quality**, which keeps the wallpapers
 playing instead of pausing them. While a chosen condition holds, the app asks the
@@ -450,10 +577,12 @@ conditions are observed as above).
   wallpapers, because reducing is no longer enough; choosing Reduced quality is not
   a promise never to pause, and the row's note says so. The fair ("warm") state is
   ignored, as it is for **Pause** and **Stop**, which act from serious.
-- **It follows the cause.** **Effective now** and the **Reduced quality** line name
-  the cause (heat, Low Power Mode, a low battery or the battery, in that order when
-  several hold), and the frame-rate note on **Settings → Displays** counts the
-  reduced-quality frame rate whichever reason lowered it.
+- **It follows the cause.** **Effective now**, the **Reduced quality** line and Quick
+  Settings' Quality and On battery modules name the cause (heat, Low Power Mode, a
+  low battery or the battery, in that order when several hold), and the frame-rate
+  note on **Settings → Displays** and in the inspector counts the reduced-quality
+  frame rate whichever reason lowered it, names that reason and opens Playback &
+  Power rather than Performance.
 - **Cost.** Each change of the render scale rebuilds a scene's render graph, the
   same cost as unplugging the Mac with **On battery** set to Reduced quality, and
   there is no hold-down: a Mac whose thermal state flaps at the serious boundary
@@ -512,7 +641,7 @@ conflicts with that mode; screen-saver-only ownership does not.
 
 ### App rules
 
-**Edit…** opens an inline list. Each row is an app name, a condition (**Running**
+The **App rules** row on Playback & Power opens an inline list. Each row is an app name, a condition (**Running**
 or **In front**), an action (**Pause**, **Mute** or **Stop**) and **Remove**. **Add
 app…** opens a native panel for one `.app` bundle. An app with no bundle identifier
 is refused. The same bundle is not added twice. Rules pause, mute or stop
@@ -530,7 +659,7 @@ diagnostics** disclosure: video shows the backend in use; scenes show the render
 and video path, whether optimisation is in force, and what is keeping the scene
 updating. These reports continue to update from snapshots, and their open state
 survives setting changes. **Renderer compatibility** remains beside the scene
-diagnostics, and **What these settings change** stays last, outside Advanced.
+diagnostics. **What these settings change** belongs to Playback & Power, not Advanced.
 What the three scene controls do (**Scene renderer**, **Scene render optimisation**
 and **Update only when the scene changes**) is described in
 [scene rendering](scene-rendering.md#scene-wallpapers).

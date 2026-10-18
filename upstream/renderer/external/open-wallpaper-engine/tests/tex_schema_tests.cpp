@@ -13,6 +13,8 @@
 #include <tuple>
 #include <vector>
 
+#include <unistd.h>
+
 #include <gtest/gtest.h>
 #include <lz4.h>
 
@@ -458,6 +460,99 @@ TEST(TexSchema, SurfaceBudgetPreservesSpriteAndVideoMipChains) {
     }
 }
 
+// A mip chain of the given level sizes, level i filled with `marks[i]`. Raw
+// RGBA levels, or, with `encoded`, the 1x1 PNG in every level under the header
+// sizes (the decoder reports a level's real size, the header only decides which
+// levels are kept).
+std::vector<uint8_t> BuildChainTex(const std::vector<std::pair<int, int>>& levels,
+                                   const std::vector<uint8_t>& marks, bool encoded = false) {
+    Bytes b;
+    b.Stamp('V', 5); b.Stamp('I', 1);
+    b.I32(0); b.U32(0);
+    for (int i = 0; i < 4; ++i) b.I32(8);
+    b.I32(0); b.Stamp('B', encoded ? 3 : 2); b.I32(1);
+    if (encoded) b.I32(static_cast<int32_t>(ImageType::PNG));
+    b.I32(static_cast<int32_t>(levels.size()));
+    for (size_t i = 0; i < levels.size(); ++i) {
+        const auto payload = encoded ? Png1x1()
+            : std::vector<uint8_t>(size_t(levels[i].first) * levels[i].second * 4, marks[i]);
+        b.I32(levels[i].first); b.I32(levels[i].second); b.I32(0); b.I32(0);
+        b.I32(static_cast<int32_t>(payload.size()));
+        b.Raw(payload);
+    }
+    return b.Take();
+}
+
+TEST(TexSchema, SurfaceBudgetKeepsALevelThatTheNextOneWouldNotCover) {
+    // 4100 px is just over the 4096 px power-of-two ceiling of a 3456 px
+    // surface, yet the next level (2050 px) is far shorter than the surface:
+    // dropping the full-size level would draw the picture magnified.
+    fs::VFS vfs;
+    auto parser = MakeParser(vfs, BuildChainTex({{4100, 64}, {2050, 32}}, {1, 2}));
+    parser.SetTextureSurfaceSize(3456, 2024);
+    auto image = parser.Parse("sample");
+    ASSERT_NE(image, nullptr);
+    ASSERT_EQ(image->slots.front().mipmaps.size(), 2u);
+    EXPECT_EQ(image->slots.front().width, 4100);
+    EXPECT_EQ(image->slots.front().mipmaps.front().data.get()[0], 1);
+}
+
+TEST(TexSchema, SurfaceBudgetKeepsTheSmallestLevelThatStillCoversTheSurface) {
+    // For a texture of any longest side, landscape or portrait, the level that
+    // is kept is as long as the surface (or as the texture, when that is
+    // shorter), and the level after it is shorter than the surface, so nothing
+    // is magnified and nothing larger than needed stays resident.
+    for (const auto [sw, sh] : std::vector<std::pair<uint32_t, uint32_t>>{
+             {1920, 1080}, {2560, 1440}, {3456, 2234}}) {
+        const int surface = int(std::max(sw, sh));
+        for (bool portrait : {false, true}) {
+            for (int longest = surface / 2; longest <= 2 * surface + 2;
+                 longest += std::max(1, surface / 16)) {
+                std::vector<std::pair<int, int>> levels;
+                std::vector<uint8_t> marks;
+                for (int w = longest, h = 2; ; w /= 2, h = std::max(1, h / 2)) {
+                    levels.push_back(portrait ? std::pair{h, w} : std::pair{w, h});
+                    marks.push_back(uint8_t(levels.size()));
+                    if (w == 1) break;
+                }
+                fs::VFS vfs;
+                auto parser = MakeParser(vfs, BuildChainTex(levels, marks));
+                parser.SetTextureSurfaceSize(sw, sh);
+                auto image = parser.Parse("sample");
+                ASSERT_NE(image, nullptr);
+                const auto& mips = image->slots.front().mipmaps;
+                ASSERT_FALSE(mips.empty());
+                const auto side = [](const auto& m) { return std::max(m.width, m.height); };
+                const std::string what = "texture " + std::to_string(longest) +
+                    (portrait ? " tall" : " wide") + " on a " + std::to_string(sw) + "x" +
+                    std::to_string(sh) + " surface";
+                EXPECT_GE(side(mips.front()), std::min(longest, surface)) << what;
+                // Only leading levels go: what is kept is the authored chain's tail.
+                const size_t dropped = levels.size() - mips.size();
+                EXPECT_EQ(mips.front().data.get()[0], marks[dropped]) << what;
+                if (dropped + 1 < levels.size())
+                    EXPECT_LT(std::max(levels[dropped + 1].first, levels[dropped + 1].second),
+                              surface) << what;
+            }
+        }
+    }
+}
+
+TEST(TexSchema, SurfaceBudgetFollowsTheHeaderSizesOfAnEncodedChain) {
+    // The levels of a TEXB0003 container are measured by their headers, since
+    // dropping one must not decode it first. A surface of 3456 needs the 4100
+    // wide level because the next is only 2050 wide; a surface of 2000 is
+    // covered by the 2050 wide one alone.
+    for (const auto [surface, kept] : std::vector<std::pair<uint32_t, size_t>>{{3456, 2}, {2000, 1}}) {
+        fs::VFS vfs;
+        auto parser = MakeParser(vfs, BuildChainTex({{4100, 4100}, {2050, 2050}}, {1, 2}, true));
+        parser.SetTextureSurfaceSize(surface, surface);
+        auto image = parser.Parse("sample");
+        ASSERT_NE(image, nullptr);
+        EXPECT_EQ(image->slots.front().mipmaps.size(), kept) << "surface " << surface;
+    }
+}
+
 // A package may ship an ordinary picture next to its `.tex` files; those are
 // the loose assets `ResolveLooseAsset` finds under the mount.
 WPTexImageParser MakeParserWithLooseImage(fs::VFS& vfs, std::string path,
@@ -477,7 +572,10 @@ struct PkgEntry {
 class TempPkg {
 public:
     explicit TempPkg(std::vector<PkgEntry> entries) {
-        const auto unique = "owe_pkg_case_test_" + std::to_string(s_nextId++) + ".pkg";
+        // The process id keeps concurrent runs of this binary, which share the
+        // temporary directory, from rewriting or deleting each other's files.
+        const auto unique = "owe_pkg_case_test_" + std::to_string(::getpid()) + "_" +
+                            std::to_string(s_nextId++) + ".pkg";
         m_path = std::filesystem::temp_directory_path() / unique;
 
         std::ofstream out(m_path, std::ios::binary | std::ios::trunc);
@@ -702,7 +800,8 @@ TEST(TexSchema, FlaggedVideoUnknownTypeUsesExistingMetadataPath) {
 // A `scenetexture` property the user filled from the image picker holds an
 // absolute path to a picture of their own, which belongs to no VFS mount.
 TEST(TexSchema, AbsolutePathLoadsTheUsersOwnPicture) {
-    const auto directory = std::filesystem::temp_directory_path() / "wpe-host-asset-test";
+    const auto directory = std::filesystem::temp_directory_path() /
+                           ("wpe-host-asset-test-" + std::to_string(::getpid()));
     std::filesystem::remove_all(directory);
     std::filesystem::create_directories(directory);
     const auto picture = directory / "chosen.png";
@@ -787,7 +886,8 @@ TEST(TexSchema, PackagedLooseBmpDecodesItsPixels) {
 // with no picture behind it, and a relative one are all "not a picture we can
 // read", which is what decides whether a slot may be replaced at all.
 TEST(TexSchema, OnlyAReadableHostPictureCountsAsOne) {
-    const auto directory = std::filesystem::temp_directory_path() / "wpe-host-asset-readable";
+    const auto directory = std::filesystem::temp_directory_path() /
+                           ("wpe-host-asset-readable-" + std::to_string(::getpid()));
     std::filesystem::remove_all(directory);
     std::filesystem::create_directories(directory);
     const auto picture = directory / "chosen.png";
@@ -838,7 +938,8 @@ TEST(PkgFs, ExactPathWinsWhenPackageContainsCaseFoldCollision) {
 // preset's `scenetexture` properties name, e.g. `files/clip.mp4`. Only the
 // package was mounted, so those resolved to nothing and the layers drew black.
 TEST(SceneSourceMount, APresetFileBesideThePackageLoadsAndThePackageStillWins) {
-    const auto directory = std::filesystem::temp_directory_path() / "wpe-scene-source-mount";
+    const auto directory = std::filesystem::temp_directory_path() /
+                           ("wpe-scene-source-mount-" + std::to_string(::getpid()));
     std::filesystem::remove_all(directory);
     std::filesystem::create_directories(directory / "files");
     {

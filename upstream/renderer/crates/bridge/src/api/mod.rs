@@ -85,13 +85,13 @@ use crate::{
             SetVerboseLogging,
             SetRendererCountersEnabled, SetScalingFactor, SetScalingMode,
             SetSceneOnDemandEnabled, SetSceneOptimizationEnabled, SetSceneRenderer,
-            SetSceneVideoPlaneSamplingEnabled, SetSharedVideoDecodeEnabled, SetTargetFps,
-            SetVideoBackend, SetVolume,
+            SetSceneResolution, SetSceneVideoPlaneSamplingEnabled, SetSharedVideoDecodeEnabled,
+            SetTargetFps, SetVideoBackend, SetVolume,
             SetWebAudioSubscribed, Shutdown,
         },
         state::BridgeActorState,
     },
-    config::{ConfigStore, SceneRendererModeCfg, VideoBackendModeCfg},
+    config::{ConfigStore, SceneRendererModeCfg, SceneResolutionCfg, VideoBackendModeCfg},
     engine::{EngineFacade, LoadJournal, RealEngineFacade},
     login::LaunchAtLoginController,
     media::SystemMediaStore,
@@ -247,8 +247,8 @@ impl<E: EngineFacade> BridgeBuilder<E> {
             log::info!(
                 "configuration: scene renderer {:?}, video backend {:?}, render scale {}, \
                  battery mode {:?} ({} fps, scale {}), frame-rate cap {}, scene optimization \
-                 {}, on-demand {}, content pacing {}, shared video decode {}, video plane \
-                 sampling {}",
+                 {}, on-demand {}, scene resolution {:?}, content pacing {}, shared video \
+                 decode {}, video plane sampling {}",
                 config.scene_renderer,
                 config.video_backend,
                 config.quality.render_scale,
@@ -261,6 +261,7 @@ impl<E: EngineFacade> BridgeBuilder<E> {
                     .map_or_else(|| "none".to_string(), |cap| cap.to_string()),
                 config.quality.scene_optimization_enabled,
                 config.quality.scene_on_demand_enabled,
+                config.quality.scene_resolution,
                 config.experimental.content_pacing,
                 config.experimental.shared_video_decode,
                 config.experimental.scene_video_plane_sampling,
@@ -736,6 +737,13 @@ impl EngineFacade for ArcEngineFacade {
         preference: wallpaper_core::SceneRendererPreference,
     ) -> Result<(), wallpaper_core::EngineError> {
         self.0.set_scene_renderer_preference(preference)
+    }
+
+    fn set_scene_resolution(
+        &self,
+        resolution: wallpaper_core::SceneResolution,
+    ) -> Result<(), wallpaper_core::EngineError> {
+        self.0.set_scene_resolution(resolution)
     }
 
     fn scene_runtime_reports(&self) -> Vec<crate::engine::SceneRuntimeReport> {
@@ -2058,6 +2066,37 @@ impl WallpaperBridge {
             }
         };
         self.actor.ask(SetSceneRenderer { mode }).await
+    }
+
+    /// Chooses how many pixels a 2D scene wallpaper is rasterized with.
+    ///
+    /// `"display"` (the default) rasterizes the canvas at the size it is
+    /// presented at on the display, as Wallpaper Engine does; `"canvas"`
+    /// rasterizes at the size the author made it and stretches the result,
+    /// which costs the least. The internal render scale divides whichever is
+    /// chosen. Perspective scenes and plain videos ignore it. Running scenes
+    /// resize their render targets in place; nothing is reparsed, a scene's
+    /// own video layers stay open and carry on, and a pause the user asked for
+    /// is untouched.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `mode` is not one of the two names, when the
+    /// setting cannot be saved, or when the renderer rejects the change.
+    pub async fn set_scene_resolution(
+        &self,
+        mode: String,
+    ) -> Result<BridgeSnapshotBundle, BridgeError> {
+        let resolution = match mode.as_str() {
+            "canvas" => SceneResolutionCfg::Canvas,
+            "display" => SceneResolutionCfg::Display,
+            other => {
+                return Err(BridgeError::invalid_input(format!(
+                    "unknown scene resolution {other}"
+                )));
+            }
+        };
+        self.actor.ask(SetSceneResolution { resolution }).await
     }
 
     /// The most recent process-wide audio analysis, or `None` when none has

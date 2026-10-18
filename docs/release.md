@@ -68,10 +68,13 @@ does both halves; GitHub's auto-generated notes are not used. Once a version's
 tag exists, its section is not extended: the tag's build already bundled it, so
 a change that lands later belongs in the next release's notes.
 
-A bundled changelog section is both languages, in this order, and nothing else at `###`:
+A bundled changelog section is both languages, in this order, and nothing else at
+`###`; each language may open with its banner line:
 
 ```markdown
 ### English
+
+![WallpaperMachine 0.2.0](Resources/ReleaseBanners/0.2.0.jpg)
 
 One or two sentences on what the release means, omitted when the lists say it.
 
@@ -80,6 +83,8 @@ One or two sentences on what the release means, omitted when the lists say it.
 - One change, one line
 
 ### 简体中文
+
+![WallpaperMachine 0.2.0](Resources/ReleaseBanners/0.2.0.zh-Hans.jpg)
 
 同样的一两句。
 
@@ -95,10 +100,38 @@ blocks; the app ignores it. The headings are:
 
 | Section | `####` English | `####` 简体中文 |
 |---|---|---|
+| highlights | Highlights | 亮点 |
 | breaking | Breaking changes | 不兼容变更 |
 | new | New | 新增 |
 | improved | Improved | 改进 |
 | fixed | Fixed | 修复 |
+
+Highlights appear only in feature releases: the three to five changes that define the
+release, which the other sections still list. A feature release is `x.y.0`, or a patch
+whose notes start below `x.y` because it replaces an `x.y.0` that was never published.
+
+### Release banners
+
+A feature release can carry a banner in each language: a 3:1 picture (2400 × 800
+pixels, JPEG or PNG) committed as `Resources/ReleaseBanners/x.y.z.jpg` (English) and
+`x.y.z.zh-Hans.jpg` (Simplified Chinese), or `.png`, before the commit with the
+`release:` line. Each banner carries its own language's words; without a Chinese file
+the Chinese notes share the English banner. When the section is written, the script
+opens each language block with its image line:
+
+- `CHANGELOG.md` on GitHub shows both from the repository path.
+- The release page shows the English one from the version's tag on
+  `raw.githubusercontent.com`, at the top of the English notes.
+- The app bundles the folder; the What's New window shows the banner of the version
+  it announces above its header, in the selected translation, not those of skipped
+  versions.
+
+Publishing refuses a banner line that names another version's file, and a banner
+line is not translated prose: a language block holding only a picture is missing its
+translation.
+Banners are drawn for the product, not taken from Workshop wallpapers: their art
+belongs to their authors. Sections whose tag exists keep the banner they shipped
+with, so a banner never goes back into an older release.
 
 ### Written by the release-notes model
 
@@ -128,15 +161,20 @@ source of the notes: write them for the reader
 
 The instructions also carry the project's rules on claims, because CI commits the
 notes without review: no energy, battery or power-saving claims, nothing called
-fully supported or fully compatible, and opt-in features (Native Metal, native
-video, content pacing, on-demand scene idle, the animated lock screen) keep their
-optional, experimental or off-by-default qualifier in both languages. Places in
-the app are named the way the panel names them (`Settings` / `设置`, and the
-same for General, Appearance, Performance, Playback, Library & Steam, Discover,
-Installed, About and Lock screen).
+fully supported or fully compatible, and opt-in features (native video, content
+pacing, on-demand scene idle, the animated lock screen) keep their optional,
+experimental or off-by-default qualifier in both languages; Native Metal is the
+default renderer and is never called optional. The model groups many commits about
+one area (text layers, particles, lighting) into one bullet that names what users
+see, keeping each section to about 15 bullets, and is told whether the version is a
+feature release, which decides whether it writes highlights. Places in
+the app are named the way the panel labels them, in English and in the zh-Hans
+catalog's words (`Settings` / `设置`); the prompt lists those names, so renaming a
+tab or a Settings section changes the list in `scripts/release_notes.py` in
+the same commit.
 
 The model answers with JSON. `summary` is `{"english", "chinese"}`. Each of
-`breaking`, `new`, `improved` and `fixed` is a list of the same pair, one object
+`highlights`, `breaking`, `new`, `improved` and `fixed` is a list of the same pair, one object
 per change, so the two languages cannot drift in length. The script renders that
 shape — `### English`, then `### 简体中文`, categories at `####`, then the compare
 link — and stops the run on a reply that is not that JSON, omits a language,
@@ -293,12 +331,16 @@ protection must allow GitHub Actions.
 
 `workflow_call` only, with a required `tag` input. It is the single place a
 publishable artifact is produced, called by Version for CI-produced tags and by
-Release for hand-pushed ones. It runs four jobs. `app-icon` compiles the app icon
+Release for hand-pushed ones. It runs three jobs. `app-icon` compiles the app icon
 on a `macos-26` runner. `build` then runs on `macos-15` (the oldest runner that
-carries Xcode 26, whose Homebrew bottles set the published app's minimum macOS)
-while `test` runs on `macos-26`, 150-minute timeout each, so the test gate adds no
-time on top of the Release build. `publish` runs on `ubuntu-latest` only after
-both succeed, so a published binary has passed the same gate a change has to pass.
+carries Xcode 26, whose Homebrew bottles set the published app's minimum macOS),
+with a 150-minute timeout. `publish` runs on `ubuntu-latest` once it succeeds.
+
+The test gate is not part of a release. Every change passes `python3 scripts/test.py`
+before it is committed, and on hosted VMs the gate failed 1.5.0 through 1.5.4 only on
+timing and layout the VM got wrong, each failure leaving a tag that could not be
+published and a fix that had to ship under the next number. The
+[Test workflow](#test-testyml) runs the same gate by hand.
 
 The icon is compiled apart because Xcode 26's `actool` crashes on most `.icon`
 compiles on macOS 15 ([build.md](build.md#stages-and-outputs)). `app-icon` runs
@@ -343,23 +385,8 @@ Step 6 is the guard that the bump actually reached the build:
 `CFBundleShortVersionString`, so a mismatch means the published tag and the
 built version disagree and the job fails instead of publishing the wrong binary.
 
-**`test`** runs `prepare-build`, `python3 scripts/build.py --renderer-only` for the
-renderer and the generated bridge, `python3 scripts/check_rust.py`,
-`python3 scripts/check_renderer.py --allow-missing-gpu --allow-imprecise-timers`,
-and `python3 scripts/test.py --serial`, which builds the Debug app, icon included,
-and its tests itself. A failure in any of them prevents publication.
-`--serial` runs one test class at a time: see
-[Parallel execution](testing/README.md#parallel-execution) for why. The two
-renderer flags are CI fallbacks for hosted VMs: only the exact exit 77 of a
-compiled device or timer probe skips the named GPU or wall-clock cadence checks
-([renderer testing](testing/renderer.md#scriptscheck_rendererpy)); each skip is a
-CI warning, and all other probe and test failures remain failures. Excluded and
-asset-dependent checks stay listed in the JSON reports and logs; they do not count
-as verified asset or GPU coverage.
-
-When either macOS job fails it uploads its full tool logs from `artifacts/` (for
-`test`, also any WebKit, app or jetsam reports from the run) as `build-logs-<tag>`
-or `test-logs-<tag>`, kept 14 days: the job output is only the scripts' filtered
+When `build` fails it uploads its full tool logs from `artifacts/` as
+`build-logs-<tag>`, kept 14 days: the job output is only the scripts' filtered
 summary.
 
 **`publish`**
@@ -378,12 +405,12 @@ non-beta `/Applications/Xcode_26*.app`, `brew install --quiet`s the
 XcodeGen/CMake/renderer package set with `dav1d` and `ccache`, and restores three
 `actions/cache` entries. Every key carries the runner's macOS (`<os>` below is
 `macos-15` or `macos-26`), because bottles, the FFmpeg keg and compiled objects
-differ between releases; `build` and `test` therefore keep separate entries.
+differ between releases; `build` and the Test workflow therefore keep separate entries.
 
 | Cache | Path | Key | What a hit saves |
 |---|---|---|---|
 | LGPL FFmpeg | `/opt/homebrew/Cellar/mwe-ffmpeg` | `mwe-ffmpeg-<os>-<dav1d version>-<hash of Formula/mwe-ffmpeg.rb>` | the FFmpeg source build; the action restores the keg's `opt` link and `scripts/install_ffmpeg.py` finds the keg current |
-| C++ objects | `~/.ccache` | `ccache-<os>-<run>`, restored by the `ccache-<os>-` prefix | recompiling the scene engine. A checkout gives every file a new mtime, so CMake rebuilds the whole engine even from a restored build tree; ccache hashes content and returns the previous objects |
+| C++ objects | `~/.ccache` | `ccache-<os>-<run>`, restored by the `ccache-<os>-` prefix | recompiling the scene engine. A checkout gives every file a new mtime, so CMake rebuilds the whole engine even from a restored build tree; ccache hashes content and returns the previous objects. Test's three jobs share a run's key, so only `renderer`, which compiles the engine and its C++ tests, saves it; `rust` and `native` pass `save-object-cache: "false"` and only restore it |
 | Renderer | `~/.cargo/registry`, `~/.cargo/git`, `upstream/renderer/target` | `renderer-ccache-<os>-<hash of Cargo.lock, rust-toolchain.toml, provenance.json>`, restored by prefix | crate downloads, and Rust compilation while the nightly toolchain is unchanged |
 
 The `CMAKE_<LANG>_COMPILER_LAUNCHER=ccache` variables only take effect on a build
@@ -428,13 +455,49 @@ unpublished. Manual invocations must be serialized with every other publisher to
 use the release workflow for the shared lock. The script's docstring and
 `scripts/tests/test_publish_release.py` cover both rules.
 
+### Test (`test.yml`)
+
+The test gate on hosted runners, run by hand from **Actions -> Test -> Run
+workflow** on the branch or tag chosen under "Use workflow from" (`--ref` below). It
+does not tag, build the Release app or publish, and no release waits for it
+([why](#build-buildyml)). It has no input naming another ref to test: its jobs save
+caches under the ref the run starts from, and a run started from `main` that built
+another ref's code would let that code write the caches every release restores. Its
+three jobs run in parallel on `macos-26` runners, each after `prepare-build` and
+`python3 scripts/build.py --renderer-only` for the renderer and the generated bridge,
+so a run takes about as long as the native tests (about 25 minutes for 1.5) rather
+than the sum (over 40):
+
+- `rust` runs `python3 scripts/check_rust.py`;
+- `renderer` runs `python3 scripts/check_renderer.py --allow-missing-gpu
+  --allow-imprecise-timers`. The two flags are fallbacks for hosted VMs: only the exact
+  exit 77 of a compiled device or timer probe skips the named GPU or wall-clock cadence
+  checks ([renderer testing](testing/renderer.md#scriptscheck_rendererpy)); each skip
+  is a CI warning, and all other probe and test failures remain failures. Excluded and
+  asset-dependent checks stay listed in the JSON reports and logs; they do not count as
+  verified asset or GPU coverage;
+- `native` runs `python3 scripts/test.py --serial`, which builds the Debug app, icon
+  included, and its tests itself. `--serial` runs one test class at a time: see
+  [Parallel execution](testing/README.md#parallel-execution) for why.
+
+```sh
+gh workflow run test.yml --ref main
+gh workflow run test.yml --ref <branch> -f skip_renderer=true -f only="SettingsWindowRenderTests WorkshopBrowserRenderTests"
+```
+
+`only` passes each space-separated name to `scripts/test.py --only`, and
+`skip_renderer` skips the `rust` and `renderer` jobs; both are for diagnosis, so only
+a run without them says the gate passes. A failed job keeps its logs, result bundles
+and any WebKit, app or jetsam reports included, as `test-logs-<run id>-<job>` for 14
+days.
+
 ### Warm caches (`warm-caches.yml`)
 
 GitHub evicts a cache entry nobody has read for seven days. Twice a week (and on
 demand from **Actions -> Warm caches -> Run workflow**) this runs `prepare-build`
 and `python3 scripts/build.py --renderer-only` on `main`, once on `macos-15` and
-once on `macos-26`, which reads every entry Build uses and saves a fresh C++ object
-cache for each, so a release after a quiet week still starts warm. Caches saved on
+once on `macos-26`, which reads every entry Build and Test use and saves a fresh C++
+object cache for each, so a release or a Test run after a quiet week still starts warm. Caches saved on
 `main` are readable from every ref, including the tags Release builds. It
 publishes nothing.
 
@@ -460,13 +523,20 @@ as they were.
 Code scanning on every push to `main`, every pull request into it, weekly, and on
 demand. It replaces GitHub's default setup, which can only autobuild Swift and
 fails at the extension's link because the renderer library and the Homebrew
-libraries do not exist yet. Actions, JavaScript/TypeScript, Python and Rust are
-analyzed without a build on Linux. Swift runs on `macos-26`: `prepare-build` and
+libraries do not exist yet. Actions, Python and Rust are analyzed without a build
+on Linux. Swift runs on `macos-26`: `prepare-build` and
 `python3 scripts/build.py --renderer-only` first, untraced, then CodeQL traces
 `scripts/build.py --swift-only` with the `--xcode-setting` overrides CodeQL's own
 Swift autobuild uses (no signing, no compilation cache, no integrated driver), so
 the extractor sees every Swift compile. C/C++ (only vendored third-party code is
-visible to it) and Ruby (only the FFmpeg formula) are deliberately not analyzed.
+visible to it), Ruby (only the FFmpeg formula) and JavaScript/TypeScript (none since
+the SwiftUI control panel; CodeQL fails a language with no code) are deliberately not
+analyzed.
+Removing a language from the matrix does not remove its configuration: **Security ->
+Code scanning -> Tool status** keeps showing that language's last scan, failed or
+not, because nothing uploads to its category again. In the same change, delete it
+there (the configuration's **⋯ -> Delete configuration**) once no alert in it needs
+keeping.
 Default setup must stay off under **Settings -> Code security -> CodeQL
 analysis**; while it is on, GitHub rejects this workflow's results.
 
@@ -545,7 +615,14 @@ gh workflow run version.yml --ref main -f spec=patch -f notes_from=v1.2.6
 
 `notes_from` only sets `release_notes.py --previous`; it does not change the version
 policy, skip tests or replace a live release. Ordinary releases leave it empty and
-use the preceding tag.
+use the preceding tag. When the unpublished tag was a feature release, its notes start
+below that minor version, so the patch gets highlights too; commit copies of its
+banners under the patch's number (`x.y.1.jpg`, `x.y.1.zh-Hans.jpg`) before running the
+workflow, since a section names only its own version's banner. Once the patch is cut,
+remove the sections of the unpublished versions it replaces, and their banners, from
+`CHANGELOG.md`: its notes already cover them, and a section left there is shown again in
+What's New. The app it builds still carries them, so remove them before cutting it when
+possible.
 
 ## Checklist for a release
 
@@ -555,7 +632,7 @@ use the preceding tag.
    `CHANGELOG.md` section and pushed `vx.y.z`. Read the section: it is `### English`
    then `### 简体中文`, and the model wrote both. The app bundles both translations;
    the GitHub release page shows only the English notes.
-3. Confirm the called Build run passed the test gate, verified the mounted
+3. Confirm the called Build run verified the mounted
    image, and published `WallpaperMachine-x.y.z-x86_64.dmg` with its `.sha256`
    sidecar, `WallpaperMachine-update.json` and a provenance attestation. The
    manifest's `digest` must equal the sidecar's checksum:

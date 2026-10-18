@@ -2,6 +2,7 @@
 
 mod alpha_to_coverage;
 mod array_parameters;
+mod builtin_variables;
 mod compat_functions;
 mod control_flow_coercion;
 mod fragment_output;
@@ -41,6 +42,9 @@ impl CodegenStrategyName {
     }
 }
 
+/// Strategy name for builtin variables spelled the OpenGL way.
+pub(super) const BUILTIN_VARIABLES: CodegenStrategyName =
+    CodegenStrategyName::new("builtin_variables");
 /// Strategy name for legacy type alias rewriting.
 pub(super) const LEGACY_TYPES: CodegenStrategyName = CodegenStrategyName::new("legacy_types");
 /// Strategy name for texture sampling call rewriting.

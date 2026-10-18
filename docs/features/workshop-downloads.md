@@ -9,21 +9,20 @@ in the app's own local prompts.
 
 ## Discover
 
-The **Discover** tab searches the Workshop and pages through results with
+The **Steam Workshop** page (Discover) searches the Workshop and pages through results with
 previous/next buttons or by typing a page number and pressing Return. A page is
 exactly one Steam page of 30 tiles, and the panel never offers more than 1,000
-pages (`WorkshopStore.maxPages`, mirrored in the snapshot as `maxPages`): the page
-number, the jump field and the native `workshopPage` action all clamp to that
-limit. Steam's public browse page clamps every query to 1,000 pages of 30 items,
-so at most 30,000 results are reachable per query (the snapshot's `reachable`
-count). Fetched pages are cached per query, so paging back never touches the
+pages (`WorkshopStore.maxPages`): the page number, the jump field and the
+controller's `showWorkshopPage` all clamp to that limit. Steam's public browse page
+clamps every query to 1,000 pages of 30 items, so at most 30,000 results are
+reachable per query (`WorkshopBrowseState.reachableCount`). Fetched pages are cached per query, so paging back never touches the
 network; a new search always starts a fresh cache. Nothing about a page depends
 on the window: resizing only reflows the tiles and never re-fetches or re-cuts a
 page (grid rules: [control panel](control-panel.md#layout)).
 
-The filter sidebar on the left (opened and closed with the toolbar's **Filter**
-button, see [control panel](control-panel.md#filtering)) mirrors Wallpaper
-Engine's own sidebar, tag for tag and default for default:
+The Filters sidebar (opened from the header's **Filter** button, see [control
+panel](control-panel.md#filtering)) mirrors Wallpaper Engine's own filter list, tag
+for tag and default for default:
 
 | Group | Boxes | Default |
 | --- | --- | --- |
@@ -31,18 +30,20 @@ Engine's own sidebar, tag for tag and default for default:
 | Type | Scene, Video, Web; Wallpaper, Preset | all on |
 | Age rating | Everyone (G), Questionable (PG-13), Mature (R-18) | Everyone only |
 | Resolution | Widescreen (Standard definition, 1280 x 720, 1366 x 768, 1920 x 1080, 2560 x 1440, 3840 x 2160), Ultrawide (standard, 2560 x 1080, 3440 x 1440), Dual monitor (standard, 3840 x 1080, 5120 x 1440, 7680 x 2160), Triple monitor (standard, 4096 x 768, 5760 x 1080, 7680 x 1440, 11520 x 2160), Portrait monitor / phone (standard, 720 x 1280, 1080 x 1920, 1440 x 2560, 2160 x 3840), Other resolution, Dynamic resolution | all on |
-| Tags | Abstract, Animal, Anime, Cartoon, CGI, Cyberpunk, Fantasy, Game, Girls, Guys, Landscape, Medieval, Memes, MMD, Music, Nature, Pixel art, Relaxing, Retro, Sci-Fi, Sports, Technology, Television, Vehicle, Unspecified genre | all on except Unspecified |
+| Tags (chips) | Abstract, Animal, Anime, Cartoon, CGI, Cyberpunk, Fantasy, Game, Girls, Guys, Landscape, Medieval, Memes, MMD, Music, Nature, Pixel art, Relaxing, Retro, Sci-Fi, Sports, Technology, Television, Vehicle, Unspecified genre | none selected; Unspecified hidden |
 
 A ticked **Show only** box is sent to Steam as `requiredtags[]`, so every ticked
-one must be on an item. Every other box starts ticked and unticking it sends the
-tag as `excludedtags[]`: Steam drops an item carrying *any* excluded tag, so a
-group with everything ticked filters nothing and unticking Anime hides every
-item tagged Anime whatever else it carries. Resolution sub-groups and Tags have
-**All** / **None** shortcuts. Application and Asset items are never offered, so
+one must be on an item. A selected Tags chip is sent the same way, so selecting
+Anime shows only items tagged Anime; a hidden chip (Option-click or its context
+menu) is sent as `excludedtags[]`. Every other box starts ticked and unticking it
+sends the tag as `excludedtags[]`: Steam drops an item carrying *any* excluded
+tag, so a group with everything ticked filters nothing and unticking Video hides
+every Video item. Resolution sub-groups have **All** / **None** shortcuts and
+Tags has **Reset**. Application and Asset items are never offered, so
 those two tags are always excluded (`WorkshopStore.defaultExcludedTags` holds
 the out-of-the-box list: Application, Asset, Questionable, Mature,
-Unspecified). A tag that is both required and excluded would empty the result,
-so the required one wins and it is not sent as excluded. The toolbar's filter
+Unspecified). A tag is never both required and excluded: selecting a chip stops
+hiding it and the other way round. The Filter button's
 count is the number of boxes that differ from the defaults; **Clear** restores
 them.
 
@@ -73,9 +74,9 @@ The lookup answers from Steam's public details endpoint, the one that already su
 every other source's tiles, so the download ring, inspector, Installed mark and update
 mark work as on any tile, and a collection opens through **Open collection**. It is a
 page of one (`WorkshopService.itemPage`), and Open on Steam goes to the item's page.
-The sidebar's age rating, tags and Type, and the sort, do not apply to an item asked
-for by name; the summary line says so while it is on show (`lookup` in the
-snapshot). Creator names cost a profile page fetch, so a looked-up tile shows the
+The filters' age rating, tags and Type, and the sort, do not apply to an item asked
+for by name; the summary line says so while it is on show
+(`WorkshopBrowseState.isLookup`). Creator names cost a profile page fetch, so a looked-up tile shows the
 generic name; **More by this author** still works from the creator id.
 
 An item that cannot be shown fails like any load: the error banner with **Retry**, and
@@ -101,8 +102,8 @@ unrelated links the page carries fall away. The page keeps Steam's own filtering
 order, because the request that fetched it carried them.
 
 The result is marked `isDegraded`: the summary line then says "Steam changed its
-Workshop page, so this list may be incomplete." instead of the result count (`degraded`
-in the snapshot), because the totals are only estimates. A full page of ids suggests
+Workshop page, so this list may be incomplete." instead of the result count
+(`WorkshopBrowseState.isDegraded`), because the totals are only estimates. A full page of ids suggests
 one more page; a short one is the last, and a page past the first counts the pages
 before it as full. The fallback is logged once per run. The original failure stands,
 and no empty list is shown, when the page names no id, when no id belongs to a
@@ -114,9 +115,10 @@ carry every collection's children, so the ids they name are not the page's items
 ### Tile thumbnails
 
 Steam's `preview_url` is the full-size preview, and most trending previews are
-animated GIFs of roughly a megabyte each. Tiles load `mwe-ui://thumbnail/<id>`
-instead: the panel's scheme handler asks `WorkshopThumbnailCache` for the item,
-which downloads the preview **once, exactly as Steam published it**, and keeps
+animated GIFs of roughly a megabyte each. Tiles ask the panel's image pipeline for a
+Steam thumbnail instead (`PanelImageSource.steamThumbnail`, https only), which reads
+it through `WorkshopThumbnailCache`; the cache downloads the preview **once, exactly
+as Steam published it**, and keeps
 both halves under `Cache/WorkshopThumbnails` in the app-support folder: one still
 frame decoded with ImageIO and stored as a 512px JPEG (`<key>.jpg`) and, when the
 preview is animated, the original bytes beside it (`<key>.anim`). A single-frame
@@ -139,67 +141,71 @@ still image keeps frame 0.
 At most eight previews download at once, concurrent requests for the same tile
 share one download, and cache hits cost no network and survive relaunches. The
 folder is trimmed to 512 MB oldest-first (stills and animations age
-independently; a hit keeps its entry young). Only ids announced in the current
-snapshot (results, queued downloads and pending requests) resolve; a tile pulses
-its placeholder until its image arrives and hides a failed image.
+independently; a hit keeps its entry young). The pipeline decodes the still at the
+size the tile draws and keeps decoded stills in its bounded memory cache; a tile shows
+a placeholder until its image arrives and keeps it for a failed image, and a tile that
+scrolls away stops waiting without cancelling a download another tile still needs.
 
-Nothing waits for the web view to ask. `WorkshopStore.onPreviewsAvailable` hands
+Nothing waits for a tile to ask. `WorkshopStore.onPreviewsAvailable` hands
 every Steam page's preview URLs to `WorkshopThumbnailCache.warm` the moment the
 page is decoded, and with `prefetchesNextPage` (both set by
-`WebControlPanel.makeCoordinator`) the store fetches the page after the one on
+`PanelController.start()`) the store fetches the page after the one on
 show in the background, so paging forward is served from the page cache and its
 tiles from disk. A failed prefetch is silent; the page is loaded normally when
 the user gets there.
 
 The animation follows the stills. Discover stills load eagerly, and no animation
 is requested until every still on the page has settled (loaded or failed). After
-that, for each tile on screen, the panel requests `mwe-ui://animated/<id>`, six
-at a time, which is normally a local read of the `.anim` file the still pass left
+that, for each tile on screen, the panel asks the pipeline for the animation
+(`WorkshopPreviewCoordinator`, `LivePreviewScheduler`), six at a time in grid order,
+which is normally a local read of the `.anim` file the still pass left
 behind (an animation asked for while its still is downloading waits for that
 download rather than starting another). It is fetched again, two at a time on its
 own lane, only when that copy was pruned; a preview the still pass found to be a
-single frame is refused without a request. The animation is placed beneath the
-still and revealed by its image-load event; a load failure keeps the still
-visible. The original animation plays as authored, including black fades.
+single frame is refused without a request, and a failed animation is not tried
+again by scrolling. `AnimatedPreview` replaces the still once its data has arrived
+and plays it as authored, black fades included, decoding one frame at a time at the
+size it draws and off the main thread, so a page of animations does not slow scrolling;
+a load failure keeps the still visible. Under Reduce Motion it shows
+the first frame.
 
-The panel never samples animation pixels: synchronous WebKit canvas
-draw/readback calls can block its JavaScript thread in repeated 15-second
-graphics-process waits, making every control appear frozen while the native app
-stays responsive. Bright still selection therefore stays in the native ImageIO
-cache. Scrolling a tile offscreen, hiding the document or leaving Discover
-releases its animation source, and returning to a visible tile reuses the disk
-cache; flipping to another page drops pending animation requests. The inspector
-keeps the full-size preview for the selected item.
+The panel never reads animation pixels back: frames go from ImageIO to the screen,
+and the bright still is chosen once, in the cache. Scrolling a tile offscreen, hiding
+the window or leaving Discover releases its animation, and returning to a visible tile
+reuses the disk cache; flipping to another page drops pending animation requests. An
+installed copy shows the library's still and never animates. The inspector shows
+Steam's 512 px still for the selected item, with its animation played over it.
 
 ## Collections, authors and subscriptions
 
-A row of tabs heading Discover's toolbar chooses what it lists: **Wallpapers**
-(the browse page above), **Collections** or **Your subscriptions**. In a narrow
-column they drop their glyphs instead of wrapping. An author's wallpapers and a
-collection's items are opened from a tile instead: no tab is current, and the
+A segmented control leading Discover's header chooses what it lists: **Wallpapers**
+(the browse page above), **Collections** or **Your subscriptions**. In the narrowest
+column it becomes one menu; the arrow keys move between the segments, and Space or
+Return chooses one. An author's wallpapers and a
+collection's items are opened from a tile instead: no segment is current, and the
 search field gives way to a back button and what is on show; back returns to the
 list, page 1, they were opened from (`WorkshopStore.open`, `back` and
-`sourceHistory`). Choosing a tab starts a new history. A list that fails to open
+`sourceHistory`). Choosing a segment starts a new history. A list that fails to open
 empties the grid rather than leaving the list it was to replace on show under its
-tab, where Next would page that other list; its error offers **Try again** for the
+segment, where Next would page that other list; its error offers **Try again** for the
 list that failed.
 
 Only Wallpapers and Collections are searched and sorted by Steam; the others come
 in their own order, so the panel hides the search field and the sort menu for
-them. The filter sidebar applies everywhere: Steam applies it to the two lists,
+them. The filters apply everywhere: Steam applies them to the two lists,
 and `WorkshopService.matching` applies the same rules to the other sources'
 pages, which can therefore show fewer than 30 tiles, or none while Steam's count
 says more exist; such a page says the filters hide everything on it and offers
 the next page. The line above the grid links **Open on Steam** to the Steam page
-listing what is on show (`WorkshopStore.browseURL`, the snapshot's `steamURL`).
+listing what is on show (`WorkshopStore.browseURL`).
 The sources are `WorkshopSource` in `App/Services/Workshop/WorkshopSource.swift`.
 
 ### Collections
 
 **Collections** is Steam's browse page with `section=collections`. A collection is
 a list, not a download: its tile says Collection and has no download ring,
-double-clicking it or **Open collection** in its details opens it, and native
-refuses a `requestDownload` for it. Opening one asks Steam's public
+double-clicking it or **Open collection** in its details opens it, and the
+panel's `requestDownload` refuses it. Opening one asks Steam's public
 `ISteamRemoteStorage/GetCollectionDetails` for its items in the collection's own
 order, then shows them 30 at a time through the details endpoint.
 
@@ -240,12 +246,26 @@ subscriptions** needs a Steam Community sign-in. This is a different sign-in fro
 SteamCMD's (see [Steam sign-in](#steam-sign-in)), and the app never sees the
 password: **Sign in to Steam…** opens Steam's own sign-in page in a window
 (`WebSignInWindowController` with its `.steam` site, the same one pixiv uses) and
-takes the `steamLoginSecure` cookie Steam sets. The cookie is kept in memory only
-(`WorkshopStore.steamWebSession`): it is never written to disk or the keychain,
-ends when the app quits or on **Sign out of Steam**, and is sent only to
-`steamcommunity.com` over HTTPS (a redirect anywhere else goes without it,
-`WorkshopService.redirected`), to read the subscriptions list (the author page
-with `browsefilter=mysubscriptions`).
+takes the `steamLoginSecure` cookie Steam sets, and with it the
+`steamRefresh_steam` renewal token Steam sets on `login.steampowered.com` when the page
+set one for the same account. The session (`WorkshopStore.steamWebSession`) is kept in
+the login keychain as one generic password (`KeychainSteamWebSessionStore`, service
+`app.wallpapermachine.steam-community`), read once at launch off the main thread, so
+the sign-in survives quitting; **Sign out of Steam**, or Steam ending the session,
+removes it. The cookie is sent only to `steamcommunity.com` over HTTPS (a redirect
+anywhere else goes without it, `WorkshopService.redirected`), to read the subscriptions
+list (the author page with `browsefilter=mysubscriptions`).
+
+The cookie's own token lasts about a day; the renewal token lasts months. Before a
+subscriptions read, a cookie whose token has run out (its JWT `exp`, read without
+checking the signature, within two minutes) is traded for a new one through
+`IAuthenticationService/GenerateAccessTokenForApp` on `api.steampowered.com`
+(`WorkshopService.renew`): the renewal token goes there alone, in a POST body, and the
+request follows no redirect. Concurrent readers wait for one renewal, and the new
+cookie is saved. Steam refusing the token (an empty `response`) ends the session like
+its sign-in page does. A session without a renewal token is used until Steam ends it.
+The SteamCMD sign-in cannot be reused here: SteamCMD keeps its own machine-bound
+client token, which the app does not read.
 
 That page lists rows rather than an author's tiles, so
 `WorkshopService.decodeProfileListing` reads an item's id from either layout: an
@@ -262,7 +282,10 @@ with **Download the ones not in your library** as the list's main action beside
 **Download the ones not in your library** reads every page of subscriptions (at
 most 1,000 pages of 30), drops what is installed, collections and Application
 items, and queues the rest as ordinary downloads, which need SteamCMD's own
-sign-in as any download does. Nothing is subscribed or unsubscribed on Steam.
+sign-in as any download does. Nothing is subscribed or unsubscribed on Steam. The
+welcome guide's **Import my subscriptions** and its one-time offer to existing users
+([first run](first-run.md#star-prompt-the-performance-data-question-and-the-subscriptions-offer))
+do the same, signing in first when needed.
 
 ## One decision per download
 
@@ -308,7 +331,7 @@ imported. The full status sentence stays in the tooltip, the inspector and the
 downloads list.
 
 Double-clicking a tile that is already in the library applies it, as on the
-Installed tab.
+Installed page.
 
 ### Transfer progress
 
@@ -337,13 +360,13 @@ inside a run the new meter counts only what it fetches, so it is added to what w
 shown when it started (still capped by the tree): the bar holds its place at the
 relaunch and moves on with the first new bytes, even when Steam has little left to
 fetch. Beside the
-speed, the queue rows, the inspector and the activity bar say how long is left
+speed, the queue rows, the inspector and the toolbar's downloads button say how long is left
 (for example "4 min left"). The estimate is the bytes gained over the last 20
 seconds, smoothed so one burst does not swing it, and it stays hidden until four
 seconds of history exist, while the pace is under 1 KB/s, at the 99% cap, and for
 an item listed without a size. Seconds show under a minute and a half, minutes
 under an hour and a half, then hours; the figure is capped at 99 hours. With
-several downloads running the activity bar shows the slowest job's time, and only
+several downloads running the downloads button shows the slowest job's time, and only
 when every running job has an estimate. The shared scene resources use SteamCMD's
 own byte counters for the same estimate.
 
@@ -454,9 +477,8 @@ needed. The implementation is `App/Services/Steam/SteamCMDPackages.swift`,
 
 ## The download queue
 
-Every download also appears in a compact popover from the bottom activity bar,
-and from the top-bar downloads button that is shown while there is download
-activity. Each transfer uses a private SteamCMD session and an account that owns
+Every download also appears in a compact popover opened from the toolbar's
+downloads button, which is shown while there is download activity. Each transfer uses a private SteamCMD session and an account that owns
 Wallpaper Engine. Closing the popover, the sign-in dialog or the panel never stops
 work.
 
@@ -503,9 +525,11 @@ work.
   session the runtime preparation, whether a saved sign-in was restored, each
   status change, the sign-in handoff and SteamCMD's exit status, so a stalled
   batch can be diagnosed from **Show download logs**.
-- **Activity bar.** It carries the running job's status, percentage, speed and
-  time left, or the batch's count, mean percentage, summed speed and slowest time
-  left while several run. The queue footer states the slot rule.
+- **Downloads button.** The toolbar's button carries, as its label and tooltip,
+  the running job's status, percentage, speed and time left, or the batch's count,
+  mean percentage, summed speed and slowest time left while several run, and it
+  rings itself with the batch's mean progress while anything transfers. The queue
+  footer states the slot rule.
 - **Menu bar.** While downloads run, the menu bar menu has a line right under **Control
   Panel**: **Downloads: 2 in progress, 40%**, or **Downloads: 2 in progress** when a figure
   cannot be given. It counts the downloads that are moving or waiting for a slot or a
@@ -513,7 +537,7 @@ work.
   failed or cancelled one and the sign-in that downloads nothing are left out, and so is
   a job that is pausing, which still holds its slot until its session closes. The percent
   is the share of the bytes all of them expect that has arrived, so a large download
-  weighs more than a small one (the activity bar averages each job's own percentage
+  weighs more than a small one (the downloads button averages each job's own percentage
   instead). It appears only when every counted job reports a size; a job that is queued,
   signing in or listed without a size leaves the figure out rather than guessing it,
   and it stops at 99% because only Steam's own success line claims the last percent.
@@ -539,7 +563,7 @@ work.
   "Signed in" card with the running job's status and progress (or notes that
   shared resources download first), offers **Done** and **Show downloads**, and
   closes by itself six seconds later. The transfer is already running on the tile
-  and in the activity bar throughout.
+  and on the downloads button throughout.
 - **Pause, resume, cancel.** **Pause download** releases the transfer's slot and
   retains its downloaded content. **Resume download** starts a fresh private
   SteamCMD runtime and lets Steam validate and reuse its partial content and
@@ -587,8 +611,14 @@ Scene support is experimental; [web wallpapers](web-wallpapers.md) run in a
 built-in web view; Windows application wallpapers are labeled unsupported.
 
 **Download from Steam…** in **Settings → Library & Steam**, or **Get shared
-resources** in a scene's details, starts the installation; **Locate an
-installation…** (**Use an existing installation** in the dialog) instead points at
+resources** in a scene's details, starts the installation. While the resources
+are missing, a scene's details lead with that notice (above any failure, with
+**Show in downloads** in place of the button while they download) and offer no
+GitHub report, and **Apply**, **Reapply** or **Apply to all displays** on an
+installed scene opens this setup instead of asking the renderer for a failure
+(`PanelController.getsSceneResourcesInstead(of:)`); the scene is not applied by
+itself once the resources arrive. **Locate an installation…** (**Use an existing
+installation** in the dialog) instead points at
 an existing purchased installation. Installation reuses the private SteamCMD login
 and cancellation flow and requests the Windows application with `app_update
 431960 validate`. Only the validated `assets` tree is retained, at
@@ -620,7 +650,7 @@ the account — and never the shared-resources stage, then runs
 `WorkshopDownloader.signIn`: a private SteamCMD session with `+login <account>
 +licenses_for_app 431960 +quit` and no download command (`isSigningInOnly`).
 Steam's password and Steam Guard prompts arrive on the job exactly as for a
-download and are answered through `downloadInput`; with **Keep me signed in** the
+download and are answered through `submitDownloadInput`; with **Keep me signed in** the
 accepted session is saved the same way, so the next download starts silently. The
 job takes a queue slot like any other (`WorkshopDownloadManager.signIn`, at most
 one at a time), succeeds only once Steam confirms the sign-in before quitting, and

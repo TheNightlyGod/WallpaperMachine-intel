@@ -19,7 +19,7 @@ use wallpaper_core::project::SceneTemplate;
 use wallpaper_core::{
     AudioSpectrum128, DisplaySelector, DisplaySnapshotEntry, EngineError, FirstFrameCallback,
     PropertyPreview, RecoveryOutcome, RecoveryReason, SceneBackend, SceneDemandReasons,
-    SceneRendererPreference, SceneUpdateMode, WallpaperAssignment, WallpaperEngine,
+    SceneRendererPreference, SceneResolution, SceneUpdateMode, WallpaperAssignment, WallpaperEngine,
     media::audio::{
         AudioCaptureBackend, AudioCaptureController, AudioVolume, PlatformAudioCaptureBackend,
         RESTART_RETRY_DELAYS, RestartOutcome, device_watch::OutputDeviceWatcher,
@@ -285,6 +285,20 @@ pub trait EngineFacade: Send + Sync + 'static {
         let _ = preference;
         Ok(())
     }
+    /// Chooses how many pixels a 2D scene is rasterized with, process-wide.
+    /// `Canvas` by default.
+    ///
+    /// A scene opened afterwards takes it when its graph is built; one already
+    /// running takes it when its render scale is next applied, which resizes
+    /// its targets in place without reparsing the project or reopening a video.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the renderer rejects the call.
+    fn set_scene_resolution(&self, resolution: SceneResolution) -> Result<(), EngineError> {
+        let _ = resolution;
+        Ok(())
+    }
     /// One row per open scene. An empty vector means nothing was observed,
     /// never that every scene is idle.
     fn scene_runtime_reports(&self) -> Vec<SceneRuntimeReport> {
@@ -504,6 +518,10 @@ impl EngineFacade for RealEngineFacade {
         preference: SceneRendererPreference,
     ) -> Result<(), EngineError> {
         self.engine.set_scene_renderer_preference(preference)
+    }
+
+    fn set_scene_resolution(&self, resolution: SceneResolution) -> Result<(), EngineError> {
+        self.engine.set_scene_resolution(resolution)
     }
 
     fn scene_runtime_reports(&self) -> Vec<SceneRuntimeReport> {
@@ -1181,6 +1199,7 @@ pub struct FakeEngineFacade {
     scene_on_demand_calls: Arc<ArcSwap<Vec<bool>>>,
     scene_video_plane_sampling_calls: Arc<ArcSwap<Vec<bool>>>,
     scene_renderer_calls: Arc<ArcSwap<Vec<SceneRendererPreference>>>,
+    scene_resolution_calls: Arc<ArcSwap<Vec<SceneResolution>>>,
     scene_runtime_reports: Arc<ArcSwap<Vec<SceneRuntimeReport>>>,
     /// Readings handed out one per read before the stored value is used again,
     /// so a test can say how a scene changes between two looks without a clock.
@@ -1613,6 +1632,12 @@ impl FakeEngineFacade {
     #[must_use]
     pub fn scene_renderer_calls(&self) -> Vec<SceneRendererPreference> {
         load_log(&self.scene_renderer_calls)
+    }
+
+    /// Every 2D scene resolution the bridge pushed, in order.
+    #[must_use]
+    pub fn scene_resolution_calls(&self) -> Vec<SceneResolution> {
+        load_log(&self.scene_resolution_calls)
     }
 
     /// What the next [`EngineFacade::scene_runtime_reports`] read returns.
@@ -2374,6 +2399,11 @@ impl EngineFacade for FakeEngineFacade {
         preference: SceneRendererPreference,
     ) -> Result<(), EngineError> {
         push_log(&self.scene_renderer_calls, preference);
+        Ok(())
+    }
+
+    fn set_scene_resolution(&self, resolution: SceneResolution) -> Result<(), EngineError> {
+        push_log(&self.scene_resolution_calls, resolution);
         Ok(())
     }
 

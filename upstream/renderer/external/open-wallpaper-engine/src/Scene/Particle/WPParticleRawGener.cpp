@@ -64,12 +64,7 @@ inline usize GenParticleData(std::span<const std::unique_ptr<ParticleInstance>> 
             specOp(p, { &lifetime });
 
             auto pos = inst->GetBoundedData().pos + p.position;
-            // The generic particle ABI exposes one scalar ParticleSize in
-            // a_TexCoordVec4.w, so nonuniform owner scale cannot be undone per
-            // billboard axis without changing the shader/vertex contract.
-            // Use the isotropic value derived from effective X/Y column norms;
-            // inverse_x/y are carried for generators that can represent them.
-            float size = (p.size / 2.0f) * render_scale.isotropic_inverse;
+            float size = p.size / 2.0f;
 
             usize offset = 0;
 
@@ -228,6 +223,30 @@ inline void EmitRopeStrip(SceneVertexArray& sv, bool thick, std::span<const Rope
     }
 }
 
+/// Splits every pair of connected points into `s` straight pieces along a
+/// Catmull-Rom curve through them, blending colour, alpha and size between the
+/// pair. `s` is one more than the authored subdivision count, which counts the
+/// points added between two particles.
+inline void SubdivideRope(std::span<const RopePoint> live, uint32_t s, std::vector<RopePoint>& rope) {
+    const usize n = live.size();
+    rope.clear();
+    rope.reserve((n - 1) * s + 1);
+    for (usize j = 0; j + 1 < n; ++j) {
+        const RopePoint& p0 = live[j == 0 ? 0 : j - 1];
+        const RopePoint& p1 = live[j];
+        const RopePoint& p2 = live[j + 1];
+        const RopePoint& p3 = live[j + 2 >= n ? n - 1 : j + 2];
+        for (uint32_t q = 0; q < s; ++q) {
+            const float t = static_cast<float>(q) / static_cast<float>(s);
+            rope.push_back(RopePoint {
+                CatmullRom(p0.position, p1.position, p2.position, p3.position, t),
+                p1.color + (p2.color - p1.color) * t, p1.alpha + (p2.alpha - p1.alpha) * t,
+                p1.half_size + (p2.half_size - p1.half_size) * t });
+        }
+    }
+    rope.push_back(live.back());
+}
+
 inline usize GenRopeData(std::span<const std::unique_ptr<ParticleInstance>> instances,
                          WPGOption opt, SceneVertexArray& sv, ParticleRenderScale render_scale,
                          bool& overflow_reported) {
@@ -245,7 +264,7 @@ inline usize GenRopeData(std::span<const std::unique_ptr<ParticleInstance>> inst
         for (const auto& p : inst->Particles()) {
             if (! ParticleModify::LifetimeOk(p)) continue;
             live.push_back(RopePoint { origin + p.position, p.color, p.alpha,
-                                       (p.size / 2.0f) * render_scale.isotropic_inverse });
+                                       p.size / 2.0f });
         }
         if (live.size() < 2) continue;
 
@@ -257,23 +276,7 @@ inline usize GenRopeData(std::span<const std::unique_ptr<ParticleInstance>> inst
             EmitRopeStrip(sv, thick, live, authored_length, quad, quad_capacity, render_scale,
                           overflow_reported);
         } else {
-            const usize n = live.size();
-            rope.clear();
-            rope.reserve((n - 1) * s + 1);
-            for (usize j = 0; j + 1 < n; ++j) {
-                const RopePoint& p0 = live[j == 0 ? 0 : j - 1];
-                const RopePoint& p1 = live[j];
-                const RopePoint& p2 = live[j + 1];
-                const RopePoint& p3 = live[j + 2 >= n ? n - 1 : j + 2];
-                for (uint32_t q = 0; q < s; ++q) {
-                    const float t = static_cast<float>(q) / static_cast<float>(s);
-                    rope.push_back(RopePoint {
-                        CatmullRom(p0.position, p1.position, p2.position, p3.position, t),
-                        p1.color + (p2.color - p1.color) * t, p1.alpha + (p2.alpha - p1.alpha) * t,
-                        p1.half_size + (p2.half_size - p1.half_size) * t });
-                }
-            }
-            rope.push_back(live.back());
+            SubdivideRope(live, s, rope);
             const float subdivided_length =
                 render_scale.uv_scrolling ? static_cast<float>(quad_capacity) + 1.0f
                                           : static_cast<float>(rope.size());
@@ -289,6 +292,7 @@ inline usize GenRopeTrailData(std::span<const std::unique_ptr<ParticleInstance>>
                               WPGOption opt, SceneVertexArray& sv,
                               ParticleRenderScale render_scale, bool& overflow_reported) {
     std::vector<RopePoint> points;
+    std::vector<RopePoint> subdivided;
     const usize            quad_capacity = sv.CapacitySize() / (sv.OneSize() * 4);
     usize                  quad { 0 };
     const bool             thick = opt.thick_format;
@@ -306,7 +310,7 @@ inline usize GenRopeTrailData(std::span<const std::unique_ptr<ParticleInstance>>
             }
 
             const uint32_t h         = trails[i].Count();
-            const float    half_size = (p.size / 2.0f) * render_scale.isotropic_inverse;
+            const float    half_size = p.size / 2.0f;
             points.clear();
             points.push_back(RopePoint { origin + p.position, p.color, p.alpha, half_size });
             for (uint32_t j = 1; j <= h; ++j) {
@@ -319,11 +323,24 @@ inline usize GenRopeTrailData(std::span<const std::unique_ptr<ParticleInstance>>
                 const RopePoint& previous = points[points.size() - 2];
                 last.position = last.position + (previous.position - last.position) * t;
             }
-            const float authored_length =
-                render_scale.uv_scrolling ? static_cast<float>(trails[i].Capacity())
-                                          : static_cast<float>(h);
-            EmitRopeStrip(sv, thick, points, authored_length, quad, quad_capacity, render_scale,
-                          overflow_reported);
+            const uint32_t s = std::max<uint32_t>(1, render_scale.rope_subdivision);
+            if (s == 1) {
+                const float authored_length =
+                    render_scale.uv_scrolling ? static_cast<float>(trails[i].Capacity())
+                                              : static_cast<float>(h);
+                EmitRopeStrip(sv, thick, points, authored_length, quad, quad_capacity, render_scale,
+                              overflow_reported);
+            } else {
+                // The recorded path is smoothed between its points: each pair
+                // is drawn as `s` pieces, so a few recorded points make a curve.
+                SubdivideRope(points, s, subdivided);
+                const float authored_length =
+                    render_scale.uv_scrolling
+                        ? static_cast<float>(trails[i].Capacity()) * static_cast<float>(s)
+                        : static_cast<float>(subdivided.size());
+                EmitRopeStrip(sv, thick, subdivided, authored_length, quad, quad_capacity,
+                              render_scale, overflow_reported);
+            }
             if (quad >= quad_capacity) return quad;
             ++i;
         }

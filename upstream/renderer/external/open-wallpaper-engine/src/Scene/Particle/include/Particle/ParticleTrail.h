@@ -4,6 +4,7 @@
 #include <vector>
 
 #include <Eigen/Core>
+#include <Eigen/Dense>
 
 namespace wallpaper
 {
@@ -53,6 +54,17 @@ public:
         m_head              = (m_head + capacity - 1) % capacity;
         m_samples[m_head]   = sample;
         if (m_count < capacity) ++m_count;
+    }
+
+    /// Carries every recorded point through `transform`, a change of the space
+    /// the points are expressed in.
+    void Transform(const Eigen::Matrix4d& transform) noexcept {
+        for (auto& sample : m_samples) {
+            const Eigen::Vector4d moved =
+                transform * Eigen::Vector4d(sample.position.x(), sample.position.y(),
+                                            sample.position.z(), 1.0);
+            sample.position = moved.head<3>().cast<float>();
+        }
     }
 
     uint32_t Count() const noexcept { return m_count; }

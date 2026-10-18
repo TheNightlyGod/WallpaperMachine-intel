@@ -64,7 +64,7 @@ enum BridgeSnapshotFixtures {
 
   /// A settings snapshot carrying shipped defaults: compatibility backend, full
   /// render scale, keep-running on battery, no frame-rate cap, both experiments
-  /// off and scene optimisation on. Tests that care about one of those pass it
+  /// off, scene optimisation on and 2D scenes drawn at the display's resolution. Tests that care about one of those pass it
   /// explicitly.
   static func settings(
     displays: [BridgeDisplaySettingsRow] = [],
@@ -79,6 +79,7 @@ enum BridgeSnapshotFixtures {
     sceneOnDemandEnabled: Bool = false,
     sceneVideoPlaneSamplingEnabled: Bool = false,
     sceneRenderer: String = "compatibility",
+    sceneResolution: String = "display",
     sceneUpdateModes: [BridgeSceneUpdateModeReport] = [],
     sceneRenderers: [BridgeSceneBackendReport] = [],
     userAssetsPath: String = "/tmp/UserAssets",
@@ -114,6 +115,7 @@ enum BridgeSnapshotFixtures {
       sceneOnDemandEnabled: sceneOnDemandEnabled,
       sceneVideoPlaneSamplingEnabled: sceneVideoPlaneSamplingEnabled,
       sceneRenderer: sceneRenderer,
+      sceneResolution: sceneResolution,
       sceneUpdateModes: sceneUpdateModes,
       sceneRenderers: sceneRenderers,
       userAssetsPath: userAssetsPath,

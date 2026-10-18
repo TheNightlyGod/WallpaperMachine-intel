@@ -86,17 +86,17 @@ change too, so it resumes current. A failure to show an update is logged (once p
 distinct problem) and the preview keeps playing what it has; the next edit tries again.
 
 A slider or a colour is also followed while it is being dragged, not only when it is
-let go. The panel sends the value under the thumb (`propertyPreview`) at most every
-100 ms and one at a time, as a Position slider does, and the window reads the draft with
+let go. The panel sends the value under the thumb (`previewProperty`, through
+`DragStepPump`) at most every 100 ms and one at a time, as a Position slider does, and the window reads the draft with
 that value on top (the `pending` list of the bridge's `wallpaper_preview`) as soon as it
 has taken the step before, without the 150 ms wait an edit gets, which a drag would
 never get to the end of. A step is not an edit: nothing becomes **Modified**, dirty or
 saved, and letting go of the control makes the edit that keeps the value. A step that
-fails is ignored, and a key press, which changes the value at once, shows no step before
-it is saved. A colour picker is used in a panel of its own, so the page sees no pointer
-on it: its first step waits one task, and a single pick, whose change event follows at
-once, shows nothing before it is saved. Whether the colour picker of WebKit sends steps
-while it is open is checked on a desktop
+fails is ignored, and a key press or a VoiceOver adjustment, which changes the value at
+once, shows no step before it is saved. The colour well opens the system colour panel,
+whose dragging the inspector cannot see: each colour it reports is a step, its first one
+waiting a turn, and the colour is saved once it has stayed the same for 350 ms or the
+panel closes. How smoothly the desktop follows is checked on a desktop
 ([manual smoke](../testing/manual-smoke.md)).
 
 A scene takes the whole property state through the renderer's
@@ -128,8 +128,9 @@ follows with per-display playback configuration, open when the wallpaper is on a
 display and collapsed otherwise, then **Collections**.
 **Wallpaper properties** comes last, with the wallpaper's authored controls in their
 original order, so a long property list never pushes the shorter sections out of
-reach. General, display and property disclosures retain their state across
-snapshot updates.
+reach. General, display and property disclosures keep their state while the same
+wallpaper stays selected; another wallpaper starts at the top with its sections at their
+defaults.
 
 Property rows place the label on the left and the checkbox, slider/value, combo
 menu or color swatch on the right; text and file editors use the full width below
@@ -162,33 +163,38 @@ sends its language to the bridge at launch and whenever the language changes, an
 the open inspector relabels at once without reloading the wallpaper or touching
 pending edits.
 
-Authors use HTML labels as a layout surface. `WebUI/property-label.js` parses them
-inertly and reconstructs a small presentation allowlist: headings, paragraphs, line
-breaks, emphasis, font colors, centered content, dividers, links and images. Author
-scripts, styles, embedded documents, form controls, event handlers and panel action
-attributes are discarded. Plain labels remain available for accessibility and
-native file pickers. An empty text property is omitted; a control without a
+Authors use HTML labels as a layout surface. `PropertyLabelDocument`
+(`App/Views/ControlPanel/Inspector/`) parses them as data, the way a browser would
+repair broken markup, and keeps a small presentation allowlist: headings, paragraphs,
+line breaks, lists, emphasis, sizes, font colors (hex values and common names),
+centered content, dividers, links and images; `PropertyLabelView` draws the result as
+attributed text, rules and registered images. Author scripts, styles, embedded
+documents and form controls are dropped with their contents, other unknown elements
+keep only their text, and the source, the number of nodes and the depth are bounded.
+Plain labels remain available for accessibility and native file pickers. An empty text property is omitted; a control without a
 readable name uses **Unnamed option**, never the editor's markup-derived id.
 
 A `group` record is a section heading for the controls after it, so it is shown
-as a bold, ruled heading (exposed to assistive technology as a level-3 heading)
-rather than as muted description text. It takes the same sanitised label as any
+as a bold heading with a rule above it (marked as a heading for VoiceOver) rather
+than as muted description text. It takes the same sanitised label as any
 other, is omitted when it has no words, and is not collapsible: Wallpaper Engine
 groups only label what follows and own no rows of their own.
 
-Author artwork is loaded only through registered `mwe-ui://property-image/`
-routes. `PropertyImageCache` fetches HTTPS raster images natively from the
+Author artwork is loaded only for the image addresses the label registered, as a
+`PanelImageSource.propertyImage` the panel's image pipeline checks again before it
+reads anything. `PropertyImageCache` fetches HTTPS raster images natively from the
 allowlisted image CDNs (`i.ibb.co`, `i.imgur.com`, the supported Steam image hosts
 and QQ's photo-store hosts), rechecks redirects, and rejects credentials, custom
-ports, unregistered routes, oversized images and non-raster content. PNG
+ports, unregistered addresses, oversized images and non-raster content. PNG
 transparency and GIF animation are preserved, and repeated dividers share a
 bounded in-memory cache. At most four author-image transfers run across all hosts;
 a URL's load is shared by its consumers and cancelled when the last one goes away.
 Other image hosts are omitted (alt text is retained). Images remain author-hosted,
 need network access on a cache miss and are not copied into the app bundle.
-Supported author links use the native external-link policy, including Bilibili
-profile/article pages, and open only when clicked; unsupported links keep their
-text without a clickable action.
+Supported author links use the panel's external-link allowlist (`ExternalLink`),
+including Bilibili profile/article pages, and open only when clicked; unsupported
+links keep their text without a clickable action. A link is part of the label's text
+(VoiceOver's rotor reaches it), not a separate keyboard stop.
 
 An authored visibility rule decides whether a property is listed, and the
 bridge re-evaluates it after every draft edit. A rule may combine property
@@ -221,7 +227,8 @@ Unsubmitted text stays with its wallpaper when navigating between pages. A dirty
 or unsubmitted control shows a localized **Modified** flag outside its
 author-provided label; Reset clears the flag once the property is clean.
 
-**Restore all defaults**, a link above the controls beside the presets, stages
+**Restore all defaults**, a link at the top of the **Wallpaper properties** card, under
+the presets, stages
 the authored default of every property at once instead of one reset icon at a
 time. It is pending like any other edit: **Apply changes** keeps it and **Revert**
 brings back every value and **Modified** flag. It also drops text not yet sent and
@@ -238,11 +245,14 @@ a wallpaper built around "choose your own picture" shows the picture. The choice
 takes effect on **Apply changes**, which reloads the scene; the picker stores the
 path, not a copy, so moving or deleting the file leaves that slot on the artwork
 the author shipped. A picture outside the app's own storage is not readable from
-the sandboxed lock-screen extension, which keeps the authored texture there.
+the sandboxed lock-screen extension, which keeps the authored texture there. A
+picture chosen for a solid placeholder layer, the user's own or one a preset ships,
+is shown as it is: the layer's colour, often the scheme colour, only paints the
+placeholder while no picture fills it.
 
 ### Showing edits on the desktop
 
-**Settings → General → Startup & desktop → Show property edits on the desktop as I
+**Settings → Desktop & Lock Screen → Desktop → Show property edits on the desktop as I
 make them** lets the displays that draw a scene wallpaper follow its pending
 properties before **Apply changes**. It is off until the user turns it on, a choice
 kept on this Mac only (`WallpaperMachine.livePropertyEdits`, `LivePropertyEditing`)
@@ -401,7 +411,7 @@ which draws a video as a one-texture scene. The native video player draws a vide
 centred whatever the position says. A video it draws shows a note saying so, with a
 link to Performance settings, where choosing Compatibility for **Video playback** lets
 the position apply; the sliders stay available, and the saved position still reaches
-the lock screen. The page learns which displays the native player draws from the
+the lock screen. The panel learns which displays the native player draws from the
 running backend reports, so a wallpaper with no report yet shows the plain note.
 
 ### Compatibility check
@@ -452,10 +462,10 @@ When a factor is named, **Set scale factor to ×N** fills in the target display'
 **Scale factor** with it. The click goes through the same bridge call as the
 Displays section's field, so it joins the pending changes: **Apply changes** saves
 it and **Revert** restores the saved factor, and like typing in that field it is
-previewed on the display while the wallpaper is playing there. The page sends only
-the wallpaper and display; the factor is recomputed in Swift from the stored bars,
-the clip's proportions and the display's size at the moment of the click, so
-nothing the page sends can change it.
+previewed on the display while the wallpaper is playing there. The button names only
+the wallpaper and display; the factor is recomputed from the stored bars, the clip's
+proportions and the display's size at the moment of the click, so nothing the view
+holds can change it.
 
 The click is refused, and changes nothing, when the card no longer matches what is
 selected and configured: another wallpaper or display, a mirror or disabled
@@ -474,7 +484,7 @@ while that factor is still waiting in the unsaved draft: the app remembers what 
 set, and forgets it when the draft is applied or reverted, the factor is edited, or
 another wallpaper or display is shown. A factor that was already saved never gets the
 line, however many other edits the wallpaper has pending. The numbers on the card come
-from the snapshot, not from what the page did last. The lock-screen configuration
+from the stores, not from what the view did last. The lock-screen configuration
 carries the display's scale factor as well; no routine test exercises that path.
 
 Sampled evidence is not proof: a scene that keeps a black border through all five

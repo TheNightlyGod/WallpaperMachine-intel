@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <string>
 
@@ -20,7 +21,7 @@ const std::set<std::string> kSkipIds {
     "2435537849",
 };
 
-// Workshop root: resolved at build time via the WAYWALLEN_WORKSHOP_DIR
+// Default workshop root: resolved at build time via the WAYWALLEN_WORKSHOP_DIR
 // macro defined in tests/CMakeLists.txt. Falls back to "workshop" so the
 // binary stays runnable from the source root for ad-hoc dev loops.
 constexpr const char* kWorkshopDirMacro =
@@ -33,6 +34,11 @@ constexpr const char* kWorkshopDirMacro =
 
 } // namespace
 
+std::string WorkshopRoot() {
+    const char* root = std::getenv("WALLPAPER_MACHINE_WORKSHOP_ROOT");
+    return (root != nullptr && *root != '\0') ? root : kWorkshopDirMacro;
+}
+
 const Corpus& Corpus::instance() {
     static const Corpus c;
     return c;
@@ -41,7 +47,7 @@ const Corpus& Corpus::instance() {
 Corpus::Corpus() { build(); }
 
 void Corpus::build() {
-    fs::path root { kWorkshopDirMacro };
+    fs::path root { WorkshopRoot() };
     if (! fs::exists(root) || ! fs::is_directory(root)) {
         std::fprintf(stderr, "corpus: workshop dir %s missing\n", root.c_str());
         return;

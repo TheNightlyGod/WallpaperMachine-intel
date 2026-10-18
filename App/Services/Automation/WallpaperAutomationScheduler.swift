@@ -36,7 +36,7 @@ final class WallpaperAutomationScheduler {
     var onInputsChanged: (() -> Void)?
     private struct CachedResolution {
         let revision: UInt64
-        let location: WallpaperSolarLocation?
+        let solar: WallpaperSolarSettings?
         let dark: Bool
         let computedAt: Date
         let result: WallpaperAutomationPlanner.Result
@@ -162,13 +162,13 @@ final class WallpaperAutomationScheduler {
         let appearance = dark()
         let result: WallpaperAutomationPlanner.Result
         if let cached = resolutions[display], cached.revision == configuration.revision,
-           cached.location == store.location, cached.dark == appearance,
+           cached.solar == store.solar, cached.dark == appearance,
            time >= cached.computedAt, time < cached.result.reevaluateAt {
             result = cached.result
         } else {
             result = WallpaperAutomationPlanner.resolve(configuration, now: time,
-                dark: appearance, location: store.location, calendar: calendar)
-            resolutions[display] = .init(revision: configuration.revision, location: store.location,
+                dark: appearance, solar: store.solar, calendar: calendar)
+            resolutions[display] = .init(revision: configuration.revision, solar: store.solar,
                 dark: appearance, computedAt: time, result: result)
         }
         var resolved = Resolution(event: result.current, next: result.next, reevaluateAt: result.reevaluateAt)

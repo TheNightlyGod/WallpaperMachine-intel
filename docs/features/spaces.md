@@ -93,9 +93,9 @@ malformed topology, persistent visits and notification teardown are covered by
 catch-up and Focus exit while topology is unavailable by `WallpaperAutomationSchedulerTests`;
 old-schema decoding and mapping restore by the store and backup tests; scoped writes,
 public-fallback exclusion, late frames and encodes, mode changes, replacement gaps,
-current-only ejection and all-Space restoration by `DesktopWallpaperTests`; and the offscreen
-picker, reordering, unavailable mappings, forgetting and native validation by
-`ControlPanelSpaceWallpaperTests`.
+current-only ejection and all-Space restoration by `DesktopWallpaperTests`; and the panel's
+choices by UUID, reordering, unavailable mappings, forgetting and validation by
+`PanelAutomationActionsTests`, with focus after Forget in `DisplaysSettingsModelTests`.
 
 These checks do not establish actual Mission Control animations, OS notification timing,
 visible layout, VoiceOver or installed-app behavior. A separate explicitly authorized desktop

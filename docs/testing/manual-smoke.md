@@ -17,9 +17,18 @@ was run.
 
 - [ ] One library window opens, the starter wallpaper is visible, and there are
       no blank floating panels.
-- [ ] Switch between the Discover, pixiv, Installed and Settings tabs and through the
-      seven Settings categories: Performance, General, Appearance, Displays,
-      Library & Steam, Storage, About.
+- [ ] Switch between the Library, Steam Workshop, pixiv and Settings tabs, between All
+      wallpapers and Favorites with Library's chips and to a collection from the filters
+      panel, and through the eleven Settings sections: Quick
+      Settings (the one Settings opens on), General, Appearance, Desktop & Lock Screen,
+      Playback & Power, Performance, Displays, Keyboard shortcuts, Library & Steam,
+      Storage, About. The window title names the place on show each time, and on All
+      wallpapers, Favorites and a collection the subtitle counts it.
+- [ ] Narrow the window below 960 points: the inspector closes, the tabs stay whole in
+      the middle of the title bar, nothing overlaps the traffic lights or the toolbar, and widening
+      the window opens the inspector again. Open it with the toolbar's **Wallpaper
+      details** button while the window is narrow: it stays open as the window grows and
+      shrinks, and so does a choice to close it in a wide window.
 - [ ] Command-comma reuses the existing window.
 - [ ] Move the panel to another Space (or a desktop with another app full screen) and
       choose Control Panel from the status menu: it appears on the Space you are on,
@@ -33,6 +42,9 @@ was run.
       and scroll down a long library, then close the panel and reopen it from the status
       menu: the search, sort, boxes and scroll position are as left. Quit and relaunch:
       Installed starts unfiltered at the top.
+- [ ] In Filters → Tags, click a chip: it fills with the accent and a check and only
+      wallpapers with that tag stay; click it again and they all return. Option-click
+      (or right-click → Hide this tag) strikes it through and hides them.
 - [ ] With the app running, `open -n` the same app: no second copy appears and the
       first shows its panel. Run a copy from another folder: an alert says another
       copy is using the library, and the running copy is untouched. After an in-app
@@ -42,12 +54,33 @@ was run.
       note says to allow it in Login Items, and **Open Login Items…** opens that pane.
       Allow it there and come back to the panel: the switch is on and the note goes
       away without any other action.
+- [ ] In Settings, flip a Quick Settings tile (try Mute All): its full row in
+      Playback & Power follows, and the other way round. Search for a word from a row's
+      explanation: matching rows stay, the section list counts matches per section and dims
+      the rest, a disclosure holding a match opens and closes again when the search
+      clears, Escape clears the field, and a word nothing contains reads "No settings
+      match …".
+- [ ] On a laptop on battery, set **On battery** to Keep running and **When the battery is
+      low** to Reduced quality at a level above the current charge: Quick Settings' On
+      battery and Quality modules read "The battery is low. Reduced quality is in use.",
+      Performance's **Effective now** reads "Limited to 30 fps while the battery is low"
+      while the Frame rate limit slider reads No limit, and a display set above 30 fps notes
+      the same limit in Settings → Displays and the inspector, whose button opens Playback &
+      Power. Set the low-battery rule to Keep running: every one of those lines goes away.
+- [ ] On a laptop on battery, set **On battery** to Keep running and **When the battery is
+      low** to Pause at a level above the current charge: wallpapers pause, Quick Settings'
+      On battery module reads "The battery is low. Wallpapers are paused." and the When the
+      battery is low row adds "In effect now. Wallpapers are paused.". Set On battery to
+      Pause: the module's line goes away; set the rule to Stop: it reads "… Wallpapers are
+      stopped." again. Plug in: the line and the row's In effect now go away.
 
 ## Appearance
 
 - [ ] Choose Light and Dark, then System, and change the macOS appearance.
-- [ ] Check the titlebar, menus, controls, dialogs, inspector and download
-      popover in each mode.
+- [ ] Check the title bar (the name and version, the tabs, one colour from the traffic
+      lights to over the inspector), the inspector's edge resizing it, the Now Playing bar
+      and its details, menus,
+      controls, dialogs, inspector, filters panel and download popover in each mode.
 - [ ] Set an accent and a surface tone; relaunch and confirm both persist.
 - [ ] Try white and black accents, then Reset appearance. Wallpapers and
       playback must not change.
@@ -67,13 +100,13 @@ was run.
 - [ ] With animated GIF previews in the library, Installed shows every tile as a
       still, with nothing moving at rest. Resting the pointer on a tile plays only
       that tile, Tab or arrow keys play only the focused one, and leaving it, a
-      selection drag, another tab or another window stops it with no flicker when
+      selection drag, another page or another window stops it with no flicker when
       the grid re-renders. When a Workshop download finishes or the library is
       rescanned, the covers stay as they are with no flicker; after a preview
       file is replaced (import it again with Replace if changed), only that
       tile's cover refreshes.
 - [ ] With a saved Steam sign-in, select an installed Workshop wallpaper and
-      choose **Reinstall from Workshop…** (the circular arrows beside Trash):
+      choose **Reinstall from Workshop…** in the inspector's **More actions** menu:
       a sheet asks first and Cancel changes nothing. Confirming shows the
       download in the queue and, when it completes, the wallpaper keeps its
       options and a display showing it loads the new files. Delete the entry file
@@ -99,10 +132,11 @@ was run.
 ## Layout and accessibility
 
 - [ ] Check Discover, pixiv and Installed at 1240×800, 960×640 and 760×560 in light and
-      dark mode. The inspector stays present; panes resize without losing the
-      target or the primary actions.
-- [ ] Command-F, grid arrows, Return/Space, text editing and VoiceOver names
-      stay correctly scoped.
+      dark mode, with the inspector open and closed. Panes resize without losing the
+      target menu or the primary actions, and nothing is cut off at the window's edge.
+- [ ] Command-F puts the keyboard in the page's search field (Settings' too); grid arrows, Home and End, Return and Space, Delete, Escape (a name field,
+      then a popover, then selection mode), text editing and VoiceOver names stay
+      correctly scoped. With Reduce Motion on, no equalizer, spinner or preview animates.
 
 ## Discover, search and filters
 
@@ -111,27 +145,29 @@ was run.
 - [ ] Navigate away and back: query, page and selection stay.
 - [ ] A failed request's Retry repeats that request.
 - [ ] Open and dismiss the Downloads/Import pane.
-- [ ] Select tags in the filter sidebar across the resolution,
-      ultrawide/portrait, genre, age-rating and category groups: results contain
-      only items matching every selected tag, and Clear filters restores the
-      unfiltered query.
+- [ ] Open the Filters sidebar from the page's Filter button and select tags across
+      the resolution, ultrawide/portrait, genre, age-rating and category groups:
+      results contain only items matching every selected tag, the sidebar slides out
+      from the window's leading edge while the grid narrows, and Clear filters restores
+      the unfiltered query. The Filter button and the sidebar's own button close it
+      with the same slide; it stays open on the next library page.
 - [ ] Filter changes never activate wallpapers.
 
 ## pixiv
 
-- [ ] The pixiv tab opens on the daily ranking; paging, a tag search and each
+- [ ] The pixiv page opens on the daily ranking; paging, a tag search and each
       filter group work, and Clear restores the defaults.
 - [ ] Select a work with several pages, step to another page and download it:
       it appears in Installed as a still wallpaper, applies, and Image fit and
       Background color change it.
 - [ ] **Sign in to pixiv…** opens pixiv's own sign-in page in its own window;
-      signing in with a pixiv ID or email closes it and the sidebar names the
+      signing in with a pixiv ID or email closes it and the Filters sidebar names the
       account. Closing the window instead changes nothing.
 - [ ] Quit and reopen: the sign-in is still there, with no keychain prompt on a
       release build.
 - [ ] With an account whose viewing restrictions allow R-18 works, tick Mature
       (R-18): search includes works with the R-18 badge and the R-18 rankings
-      join the menu. With an account that hides them, the sidebar says so.
+      join the menu. With an account that hides them, the Filters sidebar says so.
 - [ ] **Log out**: the Mature box unticks and disables, an R-18 ranking returns
       to its all-ages one, and Keychain Access no longer lists
       `app.wallpapermachine.pixiv`.
@@ -160,7 +196,8 @@ was run.
       no dialog opens, the tile's ring fills with a percentage that matches the
       inspector's received/total bytes, and clicking the ring cancels.
 - [ ] With a saved sign-in, queue at least four Workshop items: three transfer
-      at once (the activity bar reads "3 downloading" with a combined speed),
+      at once (the toolbar's downloads button rings itself and its tooltip reads "3
+      downloading" with a combined speed),
       the fourth waits for a free slot, and the app log records each start.
 - [ ] With no saved sign-in, queue several items: only the first prompts, the
       rest wait for the sign-in, then start silently as soon as Steam accepts
@@ -221,7 +258,10 @@ reuse, or visual behavior, which is why these items are manual.
       apply runs, or use a wallpaper whose files fail to load on one display: the
       others return to what they showed.
 - [ ] Pause/resume and relaunch: the expected wallpaper and playback state
-      return.
+      return. Now Playing shows the target display's wallpaper with its equalizer
+      only while playing; its Previous, play/pause, Next and Recently used buttons
+      act as labelled, and with the target display empty it says "Nothing on this
+      display" while still reporting the global playback state.
 - [ ] Leave invalid scaling text, refresh or change routes, then return: the
       text is preserved and Apply changes is disabled. Return stages only that
       field, not unrelated properties.
@@ -259,10 +299,9 @@ reuse, or visual behavior, which is why these items are manual.
       line. **Apply changes** still reloads the desktop wallpaper from the saved options.
       Drag the slider and hold: the preview follows the thumb as it moves, not only after it
       stops, and stays where the thumb is while it is held; let go and nothing jumps, and a drag
-      back to where it began puts the preview back. Open the colour picker and move around in it:
-      note whether the preview follows the colour while the picker is open or only when it
-      closes (WebKit's picker may send its input events either way), and that choosing a colour
-      and closing it saves that colour. Press **Revert** or **Restore default** while the picker
+      back to where it began puts the preview back. Open the colour panel and move around in it:
+      the preview follows the colour while the panel is open, the colour is saved once you
+      stop moving for a moment, and closing the panel saves the colour on show. Press **Revert** or **Restore default** while the picker
       is open: the preview goes back and nothing stays on show.
 - [ ] Property edits on the desktop ([edits on the desktop](../features/wallpaper-properties.md#showing-edits-on-the-desktop)):
       with **Show property edits on the desktop as I make them** off, change a slider on a
@@ -425,6 +464,10 @@ describes what should happen and the log lines to read afterwards.
       wallpaper and Mission Control thumbnails remain unchanged.
 - [ ] Change a native wallpaper outside the app and verify that quitting does
       not overwrite it.
+- [ ] Set the desktop picture to an image you can delete, apply a live wallpaper,
+      delete the image, then quit. The quit finishes, every Desktop shows another
+      display's original or macOS's default picture, and the log names the missing
+      file and what was put back instead.
 - [ ] With a live wallpaper applied, log out, then restart and shut down (separate
       runs, authorized only). macOS must show no "cancelled" or "preventing logout"
       dialog. The log says `quit: reason=logout mode=powerOff` (or restart or
@@ -634,8 +677,8 @@ closed lid has not been seen on a desktop
 - [ ] Verify that mute affects wallpaper playback only.
 - [ ] With a scene, a video (Native and Compatibility) and a Web wallpaper that all make
       sound, press **Mute Wallpapers** in the menu bar: every one goes silent at once while
-      the pictures keep playing, the item is ticked, and Settings → Performance → Playback
-      shows **Mute all wallpapers** on. Choose it again, or use `wallpapermachine://unmute`:
+      the pictures keep playing, the item is ticked, and Settings → Playback & Power
+      shows **Mute all wallpapers** on (and the Quick Settings Mute All tile is lit). Choose it again, or use `wallpapermachine://unmute`:
       each wallpaper is audible again at the volume it had, and the wallpapers' own **Mute
       audio** switches in Settings → Displays never changed. Apply another wallpaper while
       muted: it starts silent. Add an app rule that mutes, turn **Mute all wallpapers** off

@@ -1,5 +1,6 @@
 #include "SceneCamera.h"
 #include "SceneNode.h"
+#include "Utils/Algorism.h"
 #include "Utils/Logging.h"
 #include <cmath>
 #include <iostream>
@@ -13,9 +14,9 @@ using namespace Eigen;
 Vector3d SceneCamera::GetPosition() const {
 	if(m_node) {
 		m_node->UpdateTrans();
-		return Affine3d(m_node->ModelTrans()) * Vector3d::Zero();
+		return Affine3d(m_node->ModelTrans()) * Vector3d::Zero() + m_shake;
 	}
-	return Vector3d::Zero();
+	return m_shake;
 }
 
 Vector3d SceneCamera::GetDirection() const {
@@ -55,11 +56,12 @@ Matrix4d SceneCamera::GetViewProjectionMatrix() const {
 void SceneCamera::CalculateViewProjectionMatrix() {
 	// CalculateViewMatrix
 	{
+		const Matrix4d shake = Affine3d(Translation3d(m_shake)).matrix();
 		if(m_node) {
 			m_node->UpdateTrans();
-			m_viewMat = m_node->ModelTrans().inverse().eval();
+			m_viewMat = (shake * m_node->ModelTrans()).inverse().eval();
 		} else 
-			m_viewMat = Matrix4d::Identity();
+			m_viewMat = shake.inverse().eval();
 	};
 
 	if(m_perspective) {
@@ -97,6 +99,19 @@ void SceneCamera::AttatchNode(std::shared_ptr<SceneNode> node) {
 	Update();
 }
 
+void wallpaper::FitCanvasPerspective(SceneCamera& perspective, const SceneCamera& canvas) {
+	if(perspective.FovLocked()) return;
+	const double distance =
+		algorism::CalculatePersperctiveDistance(perspective.Fov(), canvas.VisibleHeight());
+	if(! std::isfinite(distance) || distance <= 0.0) return;
+	if(const auto node = perspective.GetAttachedNode(); node != nullptr) {
+		Vector3f translate = node->Translate();
+		translate.z()      = static_cast<float>(distance);
+		node->SetTranslate(translate);
+	}
+	perspective.SetClip(5.0, std::max(distance + 1000.0, 15000.0));
+}
+
 SceneCamera::Axes SceneCamera::GetAxes() const {
 	Axes axes;
 	if (! m_node) return axes;
@@ -114,8 +129,11 @@ SceneCamera::Axes SceneCamera::GetAxes() const {
 std::optional<Eigen::Vector3d> wallpaper::IntersectNdcWithNodePlane(
 	const SceneCamera& camera, SceneNode& node, double ndc_x, double ndc_y) {
 	node.UpdateTrans();
-	const Eigen::Matrix4d clip_from_local =
-		camera.GetViewProjectionMatrix() * node.ModelTrans();
+	// The plane of the node where it is drawn: its world matrix, and the draw offset
+	// a screen-anchored layer adds to where it is shown.
+	Eigen::Matrix4d drawn = node.ModelTrans();
+	drawn.block<3, 1>(0, 3) += node.DrawOffset().cast<double>();
+	const Eigen::Matrix4d clip_from_local = camera.GetViewProjectionMatrix() * drawn;
 	Eigen::FullPivLU<Eigen::Matrix4d> lu(clip_from_local);
 	if (! lu.isInvertible()) return std::nullopt;
 	const Eigen::Matrix4d local_from_clip = lu.inverse();
@@ -143,4 +161,26 @@ std::optional<Eigen::Vector3d> wallpaper::IntersectNdcWithNodePlane(
 	const Eigen::Vector3d hit = *near_p + t * delta;
 	if (! hit.allFinite()) return std::nullopt;
 	return hit;
+}
+
+std::optional<Eigen::Vector3d> wallpaper::UnprojectNdcAtDepth(
+	const SceneCamera& camera, double ndc_x, double ndc_y, double depth) {
+	if (! camera.IsPerspective() || ! std::isfinite(ndc_x) || ! std::isfinite(ndc_y) ||
+		! std::isfinite(depth) || depth <= 0.0) {
+		return std::nullopt;
+	}
+	const double tan_half_fov = std::tan(Radians(camera.Fov()) / 2.0);
+	if (! std::isfinite(tan_half_fov) || tan_half_fov <= 0.0 || ! std::isfinite(camera.Aspect()) ||
+		camera.Aspect() <= 0.0) {
+		return std::nullopt;
+	}
+	Eigen::FullPivLU<Eigen::Matrix4d> lu(camera.GetViewMatrix());
+	if (! lu.isInvertible()) return std::nullopt;
+	// The projection divides view x and y by -z, the half extent at unit
+	// distance and (for x) the aspect, so this is its inverse at one depth.
+	const Eigen::Vector4d view_space(
+		ndc_x * tan_half_fov * camera.Aspect() * depth, ndc_y * tan_half_fov * depth, -depth, 1.0);
+	const Eigen::Vector4d world = lu.inverse() * view_space;
+	if (! world.allFinite() || world.w() == 0.0) return std::nullopt;
+	return Eigen::Vector3d(world.head<3>() / world.w());
 }

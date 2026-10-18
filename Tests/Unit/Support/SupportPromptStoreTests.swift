@@ -161,6 +161,30 @@ final class SupportPromptStoreTests: XCTestCase {
             .pendingPrompt(welcomeSeen: true, telemetryOn: false, now: start + day))
     }
 
+    /// The import offer is for someone signed in to Steam who finished the guide without meeting
+    /// it; the guide's card or a Steam Community sign-in spends it, and it comes after the
+    /// performance data question.
+    func testSubscriptionsOfferIsForSignedInUsersWhoNeverMetTheImport() throws {
+        let store = SupportPromptStore(defaults: defaults, calendar: calendar)
+        XCTAssertNil(store.pendingPrompt(welcomeSeen: false, telemetryOn: true, steamSignedIn: true, now: start),
+                     "the guide offers it to new users")
+        XCTAssertNil(store.pendingPrompt(welcomeSeen: true, telemetryOn: true, steamSignedIn: false, now: start),
+                     "nothing to import without a Steam account")
+        XCTAssertEqual(store.pendingPrompt(welcomeSeen: true, telemetryOn: false, steamSignedIn: true, now: start),
+                       .telemetry)
+        XCTAssertEqual(store.pendingPrompt(welcomeSeen: true, telemetryOn: true, steamSignedIn: true, now: start),
+                       .subscriptions)
+
+        store.markPresented(.subscriptions, now: start)
+        XCTAssertNil(SupportPromptStore(defaults: defaults, calendar: calendar)
+            .pendingPrompt(welcomeSeen: true, telemetryOn: true, steamSignedIn: true, now: start + day),
+                     "offered once, for good")
+
+        let other = SupportPromptStore(defaults: try TemporaryDefaults.make(for: self).defaults, calendar: calendar)
+        other.recordSubscriptionsOffered()
+        XCTAssertNil(other.pendingPrompt(welcomeSeen: true, telemetryOn: true, steamSignedIn: true, now: start))
+    }
+
     func testStarPromptWaitsForTwoWeeksAndFiveDaysOfUse() {
         let store = SupportPromptStore(defaults: defaults, calendar: calendar)
         store.recordTelemetryAsked()

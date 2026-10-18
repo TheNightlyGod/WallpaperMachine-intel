@@ -257,6 +257,21 @@ final class PlaybackPreferences {
         persistRules()
     }
 
+    /// Settings › Reset All Settings: every choice back to its default and every app rule removed,
+    /// announced once.
+    func resetToDefaults() {
+        for key in [
+            Self.displaySleepKey, Self.otherAudioKey, Self.desktopCoveredKey, Self.appRulesKey,
+            Self.lowPowerModeKey, Self.thermalKey, Self.lowBatteryActionKey, Self.lowBatteryThresholdKey,
+            Self.periodicDesktopPictureKey, Self.writeDesktopPictureKey, Self.playOnlyOnActiveDisplayKey,
+            Self.wallpapersMutedKey,
+        ] {
+            defaults.removeObject(forKey: key)
+        }
+        appRules = []
+        postChange()
+    }
+
     private func storedEnum<T: RawRepresentable>(_ key: String, default fallback: T) -> T where T.RawValue == String {
         guard let raw = defaults.string(forKey: key), let value = T(rawValue: raw) else { return fallback }
         return value

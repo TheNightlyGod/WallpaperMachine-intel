@@ -41,15 +41,15 @@ final class SystemMediaEventCodecTests: XCTestCase {
         XCTAssertFalse(json.contains("pngBase64DataURL"))
     }
 
-    func testPlaybackUsesWallpaperEngineRawValues() throws {
-        XCTAssertEqual(
-            SystemMediaEventCodec.json(for: .playback(.playing)),
-            #"{"state":0,"type":"mediaPlaybackChanged"}"#)
-        XCTAssertEqual(
-            SystemMediaEventCodec.json(for: .playback(.paused)),
-            #"{"state":1,"type":"mediaPlaybackChanged"}"#)
+    func testPlaybackUsesSceneScriptMediaPlaybackEventNumbers() throws {
         XCTAssertEqual(
             SystemMediaEventCodec.json(for: .playback(.stopped)),
+            #"{"state":0,"type":"mediaPlaybackChanged"}"#)
+        XCTAssertEqual(
+            SystemMediaEventCodec.json(for: .playback(.playing)),
+            #"{"state":1,"type":"mediaPlaybackChanged"}"#)
+        XCTAssertEqual(
+            SystemMediaEventCodec.json(for: .playback(.paused)),
             #"{"state":2,"type":"mediaPlaybackChanged"}"#)
     }
 

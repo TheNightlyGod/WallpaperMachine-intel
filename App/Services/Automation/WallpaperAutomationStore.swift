@@ -30,13 +30,16 @@ final class WallpaperAutomationStore {
     static let shared = WallpaperAutomationStore()
     static let configurationsKey = "WallpaperMachine.automaticWallpapers"
     static let locationKey = "WallpaperMachine.solarLocation"
+    static let solarKey = "WallpaperMachine.solarSettings"
     static let handledKey = "WallpaperMachine.automaticWallpaperHandled"
     static let focusRestoreKey = "WallpaperMachine.focusWallpaperRestore"
     static let didChangeNotification = Notification.Name("WallpaperMachine.automationSettingsChanged")
     static let statusChangedNotification = Notification.Name("WallpaperMachine.automationStatusChanged")
     private let defaults: UserDefaults
     private(set) var configurations: [String: DisplayWallpaperAutomation]
-    private(set) var location: WallpaperSolarLocation?
+    private(set) var solar: WallpaperSolarSettings
+    /// The coordinates the sunset and sunrise rules plan with, whatever their source.
+    var location: WallpaperSolarLocation? { solar.location }
     private(set) var handled: [String: String]
     private(set) var focusRestore: [String: FocusWallpaperRestore]
     private(set) var loadError: String?
@@ -59,10 +62,21 @@ final class WallpaperAutomationStore {
         let stored = read(Self.configurationsKey, [String: DisplayWallpaperAutomation].self, fallback: [:])
         configurations = stored.count <= 64 ? stored.filter { Self.validDisplay($0.key) && $0.value.isValid } : [:]
         if configurations.count != stored.count { failed = true }
-        if let data = defaults.data(forKey: Self.locationKey) {
-            let value = try? JSONDecoder().decode(WallpaperSolarLocation.self, from: data)
-            location = value?.isValid == true ? value : nil
-            failed = failed || location == nil
+        if let data = defaults.data(forKey: Self.solarKey),
+           let stored = try? JSONDecoder().decode(WallpaperSolarSettings.self, from: data),
+           stored.isValid {
+            solar = stored
+        } else {
+            if defaults.data(forKey: Self.solarKey) != nil { failed = true }
+            // Settings written before the source existed hold a bare location; read it as the
+            // coordinates source so an upgrade keeps the user's position. Only the fallback
+            // reads it: a corrupt legacy value must not fail a working settings record.
+            let legacyLocation: WallpaperSolarLocation? = defaults.data(forKey: Self.locationKey).flatMap {
+                guard let value = try? JSONDecoder().decode(WallpaperSolarLocation.self, from: $0),
+                      value.isValid else { failed = true; return nil }
+                return value
+            }
+            solar = WallpaperSolarSettings(location: legacyLocation)
         }
         handled = read(Self.handledKey, [String: String].self, fallback: [:])
             .filter { Self.validDisplay($0.key) && $0.value.count <= 4096 }
@@ -107,10 +121,23 @@ final class WallpaperAutomationStore {
 
     func setLocation(_ value: WallpaperSolarLocation?) throws {
         guard value?.isValid != false else { throw Self.invalid() }
-        guard location != value else { return }
-        if let value { defaults.set(try JSONEncoder().encode(value), forKey: Self.locationKey) }
-        else { defaults.removeObject(forKey: Self.locationKey) }
-        location = value
+        guard solar.location != value else { return }
+        var updated = solar
+        updated.location = value
+        try setSolar(updated)
+    }
+
+    func setSolar(_ value: WallpaperSolarSettings) throws {
+        guard value.isValid else { throw Self.invalid() }
+        guard solar != value else { return }
+        defaults.set(try JSONEncoder().encode(value), forKey: Self.solarKey)
+        // Keep the pre-source key in step so backups and older builds still find a location.
+        if let location = value.location {
+            defaults.set(try JSONEncoder().encode(location), forKey: Self.locationKey)
+        } else {
+            defaults.removeObject(forKey: Self.locationKey)
+        }
+        solar = value
         changed()
     }
 

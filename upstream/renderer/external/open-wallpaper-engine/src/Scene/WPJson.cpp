@@ -1,17 +1,60 @@
 #include "WPJson.hpp"
 #include <nlohmann/json.hpp>
 
+#include <cctype>
+#include <string>
+
 #include "Utils/Identity.hpp"
 #include "Utils/String.h"
 
 namespace wallpaper
 {
 
+namespace
+{
+// Wallpaper Engine accepts a comma before the `]` or `}` that closes an array
+// or object, and ships documents that rely on it: its own fluid simulation
+// effect is one, and workshop packages copy it. Strict parsing dropped every
+// such effect. This removes those commas, leaving strings untouched, so the
+// document reads as Wallpaper Engine reads it.
+std::string WithoutTrailingCommas(const std::string& source) {
+    std::string out;
+    out.reserve(source.size());
+    bool in_string = false;
+    bool escaped   = false;
+    for (std::size_t i = 0; i < source.size(); ++i) {
+        const char c = source[i];
+        if (in_string) {
+            out.push_back(c);
+            if (escaped) escaped = false;
+            else if (c == '\\') escaped = true;
+            else if (c == '"') in_string = false;
+            continue;
+        }
+        if (c == '"') in_string = true;
+        if (c == ',') {
+            std::size_t next = i + 1;
+            while (next < source.size() && std::isspace(static_cast<unsigned char>(source[next])))
+                ++next;
+            if (next < source.size() && (source[next] == ']' || source[next] == '}')) continue;
+        }
+        out.push_back(c);
+    }
+    return out;
+}
+} // namespace
+
 bool ParseJson(const char* file, const char* func, int line, const std::string& source,
                nlohmann::json& result) {
     try {
         result = nlohmann::json::parse(source);
     } catch (nlohmann::json::parse_error& e) {
+        // Only a document strict parsing rejected pays for the second pass.
+        auto lenient = nlohmann::json::parse(WithoutTrailingCommas(source), nullptr, false);
+        if (! lenient.is_discarded()) {
+            result = std::move(lenient);
+            return true;
+        }
         WallpaperLog(LOGLEVEL_ERROR, file, line, "parse json(%s), %s", func, e.what());
         return false;
     }

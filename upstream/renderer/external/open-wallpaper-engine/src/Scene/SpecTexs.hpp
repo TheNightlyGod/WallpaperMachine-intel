@@ -18,6 +18,9 @@ constexpr std::array WE_GLTEX_RESOLUTION_NAMES { BASE_GLTEX_NAMES(Resolution) };
 constexpr std::array WE_GLTEX_ROTATION_NAMES { BASE_GLTEX_NAMES(Rotation) };
 constexpr std::array WE_GLTEX_TRANSLATION_NAMES { BASE_GLTEX_NAMES(Translation) };
 constexpr std::array WE_GLTEX_MIPMAPINFO_NAMES { BASE_GLTEX_NAMES(MipMapInfo) };
+/// Wallpaper Engine's per-texture step: (1 / width, 1 / height, width, height)
+/// of the texture a slot samples.
+constexpr std::array WE_GLTEX_TEXEL_NAMES { BASE_GLTEX_NAMES(Texel) };
 #undef BASE_GLTEX_NAMES
 
 constexpr std::string_view WE_SPEC_PREFIX { "_rt_" };
@@ -35,7 +38,11 @@ constexpr std::string_view WE_EFFECT_PPONG_PREFIX_B { "_rt_effect_pingpong_b_" }
 constexpr std::string_view WE_IN_POSITION { "a_Position" };
 constexpr std::string_view WE_IN_TEXCOORD { "a_TexCoord" };
 constexpr std::string_view WE_IN_NORMAL { "a_Normal" };
-constexpr std::string_view WE_IN_TANGENT { "a_Tangent" };
+/// The signed tangent of a model (xyz, and the bitangent's handedness in w).
+/// Wallpaper Engine's model shaders declare it `attribute vec4 a_Tangent4`, and
+/// a renderer hands a shader input the mesh attribute of the same name, so the
+/// mesh has to use that spelling: under any other the input is left unbound.
+constexpr std::string_view WE_IN_TANGENT { "a_Tangent4" };
 constexpr std::string_view WE_IN_BLENDINDICES { "a_BlendIndices" };
 constexpr std::string_view WE_IN_BLENDWEIGHTS { "a_BlendWeights" };
 
@@ -87,6 +94,13 @@ constexpr std::string_view G_VIEWRIGHT { "g_ViewRight" };
 constexpr std::string_view G_TIME { "g_Time" };
 constexpr std::string_view G_DAYTIME { "g_DayTime" };
 constexpr std::string_view G_POINTERPOSITION { "g_PointerPosition" };
+constexpr std::string_view G_POINTERPOSITIONLAST { "g_PointerPositionLast" };
+constexpr std::string_view G_POINTERSTATE { "g_PointerState" };
+constexpr std::string_view G_FRAMETIME { "g_Frametime" };
+constexpr std::string_view G_TEXTUREREDUCTIONSCALE { "g_TextureReductionScale" };
+constexpr std::string_view G_EFFECTMODEL { "g_EffectModelMatrix" };
+constexpr std::string_view G_EFFECTMVP { "g_EffectModelViewProjectionMatrix" };
+constexpr std::string_view G_EFFECTMVPI { "g_EffectModelViewProjectionMatrixInverse" };
 constexpr std::string_view G_TEXELSIZE { "g_TexelSize" };
 constexpr std::string_view G_TEXELSIZEHALF { "g_TexelSizeHalf" };
 constexpr std::string_view G_BONES { "g_Bones" };

@@ -458,3 +458,131 @@ fn spirv_instructions(words: &[u32], opcode: u16) -> impl Iterator<Item = &[u32]
         None
     })
 }
+
+/// The `mat3 inverse(mat3)` Wallpaper Engine's `common_perspective.h` declares
+/// for the Direct3D dialect, which has no matrix `inverse` of its own.
+const AUTHOR_INVERSE_POLYFILL: &str = r"
+mat3 inverse(mat3 m) {
+    float a00 = m[0][0], a01 = m[0][1], a02 = m[0][2];
+    float a10 = m[1][0], a11 = m[1][1], a12 = m[1][2];
+    float a20 = m[2][0], a21 = m[2][1], a22 = m[2][2];
+    float b01 = a22 * a11 - a12 * a21;
+    float b11 = -a22 * a10 + a12 * a20;
+    float b21 = a21 * a10 - a11 * a20;
+    float det = a00 * b01 + a01 * b11 + a02 * b21;
+    return mat3(b01, (-a22 * a01 + a02 * a21), (a12 * a01 - a02 * a11),
+                b11, (a22 * a00 - a02 * a20), (-a12 * a00 + a02 * a10),
+                b21, (-a21 * a00 + a01 * a20), (a11 * a00 - a01 * a10)) / det;
+}
+";
+
+#[test]
+fn a_stage_declaring_its_own_matrix_inverse_compiles_on_both_targets_and_calls_it() {
+    // `#if HLSL` is true now, so the polyfill is part of the source. A function
+    // with a builtin's name and parameters is the author's own: both targets
+    // call it, Metal needs no generated helper, and SPIR-V keeps no
+    // `MatrixInverse` of its own.
+    let source = format!(
+        "uniform vec2 g_Point0;\n\
+         uniform vec2 g_Point1;\n\
+         uniform vec2 g_Point2;\n\
+         attribute vec3 a_Position;\n\
+         attribute vec2 a_TexCoord;\n\
+         varying vec3 v_TexCoord;\n\
+         {AUTHOR_INVERSE_POLYFILL}\
+         void main() {{\n\
+             mat3 square = mat3(vec3(g_Point1 - g_Point0, 0.0), vec3(g_Point2 - g_Point0, 0.0), \
+                                vec3(g_Point0, 1.0));\n\
+             v_TexCoord = inverse(square) * vec3(a_TexCoord, 1.0);\n\
+             gl_Position = vec4(a_Position, 1.0);\n\
+         }}\n"
+    );
+    let module = shader::syntax::ShaderModule::parse(ShaderStageKind::Vertex, &source)
+        .expect("author source parses");
+    let legalized = shader::legalize::Codegen
+        .legalize(&module)
+        .expect("author source legalizes");
+    let metal_artifact = NagaCompiler
+        .compile_stage(ShaderTarget::MetalMsl, ShaderStageKind::Vertex, &legalized)
+        .unwrap_or_else(|error| {
+            panic!("the stage must translate to MSL: {}\n{}", error.to_miette_report(), legalized.source())
+        });
+    assert!(
+        !legalized.source().contains("_we_Inverse"),
+        "no generated helper may stand in for the author's function:\n{}",
+        legalized.source()
+    );
+    assert!(!metal(&metal_artifact).source().is_empty());
+    assert_eq!(
+        spirv_instructions(&vertex_spirv(&source), SPIRV_OP_EXT_INST)
+            .filter(|operands| operands.get(3) == Some(&GLSL_STD_450_MATRIX_INVERSE))
+            .count(),
+        0
+    );
+}
+
+#[test]
+fn a_redeclared_vertex_and_instance_index_reach_metal_as_builtins_not_attributes() {
+    // `in uint gl_VertexID;` compiled as a vertex attribute at the next free
+    // location, so a morph target offset read vertex data instead of the
+    // vertex index. Both spellings must end up as the stage's own builtins.
+    let source = concat!(
+        "attribute vec3 a_Position;\n",
+        "in uint gl_VertexID;\n",
+        "in uint gl_InstanceID;\n",
+        "uniform uint g_MorphOffsets[4];\n",
+        "varying float v_Shell;\n",
+        "void main() {\n",
+        "    uint morphMapOffset = gl_VertexID + g_MorphOffsets[1u];\n",
+        "    v_Shell = float(gl_InstanceID) / 3.0 + float(morphMapOffset % 4u);\n",
+        "    gl_Position = vec4(a_Position, 1.0);\n",
+        "}\n",
+    );
+    let module = shader::syntax::ShaderModule::parse(ShaderStageKind::Vertex, source)
+        .expect("author source parses");
+    let legalized = shader::legalize::Codegen
+        .legalize(&module)
+        .expect("author source legalizes");
+
+    let artifact = NagaCompiler
+        .compile_stage(ShaderTarget::MetalMsl, ShaderStageKind::Vertex, &legalized)
+        .unwrap_or_else(|error| {
+            panic!(
+                "the stage must translate to MSL: {}\n{}",
+                error.to_miette_report(),
+                legalized.source()
+            )
+        });
+    let msl = metal(&artifact).source();
+    assert!(msl.contains("[[vertex_id]]"), "{msl}");
+    assert!(msl.contains("[[instance_id]]"), "{msl}");
+    assert!(msl.contains("[[attribute(0)]]"), "{msl}");
+    assert!(
+        !msl.contains("[[attribute(1)]]"),
+        "no second vertex attribute may stand in for a builtin:\n{msl}"
+    );
+
+    let spirv = vertex_spirv(source);
+    assert_eq!(
+        spirv_instructions(&spirv, SPIRV_OP_DECORATE)
+            .filter(|operands| {
+                operands.get(1) == Some(&SPIRV_DECORATION_BUILTIN)
+                    && matches!(
+                        operands.get(2),
+                        Some(&SPIRV_BUILTIN_VERTEX_INDEX | &SPIRV_BUILTIN_INSTANCE_INDEX)
+                    )
+            })
+            .count(),
+        2,
+        "SPIR-V takes the vertex and instance index from the builtins"
+    );
+}
+
+/// SPIR-V `OpDecorate` opcode.
+const SPIRV_OP_DECORATE: u16 = 71;
+/// SPIR-V `Decoration::BuiltIn`.
+const SPIRV_DECORATION_BUILTIN: u32 = 11;
+/// SPIR-V `BuiltIn::VertexIndex`.
+const SPIRV_BUILTIN_VERTEX_INDEX: u32 = 42;
+/// SPIR-V `BuiltIn::InstanceIndex`.
+const SPIRV_BUILTIN_INSTANCE_INDEX: u32 = 43;

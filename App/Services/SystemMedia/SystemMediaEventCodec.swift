@@ -15,6 +15,17 @@ enum SystemMediaEventCodec {
         return parts.map { min(max($0 / 255, 0), 1) }
     }
 
+    /// SceneScript numbers playback as Wallpaper Engine's `MediaPlaybackEvent`
+    /// does: stopped 0, playing 1, paused 2. Scripts compare `event.state` with
+    /// those numbers as often as with the named constants.
+    static func sceneScriptPlaybackState(_ state: SystemMediaPlaybackState) -> Int {
+        switch state {
+        case .stopped: 0
+        case .playing: 1
+        case .paused: 2
+        }
+    }
+
     static func json(for event: WebWallpaperMediaRelay.Event) -> String? {
         let object: [String: Any]
         switch event {
@@ -42,7 +53,7 @@ enum SystemMediaEventCodec {
                 "highContrastColor": vec3(fromCSS: thumbnail.highContrastColor),
             ]
         case let .playback(state):
-            object = ["type": "mediaPlaybackChanged", "state": state.rawValue]
+            object = ["type": "mediaPlaybackChanged", "state": sceneScriptPlaybackState(state)]
         case let .timeline(timeline):
             object = [
                 "type": "mediaTimelineChanged",

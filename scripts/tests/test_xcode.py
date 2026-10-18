@@ -136,6 +136,17 @@ class Summarize(unittest.TestCase):
         self.assertEqual(lines[1], "  FAIL DownloaderTests/testFoo(): XCTAssertEqual failed: (\"1\") is not equal to (\"2\")")
         self.assertEqual(failed, 1)
 
+    def test_a_numbered_failure_is_still_named(self):
+        lines, _ = xcode.summarize({
+            "passedTests": 6, "failedTests": 1, "skippedTests": 0, "totalTestCount": 7, "result": "Failed",
+            "testFailures": [{
+                "testIdentifier": 3, "testName": "testBar()", "targetName": "T",
+                "testIdentifierString": "PanelTests/testBar()",
+                "failureText": "Test exceeded execution time allowance of 2 minutes",
+            }],
+        })
+        self.assertEqual(lines[1], "  FAIL PanelTests/testBar(): Test exceeded execution time allowance of 2 minutes")
+
 
 if __name__ == "__main__":
     unittest.main()

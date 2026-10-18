@@ -290,21 +290,42 @@ impl MouseButtonEdges {
     }
 }
 
-#[derive(Debug, Default)]
+/// Answers, for a button that just went down, whether the press landed on the
+/// desktop rather than on another application's window. Asked on the main
+/// thread, once per press; never for motion, held samples or a release.
+pub(crate) type PressHitTest = Box<dyn FnMut() -> bool + Send>;
+
+/// The OS button levels, and the edges the wallpapers receive from them.
+///
+/// Like Wallpaper Engine, which counts a press only while the window under
+/// the cursor is the desktop or its own wallpaper, a press over another
+/// application's window is withheld: the wallpapers see neither it, nor its
+/// held level, nor its release. A press they did receive is always released,
+/// wherever the pointer is by then, so a held state never sticks.
 pub(crate) struct MouseButtonTracker {
     down: u64,
+    /// Held buttons whose press landed on another application's window.
+    withheld: u64,
     pressed: u64,
     released: u64,
     /// Nothing watched the buttons, because the pointer monitors were not
     /// installed, so `down` may be stale.
     levels_unknown: bool,
+    press_on_desktop: PressHitTest,
 }
 
 impl MouseButtonTracker {
-    #[allow(clippy::single_call_fn)]
+    /// A tracker for which every press lands on the desktop.
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn new() -> Self {
-        Self::default()
+        Self::with_press_test(Box::new(|| true))
+    }
+
+    #[allow(clippy::single_call_fn)]
+    #[must_use]
+    pub(crate) fn with_press_test(press_on_desktop: PressHitTest) -> Self {
+        Self { down: 0, withheld: 0, pressed: 0, released: 0, levels_unknown: false, press_on_desktop }
     }
 
     pub(crate) fn set_button(&mut self, button: u32, pressed: bool) {
@@ -315,15 +336,30 @@ impl MouseButtonTracker {
         if pressed {
             if (self.down & mask) == 0 {
                 self.down |= mask;
-                self.pressed |= mask;
+                self.press(mask);
             }
             return;
         }
 
         if (self.down & mask) != 0 {
             self.down &= !mask;
-            self.released |= mask;
+            self.release(mask);
         }
+    }
+
+    /// Records buttons that just went down, all at the cursor's one location.
+    fn press(&mut self, buttons: u64) {
+        if (self.press_on_desktop)() {
+            self.pressed |= buttons;
+        } else {
+            self.withheld |= buttons;
+        }
+    }
+
+    /// Records buttons that just went up; only a delivered press has a release.
+    fn release(&mut self, buttons: u64) {
+        self.released |= buttons & !self.withheld;
+        self.withheld &= !buttons;
     }
 
     /// The monitors are going away (or never came): the next sample's buttons
@@ -336,19 +372,31 @@ impl MouseButtonTracker {
         let next = mask & u64::from(u32::MAX);
         if self.levels_unknown {
             // A button held since before the monitors came back is not a new
-            // press; edges the monitors did record meanwhile are kept.
+            // press; edges the monitors did record meanwhile are kept. A held
+            // button this tracker never saw go down could have been pressed
+            // anywhere, so its level is adopted only if the pointer is over
+            // the desktop now. One it did see keeps its verdict.
             self.levels_unknown = false;
+            let unseen = next & !self.down;
+            self.withheld &= next;
+            if unseen != 0 && !(self.press_on_desktop)() {
+                self.withheld |= unseen;
+            }
             self.down = next;
             return;
         }
-        self.pressed |= next & !self.down;
-        self.released |= self.down & !next;
+        let pressed = next & !self.down;
+        let released = self.down & !next;
         self.down = next;
+        if pressed != 0 {
+            self.press(pressed);
+        }
+        self.release(released);
     }
 
     #[must_use]
     pub(crate) fn consume_edges(&mut self) -> MouseButtonEdges {
-        let edges = MouseButtonEdges::from_masks(self.down, self.pressed, self.released);
+        let edges = MouseButtonEdges::from_masks(self.down & !self.withheld, self.pressed, self.released);
         self.pressed = 0;
         self.released = 0;
         edges
@@ -360,7 +408,8 @@ impl MouseButtonTracker {
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum MouseMonitorEvent {
     /// A button went down or up in another application. Recorded as an edge so
-    /// a click shorter than the sampling spacing is not lost.
+    /// a click shorter than the sampling spacing is not lost; the tracker
+    /// withholds a press that landed on an application window.
     Button(MouseButtonState),
     /// Motion or a drag anywhere a monitor sees it, or a button in this app's
     /// own windows (read as a level by the next sample, as before).
@@ -578,6 +627,50 @@ fn mouse_button_state_from_event(event: &NSEvent) -> Option<MouseButtonState> {
     };
 
     Some(MouseButtonState { button, pressed })
+}
+
+/// Whether a press at the cursor lands on the desktop: the [`PressHitTest`]
+/// the engine's tracker uses. The window server names the window a mouse-down
+/// there would hit; our wallpaper windows ignore the mouse, so over the
+/// desktop that is Finder's icon window or the system wallpaper. Main thread
+/// only, and two window-server round trips, so it runs once per press.
+#[allow(clippy::single_call_fn)]
+pub(crate) fn press_lands_on_desktop() -> bool {
+    let Some(mtm) = MainThreadMarker::new() else {
+        debug_assert!(false, "pointer presses are hit-tested on the main thread");
+        return true;
+    };
+    let point = objc2_app_kit::NSEvent::mouseLocation();
+    let window = NSWindow::windowNumberAtPoint_belowWindowWithWindowNumber(point, 0, mtm);
+    window_counts_as_desktop(window, window_layer)
+}
+
+/// The rule web wallpapers route by (`WebWallpaperMouseRouting`): the desktop
+/// is everything the window server stacks beneath ordinary application
+/// windows, which all report a negative layer: the system wallpaper, Finder's
+/// icons, desktop widgets and our own wallpaper windows. No window, or one
+/// that closed before its layer was read, leaves nothing covering the desktop.
+#[allow(clippy::single_call_fn)]
+fn window_counts_as_desktop(window: NSInteger, layer: impl FnOnce(NSInteger) -> Option<i64>) -> bool {
+    window <= 0 || layer(window).is_none_or(|layer| layer < 0)
+}
+
+/// A window's `kCGWindowLayer`, or `None` once it is gone.
+#[allow(clippy::single_call_fn)]
+fn window_layer(window: NSInteger) -> Option<i64> {
+    use objc2_core_foundation::{CFArray, CFDictionary, CFNumber, CFRetained, CFString, CFType};
+    use objc2_core_graphics::{CGWindowListCopyWindowInfo, CGWindowListOption, kCGWindowLayer};
+
+    let window = u32::try_from(window).ok()?;
+    let descriptions = CGWindowListCopyWindowInfo(CGWindowListOption::OptionIncludingWindow, window)?;
+    // SAFETY: CoreGraphics documents the window list as an array of
+    // dictionaries keyed by `CFString`.
+    let descriptions = unsafe {
+        CFRetained::cast_unchecked::<CFArray<CFDictionary<CFString, CFType>>>(descriptions)
+    };
+    // SAFETY: `kCGWindowLayer` is an immutable CoreGraphics constant.
+    let layer = descriptions.get(0)?.get(unsafe { kCGWindowLayer })?;
+    layer.downcast_ref::<CFNumber>()?.as_i64()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1323,12 +1416,17 @@ mod tests {
     use super::{
         LAYER_INSTALLED_NOTIFICATION, LayerInstall, MouseButtonEdges, MouseButtonState,
         MouseButtonTracker, MouseButtons, NormalizedMousePosition, announce_layer_installed,
+        window_counts_as_desktop,
     };
     use objc2::{rc::Retained, runtime::AnyObject};
+    use objc2_core_graphics::{CGWindowLevelForKey, CGWindowLevelKey};
     use objc2_foundation::{
         NSNotification, NSNotificationCenter, NSNumber, NSObject, NSString, ns_string,
     };
-    use std::sync::{Arc, Mutex};
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    };
 
     /// What an observer of the layer announcement read from one notification.
     #[derive(Debug, PartialEq, Eq)]
@@ -1562,6 +1660,174 @@ mod tests {
             vec![MouseButtonState { button: 0, pressed: false }],
             "its release afterwards is a real edge"
         );
+    }
+
+    /// Stands in for the window server: says whether the pointer is over
+    /// another application's window and counts how often it was asked.
+    #[derive(Clone, Default)]
+    struct ScriptedCursor {
+        over_window: Arc<AtomicBool>,
+        asked: Arc<AtomicUsize>,
+    }
+
+    impl ScriptedCursor {
+        fn tracker(&self) -> MouseButtonTracker {
+            let (over_window, asked) = (Arc::clone(&self.over_window), Arc::clone(&self.asked));
+            MouseButtonTracker::with_press_test(Box::new(move || {
+                asked.fetch_add(1, Ordering::SeqCst);
+                !over_window.load(Ordering::SeqCst)
+            }))
+        }
+
+        fn move_over_window(&self, over: bool) {
+            self.over_window.store(over, Ordering::SeqCst);
+        }
+
+        fn asked(&self) -> usize {
+            self.asked.load(Ordering::SeqCst)
+        }
+    }
+
+    fn transitions(edges: MouseButtonEdges) -> Vec<(u32, bool)> {
+        edges.transitions().map(|edge| (edge.button, edge.pressed)).collect()
+    }
+
+    #[test]
+    fn a_press_over_another_window_reaches_no_wallpaper_and_neither_does_its_release() {
+        let cursor = ScriptedCursor::default();
+        let mut tracker = cursor.tracker();
+        cursor.move_over_window(true);
+        tracker.set_button(0, true);
+        let held = tracker.consume_edges();
+        assert_eq!(held.down().mask(), 0, "its level is hidden too");
+        assert!(transitions(held).is_empty());
+
+        // Dragged onto the desktop and let go there: still the same gesture.
+        cursor.move_over_window(false);
+        tracker.set_button(0, false);
+        assert!(transitions(tracker.consume_edges()).is_empty());
+
+        tracker.set_button(0, true);
+        tracker.set_button(0, false);
+        assert_eq!(transitions(tracker.consume_edges()), vec![(0, true), (0, false)]);
+        assert_eq!(cursor.asked(), 2, "asked once per press, never for a release");
+    }
+
+    #[test]
+    fn a_press_first_seen_by_a_sample_is_judged_once_and_stays_hidden_while_held() {
+        let cursor = ScriptedCursor::default();
+        let mut tracker = cursor.tracker();
+        cursor.move_over_window(true);
+        for _ in 0..3 {
+            tracker.sync_down_mask(1);
+            let held = tracker.consume_edges();
+            assert_eq!(held.down().mask(), 0);
+            assert!(transitions(held).is_empty());
+        }
+        // The monitor's event for the same press arrives after the sample.
+        tracker.set_button(0, true);
+        cursor.move_over_window(false);
+        tracker.sync_down_mask(0);
+        assert!(transitions(tracker.consume_edges()).is_empty());
+        assert_eq!(cursor.asked(), 1, "held samples and the late event ask nothing");
+    }
+
+    #[test]
+    fn a_press_the_wallpapers_received_is_released_wherever_the_pointer_ends() {
+        let cursor = ScriptedCursor::default();
+        let mut tracker = cursor.tracker();
+        tracker.set_button(0, true);
+        assert_eq!(transitions(tracker.consume_edges()), vec![(0, true)]);
+
+        // Held into an application window, where a second button goes down.
+        cursor.move_over_window(true);
+        tracker.sync_down_mask(0b11);
+        let held = tracker.consume_edges();
+        assert_eq!(held.down().mask(), 1, "the delivered press stays held");
+        assert!(transitions(held).is_empty());
+
+        tracker.set_button(0, false);
+        tracker.set_button(1, false);
+        assert_eq!(transitions(tracker.consume_edges()), vec![(0, false)]);
+        assert_eq!(cursor.asked(), 2);
+    }
+
+    #[test]
+    fn a_desktop_tap_and_a_window_press_in_one_sample_deliver_only_the_tap() {
+        let cursor = ScriptedCursor::default();
+        let mut tracker = cursor.tracker();
+        tracker.set_button(0, true);
+        tracker.set_button(0, false);
+        cursor.move_over_window(true);
+        tracker.set_button(0, true);
+        let edges = tracker.consume_edges();
+        assert_eq!(transitions(edges), vec![(0, true), (0, false)]);
+        assert_eq!(edges.down().mask(), 0);
+        assert_eq!(edges.pre_transition_down_mask(), 0, "no baseline holds the hidden press");
+
+        tracker.set_button(0, false);
+        assert!(transitions(tracker.consume_edges()).is_empty());
+    }
+
+    #[test]
+    fn a_button_held_through_the_gap_is_adopted_only_over_the_desktop() {
+        let cursor = ScriptedCursor::default();
+        let mut tracker = cursor.tracker();
+        cursor.move_over_window(true);
+        tracker.mark_levels_unknown();
+        tracker.sync_down_mask(1);
+        assert_eq!(tracker.consume_edges().down().mask(), 0);
+        tracker.sync_down_mask(0);
+        assert!(transitions(tracker.consume_edges()).is_empty());
+
+        cursor.move_over_window(false);
+        tracker.mark_levels_unknown();
+        tracker.sync_down_mask(1);
+        let adopted = tracker.consume_edges();
+        assert_eq!(adopted.down().mask(), 1);
+        assert!(transitions(adopted).is_empty(), "a level, not a press");
+        tracker.sync_down_mask(0);
+        assert_eq!(transitions(tracker.consume_edges()), vec![(0, false)]);
+        assert_eq!(cursor.asked(), 2);
+    }
+
+    #[test]
+    fn a_press_seen_before_the_gap_keeps_its_verdict_through_it() {
+        let cursor = ScriptedCursor::default();
+        let mut tracker = cursor.tracker();
+        tracker.set_button(0, true);
+        cursor.move_over_window(true);
+        tracker.set_button(1, true);
+        let _ = tracker.consume_edges();
+
+        // Held while no monitor watched; the pointer is over a window when they return.
+        tracker.mark_levels_unknown();
+        tracker.set_button(1, false);
+        tracker.sync_down_mask(1);
+        let held = tracker.consume_edges();
+        assert_eq!(held.down().mask(), 1, "the delivered press is still held");
+        assert!(transitions(held).is_empty(), "the withheld press has no release");
+        tracker.sync_down_mask(0);
+        assert_eq!(transitions(tracker.consume_edges()), vec![(0, false)]);
+        assert_eq!(cursor.asked(), 2, "nothing is judged again");
+    }
+
+    #[test]
+    fn only_windows_stacked_beneath_application_windows_count_as_the_desktop() {
+        let level = |key| i64::from(CGWindowLevelForKey(key));
+        for key in [CGWindowLevelKey::DesktopWindowLevelKey, CGWindowLevelKey::DesktopIconWindowLevelKey] {
+            assert!(window_counts_as_desktop(42, |_| Some(level(key))));
+        }
+        for key in [
+            CGWindowLevelKey::NormalWindowLevelKey,
+            CGWindowLevelKey::FloatingWindowLevelKey,
+            CGWindowLevelKey::DockWindowLevelKey,
+            CGWindowLevelKey::MainMenuWindowLevelKey,
+        ] {
+            assert!(!window_counts_as_desktop(42, |_| Some(level(key))));
+        }
+        assert!(window_counts_as_desktop(0, |_| panic!("no window to look up")));
+        assert!(window_counts_as_desktop(42, |_| None), "a window gone before its layer was read");
     }
 
     #[test]

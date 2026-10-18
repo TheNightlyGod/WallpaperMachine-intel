@@ -78,9 +78,14 @@ final class WorkshopStore {
   private(set) var sourceHistory: [WorkshopSource] = []
   /// The shown source's own name when it has one Steam gave, such as an author's.
   private(set) var sourceTitle: String?
-  /// The Steam Community session subscriptions are read with. Memory only: it ends with the
-  /// app, or on Sign Out.
+  /// The Steam Community session subscriptions are read with. `webSessions` keeps it between
+  /// launches; it ends on Sign Out, or when Steam refuses to renew it.
   private(set) var steamWebSession: SteamWebSession?
+  /// Where the session is kept between launches; nil keeps it in memory only.
+  @ObservationIgnored private let webSessions: (any SteamWebSessionStoring)?
+  @ObservationIgnored private var webSessionRestore: Task<Void, Never>?
+  /// The renewal in flight, which every reader of an expired session waits for.
+  @ObservationIgnored private var webSessionRenewal: Task<SteamWebSession, Error>?
   private(set) var isSigningInToSteamWeb = false
   private(set) var sceneAssetsReady: Bool
   /// Where scene wallpapers read the shared assets from. Finding it probes up to four
@@ -171,7 +176,9 @@ final class WorkshopStore {
   }
 
   convenience init(service: WorkshopService = WorkshopService()) {
-    self.init(service: service, downloader: WorkshopDownloadManager())
+    self.init(
+      service: service, downloader: WorkshopDownloadManager(),
+      webSessions: KeychainSteamWebSessionStore())
   }
 
   init(
@@ -181,9 +188,11 @@ final class WorkshopStore {
     updates: WorkshopUpdateStore? = nil,
     sceneAssetsLocation: @escaping @MainActor () -> URL = { ClientPaths.assetsURL },
     sceneAssetsAvailable: @escaping @MainActor (URL) -> Bool = { ClientPaths.hasSceneAssets(at: $0) },
+    webSessions: (any SteamWebSessionStoring)? = nil,
     now: @escaping @MainActor () -> Date = Date.init
   ) {
     self.service = service
+    self.webSessions = webSessions
     self.now = now
     requestFile = supportDirectory.appendingPathComponent("Downloads/workshop-requests.json")
     self.downloader = downloader
@@ -758,24 +767,44 @@ final class WorkshopStore {
     search()
   }
 
+  /// Takes back the session saved by an earlier launch, once; a sign-in that finished first wins.
+  /// The keychain is read off the main thread.
+  func restoreSteamWebSession() {
+    guard let webSessions, webSessionRestore == nil, steamWebSession == nil else { return }
+    webSessionRestore = Task { [weak self] in
+      let saved = await Task.detached(priority: .userInitiated) { webSessions.load() }.value
+      // A sign-out while the keychain answered cancels this, and its session stays forgotten.
+      guard let self, !Task.isCancelled, let saved, self.steamWebSession == nil,
+        !self.isSigningInToSteamWeb
+      else { return }
+      self.steamWebSession = saved
+      if (self.committedQuery?.source ?? self.source) == .subscriptions { self.search() }
+    }
+  }
+
   /// Signs in to Steam Community through Steam's own page, so subscriptions can be read. The
-  /// app never sees the password: `obtainCookie` answers the session cookie Steam set, or nil
-  /// when the window was closed first.
-  func signInToSteamWeb(obtainCookie: @MainActor () async -> String?) async throws {
+  /// app never sees the password: `obtainCookies` answers the cookies Steam set, or nil when the
+  /// window was closed first. The session is saved for later launches; a save that fails (it is
+  /// logged) leaves it signed in for this one.
+  func signInToSteamWeb(obtainCookies: @MainActor () async -> WebSignInCookies?) async throws {
     guard !isSigningInToSteamWeb else { return }
     isSigningInToSteamWeb = true
     defer { isSigningInToSteamWeb = false }
-    guard let cookie = await obtainCookie() else { return }
-    guard let session = SteamWebSession(cookie: cookie) else {
+    guard let cookies = await obtainCookies() else { return }
+    guard let session = SteamWebSession(cookie: cookies.session, refresh: cookies.companion) else {
       throw WorkshopFailure(message: String(localized: "Steam’s sign-in finished without a session this app can use. Try signing in again."))
     }
+    webSessionRenewal?.cancel()
+    webSessionRenewal = nil
     steamWebSession = session
     if (committedQuery?.source ?? source) == .subscriptions { search() }
+    persist(session)
   }
 
-  /// Forgets the Steam Community session; Steam's own sign-in window keeps no cookie either.
+  /// Forgets the Steam Community session, here and on this Mac; Steam's own sign-in window keeps
+  /// no cookie either.
   func signOutOfSteamWeb() {
-    steamWebSession = nil
+    forgetSteamWebSession()
     if (committedQuery?.source ?? source) == .subscriptions {
       cancelSearch()
       clearResults()
@@ -799,14 +828,54 @@ final class WorkshopStore {
   /// The ids of subscribed wallpapers not in `installed`, asking Steam for every page of
   /// subscriptions. Throws `SteamSignInRequired` when the session has ended.
   func missingSubscriptions(installed: Set<String>) async throws -> [WorkshopItem] {
-    guard let session = steamWebSession else { throw SteamSignInRequired() }
     do {
+      guard let session = try await currentSteamWebSession() else { throw SteamSignInRequired() }
       let ids = try await service.subscribedIDs(account: session).filter { !installed.contains($0) }
       return try await service.details(ids: ids).filter { $0.collectionSize == nil }
     } catch is SteamSignInRequired {
-      steamWebSession = nil
+      forgetSteamWebSession()
       throw SteamSignInRequired()
     }
+  }
+
+  /// The session to read with: the one held, renewed first when its cookie has run out. Readers
+  /// that arrive during a renewal wait for that one. Steam refusing the renewal throws
+  /// `SteamSignInRequired`; the caller forgets the session.
+  func currentSteamWebSession() async throws -> SteamWebSession? {
+    if let webSessionRestore, steamWebSession == nil { await webSessionRestore.value }
+    guard let session = steamWebSession else { return nil }
+    guard session.needsRenewal(at: now()) else { return session }
+    let renewal = webSessionRenewal ?? Task { [service] in try await service.renew(session) }
+    webSessionRenewal = renewal
+    do {
+      let renewed = try await renewal.value
+      if webSessionRenewal == renewal {
+        webSessionRenewal = nil
+        // A sign-out or another sign-in while Steam answered keeps what it set.
+        if steamWebSession == session {
+          steamWebSession = renewed
+          persist(renewed)
+        }
+      }
+      return steamWebSession
+    } catch {
+      if webSessionRenewal == renewal { webSessionRenewal = nil }
+      throw error
+    }
+  }
+
+  /// Saves `session` for later launches. The store logs a failure.
+  private func persist(_ session: SteamWebSession) {
+    try? webSessions?.save(session)
+  }
+
+  /// Drops the session, and the saved one with it.
+  private func forgetSteamWebSession() {
+    webSessionRestore?.cancel()
+    webSessionRenewal?.cancel()
+    webSessionRenewal = nil
+    steamWebSession = nil
+    webSessions?.remove()
   }
 
   func loadPage(_ page: Int) {
@@ -847,7 +916,8 @@ final class WorkshopStore {
       if Self.fillsPages(query), let self {
         result = try await self.filledPage(number, query: query, cacheID: cacheID)
       } else {
-        result = try await service.page(for: query, page: number, account: self?.steamWebSession)
+        let account = query.source == .subscriptions ? try await self?.currentSteamWebSession() : nil
+        result = try await service.page(for: query, page: number, account: account)
       }
       try Task.checkCancellation()
       // Only the cache that asked keeps the page; a superseded fetch is simply dropped.
@@ -988,7 +1058,7 @@ final class WorkshopStore {
         // No session, or Steam ended it: forget it and drop whatever list was on show, so the
         // panel offers to sign in instead of leaving another list's tiles behind a Retry.
         if error is SteamSignInRequired {
-          steamWebSession = nil
+          forgetSteamWebSession()
           clearResults()
         } else if committedQuery?.source != request.query.source {
           // Another list failed to open: the tiles on show belong to the list it was to replace,

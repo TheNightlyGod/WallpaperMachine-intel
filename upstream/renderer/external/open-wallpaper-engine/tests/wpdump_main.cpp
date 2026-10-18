@@ -1,8 +1,7 @@
 // wpdump <workshop_dir> [output.json]
 //
 // Re-runs DumpWorkshop on a single workshop and writes the result as
-// pretty JSON. Used to seed tests/fixtures/<category>/<version>/<id>.json
-// during version test authoring.
+// pretty JSON, to inspect what the parser stack makes of it.
 
 #include <cstdio>
 #include <fstream>

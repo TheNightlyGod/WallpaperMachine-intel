@@ -13,6 +13,7 @@
 #include "SceneRenderTarget.h"
 #include "SceneNode.h"
 #include "SceneLight.hpp"
+#include "SceneResolution.hpp"
 
 #include "Core/NoCopyMove.hpp"
 
@@ -29,6 +30,9 @@ struct SceneMetalProgram;
 struct ScenePostProcessPass {
     std::shared_ptr<SceneNode> node;
     std::string                output;
+    /// When positive, the pass's `g_RenderVar0` is kept at this many texels of
+    /// its first texture, (+x, +y, -x, -y), whatever size that texture has.
+    float                      source_texel_radius { 0.0f };
 };
 
 struct ScenePostProcessCopy {
@@ -60,6 +64,12 @@ public:
     std::unordered_map<std::string, std::vector<std::string>>     linkedCameras;
 
     std::vector<std::unique_ptr<SceneLight>> lights;
+    /// The light counts lit shaders are compiled for (`general.lightconfig`).
+    SceneLightConfig                         light_config;
+    /// Distance and height fog (`general.fogdistance`, `general.fogheight`):
+    /// a pass whose `FOG` combo is on is compiled with `FOG_DIST`/`FOG_HEIGHT`.
+    bool                                     fog_distance { false };
+    bool                                     fog_height { false };
 
     std::shared_ptr<SceneNode>           sceneGraph;
     std::vector<std::shared_ptr<ScenePostProcess>> post_processes;
@@ -141,6 +151,12 @@ public:
     /// the camera frustum or the presentation viewport, so output size and
     /// composition are unchanged and only the sampled detail differs.
     double               render_scale { 1.0 };
+    /// How large the raster behind the canvas is before `render_scale` takes
+    /// its share: the canvas itself, or the size the canvas is presented at.
+    /// Like the scale it only changes the render targets; the canvas stays the
+    /// source extent of layout, cursor mapping and every coordinate a script
+    /// sees. A scene built without a host keeps the canvas.
+    SceneResolution      resolution { SceneResolution::Canvas };
     std::array<float, 3> clearColor { 1.0f, 1.0f, 1.0f };
     bool                 clearEnabled { true };
 

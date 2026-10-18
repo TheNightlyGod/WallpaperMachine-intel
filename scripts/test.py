@@ -37,6 +37,13 @@ UI_TARGET = "WallpaperMachineUITests"
 # which is what makes these reach the tests that gate themselves on them.
 OPT_IN_VARIABLES = ("WALLPAPER_MACHINE_MEDIA_TESTS", "WALLPAPER_MACHINE_NETWORK_TESTS")
 
+# Xcode's thread performance checker runs inside the test host, and its report of a
+# priority inversion is symbolicated on the main thread; under the gate's load that
+# has held tests past their time allowance. AppKit raises one itself: the first time
+# a focused text field with unchecked text is removed, the main thread waits for its
+# data detectors to load. Only the inversion reports are turned off.
+TEST_HOST_VARIABLES = {"PERFC_DISABLE_PRIORITY_INVERSIONS": "1"}
+
 # Result bundles are tens of megabytes each and only the newest ones are ever read.
 KEPT_RESULT_BUNDLES = 5
 
@@ -52,6 +59,17 @@ def test_identifiers(target, only):
             name = name[len(target) + 1:]
         identifiers.append(f"{target}/{name}")
     return identifiers or [target]
+
+
+def test_host_environment(environ):
+    """`environ` with the test host's own variables and the opt-in layers forwarded to it."""
+    env = dict(environ)
+    for name, value in TEST_HOST_VARIABLES.items():
+        env["TEST_RUNNER_" + name] = value
+    for name in OPT_IN_VARIABLES:
+        if name in env:
+            env["TEST_RUNNER_" + name] = env[name]
+    return env
 
 
 def xcodebuild_command(scheme, target, result, only=None, parallel=True):
@@ -139,10 +157,7 @@ def main():
     result = TEST_ARTIFACTS / (prefix + datetime.now().strftime("%Y%m%d-%H%M%S-%f") + ".xcresult")
     # UI tests drive one desktop and cannot share it with a second worker.
     command = xcodebuild_command(scheme, target, result, args.only, parallel=not (args.serial or args.ui))
-    env = dict(os.environ)
-    for name in OPT_IN_VARIABLES:
-        if name in env:
-            env["TEST_RUNNER_" + name] = env[name]
+    env = test_host_environment(os.environ)
     completed, log = run_quiet(command, result.with_suffix(".log"), cwd=ROOT, env=env, verbose=args.verbose)
     failed = None
     if (result / "Info.plist").exists():

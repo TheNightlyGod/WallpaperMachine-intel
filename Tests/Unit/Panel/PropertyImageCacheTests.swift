@@ -96,20 +96,6 @@ final class PropertyImageCacheTests: XCTestCase {
         XCTAssertEqual(PropertyImageCache.sources(in: html), [accepted.absoluteString: accepted])
     }
 
-    @MainActor
-    func testOnlyRegisteredArtworkCanBeLoadedAndRetiredRoutesDisappear() throws {
-        let assets = WebPanelAssets()
-        let source = try XCTUnwrap(URL(string: "https://i.ibb.co/art/image.gif"))
-        let key = PropertyImageCache.key(for: source)
-        let route = try XCTUnwrap(URL(string: "mwe-ui://property-image/" + key))
-        XCTAssertNil(assets.route(route))
-        assets.propertyImages = [key: source]
-        XCTAssertEqual(assets.route(route), .propertyImage(source))
-        XCTAssertNil(assets.route(try XCTUnwrap(URL(string: route.absoluteString + "?url=https://i.ibb.co/other"))))
-        assets.propertyImages = [:]
-        XCTAssertNil(assets.route(route))
-    }
-
     func testRasterValidationPreservesTransparentPixelsAndAnimation() throws {
         for type in [UTType.png, UTType.gif] {
             let data = NSMutableData()

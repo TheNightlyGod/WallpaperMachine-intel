@@ -1,6 +1,6 @@
 # Contributing
 
-WallpaperMachine is a native macOS app (SwiftUI/AppKit plus a WKWebView control
+WallpaperMachine is a native macOS app (an AppKit shell with a SwiftUI control
 panel), a sandboxed lock-screen ExtensionKit extension, and a vendored Rust/C++
 renderer. This page gets you running and points at the document that owns each
 topic; it does not repeat them.
@@ -28,7 +28,7 @@ generates the Xcode project and builds the app. Flags and failure modes:
 
 ## Day-to-day loop
 
-1. Edit sources. Swift/`WebUI`/resource changes rebuild with
+1. Edit sources. Swift and resource changes rebuild with
    `python3 scripts/build.py --swift-only`; renderer changes need a full
    `python3 scripts/build.py`.
 2. While iterating, run `python3 scripts/test.py --only <TestClass>` for the

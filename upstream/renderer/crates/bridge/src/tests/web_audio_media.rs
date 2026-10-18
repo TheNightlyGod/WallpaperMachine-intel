@@ -82,6 +82,29 @@ fn scene_media_rejects_invalid_artwork_and_timeline() {
         artwork_rgba: vec![1], ..Default::default() }.into_state().is_err());
 }
 
+/// The host's playback numbering (0 playing, 1 paused, 2 stopped, as
+/// `BridgeMediaSnapshot::playback_state` documents) is mapped by name; what the
+/// scene's scripts are sent is Wallpaper Engine's own numbering.
+#[test]
+fn scene_media_playback_reaches_scripts_in_wallpaper_engines_numbers() {
+    use crate::api::BridgeMediaSnapshot;
+    let sent = |host_state: u8| {
+        let state = BridgeMediaSnapshot { playback_state: host_state, ..Default::default() }
+            .into_state()
+            .unwrap();
+        let playback = state
+            .events
+            .iter()
+            .find(|event| matches!(event, wallpaper_core::media::MediaIntegrationEvent::PlaybackChanged { .. }))
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_str(&playback.to_json().unwrap()).unwrap();
+        json["state"].as_u64().unwrap()
+    };
+    assert_eq!(sent(0), 1, "host playing is PLAYBACK_PLAYING");
+    assert_eq!(sent(1), 2, "host paused is PLAYBACK_PAUSED");
+    assert_eq!(sent(2), 0, "host stopped is PLAYBACK_STOPPED");
+}
+
 /// One web wallpaper committed to display 7, with audio response left at its
 /// default of on.
 async fn web_bridge(engine: &FakeEngineFacade) -> WallpaperBridge {

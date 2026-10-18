@@ -8,6 +8,192 @@ Simplified Chinese. The app's What's New window offers both translations; the
 GitHub Release body repeats only the English notes. See
 [docs/release.md](docs/release.md) for how a version is cut.
 
+## 1.5.6 — 2026-10-17
+
+### English
+
+This update makes more scene wallpapers look the way they do in Wallpaper Engine, fixes a problem that could stop the app from quitting, and adds a way to reset all settings
+
+#### New
+
+- Settings › General has a new Reset section that, after a confirmation, returns every setting to its default while keeping your library, playlists, collections and sign-ins
+
+#### Improved
+
+- A wide window now shows the target display's name in the toolbar, so you can see at a glance which screen gets wallpapers
+- Wallpaper details now slide in and out from the window's right edge, matching the Filters sidebar
+
+#### Fixed
+
+- Quitting WallpaperMachine no longer fails with a missing-file error when the desktop picture you used before it has since been deleted
+- Scenes and Workshop presets with a chosen background picture now show that picture instead of turning the whole wallpaper black
+- Full-screen effects inside a group, such as the CRT screen of terminal wallpapers, no longer show a shrunken or shifted copy of the scene
+- Moving the mouse no longer makes wallpapers with a full-screen post-processing layer, such as film grain, show the picture twice
+- Clock widgets and other layers that zoom on hover no longer disappear right after a wallpaper starts
+- Wallpaper settings chosen from a list, such as a clock's date format, now follow your choice instead of always showing the same option
+- Resized animated picture layers now appear at their saved size, so the CRT monitor in Makima is Listening fills its bezel without a grey border
+- On the Compatibility renderer, effects that build on the previous frame, such as fluid simulations, no longer start from a bright screen on some Macs
+
+### 简体中文
+
+本次更新让更多场景壁纸的显示效果与 Wallpaper Engine 一致，修复了可能导致应用无法退出的问题，并新增了重置全部设置的功能
+
+#### 新增
+
+- 设置 › 通用新增“重置”部分，确认后可将所有设置恢复为默认值，同时保留你的壁纸库、播放列表、合集和登录信息
+
+#### 改进
+
+- 窗口较宽时，工具栏会显示目标显示器的名称，一眼就能看出壁纸将应用到哪块屏幕
+- 壁纸详情栏现在会从窗口右侧滑入滑出，与筛选边栏的动画保持一致
+
+#### 修复
+
+- 如果使用 WallpaperMachine 之前的桌面图片已被删除，退出应用时不再因找不到文件而失败
+- 选择了背景图片的场景或自带背景图片的创意工坊预设现在会正常显示该图片，不再整屏发黑
+- 图层组内的全屏效果（如终端类壁纸的 CRT 屏幕效果）不再显示缩小或错位的场景画面
+- 带有全屏后期处理图层（如胶片颗粒）的壁纸在移动鼠标时不再出现画面重影
+- 时钟等悬停时会放大的小部件不再在壁纸启动后立即消失
+- 从列表中选择的壁纸设置（如时钟的日期格式）现在会按你的选择生效，不再始终显示同一选项
+- 调整过大小的动态图片图层现在按场景保存的尺寸显示，Makima is Listening 中的 CRT 显示器屏幕会填满边框，不再留有灰边
+- 使用兼容渲染器时，流体模拟等基于上一帧的效果在部分 Mac 上不再从全亮画面开始
+
+**Full changelog**: https://github.com/WallpaperMachine/WallpaperMachine/compare/v1.5.5...v1.5.6
+
+## 1.5.5 — 2026-10-17
+
+### English
+
+![WallpaperMachine 1.5.5](Resources/ReleaseBanners/1.5.5.jpg)
+
+This release rebuilds the control panel as a native macOS window and brings scene wallpapers much closer to how they look and behave in Wallpaper Engine
+
+#### Highlights
+
+- The control panel is now a native macOS window, with tabs in the title bar, a sliding Filters sidebar and a Now Playing bar
+- Scenes now show their lights, distance and height fog, camera shake and light shafts, as they do in Wallpaper Engine
+- 2D scene wallpapers are drawn at your display's resolution by default, so edges and fine detail stay sharp
+- Text, particles, ripples and media widgets in scenes look and behave much closer to Wallpaper Engine
+
+#### Breaking changes
+
+- Clicking a tag chip in Filters now shows only wallpapers with that tag; to hide a tag, Option-click it or choose Hide this tag
+
+#### New
+
+- Library, Steam Workshop, pixiv and Settings are tabs in the title bar, and what is playing sits in a bar along the bottom
+- Filters open in a sidebar that slides out beside the grid, and collections are created, renamed and deleted in its Collections group
+- Settings is laid out like System Settings, with a search that finds any setting, Quick Settings tiles and new icons
+- Point, spot, tube and directional lights now light the layers and 3D models of scenes that use them
+- Distance and height fog now appear in scenes that use them
+- Camera shake now works in scenes that ask for it, following the wallpaper's own settings
+- Text layers now show their outline, blur and drop shadow
+- Light shafts made with the Wallpaper Engine editor's shape objects now appear in scenes
+- A new 2D scene resolution choice in Performance settings lets you draw at canvas size instead, using less GPU time and memory
+- Scene scripts get much more of Wallpaper Engine 2.8's scripting, so more interactive wallpapers and widgets run as their authors intended
+- Steam Workshop wallpapers have a Share button in their details, and About adds Share WallpaperMachine and Star on GitHub
+- You can choose to send a small daily performance report that helps find slow wallpapers and crashes; it stays off until you turn it on
+- The What's New window shows a banner and highlights for feature releases, in the language you read the notes in
+
+#### Improved
+
+- Scrolling the wallpaper grids stays smooth, even with animated previews playing or the details column open
+- Quick Settings now says which battery, Low Power Mode or heat rule is pausing wallpapers or lowering quality, and Performance shows the frame rate in force
+- Particle effects such as snow, leaves and stars start fully populated, scale with their layer and spawn where Wallpaper Engine puts them
+- Camera parallax now moves at Wallpaper Engine's speed, and clocks, labels and composited layers move in step with the layers around them
+- Bloom, HDR and layer brightness follow Wallpaper Engine's rules and defaults, so glowing scenes look closer to the original
+- Large pictures in scenes are drawn from their full-size image, so they no longer look soft on high-resolution displays
+- Clocks and other changing text update promptly instead of reloading their fonts every time
+- Wallpaper settings bound to a scene's bloom, parallax or zoom now take effect while the wallpaper runs
+- More scenes now stay on the Native Metal renderer instead of switching to Compatibility
+- The title bar shows WallpaperMachine and its version again, each page has its search bar at the top, and filter groups fold smoothly
+
+#### Fixed
+
+- Text layers in scenes now use the right fonts, size, alignment and spacing, with no dark edges, and stay visible under effects
+- Cursor ripple and fluid effects now move, getting one push per click instead of one every frame the button is held
+- Media widgets hide while nothing is playing, show their cover art, and tell a playing track from a paused one
+- Layers animated in size, rotation or colour now move and change as they do in Wallpaper Engine
+- Dragging on a web wallpaper no longer drops a copy of its picture onto the desktop or stops Finder from selecting icons
+- Web audio visualizers such as osu!flower Enhanced now start and react to sound
+- Clicking in another window, the menu bar or the Dock no longer counts as a click on the scene wallpaper behind it
+- With Only play on the display I'm using on, other displays keep playing while a full-screen app covers your current display
+- A video inside a scene no longer jumps back to its start or freezes when a clock drawn over it changes
+- AV1 videos inside scene wallpapers play again
+- Workshop effects that drew nothing, such as audio bars, colour grading, shadow and fluid simulation, now show
+- Pictures under a post-processing layer now fill the frame, and such layers no longer show a displaced copy of the screen
+- Lit 3D models no longer show sparkles or hard highlights, glows stay behind the models in front of them, and heads follow the cursor correctly
+- Layers that blend with the screen no longer vanish or appear upside down, and layers tied to a wallpaper's choices or scripts show when they should
+- Paused, resumed or finished downloads update at once in the Downloads list, and Chinese download progress shows its percent sign
+- Searching Settings no longer leaves the contents of an open section showing without its title
+
+### 简体中文
+
+![WallpaperMachine 1.5.5](Resources/ReleaseBanners/1.5.5.zh-Hans.jpg)
+
+本版本将控制面板重建为原生 macOS 窗口，并让场景壁纸的外观和表现更接近 Wallpaper Engine
+
+#### 亮点
+
+- 控制面板现为原生 macOS 窗口，标题栏中设有标签页，并配有可滑出的筛选侧栏和“正在播放”栏
+- 场景壁纸现在会呈现光源、距离雾与高度雾、镜头抖动和光束，和在 Wallpaper Engine 中一样
+- 2D 场景壁纸默认按显示器分辨率渲染，边缘和细节更加清晰
+- 场景中的文字、粒子、涟漪和媒体小组件，外观和表现都更接近 Wallpaper Engine
+
+#### 不兼容变更
+
+- 在筛选中点按标签现在只显示带有该标签的壁纸；如需隐藏某个标签，请按住 Option 点按或选择“隐藏此标签”
+
+#### 新增
+
+- 壁纸库、Steam 创意工坊、pixiv 和设置以标签页形式位于标题栏，正在播放的壁纸显示在窗口底部的栏中
+- 筛选条件显示在网格旁滑出的侧栏中，可在其中的“合集”分组里新建、重命名和删除合集
+- 设置采用与系统设置相同的布局，可搜索任意设置项，并提供快捷设置磁贴和全新图标
+- 使用点光源、聚光灯、管状光源或平行光的场景，现在会照亮其中的图层和 3D 模型
+- 设有距离雾或高度雾的场景现在会显示雾效
+- 需要镜头抖动的场景现在会按壁纸自身的设置抖动镜头
+- 文字图层现在会显示描边、模糊和投影
+- 用 Wallpaper Engine 编辑器形状对象制作的光束现在会显示在场景中
+- 性能设置新增 2D 场景分辨率选项，可改为按画布尺寸渲染，占用更少的 GPU 时间和内存
+- 场景脚本支持更多 Wallpaper Engine 2.8 的脚本功能，更多交互式壁纸和小组件可按作者的设计运行
+- Steam 创意工坊壁纸的详情中新增“分享”按钮，“关于”中新增分享 WallpaperMachine 和在 GitHub 上加星标
+- 可选择每天发送一份简短的性能报告，帮助发现运行缓慢的壁纸和崩溃问题；此功能在你开启前保持关闭
+- “新功能”窗口会为功能版本显示横幅和亮点，并使用你阅读说明时所选的语言
+
+#### 改进
+
+- 滚动壁纸网格更加流畅，即使正在播放动态预览或打开了详情栏也不卡顿
+- 快捷设置现在会说明是哪条电池、低电量模式或过热规则暂停了壁纸或降低了画质，性能页也会显示当前生效的帧率
+- 雪花、落叶、星光等粒子效果一开始即已铺满，随图层缩放，并在与 Wallpaper Engine 相同的位置生成
+- 镜头视差现在以 Wallpaper Engine 的速度移动，时钟、文字标签和合成图层会与周围图层同步移动
+- 泛光、HDR 和图层亮度遵循 Wallpaper Engine 的规则与默认值，发光场景更接近原作效果
+- 场景中的大尺寸图片改用原尺寸图像绘制，在高分辨率显示器上不再显得模糊
+- 时钟等不断变化的文字不再每次都重新载入字体，刷新更加及时
+- 绑定到场景泛光、视差或缩放的壁纸属性，现在在壁纸运行时即可生效
+- 更多场景现在会继续使用原生 Metal 渲染器，而不再切换到兼容渲染器
+- 标题栏重新显示 WallpaperMachine 及其版本号，每个页面顶部都有搜索栏，筛选分组的展开和收起也更顺滑
+
+#### 修复
+
+- 场景中的文字图层现在使用正确的字体、大小、对齐和间距，边缘不再发黑，套用效果后也不会消失
+- 鼠标涟漪和流体效果现在会动起来，每次点按推动一次，而不是按住时每帧都推动
+- 没有播放内容时媒体小组件会自动隐藏，显示其封面图，并能正确区分播放和暂停
+- 设有缩放、旋转或颜色动画的图层现在会像在 Wallpaper Engine 中一样动起来
+- 在网页壁纸上拖移时，不再会把图片拷贝到桌面，也不再影响在访达中框选图标
+- osu!flower Enhanced 等网页音频可视化壁纸现在能正常启动并随声音变化
+- 在其他窗口、菜单栏或程序坞中点按，不再被当作对后方场景壁纸的点按
+- 开启“仅在我正在使用的显示器上播放”后，当前显示器被全屏 App 遮挡时，其他显示器会继续播放
+- 场景中的视频不再因上方的时钟变化而跳回开头或卡住
+- 场景壁纸中的 AV1 视频恢复播放
+- 音频柱、调色、阴影、流体模拟等此前不显示的创意工坊效果现在可以正常显示
+- 后期处理图层下的图片现在会铺满画面，这类图层也不再显示错位的屏幕副本
+- 受光照的 3D 模型不再出现闪点和生硬高光，光晕会被前方模型正确遮挡，头部也能正确跟随鼠标转动
+- 与屏幕混合的图层不再消失或上下颠倒，与壁纸选项或脚本关联的图层也会在该显示时正常显示
+- 在“下载”列表中暂停、继续或完成下载时状态会立即更新，简体中文下的下载进度也会显示百分号
+- 搜索设置时，已展开部分的内容不再在标题隐藏后仍然显示
+
+**Full changelog**: https://github.com/WallpaperMachine/WallpaperMachine/compare/v1.4.1...v1.5.5
+
 ## 1.4.1 — 2026-10-14
 
 ### English

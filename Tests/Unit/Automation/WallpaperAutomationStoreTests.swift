@@ -64,4 +64,45 @@ final class WallpaperAutomationStoreTests: XCTestCase {
         defaults.set(data, forKey: WallpaperAutomationStore.configurationsKey)
         XCTAssertTrue(WallpaperAutomationStore(defaults: defaults).configurations.isEmpty)
     }
+
+    func testALocationSavedBeforeTheSourceExistedReadsAsCoordinates() throws {
+        let legacy = WallpaperSolarLocation(latitude: 30.0827, longitude: 103.874)
+        defaults.set(try JSONEncoder().encode(legacy), forKey: WallpaperAutomationStore.locationKey)
+        let store = WallpaperAutomationStore(defaults: defaults)
+        XCTAssertEqual(store.solar.source, .coordinates)
+        XCTAssertEqual(store.solar.location, legacy)
+        XCTAssertEqual(store.solar.fixedSunriseMinute, 7 * 60)
+        XCTAssertEqual(store.solar.fixedSunsetMinute, 18 * 60)
+        XCTAssertNil(store.loadError)
+    }
+
+    func testFixedTimesSurviveAReloadWithoutACoordinate() throws {
+        let store = WallpaperAutomationStore(defaults: defaults)
+        try store.setSolar(.init(
+            source: .fixed, location: nil,
+            fixedSunriseMinute: 6 * 60 + 15, fixedSunsetMinute: 19 * 60 + 45))
+        let loaded = WallpaperAutomationStore(defaults: defaults)
+        XCTAssertEqual(loaded.solar.source, .fixed)
+        XCTAssertEqual(loaded.solar.fixedSunriseMinute, 6 * 60 + 15)
+        XCTAssertEqual(loaded.solar.fixedSunsetMinute, 19 * 60 + 45)
+        XCTAssertNil(loaded.location)
+        XCTAssertNil(loaded.loadError)
+    }
+
+    func testAutomaticSourceKeepsTheLocationItTracks() throws {
+        let store = WallpaperAutomationStore(defaults: defaults)
+        let location = WallpaperSolarLocation(latitude: 30.0827, longitude: 103.874)
+        try store.setSolar(.init(source: .automatic, location: location))
+        let loaded = WallpaperAutomationStore(defaults: defaults)
+        XCTAssertEqual(loaded.solar.source, .automatic)
+        XCTAssertEqual(loaded.solar.location, location)
+        XCTAssertNil(loaded.loadError)
+    }
+
+    func testAFixedTimeOutsideTheDayIsRefused() {
+        let store = WallpaperAutomationStore(defaults: defaults)
+        XCTAssertThrowsError(try store.setSolar(.init(
+            source: .fixed, location: nil,
+            fixedSunriseMinute: 24 * 60, fixedSunsetMinute: 18 * 60)))
+    }
 }

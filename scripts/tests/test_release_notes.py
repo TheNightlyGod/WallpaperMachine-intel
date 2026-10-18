@@ -232,6 +232,16 @@ class ModelReplyTests(unittest.TestCase):
         self.assertLess(body.index("### 简体中文"), body.index("https://github.com/owner/repo/compare/v0.5.0...v0.6.0"))
         release_notes.require_bilingual(body)
 
+    def test_highlights_lead_both_languages(self):
+        body = self.notes(model_reply(bilingual(
+            highlights=[pair("A rebuilt control panel", "全新的控制面板")],
+            new=[pair("Choose how many downloads run at once", "可以选择同时进行的下载数量")],
+        )))
+        english, chinese = body.split("### 简体中文", 1)
+        self.assertLess(english.index("#### Highlights\n\n- A rebuilt control panel\n"), english.index("#### New"))
+        self.assertLess(chinese.index("#### 亮点\n\n- 全新的控制面板\n"), chinese.index("#### 新增"))
+        release_notes.require_bilingual(body)
+
     def test_a_reply_in_a_code_fence_is_still_read(self):
         body = self.notes(model_reply("```json\n" + bilingual(fixed=[WAKE]) + "\n```"))
         self.assertIn("### English\n\n#### Fixed\n\n- A crash on wake\n", body)
@@ -388,6 +398,38 @@ class ModelRangeTests(unittest.TestCase):
         self.assertNotIn("Internal verification notes", prompt)
         self.assertNotIn("bump version", prompt)
 
+    def test_only_a_feature_release_asks_for_highlights(self):
+        self.write()
+        self.assertIn("This is a feature release", self.reply.requests[0][2]["messages"][0]["content"])
+        release_notes.write_with_model("0.1.1", "v0.1.0", "HEAD", REPOSITORY, self.root, self.reply, KEY)
+        self.assertIn("This is a patch release", self.reply.requests[1][2]["messages"][0]["content"])
+
+    def test_a_patch_replacing_an_unpublished_feature_release_asks_for_highlights(self):
+        # 0.2.0 was tagged but never published: 0.2.1's notes start at 0.1.0 and are the
+        # first anyone reads of 0.2.
+        release_notes.write_with_model("0.2.1", "v0.1.0", "HEAD", REPOSITORY, self.root, self.reply, KEY)
+        self.assertIn("This is a feature release", self.reply.requests[0][2]["messages"][0]["content"])
+
+    def test_each_language_opens_with_its_own_banner(self):
+        self.assertNotIn("![", self.write(), "No picture, no banner line")
+        banners = self.root / "Resources" / "ReleaseBanners"
+        banners.mkdir(parents=True)
+        (banners / "0.2.0.jpg").write_bytes(b"jpeg")
+        shared = self.write()
+        self.assertIn("### English\n\n![WallpaperMachine 0.2.0](Resources/ReleaseBanners/0.2.0.jpg)\n\n#### Fixed", shared)
+        self.assertIn("### 简体中文\n\n![WallpaperMachine 0.2.0](Resources/ReleaseBanners/0.2.0.jpg)\n\n#### 修复", shared,
+                      "Without its own picture Chinese shares the English one")
+        (banners / "0.2.0.zh-Hans.png").write_bytes(b"png")
+        notes = self.write()
+        self.assertIn("### 简体中文\n\n![WallpaperMachine 0.2.0](Resources/ReleaseBanners/0.2.0.zh-Hans.png)\n", notes)
+        release_notes.require_bundled_history(release_notes.section("0.2.0", "2026-01-01", notes))
+        page = release_notes.release_body(notes, "0.2.0", repo=REPOSITORY).split(release_notes.NOTES_END)[0]
+        self.assertTrue(page.startswith(
+            f"### English\n\n![WallpaperMachine 0.2.0](https://raw.githubusercontent.com/{REPOSITORY}/v0.2.0/"
+            "Resources/ReleaseBanners/0.2.0.jpg)\n\n#### Fixed"))
+        self.assertNotIn("zh-Hans", page)
+        self.assertNotIn("![", release_notes.release_body(notes, "0.2.0"), "Without a repository the page has no address for it")
+
     def test_a_squash_merge_brings_the_body_of_every_commit_it_lists(self):
         long = "Rotate moves through all wallpapers in order or shuffled. " * 40
         commit(self.root, "\n".join([
@@ -521,6 +563,27 @@ class PublishTests(unittest.TestCase):
         ):
             with self.subTest(body=body), self.assertRaises(release_notes.NotesError):
                 release_notes.require_bilingual(body)
+
+    def test_a_banner_names_its_own_version(self):
+        def with_banner(english, chinese):
+            return self.changelog(RECORDED
+                                  .replace("### English\n", f"### English\n\n![WallpaperMachine]({english})\n")
+                                  .replace("### 简体中文\n", f"### 简体中文\n\n![WallpaperMachine]({chinese})\n"))
+        stolen = with_banner("Resources/ReleaseBanners/0.2.0.jpg", "Resources/ReleaseBanners/0.1.0.zh-Hans.jpg")
+        with self.assertRaisesRegex(release_notes.NotesError, "banner of 0.2.0"):
+            release_notes.require_bundled_history(stolen)
+        release_notes.require_bundled_history(
+            with_banner("Resources/ReleaseBanners/0.2.0.png", "Resources/ReleaseBanners/0.2.0.zh-Hans.jpg"))
+
+    def test_a_banner_cannot_stand_in_for_a_translation(self):
+        with self.assertRaises(release_notes.NotesError):
+            release_notes.require_bilingual(
+                "### English\n\n- Fixed a crash\n\n### 简体中文\n\n![壁纸](Resources/ReleaseBanners/0.2.0.zh-Hans.jpg)\n")
+
+    def test_every_banner_the_changelog_names_is_committed(self):
+        text = release_notes.CHANGELOG.read_text(encoding="utf-8")
+        for match in release_notes.BANNER.finditer(text):
+            self.assertTrue((release_notes.ROOT / match.group("path")).is_file(), match.group("path"))
 
     def test_missing_historical_translation_blocks_publication(self):
         text = release_notes.insert_section(

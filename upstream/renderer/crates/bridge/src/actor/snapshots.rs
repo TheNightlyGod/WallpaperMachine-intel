@@ -21,7 +21,7 @@ use crate::{
         BridgeStorageStatus, BridgeVideoBackendReport, BridgeWallpaperOptionsSnapshot,
         bridge_log_status,
     },
-    config::{SceneRendererModeCfg, SerializedSelector, VideoBackendModeCfg},
+    config::{SceneRendererModeCfg, SceneResolutionCfg, SerializedSelector, VideoBackendModeCfg},
     engine::{ActivationInputs, RendererVideoPipelineState, SceneRuntimeReport},
     display::{DisplayLabelExt, DisplaySelectorExt, DisplaySnapshotExt},
     logging::{ApplicationLogger, LogStatus},
@@ -40,6 +40,8 @@ const RUNNING_BACKEND_NATIVE: &str = "native";
 const RUNNING_BACKEND_LEGACY: &str = "legacy";
 const SCENE_RENDERER_COMPATIBILITY: &str = "compatibility";
 const SCENE_RENDERER_NATIVE_METAL_PREFERRED: &str = "native_metal_preferred";
+const SCENE_RESOLUTION_CANVAS: &str = "canvas";
+const SCENE_RESOLUTION_DISPLAY: &str = "display";
 const SCENE_BACKEND_LEGACY_VULKAN: &str = "legacy_vulkan";
 const SCENE_BACKEND_NATIVE_METAL: &str = "native_metal";
 /// A scene that is running and whose backend the renderer could not name.
@@ -779,6 +781,10 @@ impl BridgeActorState {
                 SceneRendererModeCfg::NativeMetalPreferred => {
                     SCENE_RENDERER_NATIVE_METAL_PREFERRED.to_string()
                 }
+            },
+            scene_resolution: match self.app_config.quality.scene_resolution {
+                SceneResolutionCfg::Canvas => SCENE_RESOLUTION_CANVAS.to_string(),
+                SceneResolutionCfg::Display => SCENE_RESOLUTION_DISPLAY.to_string(),
             },
             scene_update_modes,
             scene_renderers,

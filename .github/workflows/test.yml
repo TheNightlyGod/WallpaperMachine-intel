@@ -1,0 +1,161 @@
+# The test gate on hosted macOS 26 runners: the same `python3 scripts/test.py` a change
+# has to pass locally, with the Rust and renderer checks beside it. It is not part of a
+# release (build.yml says why); run it by hand (Actions -> Test -> Run workflow) to see
+# whether a branch passes on macOS 26, which a developer on a later macOS does not run.
+# A run may narrow the native tests with `only` and skip the Rust and renderer checks,
+# so only an unnarrowed run says the gate passes.
+#
+# A run tests the branch or tag it is started from ("Use workflow from", or
+# `gh workflow run test.yml --ref <branch>`), never a ref named in an input: its jobs
+# save caches under the ref they run from, and caches saved on main are restored by
+# every release. Started from main with another ref's code, a run would let that code
+# write the caches a release builds from.
+#
+# Three jobs on three runners, because one after another they took over 40 minutes
+# for 1.5 (Rust 5, renderer 9 to 13, native 18 to 22). Each builds the renderer and the
+# bridge from the shared caches, which costs a few minutes per job and leaves the gate
+# about as long as the native tests alone.
+name: Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      only:
+        description: "Optional space-separated test classes or Class/method to run alone."
+        required: false
+        default: ""
+        type: string
+      skip_renderer:
+        description: "Skip the Rust and renderer checks (diagnosis only)."
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    if: ${{ ! inputs.skip_renderer }}
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/prepare-build
+        with:
+          save-object-cache: "false"
+
+      - name: Build the renderer and bridge
+        run: python3 scripts/build.py --renderer-only
+
+      - name: Rust release checks
+        run: python3 scripts/check_rust.py
+
+      - name: Report the C++ object cache
+        if: always()
+        run: ccache --show-stats
+
+      - name: Keep the logs of a failed run
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs-${{ github.run_id }}-rust
+          path: |
+            artifacts/build/
+            artifacts/rust/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  renderer:
+    if: ${{ ! inputs.skip_renderer }}
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/prepare-build
+
+      - name: Build the renderer and bridge
+        run: python3 scripts/build.py --renderer-only
+
+      - name: Renderer regressions without a desktop
+        # Standard hosted Macs may have no Metal device. Only the separate
+        # capability probe's explicit exit 77 may skip GPU targets; started
+        # tests still fail on compile/parse/draw errors and timeouts. Hosted
+        # VMs deliver 10 ms waits 50-100 ms late; only the timer probe's exit
+        # 77 may skip the named wall-clock cadence tests.
+        run: python3 scripts/check_renderer.py --allow-missing-gpu --allow-imprecise-timers
+
+      - name: Report the C++ object cache
+        if: always()
+        run: ccache --show-stats
+
+      - name: Keep the logs of a failed run
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs-${{ github.run_id }}-renderer
+          path: |
+            artifacts/build/
+            artifacts/renderer/adaptive-*/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  native:
+    # It needs the renderer and the generated bridge, not the Release app, so it builds
+    # only those and then the Debug app and tests. macOS 26, where actool compiles the
+    # app icon the Debug app carries.
+    runs-on: macos-26
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # scripts/tests read the history the way the release scripts do.
+          fetch-depth: 0
+
+      - uses: ./.github/actions/prepare-build
+        with:
+          save-object-cache: "false"
+
+      - name: Build the renderer and bridge
+        run: python3 scripts/build.py --renderer-only
+
+      - name: Test
+        # One test class at a time. In parallel, offscreen control-panel suites failed here
+        # (never locally) with "InvalidTransition … failed(deinit)": WebKit dropped a
+        # JavaScript call unanswered. Here serial costs almost nothing: 300 s for the 1.2.0
+        # gate against 278 s in parallel (locally it is 220 s against 50 s).
+        env:
+          ONLY: ${{ inputs.only }}
+        run: |
+          args=(--serial)
+          for name in $ONLY; do args+=(--only "$name"); done
+          python3 scripts/test.py "${args[@]}"
+
+      - name: Report the C++ object cache
+        if: always()
+        run: ccache --show-stats
+
+      - name: Collect crash and jetsam reports of a failed test run
+        # Says whether a web content process crashed or was killed for memory.
+        if: failure()
+        run: |
+          mkdir -p artifacts/tests/reports
+          find ~/Library/Logs/DiagnosticReports /Library/Logs/DiagnosticReports -maxdepth 1 -type f \
+            \( -name '*WebContent*' -o -name '*WebKit*' -o -name 'WallpaperMachine*' -o -name 'JetsamEvent*' \) \
+            -mmin -180 -exec cp {} artifacts/tests/reports/ \; 2>/dev/null || true
+          ls -l artifacts/tests/reports
+
+      - name: Keep the logs of a failed test run
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs-${{ github.run_id }}-native
+          path: |
+            artifacts/build/
+            artifacts/tests/*.log
+            artifacts/tests/*.xcresult
+            artifacts/tests/reports/
+          if-no-files-found: ignore
+          retention-days: 14

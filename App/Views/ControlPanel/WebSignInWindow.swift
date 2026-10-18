@@ -1,13 +1,16 @@
 import AppKit
 import WebKit
 
-/// A site whose own sign-in page `WebSignInWindowController` shows, and the one cookie the app
-/// takes from it once someone has signed in.
+/// A site whose own sign-in page `WebSignInWindowController` shows, and the cookies the app
+/// takes from it once someone has signed in: the session, and for Steam the token that renews it.
 struct WebSignInSite: Sendable {
     let title: String
     let signInURL: URL
     let cookieName: String
     let cookieDomains: Set<String>
+    /// A second cookie taken along with the session when the page set one, and where it lives.
+    var companionName: String?
+    var companionDomains: Set<String> = []
     /// Whether a cookie value is a real session rather than a placeholder the page sets early.
     let accepts: @Sendable (String) -> Bool
 
@@ -25,13 +28,21 @@ struct WebSignInSite: Sendable {
             title: String(localized: "Sign in to Steam"),
             signInURL: URL(string: "https://steamcommunity.com/login/home/?goto=")!,
             cookieName: "steamLoginSecure", cookieDomains: ["steamcommunity.com", ".steamcommunity.com"],
+            companionName: "steamRefresh_steam", companionDomains: ["login.steampowered.com"],
             accepts: { SteamWebSession(cookie: $0) != nil })
     }
 }
 
+/// What a sign-in window took from the page: the session cookie, and the site's companion cookie
+/// when it has one and the page set it.
+struct WebSignInCookies: Equatable, Sendable {
+    let session: String
+    var companion: String?
+}
+
 /// A site's own sign-in page in a window of its own. The page runs in a private website data
-/// store that disappears with the window, and the app reads exactly one thing from it: the
-/// site's session cookie, once someone has signed in. The password, and anything else typed
+/// store that disappears with the window, and the app reads exactly what the site names from it:
+/// the session cookie, and its companion, once someone has signed in. The password, and anything else typed
 /// into the page, stays between the page and the site.
 @MainActor
 final class WebSignInWindowController: NSWindowController, NSWindowDelegate, WKNavigationDelegate, WKUIDelegate,
@@ -40,14 +51,28 @@ final class WebSignInWindowController: NSWindowController, NSWindowDelegate, WKN
     /// The open window of each site, by cookie name.
     private static var current: [String: WebSignInWindowController] = [:]
 
+    /// Runs after a sign-in window has closed, so the app can leave the Dock once no ordinary
+    /// window is left.
+    static var onClosed: (() -> Void)?
+
+    /// Whether `window` is an open sign-in window.
+    static func isOpen(_ window: NSWindow) -> Bool {
+        current.values.contains { $0.window === window }
+    }
+
     private let site: WebSignInSite
     private let webView: WKWebView
-    private var continuation: CheckedContinuation<String?, Never>?
+    private var continuation: CheckedContinuation<WebSignInCookies?, Never>?
 
-    /// Opens the window and answers the session cookie the site set, or nil once the window
-    /// closes without one. While the site's window is open, another call only brings it forward
-    /// and answers nil at once, so a caller must not start a second sign-in.
+    /// The session cookie alone, for a site without a companion.
     static func obtainCookie(for site: WebSignInSite) async -> String? {
+        await obtainCookies(for: site)?.session
+    }
+
+    /// Opens the window and answers the cookies the site set, or nil once the window closes
+    /// without a session. While the site's window is open, another call only brings it forward
+    /// and answers nil at once, so a caller must not start a second sign-in.
+    static func obtainCookies(for site: WebSignInSite) async -> WebSignInCookies? {
         if let open = current[site.cookieName] {
             open.showWindow(nil)
             return nil
@@ -95,7 +120,7 @@ final class WebSignInWindowController: NSWindowController, NSWindowDelegate, WKN
     required init?(coder: NSCoder) { nil }
 
     /// Answers the waiting caller once, then closes the window and lets the page's data go.
-    private func finish(_ session: String?) {
+    private func finish(_ session: WebSignInCookies?) {
         guard let continuation else { return }
         self.continuation = nil
         if Self.current[site.cookieName] === self { Self.current[site.cookieName] = nil }
@@ -103,6 +128,7 @@ final class WebSignInWindowController: NSWindowController, NSWindowDelegate, WKN
         webView.stopLoading()
         window?.delegate = nil
         close()
+        Self.onClosed?()
         continuation.resume(returning: session)
     }
 
@@ -113,7 +139,11 @@ final class WebSignInWindowController: NSWindowController, NSWindowDelegate, WKN
                 $0.name == site.cookieName && site.cookieDomains.contains($0.domain) && site.accepts($0.value)
             })?.value
         else { return }
-        finish(session)
+        // Steam sets its renewal cookie before the session, so both are in the same snapshot.
+        let companion = site.companionName.flatMap { name in
+            cookies.first { $0.name == name && site.companionDomains.contains($0.domain) }?.value
+        }
+        finish(WebSignInCookies(session: session, companion: companion))
     }
 
     nonisolated func cookiesDidChange(in cookieStore: WKHTTPCookieStore) {

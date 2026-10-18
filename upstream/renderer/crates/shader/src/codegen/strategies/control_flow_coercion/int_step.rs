@@ -1,9 +1,55 @@
+use std::collections::BTreeSet;
+
 use super::statements::StatementFixupInput;
 use crate::{
     SourceSpan,
     codegen::{Fixup, LocalDeclaration},
     tokenizer::{TokenCursor, TypedToken, TypedTokenFacts},
 };
+
+/// Returns the name token indices of the `int` declarators that
+/// [`IntStepInitializer`] rewrites to `float`.
+///
+/// The repairs run over one source snapshot, so the symbol facts the other
+/// coercions read must already carry the rewritten type.
+#[expect(
+    clippy::single_call_fn,
+    reason = "selects declarators with the repair's own predicate, beside the repair"
+)]
+pub(super) fn float_step_names(
+    tokens: TokenCursor<'_>,
+    token_facts: &TypedTokenFacts,
+) -> BTreeSet<usize> {
+    token_facts
+        .statements()
+        .iter()
+        .flat_map(|fact| {
+            StatementFixupInput { fact }.declaration_declarators(tokens, token_facts, "int")
+        })
+        .filter(|declaration| initialized_by_step(declaration, tokens, token_facts))
+        .map(|declaration| declaration.name_index())
+        .collect()
+}
+
+/// Returns whether `declaration` is initialized by a direct two-argument
+/// `step` call.
+fn initialized_by_step(
+    declaration: &LocalDeclaration,
+    tokens: TokenCursor<'_>,
+    token_facts: &TypedTokenFacts,
+) -> bool {
+    let Some(initializer) = declaration.initializer(tokens) else {
+        return false;
+    };
+    token_facts
+        .call_at_name(initializer.start())
+        .filter(|call| {
+            call.close_index() == initializer.end()
+                && tokens[call.open_index()].kind().is_left_paren()
+                && tokens[call.close_index()].kind().is_right_paren()
+        })
+        .is_some_and(|call| call.name() == "step" && call.arguments.len() == 2)
+}
 
 /// Integer variable initialized from GLSL `step`, whose return type is float.
 pub(super) struct IntStepInitializer<'statement> {
@@ -26,11 +72,7 @@ impl IntStepInitializer<'_> {
         let mut parts = Vec::new();
         let mut step_count = 0usize;
         for declaration in declarations {
-            let is_step = IntStepDeclarator {
-                declaration: declaration.clone(),
-                is_step: false,
-            }
-            .uses_step(tokens, self.token_facts);
+            let is_step = initialized_by_step(&declaration, tokens, self.token_facts);
             if is_step {
                 step_count += 1;
             }
@@ -105,20 +147,5 @@ impl IntStepDeclarator {
     /// Returns the type spelling after applying this declarator repair.
     fn ty(&self) -> &'static str {
         if self.is_step { "float" } else { "int" }
-    }
-
-    /// Returns whether this int declarator is initialized from `step`.
-    fn uses_step(&self, tokens: TokenCursor<'_>, token_facts: &TypedTokenFacts) -> bool {
-        let Some(initializer) = self.declaration.initializer(tokens) else {
-            return false;
-        };
-        token_facts
-            .call_at_name(initializer.start())
-            .filter(|call| {
-                call.close_index() == initializer.end()
-                    && tokens[call.open_index()].kind().is_left_paren()
-                    && tokens[call.close_index()].kind().is_right_paren()
-            })
-            .is_some_and(|call| call.name() == "step" && call.arguments.len() == 2)
     }
 }

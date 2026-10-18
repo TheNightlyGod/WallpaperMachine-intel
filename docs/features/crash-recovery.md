@@ -21,12 +21,12 @@ names the build (`ClientPaths.buildStamp`).
 
 - After the second crash in a row while one wallpaper loads, the next launch starts
   normally and leaves that wallpaper's display without a live scene. The control panel
-  shows a **banner** under the top bar, one row per held wallpaper, with a sentence
+  shows a **banner** at the top of the page, one row per held wallpaper, with a sentence
   naming it (`"<title>" was not restored: WallpaperMachine quit unexpectedly twice in a
   row while loading it. Nothing was deleted.`) and a **Try again** button. The menu-bar
   menu carries a disabled line, **A wallpaper was held back after a crash**, so a login
   launch with the panel closed still shows the state. Both come from
-  `BridgeAppSnapshot.held_wallpaper_ids` and are localized in the app and panel catalogs.
+  `BridgeAppSnapshot.held_wallpaper_ids` and are localized in the app's catalog.
 - **Try again** opens that wallpaper on its display(s) and lifts the hold. If the engine
   refuses, the panel's error banner shows the reason and the banner row stays: a retry
   that opened nothing is not a release.
@@ -361,10 +361,12 @@ Device-free, against the fake engine and a temporary support root:
 - `DiagnosticsBundleTests`: the journal is exported at the zip root, redacted and listed
   in `README.txt`, its strike history survives redaction, and a missing or unreadable
   journal is noted while the rest of the report is still exported.
-- `ControlPanelHeldWallpaperTests` (hosted, windowless web view): the panel snapshot names
-  each held wallpaper with the localized sentence, `releaseHeld` reaches the bridge once for
-  a held wallpaper and rejects an installed one that is not held, the banner lists the rows
-  and its button posts the action, and a refused retry keeps the row and shows the error.
+- `PanelLibraryActionsTests` and `ShellBannersTests` (Panel, no window): the panel names
+  each held wallpaper with the localized sentence (one missing from the library by its id),
+  `releaseHeld` reaches the bridge once for a held wallpaper and rejects an installed one
+  that is not held, the banner takes no room with nothing held and a row for each held
+  wallpaper, **Try again** runs the retry, and a refused retry keeps the row and shows the
+  reason in the same banner.
 - `tests::activation_plan`: a held wallpaper gets no scene, web or native-video
   descriptor; `build_owned` names the owner of every scene, mirrors included.
 - `InstanceLockTests` use temporary folders and an injected clock and process table (no

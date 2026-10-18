@@ -111,6 +111,11 @@ struct ReleaseNotes: Equatable, Sendable {
     struct Section: Equatable, Sendable {
         let title: String
         let items: [String]
+        /// Bullet items, as opposed to a paragraph such as a release's summary.
+        var isList = false
+
+        /// The section `scripts/release_notes.py` heads Highlights / 亮点 in feature releases.
+        var isHighlights: Bool { title == "Highlights" || title == "亮点" }
     }
 
     static let boundary = "<!-- release-notes-end -->"
@@ -132,7 +137,7 @@ struct ReleaseNotes: Equatable, Sendable {
         var items: [String] = []
         var bullets = false
         func flush(into next: String) {
-            if !items.isEmpty { sections.append(Section(title: title, items: items)) }
+            if !items.isEmpty { sections.append(Section(title: title, items: items, isList: bullets)) }
             title = next
             items = []
         }
@@ -145,6 +150,8 @@ struct ReleaseNotes: Equatable, Sendable {
             }
             // The compare link is the page's navigation, not something to read here.
             if trimmed.hasPrefix("**Full changelog**") { continue }
+            // A banner picture is shown, not read: its description is not a change.
+            if trimmed.hasPrefix("![") { continue }
             let isBullet = trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ")
             // A paragraph after a list closes it; it is a remark, not another entry.
             if !items.isEmpty, isBullet != bullets { flush(into: "") }

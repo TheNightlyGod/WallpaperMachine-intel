@@ -11,7 +11,14 @@ namespace wallpaper
 {
 
 Scene::Scene(): sceneGraph(std::make_shared<SceneNode>()) ,paritileSys(std::make_unique<ParticleSystem>(*this)) {}
-Scene::~Scene() = default;
+Scene::~Scene() {
+    // A script's `destroy()` may reach the file system, the render-exclusion list
+    // and the scene graph. Members die in reverse order of declaration, and the
+    // runtime is declared above the first two, so left to its own destructor it
+    // would end its scripts after those were gone. Ending them here, before any
+    // member is destroyed, is the one point at which all of it still exists.
+    if (runtime != nullptr) runtime->TearDownScripts();
+}
 
 void Scene::FrameCanvas(double zoom, const Eigen::Vector2f& offset) {
     const auto global = cameras.find("global");
@@ -20,8 +27,8 @@ void Scene::FrameCanvas(double zoom, const Eigen::Vector2f& offset) {
 
     const Eigen::Vector2f centre = Eigen::Vector2f(static_cast<float>(ortho[0]),
                                                    static_cast<float>(ortho[1])) * 0.5f + offset;
-    // Only the view's centre moves; each camera keeps its own distance from
-    // the canvas plane.
+    // Aiming moves only the view's centre. How far the perspective camera then
+    // sits in front of the canvas plane follows from the view's size, below.
     const auto aim = [&centre](SceneCamera& target) {
         const auto node = target.GetAttachedNode();
         if (node == nullptr) return;
@@ -36,10 +43,7 @@ void Scene::FrameCanvas(double zoom, const Eigen::Vector2f& offset) {
         perspective != cameras.end() && perspective->second != nullptr) {
         auto& perspective_camera = *perspective->second;
         aim(perspective_camera);
-        if (! perspective_camera.FovLocked()) {
-            perspective_camera.SetFov(
-                algorism::CalculatePersperctiveFov(1000.0, camera.VisibleHeight()));
-        }
+        FitCanvasPerspective(perspective_camera, camera);
         perspective_camera.Update();
     }
     UpdateLinkedCamera("global");

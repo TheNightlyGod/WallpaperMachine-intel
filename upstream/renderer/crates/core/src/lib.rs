@@ -49,7 +49,7 @@ pub use engine::{
 pub use error::EngineError;
 pub use owe::backend::AudioSpectrum128;
 pub use owe::scene_demand::{
-    SceneBackend, SceneDemandReasons, SceneRendererPreference, SceneRuntimeReport,
+    SceneBackend, SceneDemandReasons, SceneRendererPreference, SceneResolution, SceneRuntimeReport,
     SceneUpdateMode, SceneVideoPath, SurfaceHealth, SurfaceStopReason,
 };
 pub use owe::scene_registry::SceneRegistry;

@@ -121,7 +121,23 @@ fn preprocess_context_method_preprocesses_program() {
 }
 
 #[test]
-fn default_wallpaper_engine_macros_select_glsl_paths() {
+fn default_macros_are_wallpaper_engines_direct3d_dialect_plus_glsl() {
+    // Wallpaper Engine prepends `#define HLSL 1` and `#define HLSL_SM40 1` and
+    // never defines `GLSL`; this crate keeps `GLSL` for the backend-language
+    // paths shaders select with `#if GLSL`.
+    let table = MacroTable::from_combos(&[]);
+
+    assert_eq!(table.value("HLSL"), Some("1"));
+    assert_eq!(table.value("HLSL_SM40"), Some("1"));
+    assert_eq!(table.value("GLSL"), Some("1"));
+    assert!(
+        !table.contains("HLSL_SM30"),
+        "Shader Model 3 is not the model Wallpaper Engine compiles for"
+    );
+}
+
+#[test]
+fn every_spelling_of_the_hlsl_test_takes_the_direct3d_branch() {
     let provider = InMemoryShaderSourceProvider::new();
     let request = request_with_fragment(
         r#"
@@ -135,10 +151,30 @@ float hlsl_defined = 1.0;
 #else
 float hlsl_defined = 0.0;
 #endif
+#ifndef HLSL
+float hlsl_not_defined = 1.0;
+#else
+float hlsl_not_defined = 0.0;
+#endif
 #if HLSL
 float hlsl_truthy = 1.0;
 #else
 float hlsl_truthy = 0.0;
+#endif
+#if !HLSL
+float hlsl_negated = 1.0;
+#else
+float hlsl_negated = 0.0;
+#endif
+#if HLSL && HLSL_SM40
+float hlsl_sm40 = 1.0;
+#else
+float hlsl_sm40 = 0.0;
+#endif
+#ifdef HLSL_SM30
+float hlsl_sm30 = 1.0;
+#else
+float hlsl_sm30 = 0.0;
 #endif
 void main() {}
 "#,
@@ -153,12 +189,36 @@ void main() {}
         .expect("fragment stage exists")
         .source();
 
-    assert!(source.contains("float glsl_path = 1.0;"));
-    assert!(source.contains("float hlsl_defined = 1.0;"));
-    assert!(source.contains("float hlsl_truthy = 0.0;"));
-    assert!(!source.contains("float glsl_path = 0.0;"));
-    assert!(!source.contains("float hlsl_defined = 0.0;"));
-    assert!(!source.contains("float hlsl_truthy = 1.0;"));
+    for taken in [
+        "float glsl_path = 1.0;",
+        "float hlsl_defined = 1.0;",
+        "float hlsl_not_defined = 0.0;",
+        "float hlsl_truthy = 1.0;",
+        "float hlsl_negated = 0.0;",
+        "float hlsl_sm40 = 1.0;",
+        "float hlsl_sm30 = 0.0;",
+    ] {
+        assert!(source.contains(taken), "{taken} missing from:\n{source}");
+    }
+}
+
+#[test]
+fn a_dialect_macro_still_follows_the_source_that_defines_it_again() {
+    let provider = InMemoryShaderSourceProvider::new();
+    let request = request_with_fragment(
+        "#undef HLSL\n#if HLSL\nfloat v = 1.0;\n#else\nfloat v = 0.0;\n#endif\nvoid main() {}\n",
+        &[],
+    );
+
+    let program = PreprocessContext::new(&request, &provider)
+        .preprocess()
+        .expect("preprocesses");
+    let source = program
+        .stage(ShaderStageKind::Fragment)
+        .expect("fragment stage exists")
+        .source();
+
+    assert!(source.contains("float v = 0.0;"), "{source}");
 }
 
 #[test]

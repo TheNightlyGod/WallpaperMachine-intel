@@ -10,6 +10,7 @@
 #include "Platform/Apple/FfmpegVideoInterop.hpp"
 #include "Runtime/SceneRuntimeContext.hpp"
 #include "Scene/Scene.h"
+#include "Utils/Logging.h"
 #include "Video/SharedVideoSession.hpp"
 #include "Video/VideoColorConversion.hpp"
 #include "Video/VideoConversionMetal.hpp"
@@ -184,6 +185,9 @@ struct MetalVideoTextures::State {
     std::string                 pipeline_error;
 
     std::map<std::string, VideoSourceEntry> sources;
+    /// What a graph being rebuilt set aside (`hold`) for the compile that follows
+    /// to take back: each one's decoder, with what is reported of its work so far.
+    std::map<std::string, VideoSourceEntry> held;
     std::map<std::string, VideoConsumerDemand> demand;
     RendererCounters*                       counters { nullptr };
     bool                                    paused { false };
@@ -197,6 +201,7 @@ struct MetalVideoTextures::State {
     ~State()
     {
         sources.clear();
+        held.clear();
         releaseDeviceObjects();
     }
 
@@ -249,6 +254,23 @@ struct MetalVideoTextures::State {
         };
         nv12_pipeline = pipeline(@"nv12_to_bgra");
         bgra_pipeline = pipeline(@"bgra_transform");
+    }
+
+    /// What a key's source is asked to play right now: the layer's own clock and
+    /// controls, under the renderer's pause and rate. The one answer for the
+    /// frame being drawn and for a source being opened, which must not start from
+    /// any clock but the one the next frame will hand it.
+    video::VideoPlaybackState playbackFor(const Scene& scene, const std::string& key) const
+    {
+        video::VideoPlaybackState layer_state =
+            scene.runtime != nullptr
+                ? scene.runtime->ResolveVideoPlaybackState(key, scene.elapsingTime)
+                : video::VideoPlaybackState {};
+        if (scene.runtime == nullptr) layer_state.scene_elapsed_seconds = scene.elapsingTime;
+        video::VideoPlaybackState global_state {};
+        global_state.paused = paused;
+        global_state.rate   = rate;
+        return vulkan::ResolveEffectiveVideoPlaybackState(global_state, layer_state);
     }
 
     void reportSourceWork(VideoSourceEntry& entry, std::uint64_t generation)
@@ -338,6 +360,7 @@ void MetalVideoTextures::configure(id<MTLDevice> device)
     auto& state = *m_state;
     if (state.device == device) return;
     state.sources.clear();
+    state.held.clear();
     state.releaseDeviceObjects();
     state.pipeline_error.clear();
     state.device = device;
@@ -350,7 +373,12 @@ bool MetalVideoTextures::prepare(Scene&                          scene,
                                  std::string*                    error)
 {
     auto& state = *m_state;
-    if (texture_keys.empty()) return true;
+    if (texture_keys.empty()) {
+        // A graph that binds no video says so: a rebuild that left the last one out
+        // reports none open.
+        state.publishSourceIdentity();
+        return true;
+    }
     if (state.device == nil) {
         return SetError(error, "no Metal device for the scene's video textures");
     }
@@ -368,41 +396,67 @@ bool MetalVideoTextures::prepare(Scene&                          scene,
         if (auto reason = MetalVideoTextureRejection(scene, key); ! reason.empty()) {
             return SetError(error, std::move(reason));
         }
-        if (scene.imageParser == nullptr) {
-            return SetError(error, "the scene cannot resolve video texture \"" + key + "\"");
-        }
-        auto image = scene.imageParser->Parse(key);
-        if (! image) {
-            return SetError(error, "failed to parse video texture \"" + key + "\"");
-        }
-        // Not every key handed in is a video; the ones that are not belong to
-        // the ordinary texture path and are simply not ours.
-        if (! image->header.isVideo) continue;
 
-        std::string source_error;
-        // Through the registry, exactly as the compatibility backend's texture
-        // cache does: with shared decode off this is a private source per
-        // call, and with it on an equivalent running decoder is reused.
-        auto source = video::AcquireVideoTextureSource(*image, &source_error);
-        if (! source) {
-            return SetError(error,
-                            "failed to open video texture \"" + key + "\": " + source_error);
+        VideoSourceEntry entry;
+        std::string      source_error;
+        // A video the graph being rebuilt set aside is neither parsed nor opened
+        // again: reading one that is packaged in the scene copies and hashes the
+        // whole file, and a decoder opened again shows the head of its clip until
+        // a seek to the clock has landed. It is given the clock as a draw gives it,
+        // and carries on from the frame it had. One that failed while it waited is
+        // opened again like any other.
+        if (auto held = state.held.find(key); held != state.held.end()) {
+            entry = std::move(held->second);
+            state.held.erase(held);
+            if (! entry.source->syncPlayback(state.playbackFor(scene, key), &source_error) ||
+                ! entry.source->refreshFrame(&source_error) ||
+                ! entry.source->currentFrame().valid()) {
+                LOG_INFO("video texture \"%s\" did not survive the rebuild, opening it again: %s",
+                         key.c_str(), source_error.c_str());
+                entry        = VideoSourceEntry {};
+                source_error = {};
+            }
         }
-        if (! source->prime(&source_error)) {
-            return SetError(error,
-                            "failed to prime video texture \"" + key + "\": " + source_error);
+        if (! entry.source) {
+            if (scene.imageParser == nullptr) {
+                return SetError(error, "the scene cannot resolve video texture \"" + key + "\"");
+            }
+            auto image = scene.imageParser->Parse(key);
+            if (! image) {
+                return SetError(error, "failed to parse video texture \"" + key + "\"");
+            }
+            // Not every key handed in is a video; the ones that are not belong to
+            // the ordinary texture path and are simply not ours.
+            if (! image->header.isVideo) continue;
+
+            // Through the registry, exactly as the compatibility backend's texture
+            // cache does: with shared decode off this is a private source per
+            // call, and with it on an equivalent running decoder is reused.
+            auto source = video::AcquireVideoTextureSource(*image, &source_error);
+            if (! source) {
+                return SetError(error,
+                                "failed to open video texture \"" + key + "\": " + source_error);
+            }
+            if (! source->prime(&source_error)) {
+                return SetError(error,
+                                "failed to prime video texture \"" + key + "\": " + source_error);
+            }
+            // The first frame is what proves the media plays at all and what the
+            // format rejection below is decided on. Importing it is the render
+            // thread's job, because the import has to be encoded into a command
+            // buffer this call does not have. A video opened under a scene that is
+            // already some way into the clip is given that clock here, so that the
+            // seek to it starts now and not on the first draw. The head of the clip
+            // is on offer until it lands.
+            if (! source->syncPlayback(state.playbackFor(scene, key), &source_error) ||
+                ! source->refreshFrame(&source_error)) {
+                return SetError(error,
+                                "failed to read the first frame of video texture \"" + key +
+                                    "\": " + source_error);
+            }
+            entry.source = std::move(source);
         }
-        // The first frame is what proves the media plays at all and what the
-        // format rejection below is decided on. Importing it is the render
-        // thread's job, because the import has to be encoded into a command
-        // buffer this call does not have.
-        if (! source->syncPlayback(video::VideoPlaybackState {}, &source_error) ||
-            ! source->refreshFrame(&source_error)) {
-            return SetError(error,
-                            "failed to read the first frame of video texture \"" + key +
-                                "\": " + source_error);
-        }
-        const auto frame = source->currentFrame();
+        const auto frame = entry.source->currentFrame();
         if (! frame.valid()) {
             return SetError(error, "video texture \"" + key + "\" produced no first frame");
         }
@@ -426,8 +480,6 @@ bool MetalVideoTextures::prepare(Scene&                          scene,
                                 : state.pipeline_error);
         }
 
-        VideoSourceEntry entry;
-        entry.source = std::move(source);
         state.sources.emplace(key, std::move(entry));
     }
 
@@ -475,6 +527,26 @@ void MetalVideoTextures::release()
     m_state->demand.clear();
     if (m_state->texture_cache != nullptr) CVMetalTextureCacheFlush(m_state->texture_cache, 0);
 }
+
+void MetalVideoTextures::hold()
+{
+    auto& state = *m_state;
+    for (auto& [key, entry] : state.sources) {
+        if (! entry.source) continue;
+        // The decoder and what has been reported of its work, so that taking it
+        // back reports only what it does from here. The imported frame, the
+        // destinations and the texture belong to the graph that is going.
+        VideoSourceEntry kept;
+        kept.source                  = std::move(entry.source);
+        kept.selection               = entry.selection;
+        kept.reported_decode_outputs = entry.reported_decode_outputs;
+        kept.reported_seeks          = entry.reported_seeks;
+        state.held.insert_or_assign(key, std::move(kept));
+    }
+    release();
+}
+
+void MetalVideoTextures::closeHeld() { m_state->held.clear(); }
 
 bool MetalVideoTextures::owns(const std::string& key) const
 {
@@ -630,16 +702,7 @@ bool MetalVideoTextures::beginFrame(Scene& scene, id<MTLCommandBuffer> command, 
         for (auto& [key, entry] : state.sources) {
             if (! entry.source) continue;
 
-            video::VideoPlaybackState layer_state =
-                scene.runtime != nullptr
-                    ? scene.runtime->ResolveVideoPlaybackState(key, scene.elapsingTime)
-                    : video::VideoPlaybackState {};
-            if (scene.runtime == nullptr) layer_state.scene_elapsed_seconds = scene.elapsingTime;
-            video::VideoPlaybackState global_state {};
-            global_state.paused = state.paused;
-            global_state.rate   = state.rate;
-            const auto effective =
-                vulkan::ResolveEffectiveVideoPlaybackState(global_state, layer_state);
+            const auto effective = state.playbackFor(scene, key);
             entry.advancing = ! effective.paused && effective.rate > 0.0f;
 
             if (! entry.source->syncPlayback(effective, error)) return false;

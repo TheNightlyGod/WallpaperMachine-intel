@@ -172,6 +172,9 @@ void LoadHeader(fs::IBinaryStream& file, ImageHeader& header) {
             flags[WPTexFlagEnum::clampUVs] ? TextureWrap::CLAMP_TO_EDGE : TextureWrap::REPEAT;
         header.sample.minFilter = header.sample.magFilter =
             flags[WPTexFlagEnum::noInterpolation] ? TextureFilter::NEAREST : TextureFilter::LINEAR;
+        // The reference builds the sampler of a file texture from these flags: with
+        // `noInterpolation` it is point sampling for min, mag and the mip level.
+        header.sample.mipFilter = header.sample.magFilter;
         header.extraHeader["compo1"].val = flags[WPTexFlagEnum::compo1];
         header.extraHeader["compo2"].val = flags[WPTexFlagEnum::compo2];
         header.extraHeader["compo3"].val = flags[WPTexFlagEnum::compo3];
@@ -473,6 +476,19 @@ ImageHeader BuildLooseAssetHeader(
     return header;
 }
 
+// The longest side of the level after the one whose payload of `payload_size`
+// bytes starts at the stream's position. Its header follows that payload (width
+// and height come first in every container version), so it is read ahead
+// without moving the stream; 0 when the file ends before it.
+uint64_t NextLevelLongestSide(fs::IBinaryStream& file, i32 payload_size) {
+    const auto at = file.Tell();
+    if (! file.SeekSet(at + payload_size)) return 0;
+    const i32 width  = file.ReadInt32();
+    const i32 height = file.ReadInt32();
+    file.SeekSet(at);
+    return uint64_t(std::max<i32>(std::max(width, height), 0));
+}
+
 } // namespace
 
 bool wallpaper::HostLooseAssetIsReadable(std::string_view name) { return IsHostAssetPath(name); }
@@ -507,7 +523,7 @@ std::shared_ptr<Image> WPTexImageParser::Parse(const std::string& name) {
         usize first_mip = 0;
         // Use the authored mip chain, without decoding or uploading discarded
         // levels. Atlases, videos and unknown containers keep their full layout.
-        const bool limit_mips = m_texture_dimension_limit != 0 && image_count == 1 &&
+        const bool limit_mips = m_texture_surface_longest_side != 0 && image_count == 1 &&
             !img.header.isSprite && !img.header.isVideo &&
             (img.header.extraHeader["texb"].val < 3 || img.header.type != ImageType::UNKNOWN);
         // load image
@@ -533,8 +549,10 @@ std::shared_ptr<Image> WPTexImageParser::Parse(const std::string& name) {
             if (src_size <= 0 || mipmap.width <= 0 || mipmap.height <= 0 || decompressed_size < 0)
                 return nullptr;
             if (src_size > file.Size() - file.Tell()) return nullptr;
+            // Drop a leading level only while the next still covers the surface,
+            // so what is kept is never magnified to fill it.
             if (limit_mips && i_mipmap == first_mip && i_mipmap + 1 < mipmap_count &&
-                uint64_t(std::max(mipmap.width, mipmap.height)) > m_texture_dimension_limit) {
+                NextLevelLongestSide(file, src_size) >= m_texture_surface_longest_side) {
                 file.SeekSet(file.Tell() + src_size);
                 ++first_mip;
                 continue;

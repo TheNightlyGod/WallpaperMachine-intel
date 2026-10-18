@@ -213,6 +213,9 @@ public:
     // first, then by stack index; -1 means no such layer.
     i32  findLayer(std::string_view name) const noexcept;
     usize layerCount() const noexcept;
+    /// The authored name of the layer at `index`; empty for an unnamed layer or
+    /// an index with no layer.
+    std::string layerName(i32 index) const;
     bool play(i32 index) noexcept;
     bool pause(i32 index) noexcept;
     bool stop(i32 index) noexcept;
@@ -227,6 +230,10 @@ public:
     double blend(i32 index) const noexcept;
     bool setVisible(i32 index, bool visible) noexcept;
     bool visible(i32 index) const noexcept;
+    // The layers whose single-shot animation has played out since the last call,
+    // oldest first. A script's `addEndedCallback` is answered from this. The
+    // record is shared by every copy, so any one of them can take it.
+    std::vector<i32> takeFinishedLayers() noexcept;
 
 private:
     struct Layer {
@@ -243,6 +250,7 @@ private:
         double m_last_elapsed { -1.0 };
 
         std::vector<Layer> m_layers;
+        std::vector<i32>   m_finished_layers;
         std::vector<Eigen::Affine3f> m_final_affines;
         bool m_pose_valid { false };
         uint64_t m_pose_time_bits { 0 };

@@ -59,8 +59,9 @@ final class SceneMediaSinkTests: XCTestCase {
         sink.reconcile()
         try await poll { submitted.contains { $0.contains("Bohemian Rhapsody") } }
 
+        let playing = SystemMediaEventCodec.sceneScriptPlaybackState(.playing)
         XCTAssertTrue(
-            submitted.contains { $0.contains("\"state\":0") },
+            submitted.contains { $0.contains("\"state\":\(playing)") },
             "the replacement is told playback too, not only the title")
         XCTAssertEqual(artwork.first?.2, 4, "the cover pixels are re-uploaded for the new scene")
 

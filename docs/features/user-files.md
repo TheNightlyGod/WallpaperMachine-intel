@@ -169,8 +169,8 @@ are refused by the path editor.
 The store, bridge, watcher and purge are covered by `Tests/Unit/UserAssets/`
 (`UserAssetStoreTests`, `DirectoryWatcherTests`,
 `UserAssetPreparationPerformanceTests`), the page payload and staging by
-`WebWallpaperPropertyPayloadTests`, the inspector side by
-`Tests/Unit/Panel/WebPanelAssetPropertiesTests.swift`, the bridge contract by
+`WebWallpaperPropertyPayloadTests`, the inspector side by `PanelPropertyFilesTests`,
+`PanelPropertyRowsTests` and `InspectorFlowTests` in `Tests/Unit/Panel/`, the bridge contract by
 `upstream/renderer/crates/bridge/src/tests/file_properties.rs`, and the lock-screen
 republication by `LockScreenWallpaperServiceTests`; the inventory is under
 [UserAssets](../testing/coverage.md#userassets). No test drives the real open panel,

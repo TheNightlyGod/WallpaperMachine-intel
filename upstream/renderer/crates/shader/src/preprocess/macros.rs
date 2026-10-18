@@ -4,6 +4,18 @@ use smol_str::SmolStr;
 
 use crate::ShaderComboValue;
 
+/// Macros every stage sees before its own source.
+///
+/// Wallpaper Engine compiles its shaders as HLSL: it prepends `#define HLSL 1`
+/// and `#define HLSL_SM40 1` and never defines `GLSL`. `GLSL` stays defined
+/// here too, so the `#if GLSL` paths shaders pick for this crate's own language
+/// stay picked. `HLSL` has to be truthy, because `#if HLSL` is the branch
+/// Wallpaper Engine's shaders take on Direct3D (a compositing effect turns its
+/// screen coordinate over there, a polyfill stands in for an intrinsic GLSL
+/// has): as `0` that branch was skipped while `#ifdef HLSL`, true for any value,
+/// was taken.
+const DIALECT_MACROS: [(&str, &str); 3] = [("GLSL", "1"), ("HLSL", "1"), ("HLSL_SM40", "1")];
+
 /// Macro values visible while preprocessing shader conditionals.
 #[derive(Clone, Debug, Default)]
 pub struct MacroTable {
@@ -35,7 +47,7 @@ impl MacroTable {
     pub fn from_combos(combos: &[ShaderComboValue]) -> Self {
         let mut table = Self { values: Vec::new() };
 
-        for (name, value) in [("GLSL", "1"), ("HLSL", "0")] {
+        for (name, value) in DIALECT_MACROS {
             table.define(name, value);
         }
         for combo in combos {

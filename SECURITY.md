@@ -35,8 +35,10 @@ itself and offers **Restart to Update**; builds from source should follow `main`
 - The app, its lock-screen extension and its renderer, including how they handle
   a downloaded scene, video or web wallpaper: a wallpaper that reads or writes
   files, reaches the network or runs code beyond what the app means it to.
-- The control panel's web view: script injection through wallpaper titles,
-  Workshop or pixiv data, or messages from another origin.
+- The control panel: wallpaper titles, descriptions, property labels, Workshop or
+  pixiv data that the panel shows as anything other than text (formatting, a link
+  to a site it does not allow, an image from a host it does not allow), and the
+  Steam and pixiv sign-in web views reaching beyond the sign-in page.
 - Steam and pixiv sign-ins leaving the Mac, or becoming readable by other apps.
 - The [updater](docs/features/updates.md#installing) installing
   anything other than a release whose SHA-256 matches.

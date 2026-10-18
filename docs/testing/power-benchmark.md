@@ -106,10 +106,10 @@ actual power window. Neither the configured ceiling nor timer-wakeup counts
 provide elapsed time or displayed-frame counts.
 
 The app opens its control panel at launch, so each such run includes it, and
-animated GIF previews add WebContent and WindowServer work (Discover animates the
+animated previews add frame decoding in the app and WindowServer work (Discover animates the
 tiles on screen; Installed shows still covers and animates only the tile under
 the pointer or keyboard focus, see [control panel](../features/control-panel.md));
-say whether the panel was open and on which tab. The saving from Installed's
+say whether the panel was open and on which page. The saving from Installed's
 still covers has not been measured: compare a run with the panel open on
 Installed against a build before the change. System power includes every other application,
 so it is only comparable against a paired baseline taken minutes from the run;
@@ -322,6 +322,7 @@ decode-correctness defect.
 | `WALLPAPER_MACHINE_METAL_TARGET_SHARING=0` | Native Metal lets targets never alive together share images, and traded copies share a small set | Every target keeps an image of its own; the picture is byte-identical either way, the target memory is not |
 | Settings → Performance → Advanced → Video playback (`video_backend` in the app config) | Compatibility: every wallpaper on the scene engine | Native video preferred: eligible plain local videos on the platform player |
 | Settings → Performance → Advanced → Scene renderer (`scene_renderer` in the app config) | See [scene rendering](../features/scene-rendering.md#scene-renderer) | The other renderer for every scene it can draw; headless, `LocalProjectEnergyIsMeasuredHeadlessly` ([renderer.md](renderer.md#ccmake-test-binaries)) runs one scene on either |
+| Settings → Performance → Quality → 2D scene resolution (`scene_resolution` under `[quality]`) | Display resolution: a 2D scene is rasterized at the size it is presented at | Canvas size: rasterized at the authored canvas and stretched; less GPU time and memory |
 
 `WALLPAPER_MACHINE_CONTENT_PACING=1` switches content pacing on in headless
 probes. An explicit setting wins over it and the app pushes its saved value at

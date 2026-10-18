@@ -51,6 +51,10 @@ __pycache__/
 .commandcode/
 CLAUDE.local.md
 
+# Local working plans shared by the developer and agent sessions on this machine;
+# never commit or push them.
+.plans/
+
 # Root npm files belong to local agent tooling; WebUI has no npm build.
 /node_modules/
 /package.json

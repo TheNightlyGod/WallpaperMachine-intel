@@ -17,7 +17,7 @@ enum UserAssetStorage {
     static func revealManagedDirectory() {
         let url = managedRootURL
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-        NSWorkspace.shared.activateFileViewerSelecting([url])
+        DesktopActions.current.reveal([url])
     }
 
     /// Deletes stored bytes that no manifest lists any more, and returns how many bytes
