@@ -149,7 +149,7 @@ label and the choice's value are unchanged. The words are English, and the panel
 translates them whenever the same phrase is already a catalog entry.
 
 A wallpaper may carry its own translations in `general.localization`: a table per
-Wallpaper Engine language code (`en-us`, `zh-chs`, `zh-cht`, `ja-jp`) that maps
+Wallpaper Engine language code (`en-us`, `zh-chs`, `zh-cht`, `ja-jp`, `ko-kr`) that maps
 the `ui_…` tokens its labels and combo options use to text. A label or combo
 option that is exactly one of those tokens (surrounding spaces ignored) shows the
 text from the app's language, then from `en-us`, and otherwise stays as the author

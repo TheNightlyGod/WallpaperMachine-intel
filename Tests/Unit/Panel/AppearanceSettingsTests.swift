@@ -97,7 +97,7 @@ final class AppearanceSettingsTests: PanelTestCase {
     try pinPanelLanguageToEnglish()
     let options = GeneralSettingsSection.languageOptions()
     XCTAssertEqual(options.map(\.value), [AppLanguageStore.systemChoice] + AppLanguage.supported.map(\.tag))
-    XCTAssertEqual(options.map(\.title), ["System (Auto)", "English", "简体中文", "繁體中文", "日本語"])
+    XCTAssertEqual(options.map(\.title), ["System (Auto)"] + AppLanguage.supported.map(\.name))
 
     // Their own names are never translated, whatever the panel shows.
     let japanese = AppLanguageStore(
@@ -105,7 +105,7 @@ final class AppearanceSettingsTests: PanelTestCase {
     PanelLocale.shared.bind(to: japanese)
     addTeardownBlock { @MainActor in PanelLocale.shared.bind(to: .testHost) }
     let inJapanese = GeneralSettingsSection.languageOptions()
-    XCTAssertEqual(inJapanese.map(\.title).dropFirst(), ["English", "简体中文", "繁體中文", "日本語"])
+    XCTAssertEqual(Array(inJapanese.map(\.title).dropFirst()), AppLanguage.supported.map(\.name))
     XCTAssertNotEqual(inJapanese.first?.title, "System (Auto)", "Only the system entry follows the language")
   }
 
@@ -117,7 +117,8 @@ final class AppearanceSettingsTests: PanelTestCase {
       addTeardownBlock { @MainActor in PanelLocale.shared.bind(to: .testHost) }
       XCTAssertEqual(PanelLocale.shared.tag, "en")
 
-      for (tag, expected) in [("zh-Hans", "zh-Hans"), ("ja", "ja"), (AppLanguageStore.systemChoice, "en")] {
+      let choices = AppLanguage.supported.map { ($0.tag, $0.tag) } + [(AppLanguageStore.systemChoice, "en")]
+      for (tag, expected) in choices {
         let task = try XCTUnwrap(
           settings.commit("language", to: tag) { try await controller.setLanguage(AppLanguage.named($0)) })
         await task.value

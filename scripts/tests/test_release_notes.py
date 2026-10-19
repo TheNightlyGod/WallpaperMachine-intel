@@ -188,13 +188,13 @@ class Transport:
 KEY = {"RELEASE_NOTES_API_KEY": "test-key"}
 
 
-def pair(english, chinese):
-    return {"english": english, "chinese": chinese}
+def translations(english, chinese, korean):
+    return {"english": english, "chinese": chinese, "korean": korean}
 
 
-def bilingual(**sections):
-    """A model reply in the required shape. Omitted sections are empty."""
-    notes = {"summary": sections.pop("summary", pair("", ""))}
+def trilingual(**sections):
+    """A new model reply in the required shape. Omitted sections are empty."""
+    notes = {"summary": sections.pop("summary", translations("", "", ""))}
     for key, _heading in release_notes.MODEL_SECTIONS:
         notes[key] = sections.pop(key, [])
     if sections:
@@ -202,8 +202,8 @@ def bilingual(**sections):
     return json.dumps(notes)
 
 
-LAYERS = pair("Layers stay in place", "图层保持原位")
-WAKE = pair("A crash on wake", "唤醒时不再崩溃")
+LAYERS = translations("Layers stay in place", "图层保持原位", "레이어가 제자리에 유지됨")
+WAKE = translations("A crash on wake", "唤醒时不再崩溃", "잠자기에서 깨어날 때 충돌하지 않음")
 
 
 class ModelReplyTests(unittest.TestCase):
@@ -211,15 +211,16 @@ class ModelReplyTests(unittest.TestCase):
         return release_notes.render_model_notes("0.6.0", release_notes.parse_notes(release_notes.streamed_text(reply)),
                                                 "v0.5.0", REPOSITORY)
 
-    def test_both_languages_keep_the_same_changes_in_order(self):
-        body = self.notes(model_reply(bilingual(
-            summary=pair("Music wallpapers work again.", "音乐壁纸恢复正常。"),
-            fixed=[pair("Album covers show again.", "专辑封面重新显示")],
-            new=[pair("- Choose how many downloads run at once", "可以选择同时进行的下载数量")],
-            breaking=[pair("Old presets are no longer read", "不再读取旧的预设")],
+    def test_all_languages_keep_the_same_changes_in_order(self):
+        body = self.notes(model_reply(trilingual(
+            summary=translations("Music wallpapers work again.", "音乐壁纸恢复正常。", "음악 배경화면이 다시 작동함."),
+            fixed=[translations("Album covers show again.", "专辑封面重新显示", "앨범 표지가 다시 표시됨")],
+            new=[translations("- Choose how many downloads run at once", "可以选择同时进行的下载数量", "동시 다운로드 수를 선택할 수 있음")],
+            breaking=[translations("Old presets are no longer read", "不再读取旧的预设", "이전 사전 설정을 더 이상 읽지 않음")],
         )))
-        english, chinese = body.split("### 简体中文", 1)
-        self.assertTrue(english.startswith("### English\n\nMusic wallpapers work again\n"))
+        blocks = release_notes.language_blocks(body)
+        english, chinese, korean = (blocks[code] for code in ("english", "chinese", "korean"))
+        self.assertTrue(body.startswith("### English\n\nMusic wallpapers work again\n"))
         self.assertLess(english.index("#### Breaking changes"), english.index("#### New"))
         self.assertLess(english.index("#### New"), english.index("#### Fixed"))
         self.assertNotIn("#### Improved", body)
@@ -229,52 +230,101 @@ class ModelReplyTests(unittest.TestCase):
         self.assertLess(chinese.index("#### 新增"), chinese.index("#### 修复"))
         self.assertIn("- 可以选择同时进行的下载数量\n", chinese)
         self.assertIn("- 专辑封面重新显示\n", chinese)
-        self.assertLess(body.index("### 简体中文"), body.index("https://github.com/owner/repo/compare/v0.5.0...v0.6.0"))
-        release_notes.require_bilingual(body)
+        self.assertLess(korean.index("#### 호환되지 않는 변경 사항"), korean.index("#### 새로운 기능"))
+        self.assertLess(korean.index("#### 새로운 기능"), korean.index("#### 수정됨"))
+        self.assertIn("- 앨범 표지가 다시 표시됨\n", korean)
+        self.assertLess(body.index("### 简体中文"), body.index("### 한국어"))
+        self.assertLess(body.index("### 한국어"), body.index("https://github.com/owner/repo/compare/v0.5.0...v0.6.0"))
+        release_notes.require_localized_notes(body, "0.6.0")
 
-    def test_highlights_lead_both_languages(self):
-        body = self.notes(model_reply(bilingual(
-            highlights=[pair("A rebuilt control panel", "全新的控制面板")],
-            new=[pair("Choose how many downloads run at once", "可以选择同时进行的下载数量")],
+    def test_highlights_lead_all_languages(self):
+        body = self.notes(model_reply(trilingual(
+            highlights=[translations("A rebuilt control panel", "全新的控制面板", "새롭게 설계된 제어 패널")],
+            new=[translations("Choose how many downloads run at once", "可以选择同时进行的下载数量", "동시 다운로드 수를 선택할 수 있음")],
+            improved=[translations("Faster searches", "搜索更快", "더 빠른 검색")],
         )))
-        english, chinese = body.split("### 简体中文", 1)
+        blocks = release_notes.language_blocks(body)
+        english, chinese, korean = (blocks[code] for code in ("english", "chinese", "korean"))
         self.assertLess(english.index("#### Highlights\n\n- A rebuilt control panel\n"), english.index("#### New"))
         self.assertLess(chinese.index("#### 亮点\n\n- 全新的控制面板\n"), chinese.index("#### 新增"))
-        release_notes.require_bilingual(body)
+        self.assertLess(korean.index("#### 주요 변경 사항\n\n- 새롭게 설계된 제어 패널\n"), korean.index("#### 새로운 기능"))
+        self.assertLess(korean.index("#### 새로운 기능"), korean.index("#### 개선 사항"))
+        release_notes.require_localized_notes(body, "0.6.0")
 
     def test_a_reply_in_a_code_fence_is_still_read(self):
-        body = self.notes(model_reply("```json\n" + bilingual(fixed=[WAKE]) + "\n```"))
+        body = self.notes(model_reply("```json\n" + trilingual(fixed=[WAKE]) + "\n```"))
         self.assertIn("### English\n\n#### Fixed\n\n- A crash on wake\n", body)
         self.assertIn("### 简体中文\n\n#### 修复\n\n- 唤醒时不再崩溃\n", body)
 
-    def test_notes_with_nothing_in_them_say_so_in_both_languages(self):
-        body = self.notes(model_reply(bilingual(fixed=[pair(" ", " ")])))
+    def test_notes_with_nothing_in_them_say_so_in_all_languages(self):
+        body = self.notes(model_reply(trilingual(fixed=[translations(" ", " ", " ")])))
         self.assertIn("### English\n\nNo user-visible changes since `v0.5.0`.", body)
         self.assertIn("### 简体中文\n\n自 `v0.5.0` 以来没有用户能察觉的变化。", body)
-        self.assertLess(body.index("### 简体中文"), body.index("https://github.com/owner/repo/compare/v0.5.0...v0.6.0"))
+        self.assertIn("### 한국어\n\n`v0.5.0` 이후 사용자에게 표시되는 변경 사항이 없습니다.", body)
+        self.assertLess(body.index("### 한국어"), body.index("https://github.com/owner/repo/compare/v0.5.0...v0.6.0"))
+
+    def test_empty_notes_without_a_previous_tag_are_translated(self):
+        body = release_notes.render_model_notes("1.5.7", release_notes.empty_notes())
+        self.assertIn("### English\n\nNo user-visible changes in this history.", body)
+        self.assertIn("### 简体中文\n\n这段历史里没有用户能察觉的变化。", body)
+        self.assertIn("### 한국어\n\n이 기록에는 사용자에게 표시되는 변경 사항이 없습니다.", body)
+        release_notes.require_localized_notes(body, "1.5.7")
 
     def test_a_multi_line_entry_cannot_open_a_changelog_section(self):
-        body = self.notes(model_reply(bilingual(
-            summary=pair("## 9.9.9\nSurprise", "意外的摘要不会另起一节"),
-            fixed=[pair("One\n## 9.9.9 heading", "一行里的标题不会另起一节")],
+        body = self.notes(model_reply(trilingual(
+            summary=translations("## 9.9.9\nSurprise", "意外的摘要不会另起一节", "요약이 새 절을 열지 않음"),
+            fixed=[translations("One\n## 9.9.9 heading", "一行里的标题不会另起一节", "제목이 새 절을 열지 않음")],
         )))
         self.assertEqual(len(release_notes.split_sections("# Changelog\n\n## 0.6.0 — day\n\n" + body)[1]), 1)
 
     def test_the_release_notes_boundary_is_refused(self):
         with self.assertRaises(release_notes.NotesError):
-            self.notes(model_reply(bilingual(fixed=[pair("Fixed <!-- release-notes-end --> early", "提前结束")])))
+            self.notes(model_reply(trilingual(fixed=[translations("Fixed <!-- release-notes-end --> early", "提前结束", "조기 종료")])))
 
     def test_a_missing_language_stops_the_run(self):
         for reply in (
             json.dumps({"summary": "Music wallpapers work again.", "fixed": ["Album covers show again."]}),
-            bilingual(fixed=[{"english": "Album covers show again"}]),
-            bilingual(summary=pair("Music wallpapers work again.", "")),
-            bilingual(fixed=[pair("Album covers show again.", "Album covers show again.")]),
-            bilingual(fixed=[pair("Album covers show again.", "OK")]),
-            bilingual(fixed=[pair("专辑封面", "专辑封面重新显示")]),
+            trilingual(fixed=[{"english": "Album covers show again"}]),
+            trilingual(summary=translations("Music wallpapers work again.", "", "음악 배경화면이 다시 작동함")),
+            trilingual(fixed=[translations("Album covers show again.", "Album covers show again.", "앨범 표지가 다시 표시됨")]),
+            trilingual(fixed=[translations("Album covers show again.", "OK", "앨범 표지가 다시 표시됨")]),
+            trilingual(fixed=[translations("专辑封面", "专辑封面重新显示", "앨범 표지가 다시 표시됨")]),
         ):
             with self.assertRaises(release_notes.NotesError):
                 self.notes(model_reply(reply))
+
+    def test_korean_is_required_in_the_summary_and_every_bullet(self):
+        for field in ("summary", "fixed"):
+            for korean in (None, "", " ", "Layers stay in place", "图层保持原位", "Layer ga jejari", 7):
+                item = dict(LAYERS, korean=korean)
+                if korean is None:
+                    del item["korean"]
+                reply = trilingual(**{field: item if field == "summary" else [item]})
+                with self.subTest(field=field, korean=korean), self.assertRaises(release_notes.NotesError):
+                    self.notes(model_reply(reply))
+
+    def test_copied_korean_is_rejected_even_when_the_source_contains_hangul(self):
+        for source in ("english", "chinese"):
+            item = dict(LAYERS)
+            item[source] += " 다시"
+            item["korean"] = item[source]
+            with self.subTest(source=source), self.assertRaises(release_notes.NotesError):
+                self.notes(model_reply(trilingual(fixed=[item])))
+
+    def test_the_summary_must_be_a_trilingual_object(self):
+        for summary in (None, "", {}, {"english": "", "chinese": ""}):
+            with self.subTest(summary=summary), self.assertRaises(release_notes.NotesError):
+                self.notes(model_reply(trilingual(summary=summary)))
+        data = json.loads(trilingual())
+        del data["summary"]
+        with self.assertRaises(release_notes.NotesError):
+            self.notes(model_reply(json.dumps(data)))
+
+    def test_translation_objects_reject_unknown_fields_and_non_text_values(self):
+        for field in ("summary", "fixed"):
+            for item in (dict(LAYERS, japanese="翻訳"), dict(LAYERS, english=7), dict(LAYERS, chinese=[])):
+                with self.subTest(field=field, item=item), self.assertRaises(release_notes.NotesError):
+                    self.notes(model_reply(trilingual(**{field: item if field == "summary" else [item]})))
 
     def test_a_reply_that_is_not_json_stops_the_run(self):
         with self.assertRaises(release_notes.NotesError):
@@ -282,11 +332,11 @@ class ModelReplyTests(unittest.TestCase):
 
     def test_unexpected_fields_stop_the_run(self):
         with self.assertRaises(release_notes.NotesError):
-            self.notes(model_reply(json.dumps({"summary": pair("", ""), "security": [WAKE]})))
+            self.notes(model_reply(json.dumps({"summary": translations("", "", ""), "security": [WAKE]})))
 
     def test_a_reply_cut_off_at_the_token_limit_stops_the_run(self):
         with self.assertRaises(release_notes.NotesError):
-            release_notes.streamed_text(model_reply(bilingual(fixed=[WAKE]), stop="max_tokens"))
+            release_notes.streamed_text(model_reply(trilingual(fixed=[WAKE]), stop="max_tokens"))
 
     def test_an_error_event_stops_the_run(self):
         lines = model_reply("")[:6] + ["event: error", 'data: {"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}}']
@@ -378,16 +428,16 @@ class ModelRangeTests(unittest.TestCase):
         commit(self.root, "fix(scene): keep layers in place\n\nParallax no longer pushes the planet out of frame.")
         commit(self.root, "docs(testing): record a run\n\nInternal verification notes nobody should read.")
         commit(self.root, "chore: bump version to 0.2.0")
-        self.reply = Transport(model_reply(bilingual(fixed=[LAYERS])))
+        self.reply = Transport(model_reply(trilingual(fixed=[LAYERS])))
 
     def write(self, previous="v0.1.0", environ=KEY):
         return release_notes.write_with_model("0.2.0", previous, "HEAD", REPOSITORY, self.root, self.reply, environ)
 
-    def test_the_model_reads_user_visible_bodies_and_writes_both_languages(self):
+    def test_the_model_reads_user_visible_bodies_and_writes_all_languages(self):
         body = self.write()
         self.assertIn("### English\n\n#### Fixed\n\n- Layers stay in place\n", body)
         self.assertIn("### 简体中文\n\n#### 修复\n\n- 图层保持原位\n", body)
-        self.assertIn("简体中文", self.reply.requests[0][2]["system"])
+        self.assertIn("### 한국어\n\n#### 수정됨\n\n- 레이어가 제자리에 유지됨\n", body)
         url, key, payload = self.reply.requests[0]
         prompt = payload["messages"][0]["content"]
         self.assertEqual((url, key, payload["model"], payload["stream"]),
@@ -419,15 +469,26 @@ class ModelRangeTests(unittest.TestCase):
         self.assertIn("### English\n\n![WallpaperMachine 0.2.0](Resources/ReleaseBanners/0.2.0.jpg)\n\n#### Fixed", shared)
         self.assertIn("### 简体中文\n\n![WallpaperMachine 0.2.0](Resources/ReleaseBanners/0.2.0.jpg)\n\n#### 修复", shared,
                       "Without its own picture Chinese shares the English one")
+        self.assertIn("### 한국어\n\n![WallpaperMachine 0.2.0](Resources/ReleaseBanners/0.2.0.jpg)\n\n#### 수정됨", shared,
+                      "Without its own picture Korean shares the English one")
         (banners / "0.2.0.zh-Hans.png").write_bytes(b"png")
+        chinese_only = self.write()
+        self.assertIn("### 한국어\n\n![WallpaperMachine 0.2.0](Resources/ReleaseBanners/0.2.0.jpg)\n", chinese_only,
+                      "Korean falls back to English, never to the Chinese picture")
+        (banners / "0.2.0.ko.jpg").write_bytes(b"jpeg")
         notes = self.write()
         self.assertIn("### 简体中文\n\n![WallpaperMachine 0.2.0](Resources/ReleaseBanners/0.2.0.zh-Hans.png)\n", notes)
-        release_notes.require_bundled_history(release_notes.section("0.2.0", "2026-01-01", notes))
+        self.assertIn("### 한국어\n\n![WallpaperMachine 0.2.0](Resources/ReleaseBanners/0.2.0.ko.jpg)\n", notes)
+        release_notes.require_bundled_history(release_notes.section("0.2.0", "2026-01-01", notes), root=self.root)
         page = release_notes.release_body(notes, "0.2.0", repo=REPOSITORY).split(release_notes.NOTES_END)[0]
         self.assertTrue(page.startswith(
             f"### English\n\n![WallpaperMachine 0.2.0](https://raw.githubusercontent.com/{REPOSITORY}/v0.2.0/"
             "Resources/ReleaseBanners/0.2.0.jpg)\n\n#### Fixed"))
         self.assertNotIn("zh-Hans", page)
+        self.assertNotIn(".ko.", page)
+        self.assertNotIn("한국어", page)
+        self.assertNotIn("레이어", page)
+        self.assertEqual(page.count("**Full changelog**:"), 1)
         self.assertNotIn("![", release_notes.release_body(notes, "0.2.0"), "Without a repository the page has no address for it")
 
     def test_a_squash_merge_brings_the_body_of_every_commit_it_lists(self):
@@ -453,9 +514,19 @@ class ModelRangeTests(unittest.TestCase):
 
     def test_a_range_without_commits_needs_no_request(self):
         git("tag", "v0.2.0", cwd=self.root)
-        body = release_notes.write_with_model("0.3.0", "v0.2.0", "HEAD", REPOSITORY, self.root, self.reply, KEY)
+        body = release_notes.write_with_model("1.5.7", "v0.2.0", "HEAD", REPOSITORY, self.root, self.reply, {})
         self.assertIn("### English\n\nNo user-visible changes since `v0.2.0`.", body)
         self.assertIn("### 简体中文\n\n自 `v0.2.0` 以来没有用户能察觉的变化。", body)
+        self.assertIn("### 한국어\n\n`v0.2.0` 이후 사용자에게 표시되는 변경 사항이 없습니다.", body)
+        release_notes.require_localized_notes(body, "1.5.7")
+        self.assertEqual(self.reply.requests, [])
+
+    def test_a_bump_only_range_needs_no_request(self):
+        # The repository's bump-only range is also empty after filtering.
+        commit(self.root, "chore: bump version to 1.5.7")
+        previous = release_notes.git("rev-parse", "HEAD~1", cwd=self.root).strip()
+        body = release_notes.write_with_model("1.5.7", previous, "HEAD", REPOSITORY, self.root, self.reply, {})
+        self.assertIn("### 한국어", body)
         self.assertEqual(self.reply.requests, [])
 
     def test_a_missing_key_stops_before_any_request(self):
@@ -470,6 +541,8 @@ class ModelRangeTests(unittest.TestCase):
         self.assertIn("### English\n\n#### Fixed\n\n- Layers stay in place", notes)
         self.assertNotIn("### 简体中文", notes)
         self.assertNotIn("图层保持原位", notes)
+        self.assertNotIn("### 한국어", notes)
+        self.assertNotIn("레이어가 제자리에 유지됨", notes)
         self.assertIn(f"https://github.com/{REPOSITORY}/compare/v0.1.0...v0.2.0", notes)
         self.assertIn(release_notes.dmg.image_name("0.2.0"), page)
         self.assertIn("abc1234", page)
@@ -479,7 +552,7 @@ class ModelRangeTests(unittest.TestCase):
 
 
 
-RECORDED = """\
+LEGACY_RECORDED = """\
 ### English
 
 Layers stay in place.
@@ -500,16 +573,45 @@ Layers stay in place.
 """
 
 
+TRILINGUAL_RECORDED = """\
+### English
+
+Layers stay in place.
+
+#### Fixed
+
+- Layers stay in place
+
+### 简体中文
+
+图层保持原位。
+
+#### 修复
+
+- 图层保持原位
+
+### 한국어
+
+레이어가 제자리에 유지됨.
+
+#### 수정됨
+
+- 레이어가 제자리에 유지됨
+
+**Full changelog**: https://github.com/owner/repo/compare/v1.5.6...v1.5.7
+"""
+
+
 class PublishTests(unittest.TestCase):
-    """Bilingual source notes are stored once; GitHub shows only their English part."""
+    """Localized source notes are stored once; GitHub shows only their English part."""
 
     def changelog(self, body, version="0.2.0"):
         return release_notes.insert_section(
             release_notes.CHANGELOG_PREAMBLE, version, release_notes.section(version, "2026-01-01", body))
 
     def test_recorded_bilingual_notes_are_reused_exactly(self):
-        text = self.changelog(RECORDED)
-        transport = Transport(model_reply(bilingual(fixed=[LAYERS])))
+        text = self.changelog(LEGACY_RECORDED)
+        transport = Transport(model_reply(trilingual(fixed=[LAYERS])))
         notes, updated, generated = release_notes.published_notes(
             "0.2.0", "v0.1.0", "HEAD", REPOSITORY, text, "2026-09-29", ai=True, transport=transport)
         self.assertFalse(generated)
@@ -520,7 +622,7 @@ class PublishTests(unittest.TestCase):
         self.assertIn("Layers stay in place.", page)
         self.assertNotIn("图层保持原位", page)
 
-    def test_generated_bilingual_notes_are_stored_once_and_published_in_english(self):
+    def test_generated_trilingual_notes_are_stored_once_and_published_in_english(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         root = Path(directory.name)
@@ -529,20 +631,88 @@ class PublishTests(unittest.TestCase):
         git("config", "user.name", "Test", cwd=root)
         git("config", "commit.gpgsign", "false", cwd=root)
         commit(root, "fix(scene): keep layers in place")
-        transport = Transport(model_reply(bilingual(fixed=[LAYERS])))
+        transport = Transport(model_reply(trilingual(fixed=[LAYERS])))
         notes, updated, generated = release_notes.published_notes(
-            "0.2.0", None, "HEAD", REPOSITORY, release_notes.CHANGELOG_PREAMBLE, "2026-01-01",
+            "1.5.7", None, "HEAD", REPOSITORY, self.changelog(LEGACY_RECORDED, "1.5.6"), "2026-01-01",
             ai=True, cwd=root, transport=transport, environ=KEY)
         self.assertTrue(generated)
         self.assertEqual(len(transport.requests), 1)
-        self.assertEqual(notes, release_notes.recorded_notes(updated, "0.2.0"))
+        self.assertEqual(notes, release_notes.recorded_notes(updated, "1.5.7"))
         self.assertIn("### English", notes)
         self.assertIn("### 简体中文", notes)
+        self.assertIn("### 한국어", notes)
         self.assertIn("- Layers stay in place", notes)
         self.assertIn("- 图层保持原位", notes)
-        page = release_notes.release_body(notes, "0.2.0")
+        self.assertIn("- 레이어가 제자리에 유지됨", notes)
+        self.assertEqual(release_notes.split_sections(updated)[1][1],
+                         release_notes.split_sections(self.changelog(LEGACY_RECORDED, "1.5.6"))[1][0])
+        reused, untouched, regenerated = release_notes.published_notes(
+            "1.5.7", None, "HEAD", REPOSITORY, updated, "2026-09-29", ai=True,
+            cwd=root, transport=transport, environ={})
+        self.assertEqual((reused, untouched, regenerated), (notes, updated, False))
+        self.assertEqual(len(transport.requests), 1)
+        page = release_notes.release_body(notes, "1.5.7")
         self.assertIn("- Layers stay in place", page.split(release_notes.NOTES_END, 1)[0])
         self.assertNotIn("图层保持原位", page)
+        self.assertNotIn("레이어", page)
+
+    def test_korean_boundary_validates_the_section_version(self):
+        for version in ("0.2.0", "1.5.6"):
+            with self.subTest(version=version):
+                text = self.changelog(LEGACY_RECORDED, version)
+                self.assertEqual(release_notes.require_bundled_history(text), text)
+        for version in ("1.5.7", "1.5.8", "1.6.0", "2.0.0"):
+            with self.subTest(version=version), self.assertRaisesRegex(release_notes.NotesError, "Korean"):
+                release_notes.require_bundled_history(self.changelog(LEGACY_RECORDED, version))
+        for version in ("1.5.6", "1.5.7", "1.6.0"):
+            with self.subTest(version=version):
+                text = self.changelog(TRILINGUAL_RECORDED, version)
+                self.assertEqual(release_notes.require_bundled_history(text), text)
+
+    def test_recorded_new_notes_without_korean_fail_before_any_request(self):
+        transport = Transport(model_reply(trilingual(fixed=[LAYERS])))
+        text = self.changelog(LEGACY_RECORDED, "1.5.7")
+        with self.assertRaisesRegex(release_notes.NotesError, "Korean"):
+            release_notes.published_notes(
+                "1.5.7", "v1.5.6", "missing-revision", REPOSITORY, text, "2026-09-29",
+                ai=True, transport=transport, environ={})
+        self.assertEqual(transport.requests, [])
+
+    def test_recorded_trilingual_notes_are_reused_and_published_in_english(self):
+        text = self.changelog(TRILINGUAL_RECORDED, "1.5.7")
+        transport = Transport(model_reply(trilingual(fixed=[LAYERS])))
+        notes, updated, generated = release_notes.published_notes(
+            "1.5.7", "v1.5.6", "missing-revision", REPOSITORY, text, "2026-09-29",
+            ai=True, transport=transport, environ={})
+        self.assertEqual((notes, updated, generated), (TRILINGUAL_RECORDED, text, False))
+        self.assertEqual(transport.requests, [])
+        page = release_notes.release_body(notes, "1.5.7").split(release_notes.NOTES_END, 1)[0]
+        self.assertIn("Layers stay in place.", page)
+        self.assertIn("compare/v1.5.6...v1.5.7", page)
+        self.assertEqual(page.count("**Full changelog**:"), 1)
+        self.assertNotIn("图层", page)
+        self.assertNotIn("레이어", page)
+        self.assertNotIn("### 한국어", page)
+
+    def test_trilingual_notes_reject_invalid_language_blocks(self):
+        blocks = release_notes.language_blocks(TRILINGUAL_RECORDED)
+        malformed = (
+            TRILINGUAL_RECORDED + "\n### 한국어\n\n중복됨\n",
+            TRILINGUAL_RECORDED + "\n### Japanese\n\n翻訳\n",
+            TRILINGUAL_RECORDED + "\n###Unknown\n",
+            TRILINGUAL_RECORDED + "\n###\n",
+            TRILINGUAL_RECORDED + "\n### \n",
+            "### English" + blocks["english"] + "### 한국어" + blocks["korean"] + "### 简体中文" + blocks["chinese"],
+            TRILINGUAL_RECORDED.replace("### 한국어", "### 수정됨"),
+            TRILINGUAL_RECORDED.replace("레이어가 제자리에 유지됨.", "").replace("- 레이어가 제자리에 유지됨", ""),
+            TRILINGUAL_RECORDED.replace("### 한국어" + blocks["korean"],
+                                         "### 한국어\n\n![배경화면](Resources/ReleaseBanners/1.5.7.ko.jpg)\n"),
+            TRILINGUAL_RECORDED.replace("- 레이어가 제자리에 유지됨", ""),
+            TRILINGUAL_RECORDED.replace("레이어가 제자리에 유지됨", "Layers stay in place"),
+        )
+        for body in malformed:
+            with self.subTest(body=body), self.assertRaises(release_notes.NotesError):
+                release_notes.require_localized_notes(body, "1.5.7")
 
     def test_english_only_history_is_not_published(self):
         listed = "### Fixed\n\n- Something\n"
@@ -553,7 +723,7 @@ class PublishTests(unittest.TestCase):
             release_notes.published_notes(
                 "0.2.0", "v0.1.0", "HEAD", REPOSITORY, release_notes.CHANGELOG_PREAMBLE, "2026-01-01", ai=False)
         with self.assertRaises(release_notes.NotesError):
-            release_notes.require_bilingual(listed)
+            release_notes.require_localized_notes(listed, "0.2.0")
 
     def test_headings_and_links_cannot_stand_in_for_translated_notes(self):
         for body in (
@@ -562,23 +732,50 @@ class PublishTests(unittest.TestCase):
             "### English\n- Fixed a crash\n- Added a filter\n### 简体中文\n- 修复崩溃\n",
         ):
             with self.subTest(body=body), self.assertRaises(release_notes.NotesError):
-                release_notes.require_bilingual(body)
+                release_notes.require_localized_notes(body, "0.2.0")
 
     def test_a_banner_names_its_own_version(self):
         def with_banner(english, chinese):
-            return self.changelog(RECORDED
+            return self.changelog(LEGACY_RECORDED
                                   .replace("### English\n", f"### English\n\n![WallpaperMachine]({english})\n")
                                   .replace("### 简体中文\n", f"### 简体中文\n\n![WallpaperMachine]({chinese})\n"))
         stolen = with_banner("Resources/ReleaseBanners/0.2.0.jpg", "Resources/ReleaseBanners/0.1.0.zh-Hans.jpg")
         with self.assertRaisesRegex(release_notes.NotesError, "banner of 0.2.0"):
             release_notes.require_bundled_history(stolen)
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        banners = root / release_notes.BANNERS
+        banners.mkdir(parents=True)
+        (banners / "0.2.0.png").write_bytes(b"png")
+        (banners / "0.2.0.zh-Hans.jpg").write_bytes(b"jpeg")
         release_notes.require_bundled_history(
-            with_banner("Resources/ReleaseBanners/0.2.0.png", "Resources/ReleaseBanners/0.2.0.zh-Hans.jpg"))
+            with_banner("Resources/ReleaseBanners/0.2.0.png", "Resources/ReleaseBanners/0.2.0.zh-Hans.jpg"), root=root)
 
     def test_a_banner_cannot_stand_in_for_a_translation(self):
         with self.assertRaises(release_notes.NotesError):
-            release_notes.require_bilingual(
-                "### English\n\n- Fixed a crash\n\n### 简体中文\n\n![壁纸](Resources/ReleaseBanners/0.2.0.zh-Hans.jpg)\n")
+            release_notes.require_localized_notes(
+                "### English\n\n- Fixed a crash\n\n### 简体中文\n\n![壁纸](Resources/ReleaseBanners/0.2.0.zh-Hans.jpg)\n", "0.2.0")
+
+    def test_korean_banner_paths_must_exist_and_name_the_section_version(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        for path in ("Resources/ReleaseBanners/1.5.6.ko.jpg", "Resources/ReleaseBanners/1.5.7.ko.jpg", ""):
+            body = TRILINGUAL_RECORDED.replace("### 한국어\n", f"### 한국어\n\n![배경화면]({path})\n")
+            with self.subTest(path=path), self.assertRaises(release_notes.NotesError):
+                release_notes.require_bundled_history(self.changelog(body, "1.5.7"), root=root)
+        banners = root / release_notes.BANNERS
+        banners.mkdir(parents=True)
+        for suffix in (".ko.jpg", ".ko.png", ".jpg", ".png"):
+            path = f"Resources/ReleaseBanners/1.5.7{suffix}"
+            (root / path).write_bytes(b"image")
+            body = TRILINGUAL_RECORDED.replace("### 한국어\n", f"### 한국어\n\n![배경화면]({path})\n")
+            text = self.changelog(body, "1.5.7")
+            self.assertEqual(release_notes.require_bundled_history(text, root=root), text)
+            page = release_notes.release_body(body, "1.5.7", repo=REPOSITORY)
+            self.assertNotIn("![", page, "The Korean banner must never appear in English release notes")
+            self.assertIn("compare/v1.5.6...v1.5.7", page)
 
     def test_every_banner_the_changelog_names_is_committed(self):
         text = release_notes.CHANGELOG.read_text(encoding="utf-8")
@@ -587,7 +784,7 @@ class PublishTests(unittest.TestCase):
 
     def test_missing_historical_translation_blocks_publication(self):
         text = release_notes.insert_section(
-            self.changelog(RECORDED), "0.1.0",
+            self.changelog(LEGACY_RECORDED), "0.1.0",
             release_notes.section("0.1.0", "2026-01-01", "### English\n- Added a filter\n"))
         with self.assertRaises(release_notes.NotesError):
             release_notes.published_notes(
@@ -596,19 +793,19 @@ class PublishTests(unittest.TestCase):
     def test_publish_rejects_headings_the_app_cannot_parse(self):
         unreleased = (
             "## Unreleased\n\n### English\n\nUpcoming work.\n\n### 简体中文\n\n即将发布。\n\n"
-            + self.changelog(RECORDED)
+            + self.changelog(LEGACY_RECORDED)
         )
-        internal = self.changelog(RECORDED) + (
+        internal = self.changelog(LEGACY_RECORDED) + (
             "## Also see\n\n### English\n\nSee the note.\n\n### 简体中文\n\n见这条说明。\n\n"
         )
         cases = (
             ("unreleased", unreleased, "Unreleased"),
             ("internal heading", internal, "Also see"),
-            ("prerelease", "## 1.0.0-beta — 2026-01-01\n\n" + RECORDED, "1.0.0-beta"),
-            ("leading zero", "## 01.2.0 — 2026-01-01\n\n" + RECORDED, "01.2.0"),
-            ("integer overflow", "## 9223372036854775808.0.0\n\n" + RECORDED, "9223372036854775808"),
-            ("tab before heading suffix", "## 0.2.0\t—\t2026-01-01\n\n" + RECORDED, "0.2.0"),
-            ("duplicate version", self.changelog(RECORDED) + "\n## V0.2.0\n\n" + RECORDED, "0.2.0"),
+            ("prerelease", "## 1.0.0-beta — 2026-01-01\n\n" + LEGACY_RECORDED, "1.0.0-beta"),
+            ("leading zero", "## 01.2.0 — 2026-01-01\n\n" + LEGACY_RECORDED, "01.2.0"),
+            ("integer overflow", "## 9223372036854775808.0.0\n\n" + LEGACY_RECORDED, "9223372036854775808"),
+            ("tab before heading suffix", "## 0.2.0\t—\t2026-01-01\n\n" + LEGACY_RECORDED, "0.2.0"),
+            ("duplicate version", self.changelog(LEGACY_RECORDED) + "\n## V0.2.0\n\n" + LEGACY_RECORDED, "0.2.0"),
         )
         for name, text, needle in cases:
             with self.subTest(heading=name):
@@ -618,17 +815,17 @@ class PublishTests(unittest.TestCase):
                 self.assertIn(needle, str(raised.exception))
 
     def test_publish_reuses_prefixed_version_without_generating_a_duplicate(self):
-        recorded = "## V0.2.0 — 2026-01-01\n\n" + RECORDED
+        recorded = "## V0.2.0 — 2026-01-01\n\n" + LEGACY_RECORDED
         notes, bundled, generated = release_notes.published_notes(
             "0.2.0", "v0.1.0", "HEAD", REPOSITORY, recorded, "2026-09-29")
-        self.assertEqual(notes.strip(), RECORDED.strip())
+        self.assertEqual(notes.strip(), LEGACY_RECORDED.strip())
         self.assertEqual(bundled, recorded)
         self.assertFalse(generated)
 
     def test_rebuild_rejects_unreleased_instead_of_dropping_it(self):
         recorded = (
             "## Unreleased\n\n### English\n\nUpcoming work.\n\n### 简体中文\n\n即将发布。\n\n"
-            + self.changelog(RECORDED)
+            + self.changelog(LEGACY_RECORDED)
         )
         with self.assertRaises(release_notes.NotesError) as raised:
             release_notes.rebuild_changelog(REPOSITORY, recorded=recorded)

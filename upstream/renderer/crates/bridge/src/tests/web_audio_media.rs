@@ -13,6 +13,7 @@ use wallpaper_core::{
     project::{SceneHandle, SceneTemplate},
 };
 
+use super::engine_release::EngineRelease;
 use crate::{
     api::{BridgeBuilder, WallpaperBridge},
     engine::FakeEngineFacade,
@@ -36,9 +37,10 @@ fn display_snapshot(display_id: u32) -> DisplaySnapshotEntry {
 }
 
 #[tokio::test]
-async fn scene_media_requires_consent_and_clears_on_disable() {
+async fn scene_media_is_delivered_without_setup_and_clears_on_disable() {
     use crate::api::BridgeMediaSnapshot;
     let engine = FakeEngineFacade::default();
+    let _release = EngineRelease::of(&engine);
     let mut display = display_snapshot(7);
     display.handle = Some(wallpaper_core::project::SceneHandle::new(7));
     engine.set_snapshot(vec![display]);
@@ -50,19 +52,19 @@ async fn scene_media_requires_consent_and_clears_on_disable() {
     bridge.apply_wallpaper_options("301".into(), true).await.unwrap();
     let snapshot = BridgeMediaSnapshot { title: "Track".into(), playback_state: 0, ..Default::default() };
     bridge.update_scene_media("301".into(), snapshot.clone()).await.unwrap();
-    assert!(engine.media_calls().is_empty());
-    assert!(bridge.scene_media_wallpaper_ids().await.unwrap().is_empty());
-    bridge.set_media_integration_enabled("301".into(), true).await.unwrap();
     assert_eq!(bridge.scene_media_wallpaper_ids().await.unwrap(), vec!["301"]);
-    bridge.update_scene_media("301".into(), snapshot.clone()).await.unwrap();
     assert_eq!(engine.media_calls().len(), 1);
     bridge.set_media_integration_enabled("301".into(), false).await.unwrap();
     let calls = engine.media_calls();
     assert!(!calls.last().unwrap().1);
     let cleared = calls.last().unwrap().2.artwork.as_ref().unwrap();
     assert_eq!((cleared.width, cleared.height, cleared.rgba.len()), (0, 0, 0));
-    bridge.update_scene_media("301".into(), snapshot).await.unwrap();
+    assert!(bridge.scene_media_wallpaper_ids().await.unwrap().is_empty());
+    bridge.update_scene_media("301".into(), snapshot.clone()).await.unwrap();
     assert_eq!(engine.media_calls().len(), calls.len());
+    bridge.set_media_integration_enabled("301".into(), true).await.unwrap();
+    bridge.update_scene_media("301".into(), snapshot).await.unwrap();
+    assert_eq!(engine.media_calls().len(), calls.len() + 1);
 }
 
 #[test]
@@ -416,26 +418,25 @@ async fn the_spectrum_a_page_reads_is_the_one_the_renderer_produced() {
 #[tokio::test]
 async fn web_wallpapers_report_their_media_integration_consent() {
     let engine = FakeEngineFacade::default();
+    let _release = EngineRelease::of(&engine);
     let bridge = web_bridge(&engine).await;
 
-    assert!(
-        !bridge.web_wallpapers().await.unwrap()[0].media_integration_enabled,
-        "media integration needs an API this application cannot rely on, so it is opt-in"
-    );
-
-    bridge
-        .set_media_integration_enabled("300".into(), true)
-        .await
-        .unwrap();
-
     assert!(bridge.web_wallpapers().await.unwrap()[0].media_integration_enabled);
-    assert!(
+
+    for enabled in [false, true] {
         bridge
-            .wallpaper_options_snapshot("300".into())
+            .set_media_integration_enabled("300".into(), enabled)
             .await
-            .unwrap()
-            .media_integration_enabled
-    );
+            .unwrap();
+        assert_eq!(
+            bridge.web_wallpapers().await.unwrap()[0].media_integration_enabled,
+            enabled
+        );
+        assert_eq!(
+            bridge.wallpaper_options_snapshot("300".into()).await.unwrap().media_integration_enabled,
+            enabled
+        );
+    }
 }
 
 #[tokio::test]
@@ -517,6 +518,7 @@ async fn an_unrecognised_media_event_is_refused_and_stores_nothing() {
 #[tokio::test]
 async fn scene_media_events_fan_out_only_to_opted_in_handles() {
     let engine = FakeEngineFacade::default();
+    let _release = EngineRelease::of(&engine);
     engine.set_snapshot(vec![DisplaySnapshotEntry {
         handle: Some(SceneHandle::new(11)),
         accepts_pointer_input: true,
@@ -540,6 +542,7 @@ async fn scene_media_events_fan_out_only_to_opted_in_handles() {
         .set_display_config_enabled("100".into(), "7".into(), true)
         .await
         .unwrap();
+    bridge.set_media_integration_enabled("100".into(), false).await.unwrap();
     bridge.apply_wallpaper_options("100".into(), true).await.unwrap();
 
     bridge
@@ -548,7 +551,7 @@ async fn scene_media_events_fan_out_only_to_opted_in_handles() {
         .unwrap();
     assert!(
         engine.media_event_calls().is_empty(),
-        "a scene that never opted in must not receive media events"
+        "a scene with integration disabled must not receive media events"
     );
 
     bridge
@@ -599,6 +602,7 @@ async fn scene_media_events_fan_out_only_to_opted_in_handles() {
 #[tokio::test]
 async fn scene_media_handles_follow_consent_so_nothing_reads_the_player_without_it() {
     let engine = FakeEngineFacade::default();
+    let _release = EngineRelease::of(&engine);
     engine.set_snapshot(vec![DisplaySnapshotEntry {
         handle: Some(SceneHandle::new(11)),
         accepts_pointer_input: true,
@@ -624,9 +628,11 @@ async fn scene_media_handles_follow_consent_so_nothing_reads_the_player_without_
         .unwrap();
     bridge.apply_wallpaper_options("100".into(), true).await.unwrap();
 
+    assert_eq!(bridge.system_media_scene_handles().await.unwrap(), vec![11]);
+    bridge.set_media_integration_enabled("100".into(), false).await.unwrap();
     assert!(
         bridge.system_media_scene_handles().await.unwrap().is_empty(),
-        "an applied scene without consent must not make the host read the player"
+        "an applied scene with integration disabled must not make the host read the player"
     );
 
     bridge

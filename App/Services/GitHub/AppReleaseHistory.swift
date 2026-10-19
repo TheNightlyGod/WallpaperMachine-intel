@@ -1,16 +1,64 @@
 import Foundation
 
-/// The bilingual release history shipped with this copy, never the newest remote release.
+/// The localized release history shipped with this copy, never the newest remote release.
 struct AppReleaseHistory {
+    enum Language: Int, CaseIterable, Hashable, Sendable {
+        case english, chinese, korean
+
+        /// Native language identifiers shared by the changelog and translation picker.
+        var name: String {
+            switch self {
+            case .english: "English"
+            case .chinese: "简体中文"
+            case .korean: "한국어"
+            }
+        }
+
+        init(appLanguage: AppLanguage) {
+            if appLanguage.tag.hasPrefix("zh") {
+                self = .chinese
+            } else if appLanguage.tag == "ko" {
+                self = .korean
+            } else {
+                self = .english
+            }
+        }
+
+        /// Prefer English for a missing Korean banner, never another release's picture.
+        var bannerFallbacks: [Self] {
+            switch self {
+            case .english: [.english, .chinese, .korean]
+            case .chinese: [.chinese, .english, .korean]
+            case .korean: [.korean, .english, .chinese]
+            }
+        }
+    }
+
     struct Entry: Equatable, Sendable {
         let version: SemanticVersion
         let english: ReleaseNotes
         let chinese: ReleaseNotes
+        var korean: ReleaseNotes? = nil
         /// The picture each translation opens with, if the release has one.
         var englishBanner: Banner? = nil
         var chineseBanner: Banner? = nil
+        var koreanBanner: Banner? = nil
 
-        func banner(chinese: Bool) -> Banner? { chinese ? chineseBanner : englishBanner }
+        func notes(language: Language) -> ReleaseNotes {
+            switch language {
+            case .english: english
+            case .chinese: chinese
+            case .korean: korean ?? english
+            }
+        }
+
+        func banner(language: Language) -> Banner? {
+            switch language {
+            case .english: englishBanner
+            case .chinese: chineseBanner
+            case .korean: koreanBanner
+            }
+        }
     }
 
     /// A file in the bundle's `ReleaseBanners` folder, and what it shows.
@@ -21,7 +69,7 @@ struct AppReleaseHistory {
     }
 
     enum InvalidHistory: Error {
-        case missingResource, invalidVersion, duplicateVersion, missingTranslation
+        case missingResource, invalidVersion, duplicateVersion, missingTranslation, invalidLanguageHeading
     }
 
     let entries: [Entry]
@@ -36,22 +84,27 @@ struct AppReleaseHistory {
     init(markdown: String) throws {
         var entries: [Entry] = []
         var version: SemanticVersion?
-        var english = ""
-        var chinese = ""
-        var language = ""
-        var englishBanner: Banner?
-        var chineseBanner: Banner?
+        var bodies: [Language: String] = [:]
+        var languages: [Language] = []
+        var banners: [Language: Banner] = [:]
         func finish() throws {
             guard let version else { return }
             guard !entries.contains(where: { $0.version == version }) else {
                 throw InvalidHistory.duplicateVersion
             }
-            guard let en = ReleaseNotes(version: version.display, body: english),
-                  let zh = ReleaseNotes(version: version.display, body: chinese) else {
+            guard let en = ReleaseNotes(version: version.display, body: bodies[.english] ?? ""),
+                  let zh = ReleaseNotes(version: version.display, body: bodies[.chinese] ?? "") else {
                 throw InvalidHistory.missingTranslation
             }
-            entries.append(Entry(version: version, english: en, chinese: zh,
-                                 englishBanner: englishBanner, chineseBanner: chineseBanner))
+            let ko = ReleaseNotes(version: version.display, body: bodies[.korean] ?? "")
+            // 1.5.7 introduced Korean notes; older tagged bilingual sections stay valid.
+            let requiresKorean = (version.major, version.minor, version.patch) >= (1, 5, 7)
+            if (requiresKorean || languages.contains(.korean)) && ko == nil {
+                throw InvalidHistory.missingTranslation
+            }
+            entries.append(Entry(version: version, english: en, chinese: zh, korean: ko,
+                                 englishBanner: banners[.english], chineseBanner: banners[.chinese],
+                                 koreanBanner: banners[.korean]))
         }
         for line in markdown.components(separatedBy: .newlines) {
             if line.hasPrefix("## ") {
@@ -63,22 +116,25 @@ struct AppReleaseHistory {
                     throw InvalidHistory.invalidVersion
                 }
                 version = parsed
-                english = ""
-                chinese = ""
-                language = ""
-                englishBanner = nil
-                chineseBanner = nil
-            } else if line == "### English" {
-                language = "en"
-            } else if line == "### 简体中文" {
-                language = "zh-Hans"
-            } else if version != nil, !language.isEmpty, let banner = Self.banner(line) {
-                // A banner is shown above the notes, not read as one of them.
-                if language == "en" { englishBanner = englishBanner ?? banner }
-                if language == "zh-Hans" { chineseBanner = chineseBanner ?? banner }
-            } else if version != nil {
-                if language == "en" { english += line + "\n" }
-                if language == "zh-Hans" { chinese += line + "\n" }
+                bodies = [:]
+                languages = []
+                banners = [:]
+            } else if version != nil, line.hasPrefix("###"), !line.hasPrefix("####") {
+                let heading = line.dropFirst(3).trimmingCharacters(in: .whitespaces)
+                guard languages.count < Language.allCases.count,
+                      let next = Language.allCases.first(where: { $0.name == heading }),
+                      next == Language.allCases[languages.count],
+                      line.hasPrefix("### ") || line.hasPrefix("###\t") else {
+                    throw InvalidHistory.invalidLanguageHeading
+                }
+                languages.append(next)
+            } else if version != nil, let language = languages.last {
+                if let banner = Self.banner(line) {
+                    // A banner is shown above the notes, not read as one of them.
+                    banners[language] = banners[language] ?? banner
+                } else {
+                    bodies[language, default: ""] += line + "\n"
+                }
             }
         }
         try finish()

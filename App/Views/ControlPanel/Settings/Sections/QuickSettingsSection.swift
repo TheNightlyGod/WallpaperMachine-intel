@@ -12,8 +12,9 @@ struct QuickSettingsSection: View {
     id: "quick.tile-open-at-login", section: .quick, title: "Open at Login")
   static let muteAll = SettingsItem(
     id: "quick.tile-mute-all", section: .quick, title: "Mute All")
+  // The feature's noun, not the status menu's “Lock Screen” command.
   static let lockScreen = SettingsItem(
-    id: "quick.tile-lock-screen", section: .quick, title: "Lock Screen",
+    id: "quick.tile-lock-screen", section: .quick, title: "Lock screen",
     keywords: ["Experimental"])
   static let screenSaver = SettingsItem(
     id: "quick.tile-screen-saver", section: .quick, title: "Screen Saver",

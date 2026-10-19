@@ -57,6 +57,7 @@ generates the Xcode project and builds the app. Flags and failure modes:
 | Find out where a file or new code belongs | [docs/repository-layout.md](docs/repository-layout.md) |
 | Build, package, or install locally | [docs/build.md](docs/build.md) |
 | Know the code, test and doc rules | [docs/conventions.md](docs/conventions.md) |
+| Translate the app or improve existing wording | [docs/localization.md](docs/localization.md#contributing-translations) |
 | Write or run tests, or record evidence | [docs/testing/README.md](docs/testing/README.md) |
 | Debug the renderer or GPU output | [docs/testing/renderer.md](docs/testing/renderer.md) |
 | Ship a version | [docs/release.md](docs/release.md) |

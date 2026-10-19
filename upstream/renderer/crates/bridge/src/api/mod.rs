@@ -2154,8 +2154,8 @@ impl WallpaperBridge {
 
     /// Turns system media integration on or off for one wallpaper.
     ///
-    /// Off by default. This is the user's consent to look for a system media
-    /// source, not a promise that one exists.
+    /// On by default; saved choices are preserved. Enabling it allows a search
+    /// for a system media source, not a promise that one exists.
     ///
     /// # Errors
     ///

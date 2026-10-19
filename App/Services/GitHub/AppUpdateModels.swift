@@ -114,8 +114,8 @@ struct ReleaseNotes: Equatable, Sendable {
         /// Bullet items, as opposed to a paragraph such as a release's summary.
         var isList = false
 
-        /// The section `scripts/release_notes.py` heads Highlights / 亮点 in feature releases.
-        var isHighlights: Bool { title == "Highlights" || title == "亮点" }
+        /// Feature-release highlights keep their emphasis in every notes translation.
+        var isHighlights: Bool { title == "Highlights" || title == "亮点" || title == "주요 변경 사항" }
     }
 
     static let boundary = "<!-- release-notes-end -->"

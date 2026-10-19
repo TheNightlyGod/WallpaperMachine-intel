@@ -1131,8 +1131,8 @@ public protocol WallpaperBridgeProtocol : AnyObject {
     /**
      * Turns system media integration on or off for one wallpaper.
      *
-     * Off by default. This is the user's consent to look for a system media
-     * source, not a promise that one exists.
+     * On by default; saved choices are preserved. Enabling it allows a search
+     * for a system media source, not a promise that one exists.
      *
      * # Errors
      *
@@ -2912,8 +2912,8 @@ open func setLaunchAtLogin(enabled: Bool)async throws  -> BridgeDisplayMutationB
     /**
      * Turns system media integration on or off for one wallpaper.
      *
-     * Off by default. This is the user's consent to look for a system media
-     * source, not a promise that one exists.
+     * On by default; saved choices are preserved. Enabling it allows a search
+     * for a system media source, not a promise that one exists.
      *
      * # Errors
      *
@@ -10492,7 +10492,7 @@ private var initializationResult: InitializationResult = {
     if (uniffi_wallpaper_bridge_checksum_method_wallpaperbridge_set_launch_at_login() != 35969) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_wallpaper_bridge_checksum_method_wallpaperbridge_set_media_integration_enabled() != 50186) {
+    if (uniffi_wallpaper_bridge_checksum_method_wallpaperbridge_set_media_integration_enabled() != 64646) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_wallpaper_bridge_checksum_method_wallpaperbridge_set_mirror_muted() != 46663) {

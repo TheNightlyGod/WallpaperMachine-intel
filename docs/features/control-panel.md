@@ -15,7 +15,7 @@ the black-bar check](wallpaper-properties.md), [local backup and restore](backup
 ## Language
 
 The app ships in English, Simplified Chinese (简体中文), Traditional Chinese
-(繁體中文) and Japanese (日本語), including navigation, filters, wallpaper options,
+(繁體中文), Japanese (日本語) and Korean (한국어), including navigation, filters, wallpaper options,
 download and sign-in guidance, settings, accessibility labels, menus and dialogs.
 **Settings → General → Language** offers **System (Auto)** (default, follows the
 macOS language list) and every shipped language under its own name.

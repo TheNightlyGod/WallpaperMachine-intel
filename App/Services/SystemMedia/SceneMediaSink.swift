@@ -1,11 +1,11 @@
 import Foundation
 
-/// Feeds live now-playing events into every desktop scene that opted in.
+/// Feeds live now-playing events into every desktop scene with integration enabled.
 ///
-/// Scenes do not register listeners. Demand is the set of applied scenes whose
-/// user turned media integration on, which the bridge reports by handle. The
-/// engine drops events when a scene's live flag is off, so this fans out to
-/// every opted-in wallpaper without asking for handles of its own.
+/// Scenes do not register listeners. Demand is the set of applied scenes with
+/// media integration on, which the bridge reports by handle. The engine drops
+/// events when a scene's live flag is off, so this fans out to
+/// every enabled wallpaper without asking for handles of its own.
 @MainActor
 final class SceneMediaSink {
     private let session: DesktopMediaSession

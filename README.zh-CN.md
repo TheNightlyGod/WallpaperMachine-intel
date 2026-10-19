@@ -77,12 +77,12 @@
 | [**创意工坊**](docs/features/workshop-downloads.md) | 实时的 Steam 创意工坊，浏览无需登录，还有[合集、每位作者的壁纸和你的订阅](docs/features/workshop-downloads.md#collections-authors-and-subscriptions)。下载在应用内进行，可同时下载多个，需要拥有 Wallpaper Engine 的 Steam 账户。已有壁纸的[更新](docs/features/workshop-downloads.md#updates)每天检查一次，一键安装。 |
 | [**pixiv**](docs/features/pixiv.md) | pixiv 的插画排行榜和标签搜索。作品的任意一页都能保存为静态壁纸；登录 pixiv 后可查看仅限会员的作品，账户允许的话还能查看 R-18 作品。 |
 | [**壁纸选项**](docs/features/wallpaper-properties.md#properties) | 作者提供的每一个选项，在你应用修改时保存；[命名的属性预设](docs/features/wallpaper-properties.md#property-presets)可以保留多个版本，并能导出或导入。设置中的一个可选开关能让桌面[在你调整时即时显示这些修改](docs/features/wallpaper-properties.md#showing-edits-on-the-desktop)。 |
-| [**音乐**](docs/features/audio-response.md) | 打开“音频响应”，为声音制作的壁纸就会随 Mac 播放的声音律动。打开“[媒体集成](docs/features/media-integration.md)”，带音乐显示的壁纸会显示正在播放的歌曲。 |
+| [**音乐**](docs/features/audio-response.md) | 打开“音频响应”，为声音制作的壁纸就会随 Mac 播放的声音律动。“[媒体集成](docs/features/media-integration.md)”默认开启，带音乐显示的壁纸会显示正在播放的歌曲。 |
 | [**播放列表**](docs/features/playlists.md) | 让每台显示器轮流播放全部壁纸、收藏、它自己的列表或一个[本地合集](docs/features/control-panel.md#local-collections)，可按时间间隔更换，也可在每次解锁 Mac 时更换。可以调整列表顺序、保存命名的播放方案，或在白天和夜晚的壁纸之间切换。应用失败的壁纸会被暂时跳过。 |
 | [**显示器**](docs/features/control-panel.md#target-display) | 每台显示器都可以有自己的壁纸，也可以镜像另一台，缩放、位置、帧率和音量各自独立。[一次把同一张壁纸应用到所有显示器，复制或交换壁纸，并保存多屏壁纸方案](docs/features/display-layouts.md)，之后可从设置或“快捷指令”恢复各显示器的壁纸选择。 |
 | [**电池**](docs/features/performance.md#playback) | 使用电池时，继续运行、降到你选择的渲染比例和帧率，或者暂停。低电量模式、Mac 过热和电量低时，也可以同样降低画质而不是暂停。在你选定之前保持关闭。其余播放与画质选项在[性能](docs/features/performance.md)中。 |
 | [**能耗**](docs/features/performance.md#energy-use) | “设置 → 性能”会显示应用消耗的功率；在笔记本电脑上，还会显示它每小时消耗的电量占满电的比例。在那里更改设置，它会对比前后的差异。每张已安装的壁纸在测量后都会有自己的能耗评级。 |
-| [**原生体验**](docs/features/appearance.md) | 和 macOS 的其他部分一样，支持浅色、深色和你的强调色，界面提供 [English、简体中文、繁體中文和日本語](docs/features/control-panel.md#language)。 |
+| [**原生体验**](docs/features/appearance.md) | 和 macOS 的其他部分一样，支持浅色、深色和你的强调色，界面提供 [English、简体中文、繁體中文、日本語和한국어](docs/features/control-panel.md#language)。 |
 | [**导入**](docs/features/control-panel.md#downloads-and-import) | 带入你已有的 Wallpaper Engine 文件夹，或你自己的视频和图片。把它们拖到程序坞图标上，或使用“导入”；应用会复制它们，原文件保持不动。 |
 | [**备份你的设置**](docs/features/backup-restore.md#local-backup-and-restore) | 导出设置和保留的文件，还可以包含整个壁纸库；在下次启动时执行可撤回的恢复之前，先预览冲突。登录信息和密码只留在这台 Mac 上。 |
 | [**图片摆放**](docs/features/wallpaper-properties.md#image-placement) | 在每台显示器上分别拖动、定位和缩放导入的图片和保存的 pixiv 页面，不改动原图。 |

@@ -455,8 +455,8 @@ callback.
 
 ## Media integration
 
-Off by default, per wallpaper. Web pages register `wallpaperRegisterMedia*`
-listeners as above. The now-playing source is shared through `DesktopMediaSession`
+On by default, per wallpaper; saved choices are preserved. Web pages register
+`wallpaperRegisterMedia*` listeners as above. The now-playing source is shared through `DesktopMediaSession`
 and also feeds Scene wallpapers that have the same toggle on; sources, lifetime and
 lock-screen policy are in [media-integration.md](media-integration.md).
 

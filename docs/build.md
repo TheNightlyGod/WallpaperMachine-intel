@@ -326,9 +326,11 @@ repository secrets into a temporary keychain and fails when either is missing,
 rather than shipping an ad-hoc build. The private key is kept only by the
 maintainer, outside the repository. Replacing the certificate changes the
 requirement, so the release after a replacement asks for permissions once more; the
-same change updates `TelemetryEnvironment.releaseCertificateSHA1`, or every copy of
-the next release reports itself as a build from source
-([telemetry](features/telemetry.md#what-a-report-holds)).
+same change updates `TelemetryEnvironment.releaseCertificateSHA256` with the SHA-256
+of the new certificate's DER bytes, or every copy of the next release reports itself
+as a build from source ([telemetry](features/telemetry.md#what-a-report-holds)). This
+telemetry fingerprint is independent of the designated requirement's SHA-1; changing
+the telemetry hash does not change the signature or reset macOS permissions.
 To sign locally with it, import the PKCS#12 into a keychain in the search list and
 pass `--sign-identity "WallpaperMachine Code Signing"`.
 

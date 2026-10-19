@@ -180,14 +180,13 @@ final class PanelRootRenderTests: PanelTestCase {
     }
   }
 
-  /// The panel is drawn in the language its controller follows: in Japanese and in both Chinese
-  /// scripts every one of those words differs from the English panel, is written in that script and
-  /// keeps no placeholder.
+  /// The panel is drawn in the language its controller follows: in Japanese, Korean and both
+  /// Chinese scripts these words differ from the English panel, use their script and keep no placeholder.
   func testThePanelIsDrawnInTheLanguageItsControllerFollows() async throws {
     let (store, bridge) = makeStore()
     try await ShellFixtures.seed(store, bridge: bridge)
     var english: DrawnWords?
-    for language in ["en", "ja", "zh-Hans", "zh-Hant"] {
+    for language in AppLanguage.supported.map(\.tag) {
       let harness = try Harness(test: self, store: store, language: language)
       let words = try await drawnWords(harness)
       await harness.close()
@@ -276,10 +275,13 @@ final class PanelRootRenderTests: PanelTestCase {
     return nil
   }
 
-  /// Whether the text holds kana or Han ideographs.
+  /// Whether the text holds kana, Hangul or Han ideographs.
   private static func isCJK(_ text: String) -> Bool {
     text.unicodeScalars.contains { scalar in
-      [0x3040...0x30FF, 0x3400...0x4DBF, 0x4E00...0x9FFF, 0xF900...0xFAFF].contains {
+      [
+        0x1100...0x11FF, 0x3040...0x30FF, 0x3130...0x318F, 0x3400...0x4DBF,
+        0x4E00...0x9FFF, 0xAC00...0xD7A3, 0xF900...0xFAFF,
+      ].contains {
         $0.contains(scalar.value)
       }
     }

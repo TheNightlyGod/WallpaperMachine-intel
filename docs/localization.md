@@ -2,8 +2,8 @@
 
 How the app chooses a language, where each layer's strings live, and the exact
 steps for shipping another language. English is the source language; Simplified
-Chinese (`zh-Hans`), Traditional Chinese (`zh-Hant`) and Japanese (`ja`) are
-translations. The user-facing behaviour is in
+Chinese (`zh-Hans`), Traditional Chinese (`zh-Hant`), Japanese (`ja`) and Korean
+(`ko`) are translations. The user-facing behaviour is in
 [Control panel → Language](features/control-panel.md#language).
 
 ## Which language the app shows
@@ -17,7 +17,7 @@ shipped language. The effective language is
    `AppLanguage.supported`, using `Bundle.preferredLocalizations(from:forPreferences:)`
    so the rules are the ones macOS applies to the bundle (`zh-CN`, `zh`,
    `zh-Hans-TW` → `zh-Hans`; `zh-TW`, `zh-HK`, `zh-Hant` → `zh-Hant`; `ja-JP` → `ja`;
-   `en-GB`, `fr` → English).
+   `ko-KR` → `ko`; `en-GB`, `fr` → English).
 
 The macOS list is read from the global defaults domain, not from
 `Locale.preferredLanguages`, because the store also writes the user's choice into
@@ -89,7 +89,7 @@ refuses a tag the app does not ship.
 The effective language also reaches the bridge, because a wallpaper can carry
 its own label translations (`general.localization`) and the bridge resolves them
 when it builds the property snapshot. `AppLanguage.wallpaperEngineLocale` names
-the table's language code (`en-us`, `zh-chs`, `zh-cht`, `ja-jp`) and
+the table's language code (`en-us`, `zh-chs`, `zh-cht`, `ja-jp`, `ko-kr`) and
 `labelLocales` lists it followed by `en-us`. `BridgeStore.setLabelLanguageAsync`
 sends the list through `setLabelLanguages`, once before the library loads
 (`AppDelegate`) and again from `PanelController.setLanguage`; it then re-reads
@@ -176,6 +176,20 @@ Add a translated entry for every missing key and delete the keys nothing
 extracts. The catalog mixes Xcode's expanded layout with one-line entries, so
 edit it as text rather than re-serialising the JSON.
 
+## Contributing translations
+
+Community translations and corrections are welcome through a pull request. For an
+existing language, edit its `stringUnit.value` in the catalogs below, keep the
+English keys and format arguments intact, and leave each completed unit in the
+`translated` state. Include the English key and the screen or context when
+reporting a wording problem in an issue. No local patch is needed once the change
+ships in an official release; updating the app keeps the selected language.
+
+Run `python3 scripts/tests/test_localization_catalogs.py` and
+`python3 scripts/tests/test_panel_localization.py` for a quick, Xcode-free coverage
+and format check. The full gate below also checks bundled resources and panel
+layout. General contribution steps are in [CONTRIBUTING.md](../CONTRIBUTING.md).
+
 ## Adding a language
 
 Use the BCP 47 tag Xcode uses for the locale (`zh-Hant`, `ja`, `de`, `pt-BR`…).
@@ -185,23 +199,34 @@ catalogs agree.
 1. **Catalogs.** In Xcode, open `App/Resources/Localizable.xcstrings`,
    `App/Resources/InfoPlist.xcstrings` and `Extension/Localizable.xcstrings`, add
    the language and translate every key, panel strings included; each unit must
-   end in the `translated` state. The catalogs need no project change; Xcode
-   compiles each into a `<tag>.lproj` folder, which is what `PanelLocale` reads.
+   end in the `translated` state. Xcode compiles each into a `<tag>.lproj` folder,
+   which is what `PanelLocale` reads. Run `xcodegen generate` to refresh the
+   generated project's known regions from the catalogs; no `project.yml` edit is needed.
 2. **Registry.** Append
    `AppLanguage(tag: "<tag>", name: "<own name>", wallpaperEngineLocale: "<code>")`
    to `AppLanguage.supported`. The locale is the Wallpaper Engine code that
    wallpapers use for the language in their own label tables (`zh-chs`, `ja-jp`,
    `ko-kr`…); it is required so a language cannot ship without it, and
    `AppLanguageTests` checks that the codes are distinct and well formed. The
-   Settings picker, the first-run guide's picker and the panel's render tests
-   derive from this list; nothing else needs a change.
+   Settings picker and the first-run guide's picker derive from this list. Extend
+   the system-language matching cases and locale-map expectations in
+   `AppLanguageTests`, and add the language's two offscreen layout cases to
+   `SettingsBRenderTests` and its coverage set; the other per-language checks
+   derive from the registry.
 3. **Verify.** `python3 scripts/test.py`. The Python check confirms the registry,
    the translations and their arguments; the hosted tests resolve phrases from the
    new language's own bundle (`PanelLocaleTests`), switch the panel live and offer
    every shipped language in the picker (`AppearanceSettingsTests`), check that the
    Settings rows and the controller's words are translated
    (`SettingsSectionsLocalizationTests`) and lay out every page in every language.
-4. **Document.** Add the language to
+4. **Release notes.** The changelog has its own translation contract, separate
+   from the catalogs: English, Simplified Chinese and, from 1.5.7, Korean. To add
+   another notes language, update the model schema and validation in
+   `scripts/release_notes.py`, the bundled parser and What's New selector, and
+   their tests together. Keep tagged historical sections unchanged and define an
+   explicit English fallback for releases without that translation. See
+   [release notes](release.md#release-notes-and-the-changelog).
+5. **Document.** Add the language to
    [Control panel → Language](features/control-panel.md#language) and to the
    language list in both READMEs, and record the run with
    `python3 scripts/log_verification.py`.

@@ -141,7 +141,7 @@ clock of its own), and the colour timeline of a text layer or a light
 A scene starts as a desktop with no player. On its first tick, after every script has
 started and before anything is drawn, its scripts are told `mediaPropertiesChanged`
 with no track and `mediaPlaybackChanged` with `PLAYBACK_STOPPED`, once, whether or not
-the user turned media integration on. Wallpaper Engine's media widgets are authored
+media integration is on. Wallpaper Engine's media widgets are authored
 visible (a group layer, a cover, a mascot parented to it) and hide themselves on
 `PLAYBACK_STOPPED`, so a scene that was never told would show them on every start for
 anyone not playing music. The state names no one's music, so it does not wait for the

@@ -184,12 +184,16 @@ newest first. It opens with a 760 × 800-point content area and resizes down to
 ([release banners](../release.md#release-banners)), the banner sits above the
 header, at most as wide as the default window, and follows the selected
 translation; skipped versions' banners are not shown. List entries are bulleted
-with a hanging indent, and a feature release's **Highlights / 亮点** stand out in
-the accent color with ✦ markers. **English / 简体中文** tabs display one translation at a time for every
-release; the initial tab follows the app’s effective language (Settings → General
-→ Language, including **System** matching, not the bundle’s launch-time language):
-Simplified or Traditional Chinese uses Simplified Chinese notes, English or
-Japanese uses English notes. Switching tabs returns to the top of the notes and
+with a hanging indent, and a feature release's **Highlights / 亮点 / 주요 변경 사항**
+stand out in the accent color with ✦ markers. **English / 简体中文 / 한국어** tabs
+display one translation at a time for every release; the initial tab follows the
+app’s effective language (Settings → General → Language, including **System**
+matching, not the bundle’s launch-time language): Simplified or Traditional Chinese
+uses Simplified Chinese notes, Korean uses Korean notes, and English or Japanese
+uses English notes. Older releases without Korean notes fall back to English
+individually, so an update spanning several versions can show Korean current notes
+and English history. A missing or unreadable Korean banner also falls back to
+English, then Chinese if needed. Switching tabs returns to the top of the notes and
 does not change the interface language. Notes come from the bundled
 `CHANGELOG.md`, so they work offline and cannot describe a newer remote release;
 generation and translation are owned by
@@ -212,7 +216,9 @@ has no section for the installed version, `announcement` returns nil *without*
 recording the version, so the next launch repeats the check: recording on a miss
 would consume the announcement and a later bundle containing the notes would never
 show them. The bundled history is strict: every `##` heading must be a semantic
-version, each release needs notes under both `### English` and `### 简体中文` and no
-version may repeat, so `## Unreleased`, a `##` line inside notes, a missing
-translation or a duplicate fails the whole file and the window does not appear
-(publishing rejects that file first).
+version, each release needs notes under ordered `### English` and `### 简体中文`
+headings, with `### 한국어` required from 1.5.7 onward, and no version may repeat.
+An explicitly present Korean block must have notes even in older releases. A
+`## Unreleased`, a `##` line inside notes, a missing translation, a duplicate
+version or an unknown, repeated or misordered language heading fails the whole
+file and the window does not appear (publishing rejects that file first).

@@ -258,8 +258,8 @@ final class PanelPropertyRowsTests: PanelTestCase {
   /// one added without its translations cannot show English unnoticed.
   func testEveryCuratedEnginePhraseIsTranslatedInEveryShippedLanguage() throws {
     XCTAssertFalse(PropertyLabels.curatedPhrases.isEmpty)
-    for tag in ["ja", "zh-Hans", "zh-Hant"] {
-      let language = try XCTUnwrap(AppLanguage.named(tag), tag)
+    for language in AppLanguage.supported where language != .english {
+      let tag = language.tag
       let locale = PanelLocale(language: language, region: nil)
       for phrase in Set(PropertyLabels.curatedPhrases.values).sorted() {
         let translated = locale.catalogString(phrase)

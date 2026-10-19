@@ -23,8 +23,8 @@ enum BridgeSnapshotFixtures {
         logsRoot: "", activeSession: "", activeFile: "", activeFileSizeBytes: 0))
   }
 
-  /// A wallpaper options snapshot carrying shipped defaults: audio response on,
-  /// media integration off, unmuted at full volume. Tests that care about one of
+  /// A wallpaper options snapshot carrying shipped defaults: audio response and
+  /// media integration on, unmuted at full volume. Tests that care about one of
   /// those pass it explicitly.
   static func options(
     wallpaperId: String = "wallpaper",
@@ -35,7 +35,7 @@ enum BridgeSnapshotFixtures {
     properties: [BridgePropertyDescriptor] = [],
     displayConfigurations: [BridgeDisplayConfigRow] = [],
     audioResponseEnabled: Bool = true,
-    mediaIntegrationEnabled: Bool = false,
+    mediaIntegrationEnabled: Bool = true,
     muted: Bool = false,
     volume: Float = 1
   ) -> BridgeWallpaperOptionsSnapshot {

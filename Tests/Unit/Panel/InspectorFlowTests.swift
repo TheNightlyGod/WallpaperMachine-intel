@@ -101,20 +101,6 @@ final class InspectorFlowTests: InspectorTestCase {
 
   // MARK: Words and rules the views draw from
 
-  func testTheMediaSwitchStartsOffAndSaysSo() throws {
-    var inputs = InspectorOptions.Inputs()
-    inputs.locale = PanelLocale(language: .english, region: nil)
-    let options = InspectorOptions.make(
-      BridgeSnapshotFixtures.options(kind: .webpage), inputs: inputs)
-    XCTAssertFalse(options.mediaIntegrationEnabled)
-    XCTAssertTrue(options.offersMediaIntegration)
-    XCTAssertEqual(InspectorWording.mediaStatus(options), "Off. The wallpaper gets no track information.")
-    XCTAssertEqual(
-      InspectorWording.audioStatus(options),
-      "On. Apply the wallpaper to see whether it uses audio.",
-      "an unobserved web page says nothing was observed")
-  }
-
   func testOnlyASupportedSceneOrVideoOffersAPositionAndOnlySceneAndWebOfferMedia() {
     func options(_ kind: BridgeWallpaperKind, supported: Bool = true) -> InspectorOptions {
       var inputs = InspectorOptions.Inputs()

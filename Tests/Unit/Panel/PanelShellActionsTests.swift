@@ -225,7 +225,7 @@ final class PanelShellActionsTests: PanelTestCase {
         BridgeSnapshotFixtures.options(
           wallpaperId: "w", properties: [BridgeSnapshotFixtures.textProperty(id: "size", labelHtml: label)])
       }
-      let labels = ["zh-chs": "大小", "ja-jp": "サイズ"]
+      let labels = ["zh-chs": "大小", "ja-jp": "サイズ", "ko-kr": "크기"]
       panel.bridge.options["w"] = options("Size")
       panel.store.wallpaperOptionsSnapshot = panel.bridge.options["w"]
       panel.bridge.onLabelLanguages = { locales in
@@ -238,6 +238,10 @@ final class PanelShellActionsTests: PanelTestCase {
       XCTAssertEqual(panel.bridge.labelLanguageCalls.last, ["zh-chs", "en-us"])
       XCTAssertEqual(panel.bridge.optionRequests, ["w"], "the open wallpaper is read again")
       XCTAssertEqual(rows(), ["大小"])
+
+      try await controller.setLanguage(try XCTUnwrap(AppLanguage.named("ko")))
+      XCTAssertEqual(panel.bridge.labelLanguageCalls.last, ["ko-kr", "en-us"])
+      XCTAssertEqual(rows(), ["크기"])
 
       try await controller.setLanguage(try XCTUnwrap(AppLanguage.named("ja")))
       XCTAssertEqual(panel.bridge.labelLanguageCalls.last, ["ja-jp", "en-us"])

@@ -14,7 +14,7 @@
 # created as a draft and published only after the disk image it needs is uploaded, so
 # the in-app updater never sees a "latest" release with nothing to download.
 # Everything published is derived from the build or recorded at the tag: the notes
-# from the tag's bilingual CHANGELOG.md section (generated once into that file when
+# from the tag's translated CHANGELOG.md section (generated once into that file when
 # the tag has none), the checksum and the update manifest from the image, the
 # provenance attestation from this run.
 name: Build
@@ -72,11 +72,11 @@ jobs:
           fetch-depth: 0
 
       - name: Write the release notes
-        # Before the long build, so a notes problem fails in seconds. A bilingual
+        # Before the long build, so a notes problem fails in seconds. A translated
         # CHANGELOG.md section is reused. A hand-pushed tag without one asks the model
         # once and writes that exact section into the working tree before the build
-        # bundles both languages. GitHub uses only the English notes and compare link.
-        # English-only source history fails.
+        # bundles all languages. GitHub uses only the English notes and compare link.
+        # Source history missing required translations fails.
         env:
           TAG: ${{ inputs.tag }}
           RELEASE_NOTES_API_KEY: ${{ secrets.RELEASE_NOTES_API_KEY }}

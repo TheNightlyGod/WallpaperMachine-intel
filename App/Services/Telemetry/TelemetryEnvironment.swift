@@ -68,10 +68,10 @@ enum TelemetryEnvironment {
         value.range(of: pattern, options: .regularExpression) == nil ? nil : value
     }
 
-    /// SHA-1 of the project certificate `WallpaperMachine Code Signing` that releases are
-    /// signed with, the hash the release's designated requirement names
-    /// (`docs/build.md#release-signing`); replacing the certificate changes it.
-    static let releaseCertificateSHA1 = "2bdf4e2431b7edeb731de288726c896480a0fa82"
+    /// SHA-256 of the DER-encoded project certificate `WallpaperMachine Code Signing`.
+    /// This telemetry fingerprint is separate from the code-signing requirement's SHA-1
+    /// (`docs/build.md#release-signing`); replacing the certificate changes both.
+    static let releaseCertificateSHA256 = "5628ff548673a0cc17cbfc2de3298461be3340e00737a50f5356f5fcc84d364c"
 
     /// A copy is the release only when it is signed with the project certificate. That
     /// certificate is self-signed and carries no team, so a team says nothing here; a build
@@ -85,8 +85,8 @@ enum TelemetryEnvironment {
         }
         guard let leaf = (signingInformation[kSecCodeInfoCertificates as String] as? [SecCertificate])?.first
         else { return true }
-        let digest = Insecure.SHA1.hash(data: SecCertificateCopyData(leaf) as Data)
-        return digest.map { String(format: "%02x", $0) }.joined() != releaseCertificateSHA1
+        let digest = SHA256.hash(data: SecCertificateCopyData(leaf) as Data)
+        return digest.map { String(format: "%02x", $0) }.joined() != releaseCertificateSHA256
     }
 
     private static func signingInformation() -> [String: Any]? {

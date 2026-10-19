@@ -114,6 +114,8 @@ final class SettingsSearchTests: XCTestCase {
     XCTAssertFalse(search("外観", language: "en").shows(Self.appearance))
     XCTAssertFalse(search("appearance", language: "ja").shows(Self.appearance))
     XCTAssertTrue(search("外观", language: "zh-Hans").shows(Self.appearance))
+    XCTAssertTrue(search("배터리", language: "ko").shows(Self.battery))
+    XCTAssertFalse(search("배터리", language: "en").shows(Self.battery))
     XCTAssertTrue(
       search("バッテリー", language: "ja").shows(Self.battery), "A title is read in the panel language")
     // A group's title is read in the language too: 再生 is Playback.

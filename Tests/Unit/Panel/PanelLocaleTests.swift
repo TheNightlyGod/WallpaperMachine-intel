@@ -126,6 +126,9 @@ final class PanelLocaleTests: XCTestCase {
     let japanese = PanelLocale(language: AppLanguage.named("ja")!, region: "CN").locale
     XCTAssertEqual(japanese.language.languageCode?.identifier, "ja")
     XCTAssertEqual(japanese.region?.identifier, "CN")
+    let korean = PanelLocale(language: AppLanguage.named("ko")!, region: "US").locale
+    XCTAssertEqual(korean.language.languageCode?.identifier, "ko")
+    XCTAssertEqual(korean.region?.identifier, "US")
     let traditional = PanelLocale(language: AppLanguage.named("zh-Hant")!, region: "US").locale
     XCTAssertEqual(traditional.language.script?.identifier, "Hant")
     XCTAssertEqual(traditional.region?.identifier, "US")
@@ -135,10 +138,10 @@ final class PanelLocaleTests: XCTestCase {
   }
 
   func testBoundStoreDrivesTheLanguageIncludingTheSystemChoice() throws {
-    let source = try store(system: ["ja-JP"])
+    let source = try store(system: ["ko-KR"])
     let locale = PanelLocale(region: nil)
     locale.bind(to: source)
-    XCTAssertEqual(locale.tag, "ja", "System follows the macOS language list")
+    XCTAssertEqual(locale.tag, "ko", "System follows the macOS language list")
 
     try source.set("zh-Hant")
     XCTAssertEqual(locale.tag, "zh-Hant")
@@ -148,7 +151,7 @@ final class PanelLocaleTests: XCTestCase {
     try source.set("en")
     XCTAssertEqual(locale.string("Follow desktop Space"), "Follow desktop Space")
     try source.set(AppLanguageStore.systemChoice)
-    XCTAssertEqual(locale.tag, "ja")
+    XCTAssertEqual(locale.tag, "ko")
 
     let other = try store("zh-Hans")
     locale.bind(to: other)

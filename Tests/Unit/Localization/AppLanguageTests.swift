@@ -21,6 +21,8 @@ final class AppLanguageTests: XCTestCase {
       (["zh-CN"], "zh-Hans"), (["zh"], "zh-Hans"), (["zh-Hans-TW"], "zh-Hans"),
       (["fr", "zh-CN", "en"], "zh-Hans"), (["zh-TW"], "zh-Hant"), (["zh-Hant-HK"], "zh-Hant"),
       (["ja-JP"], "ja"), (["fr", "ja", "zh-CN"], "ja"),
+      (["ko"], "ko"), (["ko-KR"], "ko"), (["fr", "ko-KR", "en"], "ko"),
+      (["ko-KR", "ja-JP"], "ko"), (["ja-JP", "ko-KR"], "ja"),
       (["en-GB"], "en"), (["fr"], "en"), ([], "en"), (["zhgarbage"], "en"),
     ]
     for (system, expected) in cases {
@@ -33,23 +35,25 @@ final class AppLanguageTests: XCTestCase {
   func testChoiceSurvivesRecreationAndReachesAppleLanguages() throws {
     let suite = try Suite(self)
     suite.defaults.set(true, forKey: "unrelatedPreference")
-    let store = AppLanguageStore(defaults: suite.defaults, systemLanguages: ["en-US", "fr"])
-    try store.set("zh-Hans")
-    XCTAssertEqual(store.effective.tag, "zh-Hans")
+    for language in AppLanguage.supported {
+      let store = AppLanguageStore(defaults: suite.defaults, systemLanguages: ["en-US", "fr"])
+      try store.set(language.tag)
+      XCTAssertEqual(store.effective.tag, language.tag)
 
-    let restored = AppLanguageStore(defaults: suite.defaults, systemLanguages: ["en-US", "fr"])
-    XCTAssertEqual(restored.preference, "zh-Hans")
-    XCTAssertEqual(restored.effective.tag, "zh-Hans")
-    // Foundation reads this list at launch; the choice must lead and the user's order follow.
-    XCTAssertEqual(suite.appleLanguages, ["zh-Hans", "en-US", "fr"])
+      let restored = AppLanguageStore(defaults: suite.defaults, systemLanguages: ["en-US", "fr"])
+      XCTAssertEqual(restored.preference, language.tag)
+      XCTAssertEqual(restored.effective.tag, language.tag)
+      // Foundation reads this list at launch; the choice must lead and the user's order follow.
+      XCTAssertEqual(suite.appleLanguages, [language.tag, "en-US", "fr"])
 
-    try restored.set(AppLanguageStore.systemChoice)
-    XCTAssertEqual(restored.effective.tag, "en")
-    let system = AppLanguageStore(defaults: suite.defaults, systemLanguages: ["zh-CN"])
-    XCTAssertEqual(system.preference, AppLanguageStore.systemChoice)
-    XCTAssertEqual(system.effective.tag, "zh-Hans")
-    XCTAssertNil(suite.appleLanguages, "Returning to System must hand the language back to macOS")
-    XCTAssertTrue(suite.defaults.bool(forKey: "unrelatedPreference"))
+      try restored.set(AppLanguageStore.systemChoice)
+      XCTAssertEqual(restored.effective.tag, "en")
+      let system = AppLanguageStore(defaults: suite.defaults, systemLanguages: ["zh-CN"])
+      XCTAssertEqual(system.preference, AppLanguageStore.systemChoice)
+      XCTAssertEqual(system.effective.tag, "zh-Hans")
+      XCTAssertNil(suite.appleLanguages, "Returning to System must hand the language back to macOS")
+      XCTAssertTrue(suite.defaults.bool(forKey: "unrelatedPreference"))
+    }
   }
 
   func testUnknownOrUnsafeTagsAreRefusedAndKeepTheSavedChoice() throws {
@@ -81,7 +85,9 @@ final class AppLanguageTests: XCTestCase {
         code.range(of: "^[a-z]{2}-[a-z]{2,3}$", options: .regularExpression),
         "\(code) is not a Wallpaper Engine locale code")
     }
-    let expected = ["en": "en-us", "zh-Hans": "zh-chs", "zh-Hant": "zh-cht", "ja": "ja-jp"]
+    let expected = [
+      "en": "en-us", "zh-Hans": "zh-chs", "zh-Hant": "zh-cht", "ja": "ja-jp", "ko": "ko-kr",
+    ]
     XCTAssertEqual(
       Dictionary(uniqueKeysWithValues: AppLanguage.supported.map { ($0.tag, $0.wallpaperEngineLocale) }),
       expected)

@@ -241,6 +241,32 @@ mod tests {
     }
 
     #[test]
+    fn media_integration_choices_survive_saving_and_reopening_wallpaper_configs() {
+        for stored in [None, Some(r#"{"workshop_id":"100","type":"scene"}"#)] {
+            let root = tempfile::tempdir().unwrap();
+            let store = ConfigStore::open(root.path().to_path_buf());
+            let path = store.wallpaper_path("100");
+            if let Some(json) = stored {
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(&path, json).unwrap();
+            }
+            let mut config = store.load_wallpaper("100").unwrap();
+            store.save_wallpaper(&config).unwrap();
+            let saved: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            assert_eq!(saved["media_integration_enabled"], true);
+
+            for enabled in [false, true, false] {
+                config.media_integration_enabled = enabled;
+                store.save_wallpaper(&config).unwrap();
+                let reopened = ConfigStore::open(root.path().to_path_buf());
+                config = reopened.load_wallpaper("100").unwrap();
+                assert_eq!(config.media_integration_enabled, enabled);
+            }
+        }
+    }
+
+    #[test]
     fn legacy_native_video_opt_in_becomes_native_preferred() {
         let config = load_config("[experimental]\nnative_video_backend = true\n");
 

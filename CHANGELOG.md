@@ -3,10 +3,88 @@
 Every published version, newest first. Each section is written when its version is
 cut, by [`scripts/release_notes.py`](scripts/release_notes.py) from the commits
 between two version tags: a language model writes them up for users, where older
-sections list the commits. Each section states the same notes in English and
-Simplified Chinese. The app's What's New window offers both translations; the
-GitHub Release body repeats only the English notes. See
+sections list the commits. From 1.5.7, each section states the same notes in English,
+Simplified Chinese and Korean; earlier sections keep their original translations.
+The app's What's New window offers all three languages, with English as the fallback
+for older releases without Korean notes. The GitHub Release body repeats only the
+English notes. See
 [docs/release.md](docs/release.md) for how a version is cut.
+
+## 1.5.7 — 2026-10-19
+
+### English
+
+WallpaperMachine now speaks Korean, and sunrise and sunset rules and Steam sign-in take less setup
+
+#### New
+
+- The control panel, settings, menus, dialogs and lock screen are now available in Korean, following your macOS language or chosen in the language setting
+- What's New shows release notes in Korean when the app uses Korean, with English shown for older releases
+- Import every subscribed Workshop wallpaper missing from your library straight from the Steam page of the welcome guide
+- Sunrise and sunset rules can now switch at two fixed clock times you choose, with rule offsets still applied
+- A new Automatic option lets sunrise and sunset follow your Mac's approximate location, with a link to System Settings if access is refused
+
+#### Improved
+
+- Your Steam Community sign-in now survives quitting the app and renews itself, so Your subscriptions should not ask you to sign in again for months
+- Scene and web wallpapers show the current track without an extra opt-in, while choices you already saved are kept
+
+#### Fixed
+
+- A second display resumes its wallpaper after wake or unlock without needing a click or refresh
+- Applying a scene wallpaper before shared scene resources are installed opens their setup instead of failing with an error
+- The Dock icon stays while the control panel is minimized or a Steam or pixiv sign-in window is open, so the panel can be brought back
+- Restoring a backup keeps your sunrise and sunset settings intact, including backups made by older versions
+
+### 简体中文
+
+WallpaperMachine 现已支持韩语，日出日落规则和 Steam 登录也更省心
+
+#### 新增
+
+- 控制面板、设置、菜单、对话框和锁定屏幕现已支持韩语，可跟随 macOS 语言，也可在语言设置中选择
+- 应用语言为韩语时，新功能窗口会显示韩语更新说明，较早的版本则显示英文
+- 在欢迎向导的 Steam 页面中，可直接导入壁纸库里还没有的所有已订阅创意工坊壁纸
+- 日出日落规则现在可以按你设定的两个固定时间切换，规则的时间偏移依然生效
+- 新增“自动”选项，日出日落时间可跟随 Mac 的大致位置；若位置访问被拒绝，会提供前往系统设置的链接
+
+#### 改进
+
+- Steam 社区的登录状态现在退出应用后仍会保留并自动续期，“我的订阅”数月内通常无需重新登录
+- 场景和网页壁纸无需额外开启即可显示当前播放的曲目，已保存的设置保持不变
+
+#### 修复
+
+- 唤醒或解锁后，第二台显示器上的壁纸会自动继续播放，无需点击或刷新
+- 在共享场景资源安装前应用场景壁纸，现在会打开资源安装步骤，而不是报错失败
+- 控制面板最小化或 Steam、pixiv 登录窗口仍打开时，Dock 图标不再消失，面板可以照常恢复
+- 恢复备份时会完整保留日出日落设置，包括旧版本创建的备份
+
+### 한국어
+
+WallpaperMachine이 이제 한국어를 지원하며, 일출·일몰 규칙과 Steam 로그인도 더 간편해졌습니다
+
+#### 새로운 기능
+
+- 제어판, 설정, 메뉴, 대화상자와 잠금 화면을 이제 한국어로 사용할 수 있으며, macOS 언어를 따르거나 언어 설정에서 선택할 수 있습니다
+- 앱 언어가 한국어이면 새로운 기능 창에 한국어 릴리스 노트가 표시되며, 이전 버전은 영어로 표시됩니다
+- 시작 가이드의 Steam 페이지에서 보관함에 없는 구독한 창작마당 배경화면을 모두 바로 가져올 수 있습니다
+- 일출·일몰 규칙이 이제 직접 지정한 두 고정 시각에 전환할 수 있으며, 규칙의 시간 오프셋도 그대로 적용됩니다
+- 새 자동 옵션으로 일출·일몰이 Mac의 대략적인 위치를 따르며, 위치 접근이 거부되면 시스템 설정으로 가는 링크가 표시됩니다
+
+#### 개선 사항
+
+- Steam 커뮤니티 로그인이 이제 앱을 종료해도 유지되고 자동으로 갱신되어, 내 구독을 보려고 몇 달 동안 다시 로그인하지 않아도 됩니다
+- 장면 및 웹 배경화면이 별도로 켜지 않아도 현재 재생 중인 곡을 표시하며, 이미 저장한 설정은 그대로 유지됩니다
+
+#### 수정됨
+
+- 잠자기나 잠금을 해제한 뒤 두 번째 디스플레이의 배경화면이 클릭이나 새로 고침 없이 다시 재생됩니다
+- 공유 장면 리소스를 설치하기 전에 장면 배경화면을 적용하면 오류 대신 리소스 설치 화면이 열립니다
+- 제어판이 최소화되어 있거나 Steam 또는 pixiv 로그인 창이 열려 있으면 Dock 아이콘이 유지되어 제어판을 다시 열 수 있습니다
+- 백업을 복원할 때 이전 버전에서 만든 백업을 포함해 일출·일몰 설정이 그대로 유지됩니다
+
+**Full changelog**: https://github.com/WallpaperMachine/WallpaperMachine/compare/v1.5.6...v1.5.7
 
 ## 1.5.6 — 2026-10-17
 

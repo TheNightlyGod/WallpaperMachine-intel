@@ -14,8 +14,8 @@ final class WhatsNewViewController: NSViewController {
     private(set) var languageControl: NSSegmentedControl!
     /// The current release's banner, when it has one the bundle can show.
     private(set) var bannerView: NSImageView?
-    /// Each translation's banner and its picture; keyed by whether it is the Chinese one.
-    private var banners: [Bool: (banner: AppReleaseHistory.Banner, image: NSImage)] = [:]
+    /// Each translation's banner and its picture, loaded once for this announcement.
+    private var banners: [AppReleaseHistory.Language: (banner: AppReleaseHistory.Banner, image: NSImage)] = [:]
     private var bannerAspect: NSLayoutConstraint?
 
     init(announcement: WhatsNewStore.Announcement, preferences: WhatsNewStore,
@@ -58,9 +58,9 @@ final class WhatsNewViewController: NSViewController {
         header.spacing = 6
 
         languageControl = NSSegmentedControl(
-            labels: ["English", "简体中文"], trackingMode: .selectOne,
+            labels: AppReleaseHistory.Language.allCases.map(\.name), trackingMode: .selectOne,
             target: self, action: #selector(changeLanguage))
-        languageControl.selectedSegment = initialLanguage.tag.hasPrefix("zh") ? 1 : 0
+        languageControl.selectedSegment = AppReleaseHistory.Language(appLanguage: initialLanguage).rawValue
         languageControl.setAccessibilityLabel(String(localized: "Release notes language"))
 
         let scroll = NSScrollView()
@@ -99,11 +99,12 @@ final class WhatsNewViewController: NSViewController {
         // Only the version being announced shows its banner: older ones are history.
         if let current = announcement.releases.first {
             var loaded: [String: NSImage] = [:]
-            for chinese in [false, true] {
-                guard let banner = current.banner(chinese: chinese) else { continue }
-                if loaded[banner.fileName] == nil { loaded[banner.fileName] = bannerImage(banner) }
+            var attempted: Set<String> = []
+            for language in AppReleaseHistory.Language.allCases {
+                guard let banner = current.banner(language: language) else { continue }
+                if attempted.insert(banner.fileName).inserted { loaded[banner.fileName] = bannerImage(banner) }
                 if let image = loaded[banner.fileName], image.size.width > 0, image.size.height > 0 {
-                    banners[chinese] = (banner, image)
+                    banners[language] = (banner, image)
                 }
             }
         }
@@ -161,14 +162,18 @@ final class WhatsNewViewController: NSViewController {
         notesView.scrollRangeToVisible(NSRange(location: 0, length: 0))
     }
 
-    private func updateNotes() {
-        notesView.textStorage?.setAttributedString(Self.notesText(announcement, chinese: languageControl.selectedSegment == 1))
+    private var selectedLanguage: AppReleaseHistory.Language {
+        AppReleaseHistory.Language(rawValue: languageControl.selectedSegment) ?? .english
     }
 
-    /// The selected translation's banner; one without its own shows the other's.
+    private func updateNotes() {
+        notesView.textStorage?.setAttributedString(Self.notesText(announcement, language: selectedLanguage))
+    }
+
+    /// Resolve the selected banner after loading, so an unreadable file also falls back.
     private func updateBanner() {
-        let chinese = languageControl.selectedSegment == 1
-        guard let bannerView, let shown = banners[chinese] ?? banners[!chinese] else { return }
+        guard let bannerView,
+              let shown = selectedLanguage.bannerFallbacks.lazy.compactMap({ self.banners[$0] }).first else { return }
         bannerView.image = shown.image
         bannerView.setAccessibilityLabel(shown.banner.description)
         let ratio = shown.image.size.height / shown.image.size.width
@@ -184,7 +189,8 @@ final class WhatsNewViewController: NSViewController {
 
     @objc private func closeWindow() { close() }
 
-    private static func notesText(_ announcement: WhatsNewStore.Announcement, chinese: Bool) -> NSAttributedString {
+    private static func notesText(_ announcement: WhatsNewStore.Announcement,
+                                  language: AppReleaseHistory.Language) -> NSAttributedString {
         let text = NSMutableAttributedString(string: "")
         func paragraph(before: CGFloat, after: CGFloat, indent: CGFloat = 0) -> NSParagraphStyle {
             let style = NSMutableParagraphStyle()
@@ -221,7 +227,7 @@ final class WhatsNewViewController: NSViewController {
         }
         for release in announcement.releases {
             append(release.version.display, size: 20, weight: .semibold, before: text.length == 0 ? 0 : 24)
-            let notes = chinese ? release.chinese : release.english
+            let notes = release.notes(language: language)
             for section in notes.sections {
                 let highlighted = section.isHighlights
                 if !section.title.isEmpty {

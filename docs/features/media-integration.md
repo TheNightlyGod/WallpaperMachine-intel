@@ -1,9 +1,11 @@
 # Music information in wallpapers
 
-Enable **Media integration** in a scene or web wallpaper's inspector to share
+**Media integration** is on by default for scene and web wallpapers, sharing
 the system's current song title, artist, album, artwork and available timeline.
-It is off by default. The wallpaper must contain its own music display; this
-setting does not add an overlay to arbitrary wallpapers.
+Turn it off in a wallpaper's inspector to stop sharing; saved on/off choices are
+preserved. Configurations without a saved choice use the enabled default.
+The wallpaper must contain its own music display; this setting does not add an
+overlay to arbitrary wallpapers.
 
 The source is macOS Now Playing. Spotify, Apple Music, browsers and local media
 players can supply data through it. An MP3 is supported through the application
@@ -57,7 +59,7 @@ provider skips base64 decoding and the `MediaArtwork` lookup for a repeated
 and timeline; failed input is never cached, and the cache is released when the last
 consumer leaves or the stream fails.
 
-**Consent starts a source; presenting keeps it running.**
+**The setting starts a source; presenting keeps it running.**
 `WallpaperBridge.systemMediaSceneHandles()` names the applied desktop Scenes that
 have the setting on **and** are actually presenting; the host starts and stops its
 provider from that answer plus web consumers. A machine where every wallpaper has
@@ -101,7 +103,7 @@ setting. On its first tick, after its scripts have started and before the first 
 the runtime tells them `mediaPropertiesChanged` with an empty track (the same object
 the app sends with the setting on and nothing playing) and `mediaPlaybackChanged` with
 `PLAYBACK_STOPPED`. Wallpaper Engine's media widgets are authored visible and hide on
-`PLAYBACK_STOPPED`, so without this every user with the setting off (the default) saw
+`PLAYBACK_STOPPED`, so without this users with the setting off saw
 their covers and mascots on screen all the time. The idle state reveals nothing about
 what is playing, so it does not wait for consent: what a player really reports is
 still dropped while the setting is off. It is said once, and only for an event type no

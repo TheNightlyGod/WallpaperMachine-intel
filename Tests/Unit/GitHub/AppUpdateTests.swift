@@ -129,6 +129,20 @@ final class AppUpdateTests: XCTestCase {
         XCTAssertEqual(notes.sections[2].items, ["Plus 3 documentation, test and tooling commits."])
     }
 
+    func testReleaseNotesRecognizeTranslatedHighlightsWithoutHighlightingOtherSections() throws {
+        for (highlights, fixed) in [("Highlights", "Fixed"), ("亮点", "修复"), ("주요 변경 사항", "수정됨")] {
+            let notes = try XCTUnwrap(ReleaseNotes(version: "1.5.7", body: """
+            #### \(highlights)
+            - A highlighted change
+            #### \(fixed)
+            - An ordinary fix
+            """))
+            XCTAssertEqual(notes.sections.count, 2)
+            XCTAssertEqual(notes.sections.map(\.isHighlights), [true, false])
+            XCTAssertTrue(notes.sections.allSatisfy(\.isList))
+        }
+    }
+
     func testAReleaseWithNothingToSayHasNoNotes() {
         XCTAssertNil(ReleaseNotes(version: "1.2.3", body: ""))
         XCTAssertNil(ReleaseNotes(version: "1.2.3",
