@@ -117,14 +117,8 @@ jobs:
             security create-keychain -p "${password}" "${keychain}"
             security set-keychain-settings -lut 21600 "${keychain}"
             security unlock-keychain -p "${password}" "${keychain}"
-            security import "${certificate}" -k "${keychain}" -P "${SIGNING_CERTIFICATE_PASSWORD}" -T /usr/bin/codesign
-
-            # Add certificate to trusted roots for code signing so codesign finds it
-            pem="${RUNNER_TEMP}/signing.pem"
-            if openssl pkcs12 -in "${certificate}" -out "${pem}" -nodes -passin "pass:${SIGNING_CERTIFICATE_PASSWORD}" 2>/dev/null; then
-              security add-trusted-cert -r trustRoot -p codeSign -k "${keychain}" "${pem}" || true
-              rm -f "${pem}"
-            fi
+            security default-keychain -s "${keychain}"
+            security import "${certificate}" -k "${keychain}" -P "${SIGNING_CERTIFICATE_PASSWORD}" -T /usr/bin/codesign -T /usr/bin/security
             rm -f "${certificate}"
 
             # Lets codesign use the key without a keychain prompt.
