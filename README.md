@@ -24,7 +24,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/TheNightlyGod/WallpaperMachine-intel/releases/download/v1.5.6/WallpaperMachine-1.5.6-x86_64.dmg"><img src="https://img.shields.io/badge/Download_for_Mac-free-0a84ff?style=for-the-badge&logo=apple&logoColor=white" height="36" alt="Download for Mac, free"></a>
+  <a href="https://github.com/TheNightlyGod/WallpaperMachine-intel/releases/download/v1.5.7/WallpaperMachine-1.5.7-x86_64.dmg"><img src="https://img.shields.io/badge/Download_for_Mac-free-0a84ff?style=for-the-badge&logo=apple&logoColor=white" height="36" alt="Download for Mac, free"></a>
   &ensp;
   <a href="https://www.wallpapermachine.app/#app"><img src="https://img.shields.io/badge/Try_it_in_your_browser-live_demo-34c759?style=for-the-badge&logo=safari&logoColor=white" height="36" alt="Try the live demo in your browser"></a>
 </p>
