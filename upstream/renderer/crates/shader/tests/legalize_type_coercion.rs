@@ -11,6 +11,157 @@ fn legalize(stage: ShaderStageKind, source: &str) -> CodegenStageSource {
 }
 
 #[test]
+fn scalar_swizzles_compile_and_translate_fragment_power_exponents() {
+    let source = concat!(
+        "uniform sampler2D u_Image;\n",
+        "uniform float u_Gamma;\n",
+        "varying vec2 v_Uv;\n",
+        "void main() {\n",
+        "    float exponent = u_Gamma;\n",
+        "    vec4 color = pow(texSample2D(u_Image, v_Uv), exponent.xxxx);\n",
+        "    gl_FragColor = pow(color, 1.0 / u_Gamma.xxxx);\n",
+        "}\n",
+    );
+    let legalized = legalize(ShaderStageKind::Fragment, source);
+
+    compile_for_both_targets(&legalized, "scalar power exponents must broadcast to four components");
+}
+
+#[test]
+fn scalar_swizzles_preserve_component_types_and_widths() {
+    let source = concat!(
+        "uniform float u_Value;\n",
+        "vec4 floatSplat(float1 value) { return value /* component */ .xxxx; }\n",
+        "ivec2 intSplat(int value) { return value.rr; }\n",
+        "uvec3 uintSplat(uint value) { return value.sss; }\n",
+        "bvec4 boolSplat(bool value) { return value.xxxx; }\n",
+        "float scalarComponent(float value) { return value.x; }\n",
+        "vec3 expressionSplat(float value) { return (value + 0.5).rrr; }\n",
+        "void main() {\n",
+        "    float1 localValue = u_Value;\n",
+        "    gl_FragColor = floatSplat(localValue) + vec4(intSplat(2), 0, 0)\n",
+        "        + vec4(uintSplat(3u), 0u) + vec4(boolSplat(true))\n",
+        "        + vec4(expressionSplat(localValue), scalarComponent(localValue));\n",
+        "}\n",
+    );
+    let legalized = legalize(ShaderStageKind::Fragment, source);
+
+    for target in [ShaderTarget::VulkanSpirv, ShaderTarget::MetalMsl] {
+        let artifact = NagaCompiler
+            .compile_stage(target, ShaderStageKind::Fragment, &legalized)
+            .expect("scalar components must compile in their original numeric domain");
+        for (name, kind, size) in [
+            ("floatSplat", naga::ScalarKind::Float, naga::VectorSize::Quad),
+            ("intSplat", naga::ScalarKind::Sint, naga::VectorSize::Bi),
+            ("uintSplat", naga::ScalarKind::Uint, naga::VectorSize::Tri),
+            ("boolSplat", naga::ScalarKind::Bool, naga::VectorSize::Quad),
+            ("expressionSplat", naga::ScalarKind::Float, naga::VectorSize::Tri),
+        ] {
+            let function = artifact
+                .module()
+                .functions
+                .iter()
+                .map(|(_, function)| function)
+                .find(|function| function.name.as_deref() == Some(name))
+                .expect("broadcast helper remains in the compiled module");
+            let result = function.result.as_ref().expect("broadcast returns a vector");
+            assert!(matches!(
+                artifact.module().types[result.ty].inner,
+                naga::TypeInner::Vector { size: actual_size, scalar }
+                    if actual_size == size && scalar.kind == kind
+            ));
+            assert!(function.expressions.iter().any(|(_, expression)| matches!(
+                expression,
+                naga::Expression::Splat { size: actual_size, .. } if *actual_size == size
+            )), "{target:?}: {name} must replicate one scalar, not select a vector component");
+        }
+    }
+}
+
+#[test]
+fn scalar_swizzles_leave_vector_and_struct_member_selections_intact() {
+    let source = concat!(
+        "uniform float value;\n",
+        "uniform vec4 u_Color;\n",
+        "struct Payload { vec4 value; };\n",
+        "vec4 vectorRepeat(vec4 value) { return value.xxxx; }\n",
+        "vec4 vectorOrder(vec4 value) { return value.wzyx; }\n",
+        "vec4 aggregateOrder(Payload payload) { return payload.value.xxxx; }\n",
+        "void main() {\n",
+        "    Payload payload;\n",
+        "    payload.value = u_Color;\n",
+        "    vec4 color = value.xxxx;\n",
+        "    {\n",
+        "        vec4 value = u_Color;\n",
+        "        color += value.xxxx;\n",
+        "    }\n",
+        "    gl_FragColor = color + vectorRepeat(u_Color) + vectorOrder(u_Color)\n",
+        "        + aggregateOrder(payload) + value.xxxx;\n",
+        "}\n",
+    );
+    let legalized = legalize(ShaderStageKind::Fragment, source);
+
+    for target in [ShaderTarget::VulkanSpirv, ShaderTarget::MetalMsl] {
+        let artifact = NagaCompiler
+            .compile_stage(target, ShaderStageKind::Fragment, &legalized)
+            .expect("vector and aggregate shadowing must not become scalar broadcasts");
+        for (name, expected) in [
+            ("vectorRepeat", [naga::SwizzleComponent::X; 4]),
+            ("vectorOrder", [naga::SwizzleComponent::W, naga::SwizzleComponent::Z,
+                naga::SwizzleComponent::Y, naga::SwizzleComponent::X]),
+            ("aggregateOrder", [naga::SwizzleComponent::X; 4]),
+        ] {
+            let function = artifact
+                .module()
+                .functions
+                .iter()
+                .map(|(_, function)| function)
+                .find(|function| function.name.as_deref() == Some(name))
+                .expect("vector helper remains in the compiled module");
+            assert!(function.expressions.iter().any(|(_, expression)| matches!(
+                expression,
+                naga::Expression::Swizzle { size: naga::VectorSize::Quad, pattern, .. }
+                    if *pattern == expected
+            )), "{target:?}: {name} must retain its vector component mapping");
+        }
+    }
+}
+
+#[test]
+fn scalar_swizzles_compose_with_initializer_and_return_width_conversions() {
+    let source = concat!(
+        "uniform float u_Value;\n",
+        "vec3 narrow(float value) { return value.xxxx; }\n",
+        "void main() {\n",
+        "    vec3 prefix = u_Value.xxxx;\n",
+        "    vec4 broadcast = u_Value.x;\n",
+        "    gl_FragColor = vec4(prefix + narrow(u_Value), 1.0) + broadcast;\n",
+        "}\n",
+    );
+    let legalized = legalize(ShaderStageKind::Fragment, source);
+
+    compile_for_both_targets(
+        &legalized,
+        "scalar swizzles must keep their shape through later width conversions",
+    );
+}
+
+#[test]
+fn scalar_initializer_selects_first_component_of_nested_texture_arithmetic() {
+    let source = concat!(
+        "uniform sampler2D u_Image;\n",
+        "uniform float u_Focus;\n",
+        "varying vec2 v_Uv;\n",
+        "void main() {\n",
+        "    float depth = abs(texSample2D(u_Image, v_Uv) - u_Focus) / 0.25;\n",
+        "    gl_FragColor = vec4(depth, depth, depth, 1.0);\n",
+        "}\n",
+    );
+    let legalized = legalize(ShaderStageKind::Fragment, source);
+    compile_for_both_targets(&legalized, "vector texture arithmetic must narrow at the scalar assignment");
+}
+
+#[test]
 fn user_scalar_argument_conversion_preserves_vector_overloads() {
     let source = concat!(
         "float blendAmount(float amount) { return amount; }\n",

@@ -10,6 +10,40 @@ for older releases without Korean notes. The GitHub Release body repeats only th
 English notes. See
 [docs/release.md](docs/release.md) for how a version is cut.
 
+## 1.5.8 — 2026-10-20
+
+### English
+
+This update brings scene wallpapers closer to how they look in Wallpaper Engine and makes the Steam Workshop clearer when Steam is busy
+
+#### Fixed
+
+- Scene wallpapers show their lighting, height fog, rotating models and blur effects again, including wallpapers from older Workshop packages
+- Steam Workshop and Collections now retry on their own when Steam is busy and say so, instead of wrongly claiming Steam changed its page
+- Wallpapers that use frosted noise or audio line effects display those layers again instead of leaving them out
+
+### 简体中文
+
+本次更新让场景壁纸的效果更接近 Wallpaper Engine，并在 Steam 繁忙时给出更清楚的 Steam 创意工坊提示
+
+#### 修复
+
+- 场景壁纸重新正确显示光照、高度雾、模型旋转和模糊效果，较旧的创意工坊壁纸包也同样适用
+- Steam 繁忙时，Steam 创意工坊和合集会自动重试并如实提示，不再误报 Steam 页面已更改
+- 使用磨砂噪点或音频线条效果的壁纸，现在会重新显示这些图层，不再缺失
+
+### 한국어
+
+이번 업데이트로 장면 배경화면이 Wallpaper Engine에서 보이는 모습에 더 가까워지고, Steam이 혼잡할 때 Steam 창작마당 안내가 더 명확해집니다
+
+#### 수정됨
+
+- 장면 배경화면에서 조명, 높이 안개, 모델 회전, 흐림 효과가 다시 표시되며 오래된 창작마당 패키지의 배경화면도 마찬가지입니다
+- Steam이 혼잡하면 Steam 창작마당과 컬렉션이 자동으로 다시 시도하고 그 상황을 알려 주며, 더 이상 Steam 페이지가 바뀌었다고 잘못 안내하지 않습니다
+- 서리 낀 노이즈나 오디오 라인 효과를 쓰는 배경화면에서 해당 레이어가 빠지지 않고 다시 표시됩니다
+
+**Full changelog**: https://github.com/WallpaperMachine/WallpaperMachine/compare/v1.5.7...v1.5.8
+
 ## 1.5.7 — 2026-10-19
 
 ### English

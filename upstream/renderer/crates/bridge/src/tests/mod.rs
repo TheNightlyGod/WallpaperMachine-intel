@@ -19,6 +19,7 @@ mod persistence_round_trip;
 mod playback;
 mod power_settings;
 mod performance_settings;
+mod primary_handover;
 mod quality_settings;
 mod quality_throttle;
 mod scene_settings;

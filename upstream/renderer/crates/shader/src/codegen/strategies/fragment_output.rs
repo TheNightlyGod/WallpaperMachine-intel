@@ -4,7 +4,7 @@ use linkme::distributed_slice;
 
 use super::{
     ALPHA_TO_COVERAGE, CONTROL_FLOW_COERCION, CodegenStage, CodegenStrategy, Emitable,
-    FRAGMENT_OUTPUT, GENERAL_POLICIES, MUTABLE_INPUTS, SCALAR_TEXTURE, StrategyContext,
+    FRAGMENT_OUTPUT, GENERAL_POLICIES, MUTABLE_INPUTS, StrategyContext,
     TYPE_COERCION,
 };
 use crate::{
@@ -22,7 +22,6 @@ static FRAGMENT_OUTPUT_POLICY: CodegenStrategy = CodegenStrategy {
     after: &[
         ALPHA_TO_COVERAGE,
         TYPE_COERCION,
-        SCALAR_TEXTURE,
         CONTROL_FLOW_COERCION,
         MUTABLE_INPUTS,
     ],

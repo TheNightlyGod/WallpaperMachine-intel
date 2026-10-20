@@ -112,14 +112,27 @@ struct WorkshopLayoutChanged: LocalizedError, Sendable {
     var errorDescription: String? { Self.message }
 }
 
+/// Steam answered the browse query with `eresult` 10 (busy): its Workshop search had more
+/// queries queued than it takes. Not a layout change; `WorkshopService` asks again before
+/// showing it.
+struct WorkshopBusy: LocalizedError, Sendable {
+    static var message: String { String(localized: "Steam’s Workshop is busy. Try again in a moment.") }
+    var errorDescription: String? { Self.message }
+}
+
 actor WorkshopService {
     /// Steam's public browse page clamps `numperpage` to 30 and `total_pages` to 1000, so a single
     /// query can only ever expose the first 30,000 results; the panel explains that cap.
     static let pageSize = 30
     static let maxPages = 1000
     private let session: URLSession
+    /// The pauses before each new request for a browse page Steam answered busy.
+    private let busyRetryDelays: [Duration]
 
-    init(session: URLSession = .shared) { self.session = session }
+    init(session: URLSession = .shared, busyRetryDelays: [Duration] = [.seconds(1), .seconds(3)]) {
+        self.session = session
+        self.busyRetryDelays = busyRetryDelays
+    }
 
     static func browseURL(search: String, kind: WorkshopKind, sort: WorkshopSort, page: Int, tags: [String] = [],
                           excludedTags: [String] = [], section: String = "readytouseitems") -> URL {
@@ -151,12 +164,25 @@ actor WorkshopService {
 
     func browse(search: String, kind: WorkshopKind, sort: WorkshopSort, page: Int, tags: [String] = [],
                 excludedTags: [String] = []) async throws -> WorkshopPage {
-        let html = try await communityPage(Self.browseURL(search: search, kind: kind, sort: sort, page: page, tags: tags,
-                                                          excludedTags: excludedTags))
-        do {
-            return try Self.decodePage(html)
-        } catch let changed as WorkshopLayoutChanged {
-            return try await degradedPage(html: html, page: page, original: changed)
+        let url = Self.browseURL(search: search, kind: kind, sort: sort, page: page, tags: tags, excludedTags: excludedTags)
+        let (html, decoded) = try await browsePage(url) { html -> (String, WorkshopPage?) in
+            do { return (html, try Self.decodePage(html)) } catch is WorkshopLayoutChanged { return (html, nil) }
+        }
+        if let decoded { return decoded }
+        return try await degradedPage(html: html, page: page, original: WorkshopLayoutChanged())
+    }
+
+    /// A browse page, decoded. While Steam answers it busy the page is requested again after
+    /// each of `busyRetryDelays`; after the last, `WorkshopBusy` stands.
+    private func browsePage<T>(_ url: URL, decode: (String) throws -> T) async throws -> T {
+        var delays = busyRetryDelays[...]
+        while true {
+            let html = try await communityPage(url)
+            do {
+                return try decode(html)
+            } catch is WorkshopBusy where !delays.isEmpty {
+                try await Task.sleep(for: delays.removeFirst())
+            }
         }
     }
 
@@ -415,10 +441,9 @@ actor WorkshopService {
     func collections(
         search: String, sort: WorkshopSort, page: Int, tags: [String], excludedTags: [String]
     ) async throws -> WorkshopPage {
-        let html = try await communityPage(Self.browseURL(
+        var (listing, children) = try await browsePage(Self.browseURL(
             search: search, kind: .all, sort: sort, page: page, tags: tags, excludedTags: excludedTags,
-            section: "collections"))
-        var (listing, children) = try Self.decodeBrowse(html)
+            section: "collections"), decode: Self.decodeBrowse)
         guard Self.screensRatings(tags: tags, excludedTags: excludedTags) else { return listing }
         let excluded = Self.hiddenTags(tags: tags, excludedTags: excludedTags)
         var samples: [String: [String]] = [:]
@@ -723,8 +748,13 @@ actor WorkshopService {
             throw WorkshopLayoutChanged()
         }
         // The query is there and Steam answered it with something other than success: not a
-        // change of layout, so no list is guessed at from the page's links.
-        guard (result["eresult"] as? Int) == 1 else { throw WorkshopFailure(message: WorkshopLayoutChanged.message) }
+        // change of layout, so no list is guessed at from the page's links. Busy (10) is
+        // Steam's search being overloaded for a moment.
+        switch result["eresult"] as? Int {
+        case 1: break
+        case 10: throw WorkshopBusy()
+        default: throw WorkshopFailure(message: WorkshopLayoutChanged.message)
+        }
         guard let rows = result["results"] as? [[String: Any]] else { throw WorkshopLayoutChanged() }
         var creators: [String: String] = [:]
         for query in queries {

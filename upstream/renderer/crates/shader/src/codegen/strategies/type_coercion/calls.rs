@@ -1,11 +1,16 @@
 use smol_str::SmolStr;
 
 use super::{
-    Fixup, SourceSpan, StrategyContext, TypedToken, assignment::AssignmentLhs,
-    initializer::FloatLiteral, types::VectorTypeBindings,
+    Fixup, SourceSpan, StrategyContext, TypedToken,
+    assignment::AssignmentLhs,
+    initializer::FloatLiteral,
+    types::{ComponentKind, VectorTypeBindings},
 };
 use crate::{
-    codegen::expressions::analysis::{VectorExpressionAnalyzer, VectorWidth},
+    codegen::expressions::analysis::{
+        ScalarExpressionAnalyzer, ScalarExpressionFlavor, ScalarType, VectorExpressionAnalyzer,
+        VectorWidth,
+    },
     syntax::{CallArgument, CallArguments, FunctionCall},
     tokenizer::{
         AccessOperator, AssignmentOperator, LiteralValue,
@@ -72,16 +77,73 @@ impl FunctionCoercion<'_> {
         arguments.coercion_width(tokens, self.token_facts, self.vector_facts, self.function)
     }
 
+    /// Returns the integer overload the call's operands select: some argument
+    /// is known to be `int`, `uint` or an integer vector and none is known to
+    /// be floating point. `clamp(index, 0, 63)` on an `int` index is such a
+    /// call, and its literals must stay integers.
+    fn integer_operands(
+        &self,
+        tokens: TokenCursor<'_>,
+        arguments: &CallArguments,
+    ) -> Option<IntegerOperands> {
+        let analyzer = ScalarExpressionAnalyzer {
+            facts: self.vector_facts,
+            token_facts: self.token_facts,
+            flavor: ScalarExpressionFlavor::FloatModulo,
+        };
+        let mut signed = false;
+        let mut unsigned = false;
+        for argument in arguments.iter() {
+            if NumericLiteral::parse_argument(tokens, argument).is_ok() {
+                continue;
+            }
+            let component = match tokens[argument.start()].kind() {
+                TypedToken::Identifier(name) if argument.is_single_token() => self
+                    .vector_facts
+                    .component(name, argument.start()),
+                _ => None,
+            };
+            let ty = match component {
+                Some(ComponentKind::Int) => Some(ScalarType::Int),
+                Some(ComponentKind::Uint) => Some(ScalarType::Uint),
+                Some(ComponentKind::Float) => Some(ScalarType::Float),
+                Some(ComponentKind::Other) => None,
+                None => analyzer.range_type(tokens, argument.start(), argument.end()),
+            };
+            match ty {
+                Some(ScalarType::Int) => signed = true,
+                Some(ScalarType::Uint) => unsigned = true,
+                Some(ScalarType::Float | ScalarType::FloatVector) => return None,
+                Some(ScalarType::Bool | ScalarType::NonFloatAggregate) | None => {}
+            }
+        }
+        if signed {
+            Some(IntegerOperands::Signed)
+        } else if unsigned {
+            Some(IntegerOperands::Unsigned)
+        } else {
+            None
+        }
+    }
+
     /// Emits numeric literal and scalar broadcast fixups for this call.
     pub(super) fn emit(self, context: &mut StrategyContext<'_, '_, '_>, tokens: TokenCursor<'_>) {
         let arguments = &self.call.arguments;
         let width = self.scalar_broadcast_width(tokens, arguments);
+        let integer = (width.is_none() && self.function.has_integer_overload())
+            .then(|| self.integer_operands(tokens, arguments))
+            .flatten();
 
         for (index, argument) in arguments.iter().enumerate() {
-            if let Ok(literal) = NumericLiteral::parse_argument(tokens, argument)
-                && (self.function.promotes_integer_literals() || width.is_some())
-            {
-                literal.emit_float(context, self.function.broadcast_width(width, index));
+            let Ok(literal) = NumericLiteral::parse_argument(tokens, argument) else {
+                continue;
+            };
+            match integer {
+                Some(IntegerOperands::Unsigned) => literal.emit_unsigned(context),
+                None if self.function.promotes_integer_literals() || width.is_some() => {
+                    literal.emit_float(context, self.function.broadcast_width(width, index));
+                }
+                Some(IntegerOperands::Signed) | None => {}
             }
         }
 
@@ -273,6 +335,11 @@ impl CoercionFunction {
         )
     }
 
+    /// Returns whether GLSL also declares this builtin for integer operands.
+    pub(super) const fn has_integer_overload(self) -> bool {
+        matches!(self, Self::Clamp | Self::Min | Self::Max)
+    }
+
     /// Returns whether scalar arguments should be broadcast from peer vector
     /// width.
     pub(super) const fn broadcasts(self) -> bool {
@@ -326,6 +393,16 @@ impl CoercionFunction {
         )
     }
 }
+/// Integer overload of a builtin selected by its non-literal operands.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IntegerOperands {
+    /// `int` or `ivecN` operands; integer literals already match.
+    Signed,
+    /// `uint` or `uvecN` operands only; integer literals need a `u` suffix,
+    /// since GLSL has no implicit `int` to `uint` conversion to pick one.
+    Unsigned,
+}
+
 /// Argument-list width selection for builtin coercion functions.
 pub(super) trait CoercionArguments {
     /// Returns the vector width that builtin arguments should conform to.
@@ -398,6 +475,17 @@ impl NumericLiteral {
             text: text.clone(),
             span: tokens[argument.start()].span(),
         })
+    }
+
+    /// Emits an unsigned-literal replacement for a literal without a suffix.
+    fn emit_unsigned(self, context: &mut StrategyContext<'_, '_, '_>) {
+        if self.text.ends_with(['u', 'U']) {
+            return;
+        }
+        context
+            .context()
+            .fixups
+            .push(Fixup::replace(self.span, format!("{}u", self.text)));
     }
 
     /// Emits a float-literal replacement, optionally wrapped in a vector

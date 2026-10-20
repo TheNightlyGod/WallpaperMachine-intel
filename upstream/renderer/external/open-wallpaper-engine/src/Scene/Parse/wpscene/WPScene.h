@@ -69,6 +69,8 @@ public:
     // Black, as Wallpaper Engine leaves them when a scene omits them.
     std::array<float, 3> ambientcolor { 0.0f, 0.0f, 0.0f };
     std::array<float, 3> skylightcolor { 0.0f, 0.0f, 0.0f };
+    // Property-bound lighting/fog values are resolved when the graph is built.
+    nlohmann::json       lighting_settings = nlohmann::json::object();
     // Wallpaper Engine's defaults: bloom on, at strength 2 above 0.65.
     bool                 bloom { true };
     float                bloomstrength { 2.0f };

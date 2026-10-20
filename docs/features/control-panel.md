@@ -585,6 +585,14 @@ identity, and it stays off when the display reconnects. A display switched to
 mirroring shows its source even if it kept an earlier wallpaper; applying that
 wallpaper again does not make it independent.
 
+The **Primary display** row belongs to whichever display macOS makes the main one,
+but a wallpaper belongs to its display. When another display becomes the main one
+(a wake, a lid, a new arrangement), the previous main display keeps the wallpaper
+it showed, and the new main display shows what was saved for it, nothing if its
+wallpaper was switched off. A main display the app has never configured shows the
+wallpaper the previous main display had. `config.toml` records the display the
+row last described as `primary_display`.
+
 The renderer titles displays by CoreGraphics vendor and model numbers
 (`Vendor 1552 - Model 41055 (1 - Primary)`). `DisplayTitleResolver`
 (`App/Services/Desktop/`) replaces that label with `NSScreen.localizedName` — the

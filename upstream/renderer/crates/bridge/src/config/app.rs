@@ -46,6 +46,14 @@ pub struct AppConfig {
     pub monitors: Vec<MonitorCfg>,
     #[serde(default)]
     pub monitor_settings: Vec<MonitorSettingsCfg>,
+    /// The display the `primary` block of `monitors` last described, by its
+    /// stable identity. The block follows the role (whichever display macOS
+    /// makes the main one), so when another display takes that role display
+    /// sync hands the block over instead of moving its wallpaper along; see
+    /// [`AppConfig::sync_known_monitors`]. Absent in a config written before
+    /// this key and while the main display has no stable identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_display: Option<SerializedSelector>,
     #[serde(default)]
     pub diagnostics: DiagnosticsCfg,
 }
@@ -64,6 +72,7 @@ impl Default for AppConfig {
             quality: QualityCfg::default(),
             monitors: Vec::new(),
             monitor_settings: Vec::new(),
+            primary_display: None,
             diagnostics: DiagnosticsCfg::default(),
         }
     }

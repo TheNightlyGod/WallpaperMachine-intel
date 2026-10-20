@@ -280,6 +280,10 @@ final class WorkshopTests: XCTestCase {
             XCTAssertFalse($0 is WorkshopLayoutChanged)
             XCTAssertTrue($0 is WorkshopFailure)
         }
+        // Busy is Steam's search being overloaded, neither a layout change nor a refusal.
+        XCTAssertThrowsError(try WorkshopService.decodePage(try page([browseQuery(["eresult": 10, "results": []])]))) {
+            XCTAssertTrue($0 is WorkshopBusy)
+        }
         XCTAssertEqual(
             try WorkshopService.decodePage(try page([browseQuery(["eresult": 1, "results": [row]])])).items.map(\.id),
             ["1000000001"])

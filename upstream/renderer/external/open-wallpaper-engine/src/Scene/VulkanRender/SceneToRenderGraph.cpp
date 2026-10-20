@@ -263,7 +263,8 @@ static void AddCustomShaderGraphPass(
     std::size_t submesh_index,
     uint32_t material_slot,
     bool register_base_link_output = false,
-    bool capture_as_layer_link = false) {
+    bool capture_as_layer_link = false,
+    std::optional<BlendMode> blend_override = std::nullopt) {
     rgraph.addPass<vulkan::CustomShaderPass>(
         material.name,
         rg::PassNode::Type::CustomShader,
@@ -280,7 +281,8 @@ static void AddCustomShaderGraphPass(
          submesh_index,
          material_slot,
          register_base_link_output,
-         capture_as_layer_link](
+         capture_as_layer_link,
+         blend_override](
             rg::RenderGraphBuilder& builder, vulkan::CustomShaderPass::Desc& pdesc) {
             const auto& pass = builder.workPassNode();
             const auto  pass_output = output_override.empty()
@@ -294,6 +296,8 @@ static void AddCustomShaderGraphPass(
             pdesc.camera_override = camera_override;
             pdesc.submesh_index   = submesh_index;
             pdesc.material_slot   = material_slot;
+            pdesc.blend_override  = blend_override;
+            pdesc.texture_covers  = material.texture_covers;
             CheckAndSetSprite(scene, pdesc, material.textures);
             for (usize i = 0; i < material.textures.size(); i++) {
                 const auto& texture_name = material.textures[i];
@@ -469,7 +473,8 @@ static void ToGraphPass(
         }
         const auto& submeshes = mesh->Submeshes();
         auto add_draws = [&](const std::string& target, const std::string& camera,
-                             bool register_base, bool capture) {
+                             bool register_base, bool capture,
+                             std::optional<BlendMode> blend = std::nullopt) {
             if (submeshes.size() > 1) {
                 for (std::size_t submesh_index = 0; submesh_index < submeshes.size(); ++submesh_index) {
                     const auto material_slot = submeshes[submesh_index].material_slot;
@@ -490,7 +495,8 @@ static void ToGraphPass(
                         submesh_index,
                         material_slot,
                         register_base,
-                        capture);
+                        capture,
+                        blend);
                 }
             } else {
                 auto* material = mesh->MaterialForSlot(0);
@@ -510,15 +516,25 @@ static void ToGraphPass(
                         0,
                         0,
                         register_base,
-                        capture);
+                        capture,
+                        blend);
                 }
             }
         };
         // A composite-only layer covers its whole target with what is behind
         // it: anywhere but its own composite, that is the wrong picture.
         const bool composite_only = node->CompositeOnly();
+        // The chain's last pass puts the layer onto the scene with the layer's
+        // blending, but what it leaves in the layer's own composite is its
+        // result as it is, written as every other pass of the chain writes:
+        // blended onto the cleared composite, colour was multiplied by alpha,
+        // and a buffer that keeps data in all four channels lost most of it.
+        const bool chain_result_into_own_composite =
+            resolved_final && sstart_with(draw_output, WE_IMAGE_LAYER_COMPOSITE_PREFIX);
         if (! composite_only || sstart_with(draw_output, WE_IMAGE_LAYER_COMPOSITE_PREFIX)) {
-            add_draws(draw_output, composite_camera, imgeff != nullptr, capture_link);
+            add_draws(draw_output, composite_camera, imgeff != nullptr, capture_link,
+                      chain_result_into_own_composite ? std::optional(BlendMode::Normal)
+                                                      : std::nullopt);
         }
         if (draw_output != output && ! composite_only) {
             // Hidden now, a layer a script shows later still needs this draw:

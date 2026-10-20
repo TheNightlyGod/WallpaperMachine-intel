@@ -704,6 +704,24 @@ impl Ord for VectorWidth {
     }
 }
 
+/// Component-zero selections supported by scalar values in the legacy dialect.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ScalarSwizzleField {
+    /// Width produced by selecting or replicating the scalar component.
+    pub component_count: usize,
+}
+
+impl ScalarSwizzleField {
+    /// Recognizes one component family, without accepting invalid scalar lanes.
+    pub(crate) fn parse(field: &str) -> Option<Self> {
+        let first = *field.as_bytes().first()?;
+        ((1..=4).contains(&field.len())
+            && matches!(first, b'x' | b'r' | b's')
+            && field.bytes().all(|byte| byte == first))
+        .then_some(Self { component_count: field.len() })
+    }
+}
+
 /// Vector swizzle field on a member access expression.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct SwizzleField {
@@ -829,7 +847,7 @@ where
                 || !tokens[argument.end()].kind().is_right_paren()
                 || tokens.matching_right_paren(open) != Some(argument.end())
             {
-                return None;
+                return self.binary_vector_width(tokens, argument);
             }
             let call = self.whole_argument_call(tokens, argument)?;
             return call
@@ -921,17 +939,22 @@ where
         })
     }
 
-    /// Parses a simple `identifier.swizzle` expression whose base is a known
-    /// vector expression.
+    /// Parses a simple `identifier.swizzle` expression whose base has known
+    /// scalar or vector shape.
     pub(crate) fn terminal_swizzle_for(
         self,
         tokens: TokenCursor<'_>,
         range: TokenIndexRange,
     ) -> Option<TerminalVectorSwizzle> {
         let swizzled = Self::terminal_swizzle(tokens, range)?;
-        self.facts
-            .vector_width(swizzled.base_name.as_str(), swizzled.base_index)
-            .map(|_width| swizzled)
+        match self.facts.expression_type(swizzled.base_name.as_str(), swizzled.base_index)? {
+            VectorExpressionType::Vector(_) => Some(swizzled),
+            VectorExpressionType::Scalar => {
+                let field = tokens[range.end() - 1].kind().identifier_text()?;
+                ScalarSwizzleField::parse(field).map(|_| swizzled)
+            }
+            VectorExpressionType::Blocker => None,
+        }
     }
 
     /// Parses a source span for a vector constructor operand starting at
@@ -1241,8 +1264,7 @@ where
         })
     }
 
-    /// Returns the field token of `name.c` when `name` at `index` is a known
-    /// vector and `c` selects exactly one of its components.
+    /// Returns the field token of a known scalar/vector component read.
     fn single_component_read(self, tokens: TokenCursor<'_>, index: usize) -> Option<usize> {
         let TypedToken::Identifier(name) = tokens[index].kind() else {
             return None;
@@ -1253,7 +1275,10 @@ where
         {
             return None;
         }
-        let _width = self.facts.vector_width(name, index)?;
+        let base_type = self.facts.expression_type(name, index)?;
+        if base_type == VectorExpressionType::Blocker {
+            return None;
+        }
         let dot = tokens.next_non_comment(index + 1)?;
         if !tokens[dot].kind().is_member_access_operator() {
             return None;
@@ -1266,6 +1291,11 @@ where
             component.as_bytes(),
             [b'x' | b'y' | b'z' | b'w' | b'r' | b'g' | b'b' | b'a' | b's' | b't' | b'p' | b'q']
         ) {
+            return None;
+        }
+        if base_type == VectorExpressionType::Scalar
+            && ScalarSwizzleField::parse(component.as_str()).is_none()
+        {
             return None;
         }
         // A further access belongs to the component, not to this read.

@@ -14,7 +14,7 @@ impl ShaderPipelineRevision {
     /// already compiled. The on-disk program lookup is keyed on this identity
     /// and the source, before anything is compiled, so a stale entry would
     /// otherwise be served for a shader whose generated form has changed.
-    pub const CURRENT: Self = Self(17);
+    pub const CURRENT: Self = Self(18);
 
     /// Creates a typed pipeline revision.
     #[must_use]

@@ -1679,6 +1679,7 @@ mod tests {
             window_active: true,
             runtime_open: false,
             primary_inheritance_consumed: false,
+            bound_to_display: false,
         }] });
         let snapshots = Arc::new(EngineSnapshotPublisher::new(state.snapshot(), Arc::new(std::sync::Mutex::new(crate::window::MouseButtonTracker::new()))));
         let mut actor = EngineActor::new(OweBackend, Arc::new(|_| {}), state, snapshots.clone(), prepared.actor_ref().downgrade());
@@ -1711,6 +1712,7 @@ mod tests {
                 window_active: true,
                 runtime_open: false,
                 primary_inheritance_consumed: false,
+                bound_to_display: false,
             }],
         });
         state.display_records[0].last_runtime_state = Some(StoredSceneRuntimeState::new(
@@ -1774,6 +1776,7 @@ mod tests {
                 window_active: true,
                 runtime_open: false,
                 primary_inheritance_consumed: false,
+                bound_to_display: false,
             }],
         });
         // The user had moved the previous wallpaper at runtime, away from both

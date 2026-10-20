@@ -12,11 +12,7 @@ use crate::{
 ///
 /// The repairs run over one source snapshot, so the symbol facts the other
 /// coercions read must already carry the rewritten type.
-#[expect(
-    clippy::single_call_fn,
-    reason = "selects declarators with the repair's own predicate, beside the repair"
-)]
-pub(super) fn float_step_names(
+pub(in crate::codegen::strategies) fn float_step_names(
     tokens: TokenCursor<'_>,
     token_facts: &TypedTokenFacts,
 ) -> BTreeSet<usize> {

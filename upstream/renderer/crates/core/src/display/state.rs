@@ -28,6 +28,10 @@ pub struct DisplayRecord {
     pub window_active: bool,
     pub runtime_open: bool,
     pub primary_inheritance_consumed: bool,
+    /// The assignment was reconciled for the physical display this record
+    /// holds. A refresh keeps it on that display, even when the display's key
+    /// changes because another display became the main one.
+    pub bound_to_display: bool,
 }
 
 impl DisplayRecord {
@@ -113,6 +117,7 @@ impl DisplayStateModel {
                 window_active: true,
                 runtime_open: false,
                 primary_inheritance_consumed: false,
+                bound_to_display: false,
             }],
         };
 
@@ -141,6 +146,7 @@ impl DisplayStateModel {
             window_active: false,
             runtime_open: false,
             primary_inheritance_consumed: false,
+            bound_to_display: false,
         });
         self.records.last_mut().expect("record was just pushed")
     }
@@ -155,7 +161,9 @@ impl DisplayStateModel {
         }
         let key = DisplayKey::from_selector(selector)?;
         let mut candidate = self.clone();
-        candidate.ensure_record(key).assignment = Some(assignment);
+        let record = candidate.ensure_record(key);
+        record.assignment = Some(assignment);
+        record.bound_to_display = false;
         candidate.reject_mirror_cycles()?;
         *self = candidate;
         Ok(())
@@ -205,12 +213,92 @@ impl DisplayStateModel {
         }
 
         candidate.keep_descriptors_of_transitional_displays(self, transitional);
+        candidate.keep_bound_assignments_on_their_displays(self, transitional)?;
         candidate.reject_mirror_cycles()?;
         candidate.transfer_runtime_open_flags_from(self);
         let actions = candidate.plan_actions()?;
         candidate.log_debug_transition(self);
         *self = candidate;
         Ok(actions)
+    }
+
+    /// Moves each assignment reconciled for a concrete display to the record
+    /// that holds that physical display after the refresh.
+    ///
+    /// The [`DisplayKey::Primary`] record follows the main display. Without
+    /// this, a main-display change would carry the old main display's wallpaper
+    /// to the new one, reload it there, and close the new main display's own
+    /// wallpaper. A binding whose display disconnected leaves `Primary` for the
+    /// key the display has as a secondary. The configured `Primary` wallpaper
+    /// (`DisplaySelector::Primary`) is not bound and keeps following the main
+    /// display.
+    fn keep_bound_assignments_on_their_displays(
+        &mut self,
+        before: &DisplayStateModel,
+        transitional: &[DisplayDesc],
+    ) -> Result<(), EngineError> {
+        let primary_takes_bindings = self
+            .record(&DisplayKey::Primary)
+            .is_none_or(|record| record.bound_to_display || record.assignment.is_none());
+        let mut moves = Vec::new();
+        for source in before.records.iter().filter(|record| record.bound_to_display) {
+            let Some(display) = source.live_display.as_ref() else {
+                continue;
+            };
+            let holder = self.records.iter().find(|record| {
+                record
+                    .live_display
+                    .as_ref()
+                    .is_some_and(|live| live.is_same_physical_display_as(display))
+            });
+            let target = match holder {
+                Some(holder) if holder.key == source.key => continue,
+                Some(holder) if holder.key == DisplayKey::Primary && !primary_takes_bindings => {
+                    continue;
+                }
+                Some(holder) => holder.key.clone(),
+                None if source.key == DisplayKey::Primary => {
+                    self.key_for_disconnected_display(display)?
+                }
+                None => continue,
+            };
+            moves.push((source, target));
+        }
+
+        for (source, _) in &moves {
+            if let Some(record) = self.records.iter_mut().find(|record| record.key == source.key) {
+                record.assignment = None;
+                record.window_active = false;
+                record.bound_to_display = false;
+            }
+        }
+        for (source, target) in moves {
+            let record = self.ensure_record(target);
+            record.assignment.clone_from(&source.assignment);
+            record.window_active = source.window_active;
+            record.bound_to_display = true;
+            let display = source
+                .live_display
+                .as_ref()
+                .expect("bound sources hold a display");
+            if record.live_display.is_none()
+                && transitional
+                    .iter()
+                    .any(|settling| display.is_same_physical_display_as(settling))
+            {
+                record.live_display = Some(display.clone());
+            }
+        }
+        Ok(())
+    }
+
+    fn key_for_disconnected_display(&self, display: &DisplayDesc) -> Result<DisplayKey, EngineError> {
+        if display.identity.is_empty() {
+            return Ok(DisplayKey::LiveDisplayId(display.display_id));
+        }
+        Ok(self
+            .matching_identity_key(&display.identity)?
+            .unwrap_or_else(|| DisplayKey::Identity(display.identity.clone())))
     }
 
     pub fn set_window_active(
@@ -518,6 +606,7 @@ impl DisplayStateModel {
         for record in &mut self.records {
             if record.live_display.is_some() && !requested.contains(&record.key) {
                 record.window_active = false;
+                record.bound_to_display = false;
                 record.runtime_open = false;
             }
         }
@@ -535,11 +624,13 @@ impl DisplayStateModel {
                         window_active: false,
                         runtime_open: false,
                         primary_inheritance_consumed: false,
+                        bound_to_display: false,
                     });
                     self.records.last_mut().expect("record was just pushed")
                 };
             record.live_display = Some(scene.display.clone());
             record.window_active = true;
+            record.bound_to_display = true;
             record.assignment = Some(WallpaperAssignment::Direct(SceneTemplate::from_scene_desc(
                 scene,
             )));
@@ -818,6 +909,7 @@ mod tests {
                     window_active: true,
                     runtime_open: false,
                     primary_inheritance_consumed: false,
+                    bound_to_display: false,
                 },
                 DisplayRecord {
                     key: DisplayKey::LiveDisplayId(2),
@@ -826,6 +918,7 @@ mod tests {
                     window_active: true,
                     runtime_open: false,
                     primary_inheritance_consumed: false,
+                    bound_to_display: false,
                 },
             ],
         };
@@ -902,6 +995,7 @@ mod tests {
                     window_active: true,
                     runtime_open: false,
                     primary_inheritance_consumed: false,
+                    bound_to_display: false,
                 },
                 DisplayRecord {
                     key: DisplayKey::Identity(external.clone()),
@@ -910,6 +1004,7 @@ mod tests {
                     window_active: true,
                     runtime_open: true,
                     primary_inheritance_consumed: false,
+                    bound_to_display: false,
                 },
             ],
         };
@@ -934,6 +1029,144 @@ mod tests {
         );
     }
 
+    fn scene_at(display: &DisplayDesc, path: &str) -> SceneDesc {
+        SceneDesc::new(display.clone(), path, "/tmp/assets", 60, false)
+    }
+
+    fn record_on<'a>(model: &'a DisplayStateModel, display: &DisplayDesc) -> &'a DisplayRecord {
+        model
+            .records
+            .iter()
+            .find(|record| {
+                record
+                    .live_display
+                    .as_ref()
+                    .is_some_and(|live| live.is_same_physical_display_as(display))
+            })
+            .expect("a record should hold the display")
+    }
+
+    fn reconciled_open(model: &mut DisplayStateModel, scenes: &[SceneDesc]) {
+        model.apply_reconcile(scenes).unwrap();
+        for record in &mut model.records {
+            record.runtime_open = record.should_have_runtime();
+        }
+    }
+
+    fn assert_scene_path(record: &DisplayRecord, path: &str) {
+        assert!(
+            matches!(
+                &record.assignment,
+                Some(WallpaperAssignment::Direct(template)) if template.scene_path == path
+            ),
+            "{:?} should show {path}",
+            record.key
+        );
+    }
+
+    #[test]
+    fn main_display_change_keeps_a_reconciled_scene_on_its_display() {
+        let built_in = display(1, identity("built-in"));
+        let external = display(2, identity("external"));
+        let mut model = DisplayStateModel::from_config(WallpaperEngineConfig::default()).unwrap();
+        model
+            .refresh_connected(built_in.clone(), vec![built_in.clone()])
+            .unwrap();
+        reconciled_open(&mut model, &[scene_at(&built_in, "/tmp/built-in.json")]);
+
+        let built_in_shifted = DisplayDesc::with_identity(
+            1,
+            built_in.identity.clone(),
+            -1920,
+            0,
+            1920,
+            1080,
+            1.0,
+        );
+        let actions = model
+            .refresh_connected(
+                external.clone(),
+                vec![built_in_shifted.clone(), external.clone()],
+            )
+            .unwrap();
+
+        let on_external = record_on(&model, &external).key.clone();
+        assert!(
+            !actions.iter().any(|action| matches!(
+                action,
+                DisplayAction::Open(key) | DisplayAction::Rebuild(key) if *key == on_external
+            )),
+            "nothing may open on the new main display: {actions:?}"
+        );
+        assert_eq!(model.resolved_assignment(&on_external).unwrap(), None);
+        let on_built_in = record_on(&model, &built_in);
+        assert_eq!(on_built_in.live_display, Some(built_in_shifted));
+        assert!(on_built_in.runtime_open);
+        assert_scene_path(on_built_in, "/tmp/built-in.json");
+    }
+
+    #[test]
+    fn main_display_change_keeps_every_reconciled_scene_on_its_display() {
+        let built_in = display(1, identity("built-in"));
+        let external = display(2, identity("external"));
+        let mut model = DisplayStateModel::from_config(WallpaperEngineConfig::default()).unwrap();
+        model
+            .refresh_connected(built_in.clone(), vec![built_in.clone(), external.clone()])
+            .unwrap();
+        reconciled_open(
+            &mut model,
+            &[
+                scene_at(&built_in, "/tmp/built-in.json"),
+                scene_at(&external, "/tmp/external.json"),
+            ],
+        );
+
+        let actions = model
+            .refresh_connected(external.clone(), vec![built_in.clone(), external.clone()])
+            .unwrap();
+
+        assert!(
+            !actions
+                .iter()
+                .any(|action| matches!(action, DisplayAction::Open(_) | DisplayAction::Close(_))),
+            "both runtimes stay open where they are: {actions:?}"
+        );
+        let on_external = record_on(&model, &external);
+        assert_eq!(on_external.key, DisplayKey::Primary);
+        assert!(on_external.runtime_open);
+        assert_scene_path(on_external, "/tmp/external.json");
+        let on_built_in = record_on(&model, &built_in);
+        assert!(on_built_in.runtime_open);
+        assert_scene_path(on_built_in, "/tmp/built-in.json");
+    }
+
+    #[test]
+    fn configured_primary_wallpaper_follows_the_main_display() {
+        let built_in = display(1, identity("built-in"));
+        let external = display(2, identity("external"));
+        let mut model = DisplayStateModel::from_config(WallpaperEngineConfig {
+            displays: vec![DisplayConfig {
+                selector: DisplaySelector::Primary,
+                window_active: true,
+                wallpaper: Some(WallpaperAssignment::Direct(template("/tmp/primary.json"))),
+            }],
+        })
+        .unwrap();
+        model
+            .refresh_connected(built_in.clone(), vec![built_in.clone()])
+            .unwrap();
+        model.records[0].runtime_open = true;
+
+        let actions = model
+            .refresh_connected(external.clone(), vec![built_in, external.clone()])
+            .unwrap();
+
+        assert_eq!(actions, vec![DisplayAction::Rebuild(DisplayKey::Primary)]);
+        let primary = model.record(&DisplayKey::Primary).unwrap();
+        assert_eq!(primary.live_display, Some(external));
+        assert_scene_path(primary, "/tmp/primary.json");
+    }
+
     #[test]
     fn display_debug_events_report_connected_and_disconnected_displays() {
         let primary = identity("primary");
@@ -947,6 +1180,7 @@ mod tests {
                     window_active: true,
                     runtime_open: false,
                     primary_inheritance_consumed: false,
+                    bound_to_display: false,
                 },
                 DisplayRecord {
                     key: DisplayKey::Identity(external.clone()),
@@ -955,6 +1189,7 @@ mod tests {
                     window_active: false,
                     runtime_open: false,
                     primary_inheritance_consumed: false,
+                    bound_to_display: false,
                 },
             ],
         };
@@ -967,6 +1202,7 @@ mod tests {
                     window_active: true,
                     runtime_open: false,
                     primary_inheritance_consumed: false,
+                    bound_to_display: false,
                 },
                 DisplayRecord {
                     key: DisplayKey::Identity(external.clone()),
@@ -975,6 +1211,7 @@ mod tests {
                     window_active: false,
                     runtime_open: false,
                     primary_inheritance_consumed: false,
+                    bound_to_display: false,
                 },
             ],
         };
@@ -1007,6 +1244,7 @@ mod tests {
                 window_active: true,
                 runtime_open: true,
                 primary_inheritance_consumed: false,
+                bound_to_display: false,
             }],
         };
         let after = DisplayStateModel {
@@ -1017,6 +1255,7 @@ mod tests {
                 window_active: true,
                 runtime_open: true,
                 primary_inheritance_consumed: false,
+                bound_to_display: false,
             }],
         };
 
@@ -1040,6 +1279,7 @@ mod tests {
                 window_active: true,
                 runtime_open: true,
                 primary_inheritance_consumed: false,
+                bound_to_display: false,
             }],
         };
         let after = DisplayStateModel {
@@ -1050,6 +1290,7 @@ mod tests {
                 window_active: true,
                 runtime_open: true,
                 primary_inheritance_consumed: false,
+                bound_to_display: false,
             }],
         };
 
@@ -1220,6 +1461,7 @@ mod tests {
                     window_active: true,
                     runtime_open: false,
                     primary_inheritance_consumed: false,
+                    bound_to_display: false,
                 },
                 DisplayRecord {
                     key: DisplayKey::LiveDisplayId(1),
@@ -1228,6 +1470,7 @@ mod tests {
                     window_active: false,
                     runtime_open: false,
                     primary_inheritance_consumed: false,
+                    bound_to_display: false,
                 },
             ],
         };
@@ -1263,6 +1506,7 @@ mod tests {
                     window_active: false,
                     runtime_open: false,
                     primary_inheritance_consumed: false,
+                    bound_to_display: false,
                 },
                 DisplayRecord {
                     key: DisplayKey::LiveDisplayId(1),
@@ -1271,6 +1515,7 @@ mod tests {
                     window_active: true,
                     runtime_open: true,
                     primary_inheritance_consumed: false,
+                    bound_to_display: false,
                 },
             ],
         };
@@ -1307,6 +1552,7 @@ mod tests {
                     window_active: true,
                     runtime_open: false,
                     primary_inheritance_consumed: false,
+                    bound_to_display: false,
                 },
                 DisplayRecord {
                     key: DisplayKey::Identity(external.clone()),
@@ -1315,6 +1561,7 @@ mod tests {
                     window_active: true,
                     runtime_open: false,
                     primary_inheritance_consumed: false,
+                    bound_to_display: false,
                 },
                 DisplayRecord {
                     key: DisplayKey::LiveDisplayId(2),
@@ -1323,6 +1570,7 @@ mod tests {
                     window_active: false,
                     runtime_open: false,
                     primary_inheritance_consumed: false,
+                    bound_to_display: false,
                 },
             ],
         };
@@ -1529,6 +1777,7 @@ mod tests {
                     window_active: true,
                     runtime_open: true,
                     primary_inheritance_consumed: false,
+                    bound_to_display: false,
                 },
                 DisplayRecord {
                     key: DisplayKey::Identity(primary_identity.clone()),
@@ -1537,6 +1786,7 @@ mod tests {
                     window_active: true,
                     runtime_open: false,
                     primary_inheritance_consumed: false,
+                    bound_to_display: false,
                 },
                 DisplayRecord {
                     key: DisplayKey::Identity(secondary_identity.clone()),
@@ -1545,6 +1795,7 @@ mod tests {
                     window_active: true,
                     runtime_open: true,
                     primary_inheritance_consumed: false,
+                    bound_to_display: false,
                 },
             ],
         };
@@ -1727,6 +1978,7 @@ mod tests {
                     window_active: true,
                     runtime_open: false,
                     primary_inheritance_consumed: false,
+                    bound_to_display: false,
                 },
                 DisplayRecord {
                     key: DisplayKey::Identity(external.clone()),
@@ -1735,6 +1987,7 @@ mod tests {
                     window_active: true,
                     runtime_open: false,
                     primary_inheritance_consumed: false,
+                    bound_to_display: false,
                 },
             ],
         };

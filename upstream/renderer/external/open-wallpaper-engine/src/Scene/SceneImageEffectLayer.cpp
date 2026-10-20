@@ -101,6 +101,7 @@ void SceneImageEffectLayer::ResolveEffect(const SceneMesh& default_mesh,
                 material.blenmode = BlendMode::Normal;
                 it->sceneNode->SetCamera(effect_cam.data());
                 it->sceneNode->CopyTrans(default_node);
+                it->sceneNode->SetCompositeOnly(false);
                 it->sceneNode->Mesh()->ChangeMeshDataFrom(default_mesh);
             }
 
@@ -137,6 +138,7 @@ void SceneImageEffectLayer::ResolveEffect(const SceneMesh& default_mesh,
             }
             last_output->sceneNode->SetCamera(m_final_camera);
             last_output->sceneNode->CopyTrans(*m_final_node);
+            last_output->sceneNode->SetCompositeOnly(m_final_composite_only);
             mesh.ChangeMeshDataFrom(*m_final_mesh);
         }
     }

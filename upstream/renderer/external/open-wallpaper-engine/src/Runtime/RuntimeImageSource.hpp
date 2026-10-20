@@ -76,6 +76,23 @@ public:
                m_cover_slots.find(name) != m_cover_slots.end();
     }
 
+    /// Whether `image`, what a cover name holds, is the empty texel the cover
+    /// names start as and a clear leaves rather than a track's cover. A slot
+    /// whose authored texture is a render target, another layer's composite,
+    /// samples that target while its cover is empty
+    /// (`SceneMaterial::texture_covers`): the target is not a picture this
+    /// source can hold, so the renderer decides where it binds the pass's
+    /// textures, from the very image it uploads.
+    static bool IsEmptyCover(const Image& image) {
+        if (image.header.width != 1 || image.header.height != 1 || image.slots.empty()) {
+            return false;
+        }
+        const auto& mipmaps = image.slots.front().mipmaps;
+        return ! mipmaps.empty() && mipmaps.front().data != nullptr &&
+               mipmaps.front().size >= 4 &&
+               IsEmptyCoverPixel(1, 1, mipmaps.front().data.get()[3]);
+    }
+
     /// Changes whenever a name joins or leaves this source (`RemoveImage`,
     /// `BindCoverSlot`).
     ///
@@ -310,16 +327,6 @@ private:
     /// which is also what an explicit clear publishes.
     static bool IsEmptyCoverPixel(uint32_t width, uint32_t height, uint8_t alpha) {
         return width == 1 && height == 1 && alpha == 0;
-    }
-
-    static bool IsEmptyCover(const Image& image) {
-        if (image.header.width != 1 || image.header.height != 1 || image.slots.empty()) {
-            return false;
-        }
-        const auto& mipmaps = image.slots.front().mipmaps;
-        return ! mipmaps.empty() && mipmaps.front().data != nullptr &&
-               mipmaps.front().size >= 4 &&
-               IsEmptyCoverPixel(1, 1, mipmaps.front().data.get()[3]);
     }
 
     /// The formats a cover can stand in for: colour pictures, which a shader

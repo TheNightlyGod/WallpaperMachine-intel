@@ -25,6 +25,54 @@ and moves whatever falls past ten verbatim into a monthly file under
 [archive/](archive/); promote anything durable before it goes. Editing an
 entry's recorded result is not allowed.
 
+## 2026-10-20 — Cover slots over another layer's picture; effect and keyed-constant script objects
+
+A cover slot whose authored texture is another layer's composite now shows that composite until a cover is published, on both renderers, and property scripts get Wallpaper Engine's thisObject for an effect's visibility and for a keyed shader constant's own timeline. Found on a local music-player wallpaper whose blurred cover background rendered as the clear colour.
+
+- `python3 scripts/check_renderer.py` — exit 0; every registered binary exit 0, the new MetalSceneDraw.ACoverOverAnotherLayersPictureShowsThatPictureUntilACoverArrivesOnBothRenderers, SceneSchema.AnEffectsVisibilityScriptSwitchesTheEffectAndNotItsLayer and .AKeyedConstantsScriptPlaysTheConstantsOwnTimeline included; generated cases pixel-equal pooled and isolated; reload probe 0
+- `python3 scripts/build.py --renderer-only` — exit 0; App/Bridge/Generated unchanged
+- `python3 scripts/test.py` — exit 0; 3944 tests: 3899 passed, 45 skipped
+- The three new tests fail with the fixes reverted: the idle, cleared and first-track cover cases draw nothing on both renderers, a cover published mid-run is never shown without the pass marked as reading a runtime image, the effect's script hides its layer, and the keyed constant stays on its first key
+- Headless Native Metal probe of the wallpaper at 1720x720, display resolution, with media events and a published cover: the background is a blurred, darkened copy of the cover; with nothing playing it is the default art blurred and the player shows that art; the 21:9 layout option fills the width; the 16:9 option leaves dark side bars on a 21:9 surface, as authored
+- Local library: the 14 effect-visibility scripts in 16 scenes use thisObject only for visible
+- Not compared with Wallpaper Engine's own frame: the reference VM is unavailable
+
+## 2026-10-20 — Layer composites carry what their effects made
+
+Fixes an audio-visualizer media player whose bars never moved: its spectrum buffer is a hidden layer 64 wide and 0 high whose composite stayed empty. A card with no area that draws into targets of its own now fills them and draws only there, and a chain's last pass writes into its layer's own composite instead of blending into it.
+
+- `metal_scene_draw_smoke --gtest_filter=*NoAreaFills*` — new case fails with either change removed (empty composite, then colour times 0.25), passes with both
+- `python3 scripts/check_renderer.py` — first run exit 1: `UnchangedPresent.APlainVideoPresentsEveryNewFrameAndNothingElse` at load average 108; the case alone passed 3/3 at load 12; `--skip-build` rerun exit 0, 24 asset or environment skips
+- `python3 scripts/build.py --renderer-only` — exit 0; bindings unchanged
+- `python3 scripts/test.py` — exit 0; 3899 passed, 0 failed, 45 skipped of 3944
+- Local audio-visualizer scene, 240 frames at 1720x720 with synthetic noise and the app's media events: the buffer layer's composite went from empty to the accumulated spectrum; the bars on the cover now move with audio; nothing else on the frame changed under the same input
+- Not compared with Wallpaper Engine's frame: the Parallels reference VM could not be resumed (activation expired)
+- Gap: the scene's blurred cover background still draws as the clear colour in the probe; not investigated further. Gap: no desktop run; the app was not rebuilt for Release
+
+## 2026-10-20 — SceneScript start-up order, init values and sound layers
+
+Fixes a music-player widget that sat misaligned and then faded out. Four general script mechanisms: authored names of layers under generated keys are recorded before any script compiles; every property script runs init before any is told the user properties; what init returns becomes the property's value (same kind only); sound objects are layers scripts list and play.
+
+- `scene_schema_tests` — 5 cases (LayersWithScriptsOfTheirOwnCarryTheirAuthoredNameUnderGeneratedKeys, EveryScriptRunsInitBeforeAnyIsToldTheUserProperties, WhatInitReturnsIsThePropertysValue, ScriptsListSoundLayersInTheScenesOrderAndPlayThem, plus the existing authored-name case) pass; the four new ones fail with the source changes removed
+- `python3 scripts/check_renderer.py` — exit 0; generated scenes pixel-equal pooled/isolated, 8 reload cycles clean; 24 asset- or environment-dependent cases skipped
+- `python3 scripts/build.py --renderer-only` — exit 0; generated bindings unchanged
+- `python3 scripts/test.py` — exit 0; 3899 passed, 0 failed, 45 skipped of 3944
+- `metal_scene_draw_smoke` on a local music-player scene, 600 frames at 1920x1080: script errors 1 → 0; the cover moves with the player, the player stays shown at 10 s (it had faded out), the track plays, the drag handle is hidden
+- Not compared with Wallpaper Engine's frame: the Parallels reference VM could not be resumed (activation expired)
+- Gap: with nothing playing, the first-tick idle media state (empty title) makes the widget's title read "-"; unchanged and unverified against Wallpaper Engine
+- Gap: no desktop run; the app was not rebuilt for Release
+
+## 2026-10-20 — Issue #61: height fog, model rotation and blur parity
+
+- Generic height-fog pixel regression failed before the fix and passed afterward; property-selected ambient/skylight pixels and three local-rotation regressions pass.
+- Scalar swizzle and nested texture-to-scalar shader regressions compile for SPIR-V and Metal; obsolete duplicate scalar sampling rewrite and source-wording tests removed.
+- python3 scripts/check_renderer.py — final exit 0; GPU and real-time checks enabled, all twelve generated pixel comparisons and reload cycles pass. Optional local-corpus checks skipped.
+- python3 scripts/check_rust.py with installed SceneAssets — exit 0; core, bridge, integration and shader checks pass. Two unavailable private shader fixtures skipped; desktop/corpus exclusions remain explicit.
+- python3 scripts/test.py — Python checks pass; native verdict 3897 passed, 0 failed, 45 skipped.
+- scripts/we_reference.py capture/render/compare — Wallpaper Engine in Parallels versus native Metal, 3456x2092 at 8.04 s and 15.26 s, identical assembled preset; work-area mean pixel errors 74.80 -> 1.84 and 64.44 -> 1.99 (0-255).
+- Both comparison sheets inspected: shading, animated geometry and blur restored; residual moving-edge offsets and Windows activation watermark remain. Final native runs have no shader compilation, translation, effect-load or SceneScript failures.
+- Wallpaper Engine kept muted; VM suspended after capture. Native verification was offscreen; Mac desktop presentation was not exercised. Release app not rebuilt.
+
 ## 2026-10-19 — Korean release notes for 1.5.7
 
 - Release-note generation and bundled history now support English, Simplified Chinese and Korean; pre-1.5.7 sections stay unchanged and Korean falls back to English for legacy entries.
@@ -86,35 +134,3 @@ New scripts/we_reference.py (capture, render, compare) and the rule that a wallp
 - `render` + `compare` with a freshly built `metal_scene_draw_smoke` — mean difference 1.0 (2850003448) and 2.7 (2440387496, whose monitor screen we draw smaller than Wallpaper Engine; not fixed here)
 - Same scenes, Wallpaper Engine frames of 2026-10-14 vs 2026-10-17 — mean difference 0.2 to 1.0, brightness correlation 0.98 to 0.99 (the noise floor in the doc)
 - Not run: `check_renderer.py`, `check_rust.py` (no renderer or crate change); no Release build (no app change)
-
-## 2026-10-17 — Settings: Reset all settings
-
-- python3 scripts/test.py --only PanelSettingsResetTests: 2 passed (confirm/cancel; defaults restored, content kept, unchanged engine settings not sent).
-- python3 scripts/test.py: 3837 passed, 0 failed, 45 skipped.
-- Not checked: the confirmation sheet and button on a real window (no desktop run); lock screen/screen saver turn-off and launch-at-login reset are exercised only through their existing services.
-
-## 2026-10-16 — Per-language release banners, bulleted What's New
-
-Each language block opens with its own banner (x.y.z.jpg, x.y.z.zh-Hans.jpg; Chinese falls back to English); What's New swaps the banner with the language tab, bullets list entries with a hanging indent and shows Highlights in the accent colour with ✦ markers. 1.5.0 now has English and Chinese banners.
-
-- `python3 scripts/test.py` — exit 0; 3873 tests: 3828 passed, 45 skipped; test_release_notes.py 62 tests OK
-- Visual: temporary on-screen XCTest window with a draft 1.5.0 section, captured in English and Chinese; probe deleted
-- Skipped: live --ai model run (no key locally); the draft section was hand-written to preview layout only
-
-## 2026-10-16 — Release banners and highlights in the changelog
-
-Feature releases can carry a bundled 3:1 banner (Resources/ReleaseBanners/x.y.z.jpg) shown in CHANGELOG.md, the GitHub release page and the What's New window; the release-notes model writes Highlights for x.y.0 and groups many commits per area. Banner for 1.5.0 added.
-
-- `python3 scripts/test.py` — exit 0; 3872 tests: 3827 passed, 45 skipped; test_release_notes.py 61 tests OK
-- `python3 scripts/test.py --only WhatsNewTests` / `--only AppUpdateTests` — passed while iterating
-- Visual: temporary offscreen XCTest snapshot of the What's New window with the bundled 1.5.0 banner (dark), banner above the header at 712 pt, notes below; probe deleted
-- Skipped: live --ai model run (no RELEASE_NOTES_API_KEY locally), so the 1.5.0 wording is written by CI at release; the raw.githubusercontent banner URL is checked only by unit test until v1.5.0 is tagged
-
-## 2026-10-16 — Tabs in the title bar, Now Playing bar and one-colour title bar on top of the Filters sidebar
-
-- Rebased onto main's Filters sidebar (69955b77, cf9f5ebe): my own filters panel was dropped; the sidebar now slides from the window's leading edge, and Installed's has the Collections group at its top.
-- Window: no window sidebar; Library, Steam Workshop, pixiv and Settings are tabs centred in the title bar (symbols only under 960 points) with the mark, name and version leading; Library has All wallpapers and Favorites chips; Now Playing is a bottom bar whose wallpaper part opens a details popover; Settings searches above its own section list.
-- Title bar: macOS 26 draws a band per window column (opaque grey over a page without a top scroll view, its own dark band over the system inspector). The inspector is now an in-page InspectorColumn (260-420, drag to resize) and the Filters sidebar, page and inspector sit in one full-width scroll host, so the bar is one colour.
-- Real window (desktop control allowed by the user): Library with Filters sidebar and inspector open, and Settings, sampled 29,29,31 across the whole bar in dark; inspector edge drag resized it.
-- Gate: python3 scripts/test.py passed, 3826 passed, 0 failed, 45 skipped. Targeted shell, root, welcome, installed, inspector, pixiv and workshop classes: 160 passed.
-- Not run: desktop UI tests (Tests/UI updated, not executed); light appearance not checked on the real window.

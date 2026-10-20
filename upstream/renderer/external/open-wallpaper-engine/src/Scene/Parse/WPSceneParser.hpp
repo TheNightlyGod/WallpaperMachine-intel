@@ -49,10 +49,18 @@ struct WPUserTexture;
 /// `covers` is given: the slot is then bound through `BindCoverSlot` and holds
 /// the name that shows the authored picture until a cover arrives. Without
 /// `covers` it names the cover itself.
+///
+/// A cover slot whose authored texture is a render target (another layer's
+/// composite: a default cover a layer of its own draws) keeps that target when
+/// `target_covers` is given, and the cover's name goes into `target_covers` at
+/// the slot's position, for the renderer to bind in its place while a cover is
+/// published (`SceneMaterial::texture_covers`). Without it the slot names the
+/// cover itself.
 void ApplySystemUserTextures(std::vector<std::string>& textures,
                              const std::vector<wpscene::WPUserTexture>& usertextures,
                              const ProjectProperties* properties = nullptr,
-                             RuntimeImageSource* covers = nullptr);
+                             RuntimeImageSource* covers = nullptr,
+                             std::vector<std::string>* target_covers = nullptr);
 /// The property a `usertextures` slot names (the bare-string form), or empty for
 /// a slot the runtime supplies or one that names nothing. The scene reads such a
 /// property once, while it loads.

@@ -165,7 +165,7 @@ DynamicValueUniquePtr wrap_script_if_needed(
     std::string_view     current_layer_name,
     DynamicValueUniquePtr value,
     ScriptedValueSemantic semantic = ScriptedValueSemantic::Generic,
-    int animation_layer_index = -1)
+    PropertyScriptObject object = {})
 {
     if (!setting.is_object() || !setting.contains("script") || !setting.at("script").is_string()) {
         return value;
@@ -193,7 +193,7 @@ DynamicValueUniquePtr wrap_script_if_needed(
         std::move(script_properties),
         *value,
         semantic,
-        animation_layer_index);
+        object);
     context.RegisterScriptedValue(scripted_value.get());
     return scripted_value;
 }
@@ -402,7 +402,7 @@ std::unique_ptr<DynamicValue> ResolveBoolSetting(
     SceneRuntimeContext& context,
     const nlohmann::json& setting,
     std::string_view current_layer_name,
-    int animation_layer_index)
+    PropertyScriptObject object)
 {
     auto value = std::make_unique<DynamicValue>(parse_bool(setting));
     value      = wrap_script_if_needed(
@@ -411,7 +411,7 @@ std::unique_ptr<DynamicValue> ResolveBoolSetting(
         current_layer_name,
         std::move(value),
         ScriptedValueSemantic::Generic,
-        animation_layer_index);
+        object);
     bind_user_property(context, setting, *value);
     return value;
 }
@@ -420,7 +420,7 @@ std::unique_ptr<DynamicValue> ResolveFloatSetting(
     SceneRuntimeContext& context,
     const nlohmann::json& setting,
     std::string_view current_layer_name,
-    int animation_layer_index)
+    PropertyScriptObject object)
 {
     auto value = std::make_unique<DynamicValue>(parse_float(setting));
     value      = wrap_script_if_needed(
@@ -429,7 +429,7 @@ std::unique_ptr<DynamicValue> ResolveFloatSetting(
         current_layer_name,
         std::move(value),
         ScriptedValueSemantic::Generic,
-        animation_layer_index);
+        object);
     bind_user_property(context, setting, *value);
     return value;
 }
@@ -438,7 +438,8 @@ std::unique_ptr<DynamicValue> ResolveVec3Setting(
     SceneRuntimeContext& context,
     const nlohmann::json& setting,
     std::string_view current_layer_name,
-    Vec3SettingSemantic semantic)
+    Vec3SettingSemantic semantic,
+    PropertyScriptObject object)
 {
     auto value = std::make_unique<DynamicValue>(parse_vec3(setting));
     const auto scripted_semantic =
@@ -450,7 +451,8 @@ std::unique_ptr<DynamicValue> ResolveVec3Setting(
         setting,
         current_layer_name,
         std::move(value),
-        scripted_semantic);
+        scripted_semantic,
+        object);
     bind_vec3_user_property(context, setting, *value);
     return value;
 }
@@ -459,11 +461,15 @@ std::unique_ptr<DynamicValue> ResolveVectorSetting(
     SceneRuntimeContext& context,
     const nlohmann::json& setting,
     std::size_t components,
-    std::string_view current_layer_name)
+    std::string_view current_layer_name,
+    PropertyScriptObject object)
 {
-    if (components == 3) return ResolveVec3Setting(context, setting, current_layer_name);
+    if (components == 3) {
+        return ResolveVec3Setting(context, setting, current_layer_name,
+                                  Vec3SettingSemantic::Generic, object);
+    }
     if (components != 2 && components != 4) {
-        return ResolveFloatSetting(context, setting, current_layer_name);
+        return ResolveFloatSetting(context, setting, current_layer_name, object);
     }
 
     // A single authored number fills every component, matching parse_vec3.
@@ -481,7 +487,8 @@ std::unique_ptr<DynamicValue> ResolveVectorSetting(
         setting,
         current_layer_name,
         std::move(value),
-        ScriptedValueSemantic::Generic);
+        ScriptedValueSemantic::Generic,
+        object);
     bind_user_property(context, setting, *value);
     return value;
 }
@@ -489,7 +496,8 @@ std::unique_ptr<DynamicValue> ResolveVectorSetting(
 std::unique_ptr<DynamicValue> ResolveStringSetting(
     SceneRuntimeContext& context,
     const nlohmann::json& setting,
-    std::string_view current_layer_name)
+    std::string_view current_layer_name,
+    PropertyScriptObject object)
 {
     auto value = std::make_unique<DynamicValue>(parse_string(setting));
     value      = wrap_script_if_needed(
@@ -497,7 +505,8 @@ std::unique_ptr<DynamicValue> ResolveStringSetting(
         setting,
         current_layer_name,
         std::move(value),
-        ScriptedValueSemantic::Generic);
+        ScriptedValueSemantic::Generic,
+        object);
     bind_user_property(context, setting, *value);
     return value;
 }

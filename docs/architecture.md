@@ -455,7 +455,9 @@ per-Space getter and setter through optional private CoreGraphics and HIServices
   picked up on the next refresh, which the display reconfiguration watcher schedules when it
   settles: one that already runs a scene keeps its previous descriptor, so the scene is not
   closed and reloaded, and a new one gets no window yet. If the primary display reports no
-  pixels, the whole refresh waits.
+  pixels, the whole refresh waits. When another display becomes the main one, the renderer
+  keeps every scene the bridge reconciled on the display it was opened for (its window only
+  moves), so the refresh itself opens or reloads nothing before the bridge's reconcile.
 - **Switch hold.** `WallpaperSwitchHold` keeps the previous picture on a display while a
   switched wallpaper loads. `BridgeStore.performActivation` calls three optional hooks around
   the bridge apply (`willSwitchWallpaper`, then `didSettleWallpaperSwitch` or
@@ -579,7 +581,13 @@ an identity names a display. A UUID both sides carry decides on its own, then ve
 serial; the unit number is a last resort that never overrides a UUID or serial that disagrees.
 macOS renumbers displays and renames identical models ("Name (1)", "Name (2)") across reboots
 and reconnects, so display sync (`AppConfig::sync_known_monitors`) keeps one block per display,
-renamed to its current selector, and settings entries and mirror targets follow.
+renamed to its current selector, and settings entries and mirror targets follow. The `primary`
+block is a role: sync records the display it describes (`primary_display`), and when macOS
+makes another display the main one it writes the block's wallpaper back to the previous main
+display's own block and loads the new main display's own block into it, so a wallpaper stays
+on its display and a display switched off stays off. The renderer agrees: its `Primary` record
+follows the main display, but a scene reconciled for a concrete display (`bound_to_display`)
+stays with that display's record, so a main-display change costs no scene load or flash.
 
 The bridge also keeps a load journal (`engine/load_journal.rs`, `load-journal.json` beside
 `config.toml`) of the scenes `reconcile_with` is about to open. A wallpaper that was being

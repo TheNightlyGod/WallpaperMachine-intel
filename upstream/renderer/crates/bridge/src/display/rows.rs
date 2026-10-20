@@ -82,6 +82,7 @@ impl AppConfig {
     pub fn sync_known_monitors(&mut self, displays: &[DisplaySnapshotEntry]) -> bool {
         let before = self.monitors.clone();
         let settings_before = self.monitor_settings.clone();
+        let primary_display_before = self.primary_display.clone();
         self.merge_display_aliases(displays);
         let mut primary = self
             .monitor_index(&SerializedSelector::Primary)
@@ -134,15 +135,21 @@ impl AppConfig {
                 primary_monitor.wallpaper = Some(wallpaper);
             }
 
+            if let Some(previous) = self.primary_display.as_ref().and_then(identity_of)
+                && !previous.same_physical_identity(&primary.identity)
+            {
+                self.hand_over_primary(&previous, &primary.identity);
+            }
+            self.primary_display = primary.stable_identity_selector();
+
             if let Some(identity_selector) = primary.stable_identity_selector()
                 && let Some(primary_index) = self.monitor_index(&SerializedSelector::Primary)
                 && self.monitors[primary_index].wallpaper.is_none()
                 && let Some(identity_index) = self.monitor_index(&identity_selector)
             {
-                let identity_wallpaper = self.monitors[identity_index].wallpaper.clone();
-                self.monitors[primary_index]
-                    .wallpaper
-                    .clone_from(&identity_wallpaper);
+                let identity_wallpaper =
+                    self.monitors[identity_index].shown_wallpaper().map(str::to_owned);
+                self.monitors[primary_index].wallpaper = identity_wallpaper;
             }
         }
 
@@ -165,7 +172,50 @@ impl AppConfig {
             }
         }
 
-        self.monitors != before || self.monitor_settings != settings_before
+        self.monitors != before
+            || self.monitor_settings != settings_before
+            || self.primary_display != primary_display_before
+    }
+
+    /// Moves the `primary` block off the display that had the role onto the
+    /// display macOS made the main one. The block's wallpaper is what the
+    /// previous main display showed, so that display's own block keeps it, and
+    /// the new main display shows what its own block says, a wallpaper it was
+    /// switched off for included. A main display without a block of its own
+    /// keeps the role's wallpaper, as a display seen for the first time does.
+    fn hand_over_primary(&mut self, previous: &DisplayIdentity, current: &DisplayIdentity) {
+        let Some(primary_index) = self.monitor_index(&SerializedSelector::Primary) else {
+            return;
+        };
+        let role_wallpaper = self.monitors[primary_index].wallpaper.clone();
+        match self.monitors.iter().position(|monitor| names_identity(monitor, previous)) {
+            Some(index) => {
+                let block = &mut self.monitors[index];
+                if block.shown_wallpaper() != role_wallpaper.as_deref() {
+                    if role_wallpaper.is_some() {
+                        block.enabled = true;
+                        block.mode = "independent".to_string();
+                        block.mirror_target = None;
+                    }
+                    block.wallpaper = role_wallpaper;
+                }
+            }
+            None => {
+                if role_wallpaper.is_some() {
+                    self.monitors.push(MonitorCfg {
+                        selector: SerializedSelector::from_selector(&DisplaySelector::Identity(
+                            previous.clone(),
+                        )),
+                        wallpaper: role_wallpaper,
+                        ..MonitorCfg::default()
+                    });
+                }
+            }
+        }
+        if let Some(own) = self.monitors.iter().find(|monitor| names_identity(monitor, current)) {
+            let shown = own.shown_wallpaper().map(str::to_owned);
+            self.monitors[primary_index].wallpaper = shown;
+        }
     }
 
     /// macOS renumbers displays and renames identical models ("Name (1)",
@@ -312,6 +362,19 @@ fn first_for_identity(selector: &SerializedSelector, seen: &mut Vec<DisplayIdent
     true
 }
 
+fn identity_of(selector: &SerializedSelector) -> Option<DisplayIdentity> {
+    match selector.to_selector() {
+        DisplaySelector::Identity(identity) => Some(identity),
+        DisplaySelector::Primary | DisplaySelector::LiveDisplayId(_) => None,
+    }
+}
+
+/// Whether `monitor` is the block saved under `identity`'s display, by UUID or
+/// serial, the rule display sync renames and merges blocks by.
+fn names_identity(monitor: &MonitorCfg, identity: &DisplayIdentity) -> bool {
+    identity_of(&monitor.selector).is_some_and(|saved| saved.has_stable_match(identity))
+}
+
 impl SerializedSelector {
     #[must_use]
     pub fn mirror_target_id(
@@ -358,6 +421,15 @@ impl MonitorCfg {
             monitor.wallpaper = primary_wallpaper.map(str::to_owned);
         }
         monitor
+    }
+
+    /// The wallpaper this block puts on its display: none while the display
+    /// is switched off or mirrors another one.
+    fn shown_wallpaper(&self) -> Option<&str> {
+        if !self.enabled || self.mode.eq_ignore_ascii_case("mirror") {
+            return None;
+        }
+        self.wallpaper.as_deref()
     }
 }
 

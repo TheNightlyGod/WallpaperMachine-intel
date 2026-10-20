@@ -1159,6 +1159,136 @@ TEST_F(MetalSceneDraw, AComposeLayersEffectSamplesItsOwnChild)
     }
 }
 
+namespace
+{
+
+/// A 256x128 canvas. Layer 2 is a data buffer of the kind audio widgets keep: a
+/// translucent solid layer 64 wide and 0 high, its effect drawing one colour of
+/// alpha 0.25 through the model-view-projection matrix (as a pass that copies
+/// its buffer out does). Layer 1, a card over the left half, shows layer 2's
+/// composite: its colour on the card's left half, its alpha on the right half.
+/// Layer 2 is hidden at zero scale, or shown at full scale over the right half.
+std::filesystem::path WriteZeroHeightBufferFixture(const std::filesystem::path& root,
+                                                   bool buffer_shown)
+{
+    const auto project = WriteFixture(root);
+    const std::string vertex =
+        "uniform mat4 g_ModelViewProjectionMatrix;\n"
+        "attribute vec3 a_Position;\nattribute vec2 a_TexCoord;\n"
+        "varying vec2 v_TexCoord;\n"
+        "void main(){ gl_Position=g_ModelViewProjectionMatrix*vec4(a_Position,1.0);"
+        "v_TexCoord=a_TexCoord; }\n";
+    const std::string buffer = std::string(R"({"id":2,"name":"buffer",)")
+        + R"("image":"models/util/solidlayer_depthtest.json","size":[64,0],)"
+        + (buffer_shown ? R"("origin":[192,64,0],"scale":[1,1,1],"visible":true,)"
+                        : R"("origin":[0,0,0],"scale":[0,0,0],"visible":false,)")
+        + R"("effects":[{"file":"effects/fill/effect.json","visible":true}]})";
+    const std::map<std::string, std::string> files {
+        { "models/util/solidlayer_depthtest.json",
+          R"({"solidlayer":true,"material":"materials/buffer.json"})" },
+        { "materials/buffer.json",
+          R"({"passes":[{"shader":"buffer_clear","blending":"translucent","cullmode":"nocull",)"
+          R"("depthtest":"disabled","depthwrite":"disabled"}]})" },
+        { "effects/fill/effect.json",
+          R"({"name":"fill","passes":[{"material":"materials/fill.json"}]})" },
+        { "materials/fill.json",
+          R"({"passes":[{"shader":"buffer_fill","blending":"normal","cullmode":"nocull",)"
+          R"("depthtest":"disabled","depthwrite":"disabled","textures":[null]}]})" },
+        { "models/consumer.json", R"({"width":128,"height":128,"material":"materials/consumer.json"})" },
+        { "materials/consumer.json",
+          R"({"passes":[{"shader":"buffer_show","blending":"translucent","cullmode":"nocull",)"
+          R"("depthtest":"disabled","depthwrite":"disabled","textures":["_rt_imageLayerComposite_2_a"]}]})" },
+        { "shaders/buffer_clear.vert", vertex },
+        { "shaders/buffer_clear.frag", "void main(){ gl_FragColor=vec4(0.0); }\n" },
+        { "shaders/buffer_fill.vert", vertex },
+        { "shaders/buffer_fill.frag", "void main(){ gl_FragColor=vec4(0.25,0.5,0.75,0.25); }\n" },
+        { "shaders/buffer_show.vert", vertex },
+        { "shaders/buffer_show.frag",
+          "uniform sampler2D g_Texture0;\nvarying vec2 v_TexCoord;\n"
+          "void main(){ vec4 c=texture(g_Texture0,v_TexCoord);\n"
+          "gl_FragColor=vec4(v_TexCoord.x<0.5 ? c.rgb : vec3(c.a),1.0); }\n" },
+        { "layout.json",
+          R"({"camera":{"center":[0,0,0],"eye":[0,0,1],"up":[0,1,0]},)"
+          R"("general":{"ambientcolor":[0,0,0],"skylightcolor":[0,0,0],"clearcolor":[0.0,0.0,0.0],)"
+          R"("cameraparallax":false,"orthogonalprojection":{"width":256,"height":128}},)"
+          R"("objects":[{"id":1,"name":"consumer","image":"models/consumer.json",)"
+          R"("size":[128,128],"origin":[64,64,0],"dependencies":[2],"visible":true},)"
+            + buffer + "]}" },
+    };
+    for (const auto& [name, contents] : files) {
+        const auto path = root / name;
+        std::filesystem::create_directories(path.parent_path());
+        std::ofstream(path) << contents;
+    }
+    return project;
+}
+
+} // namespace
+
+// A layer whose card has no area (a size of 0 on one axis) still fills the
+// targets it draws into: its effects ran, but the card that carries their
+// result into the composite another layer samples was 0 high, so that layer
+// read nothing. An audio widget's spectrum buffer is such a layer, and its bars
+// stayed flat whatever played. On screen the card still draws nothing. And the
+// chain's result goes into the composite as it is: blended in with the layer's
+// translucency, its colour came out multiplied by its alpha, which the buffer
+// uses for data.
+TEST_F(MetalSceneDraw, ALayerWithNoAreaFillsTheCompositeAnotherLayerSamples)
+{
+    for (const bool shown : { false, true }) {
+        const auto  directory = root_ / (shown ? "zero-height-shown" : "zero-height-hidden");
+        const auto  project   = WriteZeroHeightBufferFixture(directory, shown);
+        LoadedScene loaded;
+        std::string error;
+        ASSERT_TRUE(LoadScene(project, directory / "cache", loaded, error)) << error;
+        auto& scene = *loaded.scene;
+        ASSERT_TRUE(scene.layer_texture_error.empty()) << scene.layer_texture_error;
+        const auto selection = SelectSceneBackend(scene);
+        ASSERT_EQ(selection.backend, SceneBackend::NativeMetal) << selection.fallback_reason;
+        const auto graph = sceneToRenderGraph(scene);
+        ASSERT_NE(graph, nullptr);
+
+        @autoreleasepool {
+            CAMetalLayer* layer = [CAMetalLayer layer];
+            layer.device        = MTLCreateSystemDefaultDevice();
+            layer.pixelFormat   = MTLPixelFormatBGRA8Unorm;
+            layer.drawableSize  = CGSizeMake(256, 128);
+            MetalRender render;
+            ASSERT_TRUE(render.init(MetalRenderInitInfo {
+                .metal_layer = (__bridge void*)layer, .width = 256, .height = 128,
+                .render_width = 256, .render_height = 128, .display_scale_factor = 1.0,
+            }));
+            ASSERT_TRUE(render.compileRenderGraph(scene, *graph)) << render.lastError();
+            ASSERT_TRUE(render.drawFrame(scene)) << render.lastError();
+            std::vector<uint8_t> bytes;
+            std::vector<float>   radiance;
+            uint32_t             width = 0, height = 0;
+            ASSERT_TRUE(render.ReadRenderTargetForTests(
+                scene.ResolveRenderTargetName(SpecTex_Default), bytes, width, height, &radiance));
+            ASSERT_EQ(width, 256u);
+            ASSERT_EQ(height, 128u);
+            const auto expect_color = [&](uint32_t x, uint32_t y, std::array<float, 3> expected) {
+                const size_t pixel = (y * width + x) * 4;
+                for (size_t channel = 0; channel < 3; ++channel) {
+                    EXPECT_NEAR(radiance[pixel + channel], expected[channel], 0.01f)
+                        << (shown ? "shown" : "hidden") << " buffer, pixel " << x << "," << y
+                        << " channel " << channel;
+                }
+            };
+            // The consumer shows the buffer's colour and alpha as the effect
+            // wrote them, wherever it samples it...
+            expect_color(16, 16, { 0.25f, 0.5f, 0.75f });
+            expect_color(48, 100, { 0.25f, 0.5f, 0.75f });
+            expect_color(80, 30, { 0.25f, 0.25f, 0.25f });
+            expect_color(112, 112, { 0.25f, 0.25f, 0.25f });
+            // ...and the buffer itself puts nothing on screen.
+            expect_color(192, 64, { 0.0f, 0.0f, 0.0f });
+            expect_color(170, 10, { 0.0f, 0.0f, 0.0f });
+            render.destroy();
+        }
+    }
+}
+
 TEST_F(MetalSceneDraw, TranslatedAuthorShaderCompilesAndDrawsTheScene)
 {
     const auto project = WriteFixture(root_ / "project");
@@ -5884,6 +6014,59 @@ void ExpectFoggedLikeThePlainLayer(const RendererPicture& plain, const RendererP
                 << y << ", channel " << channel;
         }
     }
+}
+
+TEST_F(MetalSceneDraw, OlderPackagesApplyPropertyBoundHeightFog)
+{
+    const auto project = WriteFoggedLayerFixture(
+        root_ / "bound-fog",
+        R"("fogheight":true,"fogheightstart":{"value":-100,"user":"start"},)"
+        R"("fogheightend":{"value":100,"user":"end"},)"
+        R"("fogheightcolor":{"value":"0 1 0","user":"tint"})", "[]", true, {});
+    std::ofstream(project) << R"({"type":"scene","file":"layout.json","general":{"properties":{)"
+        R"("start":{"type":"slider","value":-10},"end":{"type":"slider","value":10},)"
+        R"("tint":{"type":"color","value":"1 0 0"}}}})";
+    LoadedScene loaded;
+    std::string error;
+    ASSERT_TRUE(LoadScene(project, root_ / "bound-fog-cache", loaded, error)) << error;
+    WPSceneParser parser;
+    loaded.scene = parser.Parse(SceneParseRequest {
+        .scene_id = "bound-fog", .project_path = project.string(),
+        .project_properties = &loaded.properties, .pkg_version = 22,
+    }, loaded.vfs.Open("/assets/layout.json")->ReadAllStr(), loaded.vfs, loaded.sound);
+    ASSERT_NE(loaded.scene, nullptr);
+    const auto picture = DrawWithRenderer(*loaded.scene, true, 384, 256, 1, 1.0 / 60.0);
+    ASSERT_TRUE(picture.error.empty()) << picture.error;
+    ASSERT_EQ(picture.rgb.size(), 384u * 256u * 3u);
+    // At world height zero, squared fog density is 1/4. Red fog over white
+    // leaves red intact and attenuates both other channels to 3/4.
+    EXPECT_NEAR(FoggedChannel(picture, 192, 128, 0), 255, 2);
+    EXPECT_NEAR(FoggedChannel(picture, 192, 128, 1), 191, 3);
+    EXPECT_NEAR(FoggedChannel(picture, 192, 128, 2), 191, 3);
+}
+
+TEST_F(MetalSceneDraw, LightingColorsUseProjectPropertyValues)
+{
+    const auto directory = root_ / "bound-light";
+    const auto project = WriteFoggedLayerFixture(directory,
+        R"("ambientcolor":{"value":"1 0 0","user":"ambient"},)"
+        R"("skylightcolor":{"value":"0 1 0","user":"sky"})", "[]", true, {});
+    std::ofstream(project) << R"({"type":"scene","file":"layout.json","general":{"properties":{)"
+        R"("ambient":{"type":"color","value":"0.2 0.4 0.6"},)"
+        R"("sky":{"type":"color","value":"0.6 0.4 0.2"}}}})";
+    std::ofstream(directory / "shaders/metal_probe.frag") <<
+        "uniform vec3 g_LightAmbientColor;\nuniform vec3 g_LightSkylightColor;\n"
+        "void main() { gl_FragColor = vec4(0.25 * g_LightAmbientColor + "
+        "0.75 * g_LightSkylightColor, 1.0); }\n";
+    LoadedScene loaded;
+    std::string error;
+    ASSERT_TRUE(LoadScene(project, root_ / "bound-light-cache", loaded, error)) << error;
+    const auto picture = DrawWithRenderer(*loaded.scene, true, 384, 256, 1, 1.0 / 60.0);
+    ASSERT_TRUE(picture.error.empty()) << picture.error;
+    ASSERT_EQ(picture.rgb.size(), 384u * 256u * 3u);
+    EXPECT_NEAR(FoggedChannel(picture, 192, 128, 0), 128, 2);
+    EXPECT_NEAR(FoggedChannel(picture, 192, 128, 1), 102, 2);
+    EXPECT_NEAR(FoggedChannel(picture, 192, 128, 2), 77, 2);
 }
 
 TEST_F(MetalSceneDraw, AnEffectLayerIsFoggedWhereItSitsAsAPlainLayerIsOnBothRenderers)
@@ -10879,6 +11062,125 @@ TEST_F(MetalSceneDraw, AnIdleCoverSlotUploadsItsPictureOnceAndACoverChangeCostsO
         for (int frame = 0; frame < 12; ++frame) AdvanceSceneFrame(render, *loaded.scene);
         EXPECT_EQ(render.RuntimeImageUploadsForTests(), cleared_uploads);
         render.destroy();
+    }
+}
+
+namespace
+{
+
+/// A cover layer whose default art is another layer's picture: a hidden layer
+/// draws the art (red) into its composite, and the cover layer's one slot is
+/// that composite with `cover` (`$mediaThumbnail` or `$mediaPreviousThumbnail`)
+/// bound over it.
+std::filesystem::path WriteCoverOverCompositeFixture(const std::filesystem::path& root,
+                                                     std::string_view              cover)
+{
+    const auto project = WriteCoverSlotFixture(root, "");
+    std::ofstream(root / "models/art.json")
+        << R"({"width":256,"height":192,"material":"materials/art.json"})";
+    std::ofstream(root / "materials/art.json")
+        << R"({"passes":[{"shader":"cover_probe","blending":"translucent","cullmode":"nocull",)"
+           R"("depthtest":"disabled","depthwrite":"disabled","textures":["red"]}]})";
+    const nlohmann::json instance {
+        { "id", 3 },
+        { "textures", nlohmann::json::array({ "_rt_imageLayerComposite_1_a" }) },
+        { "usertextures",
+          nlohmann::json::array({ { { "name", std::string(cover) }, { "type", "system" } } }) },
+    };
+    std::ofstream(root / "layout.json")
+        << R"({"camera":{"center":[0,0,0],"eye":[0,0,1],"up":[0,1,0]},)"
+           R"("general":{"ambientcolor":[0,0,0],"skylightcolor":[0,0,0],"clearcolor":[0.0,0.0,0.0],)"
+           R"("cameraparallax":false,"orthogonalprojection":{"width":384,"height":256}},)"
+           R"("objects":[{"id":1,"name":"art","image":"models/art.json","origin":[192,128,0],)"
+           R"("scale":[1,1,1],"angles":[0,0,0],"visible":false},)"
+           R"({"id":2,"name":"cover","image":"models/cover.json","origin":[192,128,0],)"
+           R"("scale":[1,1,1],"angles":[0,0,0],"visible":true,"dependencies":[1],"instance":)"
+        << instance.dump() << "}]}";
+    return project;
+}
+
+} // namespace
+
+TEST_F(MetalSceneDraw, ACoverOverAnotherLayersPictureShowsThatPictureUntilACoverArrivesOnBothRenderers)
+{
+    // Where a cover layer's default art is drawn by a layer of its own, the slot
+    // the cover is bound to holds that layer's composite. Wallpaper Engine shows
+    // the composite there until a track brings a cover, and again once it is
+    // cleared; the previous-cover slot shows it until a track has a predecessor.
+    // The slot was the transparent texel the cover names start as, so a
+    // cross-fade that writes the previous cover's alpha drew nothing at all. The
+    // cover arrives a few frames in, after an unchanged picture could have been
+    // kept by the reuse of still targets, so that is tested too.
+    using Rgb = std::array<int, 3>;
+    constexpr Rgb kRed { 255, 0, 0 };
+    constexpr Rgb kGreen { 0, 255, 0 };
+    enum class Event { Green, Blue, Clear };
+    struct Case
+    {
+        const char*                        name;
+        const char*                        cover;
+        std::vector<std::pair<int, Event>> live;
+        int                                frames;
+        Rgb                                expected;
+    };
+    const std::vector<Case> cases {
+        { "idle", "$mediaThumbnail", {}, 4, kRed },
+        { "cover-while-running", "$mediaThumbnail", { { 3, Event::Green } }, 8, kGreen },
+        { "cover-then-clear", "$mediaThumbnail", { { 2, Event::Green }, { 5, Event::Clear } }, 9,
+          kRed },
+        { "previous-idle", "$mediaPreviousThumbnail", {}, 4, kRed },
+        { "previous-first-track", "$mediaPreviousThumbnail", { { 3, Event::Green } }, 8, kRed },
+        { "previous-second-track", "$mediaPreviousThumbnail",
+          { { 2, Event::Green }, { 4, Event::Blue } }, 8, kGreen },
+    };
+    const auto solid = [](uint8_t r, uint8_t g, uint8_t b) {
+        std::vector<uint8_t> rgba(4 * 4 * 4);
+        for (std::size_t i = 0; i < rgba.size(); i += 4) {
+            rgba[i] = r;
+            rgba[i + 1] = g;
+            rgba[i + 2] = b;
+            rgba[i + 3] = 255;
+        }
+        return rgba;
+    };
+    const auto green = solid(0, 255, 0);
+    const auto blue  = solid(0, 0, 255);
+
+    for (const auto& c : cases) {
+        SCOPED_TRACE(c.name);
+        for (const bool native : { false, true }) {
+            SCOPED_TRACE(native ? "native" : "compatibility");
+            const std::string name    = std::string("cover-composite-") + c.name + (native ? "-n" : "-c");
+            const auto        project = WriteCoverOverCompositeFixture(root_ / name, c.cover);
+            LoadedScene loaded;
+            std::string error;
+            ASSERT_TRUE(LoadScene(project, root_ / (name + "-cache"), loaded, error)) << error;
+            if (native) {
+                const auto selection = SelectSceneBackend(*loaded.scene);
+                ASSERT_EQ(selection.backend, SceneBackend::NativeMetal) << selection.fallback_reason;
+            }
+            auto* images = dynamic_cast<RuntimeImageSource*>(loaded.scene->imageParser.get());
+            ASSERT_NE(images, nullptr);
+            const auto picture = DrawWithRenderer(
+                *loaded.scene, native, 384, 256, c.frames, 1.0 / 60.0, [&](int frame) {
+                    for (const auto& [at, event] : c.live) {
+                        if (at != frame) continue;
+                        if (event == Event::Clear) {
+                            PublishSystemMediaArtwork(*images, 0, 0, nullptr, 0);
+                        } else {
+                            const auto& rgba = event == Event::Green ? green : blue;
+                            PublishSystemMediaArtwork(*images, 4, 4, rgba.data(), rgba.size());
+                        }
+                    }
+                });
+            ASSERT_TRUE(picture.error.empty()) << picture.error;
+            ASSERT_EQ(picture.rgb.size(), 384u * 256u * 3u);
+            const std::size_t at = (std::size_t(128) * 384 + 192) * 3;
+            for (std::size_t channel = 0; channel < 3; ++channel) {
+                EXPECT_NEAR(int(picture.rgb[at + channel]), c.expected[channel], 8)
+                    << "channel " << channel << " of the cover layer's centre";
+            }
+        }
     }
 }
 

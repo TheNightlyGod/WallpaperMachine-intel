@@ -1,6 +1,7 @@
 //! Internal legalizer strategies.
 
 mod alpha_to_coverage;
+mod array_declarators;
 mod array_parameters;
 mod builtin_variables;
 mod compat_functions;
@@ -13,7 +14,6 @@ mod legacy_types;
 mod mutable_inputs;
 mod pipeline;
 mod reserved_identifiers;
-mod scalar_texture;
 mod texture_sampling;
 mod type_coercion;
 mod widened_arrays;
@@ -60,6 +60,9 @@ pub(super) const COMPATIBILITY_FUNCTIONS: CodegenStrategyName =
 /// Strategy name for reserved identifier rewriting.
 pub(super) const RESERVED_IDENTIFIERS: CodegenStrategyName =
     CodegenStrategyName::new("reserved_identifiers");
+/// Strategy name for splitting declarator lists after array declarators.
+pub(super) const ARRAY_DECLARATORS: CodegenStrategyName =
+    CodegenStrategyName::new("array_declarators");
 /// Strategy name for fixed-array parameter specialization.
 pub(super) const ARRAY_PARAMETERS: CodegenStrategyName =
     CodegenStrategyName::new("array_parameters");
@@ -71,8 +74,6 @@ pub(super) const CONTROL_FLOW_COERCION: CodegenStrategyName =
     CodegenStrategyName::new("control_flow_coercion");
 /// Strategy name for strict GLSL type-shape coercions.
 pub(super) const TYPE_COERCION: CodegenStrategyName = CodegenStrategyName::new("type_coercion");
-/// Strategy name for scalar texture assignment rewriting.
-pub(super) const SCALAR_TEXTURE: CodegenStrategyName = CodegenStrategyName::new("scalar_texture");
 /// Strategy name for mutable stage input preparation.
 pub(super) const MUTABLE_INPUTS: CodegenStrategyName = CodegenStrategyName::new("mutable_inputs");
 /// Strategy name for generated fragment output preparation.

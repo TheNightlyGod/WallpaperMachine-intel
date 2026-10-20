@@ -711,6 +711,48 @@ final class WorkshopSourceTests: XCTestCase {
     XCTAssertEqual(fixture.detailsRequests, 0)
   }
 
+  // MARK: Steam busy
+
+  /// A browse page Steam answers busy is asked for again, and the page that follows is shown
+  /// as if nothing had happened.
+  func testABusyAnswerIsAskedAgainAndTheNextPageIsShown() async throws {
+    let store = fixture.store
+    let busy = browseHTML(rows: [], eresult: 10)
+    fixture.browseQueue = [busy, busy]
+    fixture.browse = browseHTML(rows: [wallpaperRow("12", tags: ["Scene"])])
+    store.search()
+    try await finished(store)
+    XCTAssertEqual(store.items.map(\.id), ["12"])
+    XCTAssertNil(store.errorMessage)
+    XCTAssertFalse(store.isDegraded)
+    XCTAssertEqual(fixture.browsePagesRequested.count, 3)
+  }
+
+  /// Still busy after the retries: the failure says Steam is busy, not that its page changed,
+  /// and no list is guessed at from the page.
+  func testStayingBusySaysSoAndListsNothing() async throws {
+    let store = fixture.store
+    fixture.browse = browseHTML(rows: [wallpaperRow(Self.degradedIDs[0], tags: ["Scene"])], eresult: 10)
+    serve(Self.degradedIDs)
+    store.search()
+    try await finished(store)
+    XCTAssertEqual(store.errorMessage, WorkshopBusy.message)
+    XCTAssertTrue(store.items.isEmpty)
+    XCTAssertFalse(store.isDegraded)
+    XCTAssertEqual(fixture.browsePagesRequested.count, 3)
+    XCTAssertEqual(fixture.detailsRequests, 0)
+
+    // Collections are read the same way.
+    let busy = browseHTML(rows: [], eresult: 10)
+    fixture.browseQueue = [busy, busy]
+    fixture.browse = browseHTML(rows: [])
+    store.excludedTags = []
+    store.open(.collections)
+    try await finished(store)
+    XCTAssertNil(store.errorMessage)
+    XCTAssertEqual(fixture.browsePagesRequested.count, 6)
+  }
+
   // MARK: Fixtures
 
   private func finished(_ store: WorkshopStore) async throws {
@@ -868,6 +910,11 @@ private final class SourceFixture {
     get { answers.read { $0.browsePages } }
     set { answers.write { $0.browsePages = newValue } }
   }
+  /// Steam's next browse answers, one per request, before `browsePages` and `browse`.
+  var browseQueue: [Data] {
+    get { answers.read { $0.browseQueue } }
+    set { answers.write { $0.browseQueue = newValue } }
+  }
   var collection: Data {
     get { answers.read { $0.collection } }
     set { answers.write { $0.collection = newValue } }
@@ -907,7 +954,7 @@ private final class SourceFixture {
     configuration.timeoutIntervalForRequest = 5
     session = URLSession(configuration: configuration)
     SourceFixtureProtocol.register(identifier, answers: answers)
-    service = WorkshopService(session: session)
+    service = WorkshopService(session: session, busyRetryDelays: [.zero, .zero])
     defaults = TemporaryDefaults.makeForCurrentTest().defaults
     store = WorkshopStore(
       service: service,
@@ -935,6 +982,7 @@ private final class SourceAnswers: @unchecked Sendable {
   struct State {
     var browse = Data()
     var browsePages: [Int: Data] = [:]
+    var browseQueue: [Data] = []
     var collection = Data()
     var details: [String: [String: Any]] = [:]
     var profiles: [String: Data] = [:]
@@ -965,6 +1013,7 @@ private final class SourceAnswers: @unchecked Sendable {
         state.browseSections.append(value("section") ?? "")
         let page = Int(value("p") ?? "1") ?? 1
         state.browsePagesRequested.append(page)
+        if !state.browseQueue.isEmpty { return (200, state.browseQueue.removeFirst()) }
         return (200, state.browsePages[page] ?? state.browse)
       case ("api.steampowered.com", "/IAuthenticationService/GenerateAccessTokenForApp/v1"):
         state.renewalForms.append(String(decoding: body, as: UTF8.self))

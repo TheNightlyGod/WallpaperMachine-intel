@@ -24,6 +24,7 @@ mod symbols;
 
 use linkme::distributed_slice;
 
+pub(super) use self::int_step::float_step_names;
 use self::{
     array_index::FloatArraySubscriptIndex,
     bool_coercion::{BoolFloatInitializer, FloatBoolAssignment},

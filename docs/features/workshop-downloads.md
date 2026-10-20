@@ -109,6 +109,10 @@ before it as full. The fallback is logged once per run. The original failure sta
 and no empty list is shown, when the page names no id, when no id belongs to a
 Wallpaper Engine item, and when the query is there but Steam answered it with a
 failure (`eresult` other than 1: a sign-in or access problem is not a layout change).
+`eresult` 10 is Steam's search being overloaded ("Rejected CRE query, because there
+are already 501 jobs"): the page is requested twice more, after 1 s and 3 s, for
+browsing and collections alike, and only then fails with "Steam’s Workshop is busy.
+Try again in a moment." (`WorkshopBusy`) instead of the page-changed message.
 Collections, which are read by the same decoder, are not listed this way: their pages
 carry every collection's children, so the ids they name are not the page's items.
 

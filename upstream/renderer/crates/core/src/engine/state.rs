@@ -174,47 +174,63 @@ impl EngineState {
             .expect("record was just pushed")
     }
 
+    /// Pairs each model record with the runtime record it continues. A record
+    /// that needs a runtime first claims the one already on its physical
+    /// display, whatever key that runtime had; the remaining records pair by
+    /// key. Claiming by display first keeps a runtime whose display changed
+    /// key (the main display changed) from being paired, and closed, by the
+    /// key it left.
     #[allow(clippy::unnecessary_wraps)]
     pub fn apply_display_model(&mut self, model: &DisplayStateModel) -> Result<(), EngineError> {
         let mut previous = std::mem::take(&mut self.display_records);
-        let mut next_records = Vec::with_capacity(model.records.len().max(previous.len()));
+        let mut sources: Vec<Option<DisplayRuntimeRecord>> =
+            Vec::with_capacity(model.records.len());
 
-        for model_record in model.records.iter().cloned() {
-            let source_index = if model_record.should_have_runtime() {
-                let display = model_record
-                    .live_display
-                    .as_ref()
-                    .expect("runtime target records have live displays");
-                previous.iter().position(|record| {
-                    record
-                        .model
+        for model_record in &model.records {
+            let source_index = model_record
+                .should_have_runtime()
+                .then(|| {
+                    let display = model_record
                         .live_display
                         .as_ref()
-                        .is_some_and(|source_display| {
-                            source_display.is_same_physical_display_as(display)
-                        })
+                        .expect("runtime target records have live displays");
+                    previous.iter().position(|record| {
+                        record
+                            .model
+                            .live_display
+                            .as_ref()
+                            .is_some_and(|source_display| {
+                                source_display.is_same_physical_display_as(display)
+                            })
+                    })
                 })
-            } else {
-                None
-            }
-            .or_else(|| {
-                previous
+                .flatten();
+            sources.push(source_index.map(|index| previous.swap_remove(index)));
+        }
+        for (model_record, source) in model.records.iter().zip(&mut sources) {
+            if source.is_none()
+                && let Some(index) = previous
                     .iter()
                     .position(|record| record.model.key == model_record.key)
-            });
+            {
+                *source = Some(previous.swap_remove(index));
+            }
+        }
 
-            if let Some(source_index) = source_index {
-                let mut record = previous.swap_remove(source_index);
-                record.model = model_record;
-                next_records.push(record);
-            } else {
-                next_records.push(DisplayRuntimeRecord {
+        let mut next_records = Vec::with_capacity(model.records.len().max(previous.len()));
+        for (model_record, source) in model.records.iter().cloned().zip(sources) {
+            next_records.push(match source {
+                Some(mut record) => {
+                    record.model = model_record;
+                    record
+                }
+                None => DisplayRuntimeRecord {
                     model: model_record,
                     handle: None,
                     runtime: None,
                     last_runtime_state: None,
-                });
-            }
+                },
+            });
         }
 
         for record in previous {
@@ -402,6 +418,7 @@ mod tests {
                     window_active: true,
                     runtime_open: true,
                     primary_inheritance_consumed: false,
+                    bound_to_display: false,
                 },
                 DisplayRecord {
                     key: DisplayKey::Identity(primary_identity.clone()),
@@ -410,6 +427,7 @@ mod tests {
                     window_active: true,
                     runtime_open: false,
                     primary_inheritance_consumed: false,
+                    bound_to_display: false,
                 },
                 DisplayRecord {
                     key: DisplayKey::Identity(secondary_identity.clone()),
@@ -418,6 +436,7 @@ mod tests {
                     window_active: true,
                     runtime_open: true,
                     primary_inheritance_consumed: false,
+                    bound_to_display: false,
                 },
             ],
         });
@@ -511,6 +530,7 @@ mod tests {
                 window_active: true,
                 runtime_open: true,
                 primary_inheritance_consumed: false,
+                bound_to_display: false,
             },
             handle: None,
             runtime: None,
@@ -552,6 +572,7 @@ mod tests {
                 window_active: true,
                 runtime_open: true,
                 primary_inheritance_consumed: false,
+                bound_to_display: false,
             },
             handle: None,
             runtime: None,
@@ -589,6 +610,7 @@ mod tests {
                 window_active: false,
                 runtime_open: false,
                 primary_inheritance_consumed: false,
+                bound_to_display: false,
             }],
         });
         let handle = state.reserve_handle_for_key(DisplayKey::LiveDisplayId(7));

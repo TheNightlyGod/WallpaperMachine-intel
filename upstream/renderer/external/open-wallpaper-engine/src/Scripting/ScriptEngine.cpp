@@ -6,6 +6,8 @@
 #include "Utils/Logging.h"
 #include "Utils/TimeOfDay.hpp"
 
+#include <Eigen/Geometry>
+
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -1851,6 +1853,11 @@ void AppendCommonHostBootstrap(std::ostringstream& wrapper) {
         << "      setFrame: function(value) { __animationControl(layer, name, 'setFrame', Number(value)); }\n"
         << "    };\n"
         << "  }\n"
+        // The timeline bound to one setting, by the handle the runtime gave it
+        // (`PropertyScriptObject::property_animation`), for that setting's script.
+        << "  globalThis.__makePropertyAnimation = function(handle) {\n"
+        << "    return __makeAnimation(handle, '');\n"
+        << "  };\n"
         << "  function __makeVideoTexture(name) {\n"
         << "    if (!globalThis.__videoTextureCache[name]) {\n"
         << "      globalThis.__videoTextureCache[name] = {\n"
@@ -1923,6 +1930,7 @@ void AppendCommonHostBootstrap(std::ostringstream& wrapper) {
            "__layerSetAlignment(name, state.alignment); },\n"
         << "      get angles() { return __layerGetAngles(name); },\n"
         << "      set angles(v) { __layerSetAngles(name, v); },\n"
+        << "      rotateObjectSpace: function(angles) { __layerRotateObjectSpace(name, angles); },\n"
         << "      get size() { return __layerGetSize(name); },\n"
         << "      get text() { return __layerGetText(name); },\n"
         << "      set text(v) { __layerSetText(name, v); },\n"
@@ -2864,6 +2872,31 @@ JSValue JsLayerSetAngles(JSContext* context, JSValueConst, int argc, JSValueCons
     return JS_UNDEFINED;
 }
 
+JSValue JsLayerRotateObjectSpace(JSContext* context, JSValueConst, int argc, JSValueConst* argv) {
+    auto* bridge = GetBridgeState(context);
+    if (argc < 2 || bridge == nullptr || bridge->runtime == nullptr) return JS_UNDEFINED;
+    const char* layer_name = JS_ToCString(context, argv[0]);
+    DynamicValue increment;
+    FillDynamicValueFromJS(context, argv[1], DynamicValue::Vec3, increment);
+    if (layer_name != nullptr && increment.getType() == DynamicValue::Vec3) {
+        // Unlike the degree-valued `angles` property, this increment is radians.
+        // Rz * Ry * Rx is the node's Euler convention; a local turn composes on
+        // the right of its current orientation, not as component-wise addition.
+        const auto rotation = [](const Eigen::Vector3f& angles) {
+            return Eigen::AngleAxisf(angles.z(), Eigen::Vector3f::UnitZ()) *
+                   Eigen::AngleAxisf(angles.y(), Eigen::Vector3f::UnitY()) *
+                   Eigen::AngleAxisf(angles.x(), Eigen::Vector3f::UnitX());
+        };
+        const Eigen::Matrix3f rotated =
+            (rotation(bridge->runtime->NodeRotation(layer_name)) * rotation(increment.getVec3()))
+                .toRotationMatrix();
+        const Eigen::Vector3f zyx = rotated.eulerAngles(2, 1, 0);
+        bridge->runtime->SetNodeRotation(layer_name, Eigen::Vector3f(zyx.z(), zyx.y(), zyx.x()));
+    }
+    if (layer_name != nullptr) JS_FreeCString(context, layer_name);
+    return JS_UNDEFINED;
+}
+
 JSValue JsLayerGetSize(JSContext* context, JSValueConst, int argc, JSValueConst* argv) {
     if (argc < 1) return CreateJsVec2(context, 0.0, 0.0);
     auto* bridge = GetBridgeState(context);
@@ -3297,13 +3330,18 @@ JSValue JsAnimationControl(JSContext* context, JSValueConst, int argc, JSValueCo
     auto* bridge = GetBridgeState(context);
     if (bridge == nullptr || bridge->runtime == nullptr || argc < 3) return JS_UNDEFINED;
     // A null layer means `scene.getAnimation(name)`: the authored name is looked
-    // up across the scene instead of inside one layer.
+    // up across the scene instead of inside one layer. A number is the handle of
+    // the timeline bound to one setting, which that setting's script reaches.
+    const bool  by_handle  = JS_IsNumber(argv[0]);
     const bool  scene_wide = JS_IsNull(argv[0]) || JS_IsUndefined(argv[0]);
-    const char* layer      = scene_wide ? nullptr : JS_ToCString(context, argv[0]);
+    double      handle     = 0.0;
+    if (by_handle && JS_ToFloat64(context, &handle, argv[0]) != 0) handle = 0.0;
+    const char* layer      = scene_wide || by_handle ? nullptr : JS_ToCString(context, argv[0]);
     const char* name       = JS_ToCString(context, argv[1]);
     const char* operation  = JS_ToCString(context, argv[2]);
     auto*       playback =
-        name == nullptr ? nullptr
+        by_handle       ? bridge->runtime->FindPropertyAnimation(static_cast<uint64_t>(handle))
+        : name == nullptr ? nullptr
         : scene_wide    ? bridge->runtime->FindAnimationByName(name)
         : layer != nullptr ? bridge->runtime->FindScalarAnimation(layer, name)
                            : nullptr;
@@ -3673,6 +3711,26 @@ std::string BuildPropertyScriptFactorySource(const ScriptFrontEndResult& front_e
             // animation layer: `thisObject` is it, and `thisLayer` stays the layer.
             << "  let thisObject = (thisLayer && __scriptContext.animationLayerIndex >= 0)\n"
             << "    ? thisLayer.getAnimationLayer(__scriptContext.animationLayerIndex) : thisLayer;\n"
+            // A script that decides an effect's visibility has that effect as
+            // `thisObject`: its `visible` is the setting, not the layer's.
+            << "  if (__scriptContext.ownStateName) {\n"
+            << "    const __own = globalThis[__scriptContext.ownStateName];\n"
+            << "    thisObject = {\n"
+            << "      get visible() { return !!__own.value; },\n"
+            << "      set visible(value) { __own.value = !!value; __own.written = true; },\n"
+            << "      getAnimation: function(name) {\n"
+            << "        return thisLayer ? thisLayer.getAnimation(name) : undefined;\n"
+            << "      }\n"
+            << "    };\n"
+            // `getAnimation()` with no name is the timeline bound to the
+            // script's own setting; a name still finds one of the layer's.
+            << "  } else if (thisObject && __scriptContext.propertyAnimation > 0) {\n"
+            << "    const __owner = thisObject;\n"
+            << "    const __own = globalThis.__makePropertyAnimation(__scriptContext.propertyAnimation);\n"
+            << "    thisObject = Object.create(__owner, { getAnimation: { value: function(name) {\n"
+            << "      return name ? __owner.getAnimation(name) : __own;\n"
+            << "    } } });\n"
+            << "  }\n"
             << front_end.transformed_body << "\n"
             << "  globalThis[__scriptContext.exportsName] = {\n"
             << "    init: (typeof init === 'function') ? init : null,\n"
@@ -3830,6 +3888,9 @@ bool EnsureSharedHostBindings(JSContext* context, SceneRuntimeContext* runtime,
                           global_object,
                           "__layerSetAngles",
                           JS_NewCFunction(context, JsLayerSetAngles, "__layerSetAngles", 2));
+        JS_SetPropertyStr(context, global_object, "__layerRotateObjectSpace",
+                          JS_NewCFunction(context, JsLayerRotateObjectSpace,
+                                          "__layerRotateObjectSpace", 2));
         JS_SetPropertyStr(context,
                           global_object,
                           "__layerGetSize",
@@ -4080,10 +4141,15 @@ JSValue AcquireScriptFactory(JSContext* context, const std::string& script_sourc
 bool ExecuteScriptFactory(JSContext* context, JSValue factory,
                           const std::string& exports_object_name,
                           const std::string& current_layer_name, const std::string_view props_name,
-                          const char* scope, int animation_layer_index = -1) {
+                          const char* scope, const PropertyScriptObject& object = {},
+                          const std::string& own_state_name = {}) {
     JSValue script_context = JS_NewObject(context);
     JS_SetPropertyStr(context, script_context, "animationLayerIndex",
-                      JS_NewInt32(context, animation_layer_index));
+                      JS_NewInt32(context, object.animation_layer_index));
+    JS_SetPropertyStr(context, script_context, "propertyAnimation",
+                      JS_NewFloat64(context, static_cast<double>(object.property_animation)));
+    JS_SetPropertyStr(context, script_context, "ownStateName",
+                      JS_NewString(context, own_state_name.c_str()));
     JS_SetPropertyStr(
         context, script_context, "exportsName", JS_NewString(context, exports_object_name.c_str()));
     JS_SetPropertyStr(
@@ -4141,14 +4207,14 @@ PropertyScriptProgram::PropertyScriptProgram(
     std::map<std::string, DynamicValue*> script_properties, DynamicValue initial_value,
     ScriptHostContext host_context, JSRuntime* shared_runtime, JSContext* shared_context,
     std::string exports_object_name, std::string script_properties_name,
-    PropertyScriptValueSemantic semantic, int animation_layer_index)
+    PropertyScriptValueSemantic semantic, PropertyScriptObject object)
     : m_script_properties(std::move(script_properties)),
       m_runtime(runtime),
       m_current_layer_name(std::move(current_layer_name)),
       m_exports_object_name(std::move(exports_object_name)),
       m_script_properties_name(std::move(script_properties_name)),
       m_semantic(semantic),
-      m_animation_layer_index(animation_layer_index) {
+      m_object(object) {
     auto* runtime_handle = shared_runtime;
     if (runtime_handle == nullptr) {
         LOG_ERROR("PropertyScriptProgram: failed to create JS runtime");
@@ -4179,6 +4245,15 @@ PropertyScriptProgram::PropertyScriptProgram(
     JSValue global_object = JS_GetGlobalObject(context_handle);
     JS_SetPropertyStr(
         context_handle, global_object, m_script_properties_name.c_str(), JS_NewObject(context_handle));
+    // An effect's `thisObject` starts from the visibility the effect loads with.
+    if (m_object.effect_visibility) {
+        m_own_state_name = m_exports_object_name + "_effect";
+        JSValue state    = JS_NewObject(context_handle);
+        JS_SetPropertyStr(context_handle, state, "value",
+                          JS_NewBool(context_handle, initial_value.getBool()));
+        JS_SetPropertyStr(context_handle, state, "written", JS_NewBool(context_handle, false));
+        JS_SetPropertyStr(context_handle, global_object, m_own_state_name.c_str(), state);
+    }
 
     JSValue factory =
         AcquireScriptFactory(context_handle, script_source, ScriptProgramMode::Property);
@@ -4193,7 +4268,8 @@ PropertyScriptProgram::PropertyScriptProgram(
                                m_current_layer_name,
                                m_script_properties_name,
                                "PropertyScriptProgram",
-                               m_animation_layer_index)) {
+                               m_object,
+                               m_own_state_name)) {
         JS_FreeValue(context_handle, factory);
         JS_FreeValue(context_handle, global_object);
         return;
@@ -4219,6 +4295,27 @@ PropertyScriptProgram::~PropertyScriptProgram() {
 }
 
 bool PropertyScriptProgram::Valid() const { return m_valid; }
+
+std::optional<bool> PropertyScriptProgram::TakeOwnVisibilityWrite() {
+    auto* context_handle = static_cast<JSContext*>(m_impl_context);
+    if (m_own_state_name.empty() || context_handle == nullptr) return std::nullopt;
+    JSValue global_object = JS_GetGlobalObject(context_handle);
+    JSValue state = JS_GetPropertyStr(context_handle, global_object, m_own_state_name.c_str());
+    std::optional<bool> written;
+    if (JS_IsObject(state)) {
+        JSValue flag = JS_GetPropertyStr(context_handle, state, "written");
+        if (JS_ToBool(context_handle, flag) > 0) {
+            JSValue value = JS_GetPropertyStr(context_handle, state, "value");
+            written       = JS_ToBool(context_handle, value) > 0;
+            JS_FreeValue(context_handle, value);
+            JS_SetPropertyStr(context_handle, state, "written", JS_NewBool(context_handle, false));
+        }
+        JS_FreeValue(context_handle, flag);
+    }
+    JS_FreeValue(context_handle, state);
+    JS_FreeValue(context_handle, global_object);
+    return written;
+}
 
 void PropertyScriptProgram::UpdateHostContext(const ScriptHostContext& host_context) {
     auto* context_handle = static_cast<JSContext*>(m_impl_context);
@@ -4254,15 +4351,88 @@ void PropertyScriptProgram::ApplyProjectProperties(
     SetEngineUserProperties(context_handle, global_object, project_properties);
     JS_FreeValue(context_handle, global_object);
     UpdateScriptProperties();
-    // Lazy initialization delivers the full initial snapshot once, not an
-    // additional changed-property event before the program has initialized.
-    if (! m_init_called || changed_properties.empty()) return;
+    // The first delivery is the full snapshot, once the script has started; a
+    // change before then is already in it.
+    if (! m_user_properties_delivered || changed_properties.empty()) return;
     JSValue changed = CreateChangedPropertiesObject(context_handle, changed_properties);
     JSValueConst argv[] = { changed };
     JSValue result = CallStoredExport(
         context_handle, m_exports_object_name.c_str(), "applyUserProperties", 1, argv);
     JS_FreeValue(context_handle, result);
     JS_FreeValue(context_handle, changed);
+}
+
+namespace
+{
+// What a property script is handed as the property's value: angles in degrees,
+// anything else as it is held. Only the payload is serialized; copying a
+// DynamicValue would also copy its live subscriptions.
+JSValue PropertyScriptInput(JSContext* context, PropertyScriptValueSemantic semantic,
+                            const DynamicValue& value) {
+    if (semantic == PropertyScriptValueSemantic::AnglesDegrees &&
+        value.getType() == DynamicValue::Vec3) {
+        const auto angles = RadiansToDegrees(value.getVec3());
+        return CreateJsVec3(context, angles.x(), angles.y(), angles.z());
+    }
+    return DynamicValueToJS(context, value);
+}
+
+// What `init` or `update` returned, as the property's value; null when it
+// returned nothing the property can take (nothing at all, an exception, an
+// object for a flag).
+DynamicValueUniquePtr PropertyScriptOutput(JSContext* context, PropertyScriptValueSemantic semantic,
+                                           JSValueConst result, const DynamicValue& current_value) {
+    if (JS_IsException(result) || JS_IsUndefined(result) ||
+        (current_value.getType() == DynamicValue::Boolean &&
+         JS_VALUE_GET_TAG(result) == JS_TAG_OBJECT)) {
+        return nullptr;
+    }
+    auto value = std::make_unique<DynamicValue>();
+    FillDynamicValueFromJS(context, result, current_value.getType(), *value);
+    if (semantic == PropertyScriptValueSemantic::AnglesDegrees &&
+        value->getType() == DynamicValue::Vec3) {
+        value->update(DegreesToRadians(value->getVec3()));
+    }
+    return value;
+}
+} // namespace
+
+DynamicValueUniquePtr PropertyScriptProgram::Start(const ScriptHostContext& host_context,
+                                                   const DynamicValue&      current_value) {
+    auto* context_handle = static_cast<JSContext*>(m_impl_context);
+    if (! m_valid || context_handle == nullptr || m_init_called) return nullptr;
+
+    UpdateHostContext(host_context);
+    UpdateScriptProperties();
+    JSValue      initial_value_js = PropertyScriptInput(context_handle, m_semantic, current_value);
+    JSValueConst init_argv[]      = { initial_value_js };
+    JSValue      init_result =
+        CallStoredExport(context_handle, m_exports_object_name.c_str(), "init", 1, init_argv);
+    auto initial = PropertyScriptOutput(context_handle, m_semantic, init_result, current_value);
+    JS_FreeValue(context_handle, init_result);
+    JS_FreeValue(context_handle, initial_value_js);
+    // Right after `init`: a script keeps its language tables here.
+    CallGeneralSettings(context_handle, m_exports_object_name, host_context);
+    m_init_called = true;
+    return initial;
+}
+
+void PropertyScriptProgram::DeliverInitialUserProperties() {
+    auto* context_handle = static_cast<JSContext*>(m_impl_context);
+    if (! m_valid || context_handle == nullptr || ! m_init_called || m_user_properties_delivered) {
+        return;
+    }
+    m_user_properties_delivered = true;
+    if (m_runtime == nullptr) return;
+
+    UpdateScriptProperties();
+    JSValue changed_properties =
+        CreateChangedPropertiesObject(context_handle, m_runtime->projectProperties());
+    JSValueConst changed_argv[] = { changed_properties };
+    JSValue      apply_result   = CallStoredExport(
+        context_handle, m_exports_object_name.c_str(), "applyUserProperties", 1, changed_argv);
+    JS_FreeValue(context_handle, apply_result);
+    JS_FreeValue(context_handle, changed_properties);
 }
 
 DynamicValueUniquePtr PropertyScriptProgram::Evaluate(const ScriptHostContext& host_context,
@@ -4274,65 +4444,30 @@ DynamicValueUniquePtr PropertyScriptProgram::Evaluate(const ScriptHostContext& h
     UpdateScriptProperties();
     ProcessScheduledCallbacks(context_handle);
 
-    // Serialize only the payload; copying DynamicValue also copies its live subscriptions.
-    const auto make_script_input = [&]() {
-        if (m_semantic == PropertyScriptValueSemantic::AnglesDegrees &&
-            current_value.getType() == DynamicValue::Vec3) {
-            const auto angles = RadiansToDegrees(current_value.getVec3());
-            return CreateJsVec3(context_handle, angles.x(), angles.y(), angles.z());
-        }
-        return DynamicValueToJS(context_handle, current_value);
-    };
-
-    if (! m_init_called) {
-        JSValue      initial_value_js = make_script_input();
-        JSValueConst init_argv[]      = { initial_value_js };
-        JSValue      init_result =
-            CallStoredExport(context_handle, m_exports_object_name.c_str(), "init", 1, init_argv);
-        JS_FreeValue(context_handle, init_result);
-        JS_FreeValue(context_handle, initial_value_js);
-        // Right after `init`: a script keeps its language tables here.
-        CallGeneralSettings(context_handle, m_exports_object_name, host_context);
-        if (m_runtime != nullptr) {
-            JSValue changed_properties =
-                CreateChangedPropertiesObject(context_handle, m_runtime->projectProperties());
-            JSValueConst changed_argv[] = { changed_properties };
-            JSValue      apply_result   = CallStoredExport(context_handle,
-                                                    m_exports_object_name.c_str(),
-                                                    "applyUserProperties",
-                                                    1,
-                                                    changed_argv);
-            JS_FreeValue(context_handle, apply_result);
-            JS_FreeValue(context_handle, changed_properties);
-        }
-        m_init_called = true;
-    }
+    // A script nothing started yet starts here, on its own, and what its
+    // `init` returned, when the property can take it, is the value `update`
+    // continues from.
+    const auto initial = Start(host_context, current_value);
+    DeliverInitialUserProperties();
+    const DynamicValue& input =
+        initial != nullptr && initial->getType() == current_value.getType() ? *initial
+                                                                            : current_value;
 
     if (! m_capabilities.update) return nullptr;
 
-    JSValue      current_value_js = make_script_input();
+    JSValue      current_value_js = PropertyScriptInput(context_handle, m_semantic, input);
     JSValueConst argv[]           = { current_value_js };
     JSValue      result =
         CallStoredExport(context_handle, m_exports_object_name.c_str(), "update", 1, argv);
     JS_FreeValue(context_handle, current_value_js);
 
-    auto published = std::make_unique<DynamicValue>();
-    m_update_returned_value = false;
-    if (JS_IsException(result) || JS_IsUndefined(result) ||
-        (current_value.getType() == DynamicValue::Boolean &&
-         JS_VALUE_GET_TAG(result) == JS_TAG_OBJECT)) {
-        JS_FreeValue(context_handle, result);
-        published->update(current_value);
-        return published;
-    }
-
-    m_update_returned_value = true;
-    FillDynamicValueFromJS(context_handle, result, current_value.getType(), *published);
-    if (m_semantic == PropertyScriptValueSemantic::AnglesDegrees &&
-        published->getType() == DynamicValue::Vec3) {
-        published->update(DegreesToRadians(published->getVec3()));
-    }
+    auto published = PropertyScriptOutput(context_handle, m_semantic, result, input);
     JS_FreeValue(context_handle, result);
+    m_update_returned_value = published != nullptr;
+    if (published == nullptr) {
+        published = std::make_unique<DynamicValue>();
+        published->update(input);
+    }
     return published;
 }
 
@@ -4845,7 +4980,7 @@ std::unique_ptr<PropertyScriptProgram> ScriptEngine::CreatePropertyScriptProgram
     SceneRuntimeContext* runtime, std::string script_source, std::string current_layer_name,
     std::map<std::string, DynamicValue*> script_properties, DynamicValue initial_value,
     ScriptHostContext host_context, PropertyScriptValueSemantic semantic,
-    int animation_layer_index) {
+    PropertyScriptObject object) {
     if (m_context == nullptr || m_runtime == nullptr) return nullptr;
     const auto program_id = ++m_next_program_id;
     auto       program =
@@ -4860,7 +4995,7 @@ std::unique_ptr<PropertyScriptProgram> ScriptEngine::CreatePropertyScriptProgram
                                                 "__propertyExports_" + std::to_string(program_id),
                                                 "__scriptProps_" + std::to_string(program_id),
                                                 semantic,
-                                                animation_layer_index);
+                                                object);
     if (! program->Valid()) return nullptr;
     return program;
 }

@@ -125,7 +125,9 @@ them, and promises only this:
   macOS names it. The app does not choose another member or draw on the others.
 - A closed lid follows the same rule: the `primary` selector means whichever display
   macOS then reports as the main one, and a wallpaper assigned to the built-in display
-  waits there until that display is listed again.
+  waits there until that display is listed again. The new main display shows its own
+  saved wallpaper, or the built-in display's if it was never configured
+  ([main display changes](control-panel.md#target-display)).
 - A screen AppKit lists without a display number is not drawn on by the Swift hosts,
   because there is no ID to match it to a wallpaper. It is not mistaken for a display
   that left: its coming and going refreshes the displays like any other change.

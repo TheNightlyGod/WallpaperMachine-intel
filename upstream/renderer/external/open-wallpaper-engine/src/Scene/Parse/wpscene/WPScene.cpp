@@ -136,13 +136,20 @@ bool WPSceneGeneral::FromJson(const nlohmann::json& json, uint16_t pkg_version) 
 	    GET_JSON_NAME_VALUE_NOWARN(json, "fogdistancestartdensity", fogdistancestartdensity);
 	    GET_JSON_NAME_VALUE_NOWARN(json, "fogdistanceenddensity", fogdistanceenddensity);
     }
-    if (WantsVersion(pkg_version, 23)) {
-	    GET_JSON_NAME_VALUE_NOWARN(json, "fogheight", fogheight);
-	    GET_JSON_NAME_VALUE_NOWARN(json, "fogheightstart", fogheightstart);
-	    GET_JSON_NAME_VALUE_NOWARN(json, "fogheightend", fogheightend);
-	    GET_JSON_NAME_VALUE_NOWARN(json, "fogheightcolor", fogheightcolor);
-	    GET_JSON_NAME_VALUE_NOWARN(json, "fogheightstartdensity", fogheightstartdensity);
-	    GET_JSON_NAME_VALUE_NOWARN(json, "fogheightenddensity", fogheightenddensity);
+    // Package versions describe the container, not which JSON fog keys may
+    // appear: height fog is authored in version 22 packages too.
+    GET_JSON_NAME_VALUE_NOWARN(json, "fogheight", fogheight);
+    GET_JSON_NAME_VALUE_NOWARN(json, "fogheightstart", fogheightstart);
+    GET_JSON_NAME_VALUE_NOWARN(json, "fogheightend", fogheightend);
+    GET_JSON_NAME_VALUE_NOWARN(json, "fogheightcolor", fogheightcolor);
+    GET_JSON_NAME_VALUE_NOWARN(json, "fogheightstartdensity", fogheightstartdensity);
+    GET_JSON_NAME_VALUE_NOWARN(json, "fogheightenddensity", fogheightenddensity);
+    for (const char* key : { "ambientcolor", "skylightcolor", "fogheight",
+                            "fogheightstart", "fogheightend", "fogheightcolor",
+                            "fogheightstartdensity", "fogheightenddensity" }) {
+        if (json.contains(key) && HasDynamicSetting(json.at(key))) {
+            lighting_settings[key] = json.at(key);
+        }
     }
     if (WantsVersion(pkg_version, 21) &&
         json.contains("lightconfig") && json.at("lightconfig").is_object()) {

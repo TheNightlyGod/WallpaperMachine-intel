@@ -409,6 +409,14 @@ Playback, backend, host and startup areas are in
 
 All in `script_runtime_compat_test` and `scene_schema_tests` unless noted.
 
+- **Local-axis rotation** — `ScriptRuntimeCompat.RotateObjectSpace*` checks radians
+  increments composed with an existing orientation, degree-valued angles readback,
+  repeated updates, transformed parents, mirrored scale and anchored pivots.
+- **Property-bound scene shading** — `MetalSceneDraw.OlderPackagesApplyPropertyBoundHeightFog`
+  draws a known squared-density gradient from a version-22 scene with property-selected
+  endpoints and colour; `.LightingColorsUseProjectPropertyValues` checks ambient and
+  skylight contributions independently in the resulting pixels.
+
 - **Callback-only property scripts** — `*CallbackOnly*` in both binaries.
   Callback-only scripts keep their no-writeback behavior.
 - **Script property load order** — `ScriptRuntimeCompat.ModuleCodeSeesDeclaredDefaultsAndInitSeesTheBoundValue`.
@@ -535,6 +543,24 @@ All in `script_runtime_compat_test` and `scene_schema_tests` unless noted.
   projected input (`WE_TEST_INPUT_JSON`, `WE_TEST_CLICK_*`), not by forcing
   overlay alpha. A closed author menu and an audio-driven wave with no audio are
   not evidence that a rendered frame has exercised either feature.
+- **Script start-up order and what `init` returns** —
+  `SceneSchema.EveryScriptRunsInitBeforeAnyIsToldTheUserProperties` (an options
+  layer calls from its first `applyUserProperties` a function a later layer's
+  `init` hands out, then sets the switch that keeps the widget shown) and
+  `SceneSchema.WhatInitReturnsIsThePropertysValue` (a handle that hides itself
+  from `init`, a typing text that starts empty there, and an `init` that returns
+  nothing keeping the scene file's value). Started one script at a time, the
+  call threw and the switch was never set, so a music widget faded itself out;
+  with `init`'s value dropped, its drag handle stayed on screen and its title typed
+  onto the placeholder.
+- **Layers scripts gather by name** —
+  `SceneSchema.LayersWithScriptsOfTheirOwnCarryTheirAuthoredNameUnderGeneratedKeys`
+  (twin images, an unnamed image and a twin text, each with a script of its own,
+  are found by name and moved by another layer's `init`) and
+  `SceneSchema.ScriptsListSoundLayersInTheScenesOrderAndPlayThem` (sound layers in
+  the scene's order, found by id and by name, two that share a name played
+  separately). A widget that moves its layers by name prefix left its cover behind,
+  and one that finds its tracks by `.mp3` found none and threw when told to play.
 - **User-switched effects** — `RenderGraph.parsedEffectVisibilityFollowsTheBoundUserProperty`
   (`rendergraph_smoke`, image layers) and
   `TextObjectRuntime.TextEffectVisibilityFollowsTheBoundUserProperty`. An
@@ -1008,6 +1034,14 @@ All in `script_runtime_compat_test` and `scene_schema_tests` unless noted.
     layer's authored name; `addEndedCallback` listeners (one set per layer,
     however it was asked for) run once per finish of a single-shot layer, from
     the puppet state the renderer advances, and never for a looping one.
+  - *A property script's own object.* `SceneSchema.AnEffectsVisibilityScriptSwitchesTheEffectAndNotItsLayer`
+    and `SceneSchema.AKeyedConstantsScriptPlaysTheConstantsOwnTimeline`: a script
+    deciding an effect's visibility has the effect as `thisObject`, so writing
+    `thisObject.visible` from `init` or a media handler switches the effect and leaves
+    the layer shown (it hid the layer and left the effect on); a script on a keyed
+    shader constant gets the constant's own timeline from `getAnimation()` with no
+    name on a layer whose origin also has an unnamed timeline (it got the origin's,
+    and the constant stayed on its first key).
   - *Sprite sheets.* `.PausedSpriteSheetHoldsItsFrameAndPlayResumesIt`,
     `.StoppedSpriteSheetReturnsToItsFirstFrameAndSetFrameStillPins`,
     `.SpriteSheetRateScalesPlaybackAndTheSheetDescribesItself`,
@@ -1077,7 +1111,7 @@ All in `script_runtime_compat_test` and `scene_schema_tests` unless noted.
     not change what the host builds. Each call answers a matrix of its own.
   - Not covered here: `localStorage` persistence, effects, bones, particles,
     scene properties, the camera, `Intl`, and the other layer transform calls
-    (`getChildren`, `setParent`, `rotateObjectSpace`, `lookAt`, `lookAtYaw`,
+    (`getChildren`, `setParent`, `lookAt`, `lookAtYaw`,
     `getAttachment*`: a script that calls one still stops at `not a function`);
     host plumbing for `SetLanguage` (scripts are told `en-us` until the host calls
     it).
@@ -1170,6 +1204,16 @@ All in `script_runtime_compat_test` and `scene_schema_tests` unless noted.
   the source layer says `"clampuvs": false` and clamps when it is true or absent;
   otherwise a model whose UVs run far outside 0..1 smears the composite's edge
   texels into solid bands.
+- **A composite holds the chain's result as written** —
+  `MetalSceneDraw.ALayerWithNoAreaFillsTheCompositeAnotherLayerSamples` in
+  `metal_scene_draw_smoke`: a translucent solid layer 64 wide and 0 high, hidden at
+  zero scale or shown, whose effect writes a colour of alpha 0.25 through the
+  model-view-projection matrix; a second layer shows that composite's colour and
+  alpha, and the buffer itself draws nothing on screen. Before the change the card
+  that carries the chain into the composite was 0 high, so the composite stayed
+  empty (an audio widget's bars, which read their spectrum from such a buffer,
+  never moved), and once filled, the chain's last pass blended into it with the
+  layer's translucency, multiplying the colour by an alpha the buffer uses for data.
 - **Layer targets: point sampling and wrap** — `LayerTextureReference.LayerTargetsFollowNointerpolationClampuvsAndTheTextureHeader`
   and `.ACompositeFollowsItsLayersTextureHeaderWhateverIsParsedFirst` in
   `layer_texture_reference_test` and
@@ -1423,6 +1467,7 @@ All in `script_runtime_compat_test` and `scene_schema_tests` unless noted.
   block-compressed art, a slot with nothing authored; both renderers),
   `.ACoverIsSampledClampedWhateverItsAuthoredPictureAskedForOnBothRenderers` and
   `.AnIdleCoverSlotUploadsItsPictureOnceAndACoverChangeCostsOneUploadPerFrameInFlight`
+  and `.ACoverOverAnotherLayersPictureShowsThatPictureUntilACoverArrivesOnBothRenderers`
   in `metal_scene_draw_smoke`; `CoverSlot.*` in `media_thumbnail_texture_smoke`. A
   `usertextures` cover slot (`$mediaThumbnail`, `$mediaPreviousThumbnail`) is the
   picture its author left in that position until a cover is published, and again
@@ -1433,9 +1478,16 @@ All in `script_runtime_compat_test` and `scene_schema_tests` unless noted.
   version check a cover already had: no graph rebuild, an idle layer uploads its art
   once per frame in flight and a cover change once per frame in flight again. The
   picture is decoded when a renderer first asks, once, so the texture budget set after
-  the parse applies to it. Not substituted: a video, a sprite sheet, a render target
-  or composite, a mask or normal map (one or two channels), a missing file. A cover
-  keeps its own clamped sampler whatever the art's flags say.
+  the parse applies to it. Not substituted: a video, a sprite sheet, a mask or normal
+  map (one or two channels), a missing file. A cover keeps its own clamped sampler
+  whatever the art's flags say. Art that is another layer's composite stays a render
+  target in the slot, with the cover beside it (`SceneMaterial::texture_covers`), and
+  each renderer binds the cover there while the image it uploaded is one; the new test
+  draws a hidden layer's composite under both cover names, idle, with a cover a few
+  frames in (after a still target could have been reused), cleared, and with one and
+  two tracks for the previous cover. Before, the slot was the transparent texel: the
+  idle, cleared and first-track cases drew nothing on either renderer, and without the
+  pass marked as reading a runtime image a cover published mid-run was never shown.
 - **JPEG/EXIF orientation** — `tex_schema_tests`: all eight EXIF display
   transforms on asymmetric RGBA pixels, both TIFF byte orders, truncated
   JPEG/EXIF data, invalid IFD offsets.
@@ -2543,6 +2595,17 @@ Rust regressions in `crates/shader/tests` (`legalize`, `preprocess`,
 `video_planes`, `pipeline`) cover these paths with synthetic shader sources;
 `pipeline` skips asset-dependent cases with a printed reason.
 
+- **Scalar component swizzles** — `legalize_type_coercion::scalar_swizzles_*`
+  compiles scalar splats through both backends and checks Naga IR component types,
+  widths, vector selection, lexical shadowing and downstream width conversions.
+  A scalar's repeated component zero broadcasts; a genuine vector swizzle keeps
+  its authored component mapping. Shader pipeline revision 18 invalidates older
+  cached programs.
+  `scalar_initializer_selects_first_component_of_nested_texture_arithmetic`
+  also covers scalar initialization from a sampled vector inside arithmetic and
+  component-wise builtins: narrowing selects the completed expression's first
+  component, not the sample before its consumers run.
+
 - **Built-in simulation uniforms** —
   `ShaderValueUpdaterCompat.SimulationEffectsSeeFrameTimeCursorTravelAndButtons`
   checks that a shader declaring `g_Frametime`, `g_PointerPositionLast`,
@@ -2736,6 +2799,35 @@ Rust regressions in `crates/shader/tests` (`legalize`, `preprocess`,
   other; before, it took that token for its type and every repair skipped it.
   Known and not handled: logical-not applied to a float (`!someFloat`), which
   still rejects Wallpaper Engine's own `clipping_mask` effect.
+- **An array suffix declares one name, and an integer `clamp` stays integer** —
+  `pipeline` tests `array_suffix_declares_only_its_own_declarator` and
+  `integer_clamp_keeps_integer_literals`, each compiled for SPIR-V and MSL; both
+  fail without the change. Naga's GLSL frontend applies an array suffix to the
+  type a declarator list shares, so in `float color[4], f;` the scalar `f` became
+  `float[4]` and the effect failed to load (a Workshop procedural noise effect).
+  The `array_declarators` strategy ends the statement after each declarator with
+  a suffix and restates the qualifiers and type for the rest
+  (`float color[4]; float f;`); `for` initializers and stage interface or uniform
+  lists are left alone. Integer literals in `clamp` become floats for float
+  operands, which legacy shaders rely on, but an `int` or `ivecN` operand selects
+  the integer overload, so `clamp(index, 0, BANDS - 1)` on an `int` keeps its
+  literals; with only `uint` or `uvecN` operands they gain a `u` suffix, as do
+  those of `min` and `max`. Before, the float literals made an integer index
+  float and an audio line effect failed to load. The coercion now reads a
+  binding's component kind (`int`, `uint`, `float`) as well as its width, and
+  sees an `int` that the step repair turns into a `float` as a float. No pipeline
+  revision bump: a failed compile is never stored, and a program that compiled
+  before keeps its meaning. A split list only restates a name it never used, and
+  an integer `clamp` whose result is used as a float (`clamp(i, 0, 5) * 0.5`),
+  which Naga had compiled as a float clamp of `float(i)`, now clamps as `int`,
+  the same value for integer bounds. Over the 15 local scenes the SPIR-V corpus
+  sweep went from 3 failures to none, and on native Metal no other scene's last
+  frame changed beyond its run-to-run variation; generated SPIR-V and MSL were
+  not compared.
+  Known and not handled: in `uniform float a[4], b;` the generated source still
+  declares no `b`, and a declarator list whose array takes a
+  brace initializer (`= {…}, b`) is not recognized as a declaration, so it is not
+  split.
 - **Legacy effect shader interfaces** — `pipeline` tests: array varyings reserve
   all element locations; unambiguous user function parameters narrow wider vector
   arguments; a whole vector variable assigned to a narrower one keeps its leading

@@ -86,6 +86,10 @@ public:
     /// scene; a fullscreen layer's result is the screen and must cover it
     /// however a camera layer frames the scene.
     void        SetFinalCamera(std::string camera) { m_final_camera = std::move(camera); }
+    /// The chain's result goes only into the layer's own composite, which
+    /// another layer samples, and never onto the scene: the layer's card has
+    /// no area on screen (`SceneNode::CompositeOnly` on the last pass).
+    void        SetFinalCompositeOnly(bool only) { m_final_composite_only = only; }
 
     void ResolveEffect(const SceneMesh& defualt_mesh, std::string_view effect_cam);
 
@@ -105,6 +109,7 @@ private:
     /// The depth test and write the last pass is drawn with; empty keeps the
     /// ones its own material authored.
     std::optional<SceneDepthState> m_final_depth;
+    bool                           m_final_composite_only { false };
 
     std::vector<std::shared_ptr<SceneImageEffect>> m_effects;
     bool                                           m_authored_captured { false };

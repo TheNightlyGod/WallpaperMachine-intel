@@ -1437,7 +1437,7 @@ impl AudioFrameConsumer for WallpaperEngine {
 mod tests {
     use super::*;
     use crate::{
-        display::state::{DisplayAction, DisplayKey, DisplayRecord},
+        display::state::{DisplayKey, DisplayRecord},
         engine::state::DisplayRuntimeRecord,
         window::MouseButtonState,
     };
@@ -1837,6 +1837,7 @@ mod tests {
             window_active: true,
             runtime_open: true,
             primary_inheritance_consumed: false,
+            bound_to_display: false,
         });
         record.handle = Some(handle);
         record.last_runtime_state = Some(StoredSceneRuntimeState::new(
@@ -1924,6 +1925,7 @@ mod tests {
                     window_active: true,
                     runtime_open: true,
                     primary_inheritance_consumed: false,
+                    bound_to_display: false,
                 },
                 DisplayRecord {
                     key: DisplayKey::Identity(identity),
@@ -1932,6 +1934,7 @@ mod tests {
                     window_active: true,
                     runtime_open: true,
                     primary_inheritance_consumed: false,
+                    bound_to_display: false,
                 },
                 DisplayRecord {
                     key: DisplayKey::LiveDisplayId(live.display_id),
@@ -1940,6 +1943,7 @@ mod tests {
                     window_active: true,
                     runtime_open: true,
                     primary_inheritance_consumed: false,
+                    bound_to_display: false,
                 },
             ],
         };
@@ -1980,6 +1984,7 @@ mod tests {
                     window_active: true,
                     runtime_open: true,
                     primary_inheritance_consumed: false,
+                    bound_to_display: false,
                 },
                 DisplayRecord {
                     key: DisplayKey::Identity(identity),
@@ -1988,6 +1993,7 @@ mod tests {
                     window_active: true,
                     runtime_open: true,
                     primary_inheritance_consumed: false,
+                    bound_to_display: false,
                 },
             ],
         };
@@ -2008,96 +2014,68 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_scene_for_current_primary_follows_primary_after_display_switch() {
-        let old_primary = crate::DisplayDesc::with_identity(
-            1,
-            crate::DisplayIdentity {
-                uuid: Some("old-primary".to_string()),
-                vendor_id: Some(1),
-                model_id: Some(2),
-                serial_number: Some(3),
-                unit_number: None,
-                name: None,
-            },
-            0,
-            0,
-            3420,
-            2214,
-            2.0,
-        );
-        let new_primary = crate::DisplayDesc::with_identity(
-            2,
-            crate::DisplayIdentity {
-                uuid: Some("new-primary".to_string()),
-                vendor_id: Some(4),
-                model_id: Some(5),
-                serial_number: Some(6),
-                unit_number: None,
-                name: None,
-            },
-            0,
-            0,
-            1920,
-            1080,
-            1.0,
-        );
-        let old_primary_shifted = crate::DisplayDesc::with_identity(
-            1,
-            old_primary.identity.clone(),
-            -1710,
-            0,
-            3420,
-            2214,
-            2.0,
-        );
-        let scene = crate::project::SceneDesc::new(
-            old_primary.clone(),
-            "/tmp/requested.json",
-            "/tmp/assets",
-            60,
-            false,
-        );
-        let mut model = DisplayStateModel {
-            records: vec![DisplayRecord {
-                key: DisplayKey::Primary,
-                live_display: Some(old_primary.clone()),
-                assignment: None,
-                window_active: true,
-                runtime_open: false,
-                primary_inheritance_consumed: false,
-            }],
+    fn main_display_change_keeps_a_reconciled_runtime_on_its_display() {
+        let identity = |label: &str| crate::DisplayIdentity {
+            uuid: Some(label.to_string()),
+            ..crate::DisplayIdentity::default()
         };
-
-        model.apply_reconcile(&[scene]).unwrap();
-
-        let primary = model
-            .records
+        let built_in =
+            crate::DisplayDesc::with_identity(1, identity("built-in"), 0, 0, 3420, 2214, 2.0);
+        let built_in_shifted =
+            crate::DisplayDesc::with_identity(1, identity("built-in"), -1710, 0, 3420, 2214, 2.0);
+        let external =
+            crate::DisplayDesc::with_identity(2, identity("external"), 0, 0, 1920, 1080, 1.0);
+        let mut model =
+            DisplayStateModel::from_config(crate::WallpaperEngineConfig::default()).unwrap();
+        model
+            .refresh_connected(built_in.clone(), vec![built_in.clone()])
+            .unwrap();
+        model
+            .apply_reconcile(&[crate::project::SceneDesc::new(
+                built_in.clone(),
+                "/tmp/built-in.json",
+                "/tmp/assets",
+                60,
+                false,
+            )])
+            .unwrap();
+        let mut state = EngineState::with_display_model(model);
+        let handle = state.reserve_handle_for_key(DisplayKey::Primary);
+        let running = state
+            .display_records
             .iter_mut()
-            .find(|record| record.key == DisplayKey::Primary)
-            .expect("primary record should remain");
-        assert!(primary.window_active);
-        assert!(primary.assignment.is_some());
-        primary.runtime_open = true;
-        assert!(!model.records.iter().any(|record| {
-            record.key == DisplayKey::LiveDisplayId(old_primary.display_id) && record.window_active
-        }));
+            .find(|record| record.model.live_display.as_ref() == Some(&built_in))
+            .expect("the reconciled scene should have a record");
+        running.handle = Some(handle);
+        running.model.runtime_open = true;
 
-        let actions = model
+        let mut refreshed = DisplayStateModel {
+            records: state
+                .display_records
+                .iter()
+                .map(|record| record.model.clone())
+                .collect(),
+        };
+        refreshed
             .refresh_connected(
-                new_primary.clone(),
-                vec![old_primary_shifted, new_primary.clone()],
+                external.clone(),
+                vec![built_in_shifted.clone(), external.clone()],
             )
             .unwrap();
+        state.apply_display_model(&refreshed).unwrap();
 
-        let primary = model
-            .records
+        let holder = state
+            .display_records
             .iter()
-            .find(|record| record.key == DisplayKey::Primary)
-            .expect("primary record should remain after display switch");
-        assert!(primary.window_active);
-        assert_eq!(primary.live_display, Some(new_primary));
-        assert!(primary.assignment.is_some());
-        assert_eq!(actions, vec![DisplayAction::Rebuild(DisplayKey::Primary)]);
+            .find(|record| record.handle == Some(handle))
+            .expect("the running scene keeps its handle");
+        assert_eq!(holder.model.live_display, Some(built_in_shifted));
+        assert!(holder.model.should_have_runtime());
+        assert_eq!(state.displays_by_handle.get(&handle), Some(&holder.model.key));
+        assert!(state.display_records.iter().all(|record| {
+            record.model.live_display.as_ref() != Some(&external)
+                || !record.model.should_have_runtime()
+        }));
     }
 
     #[test]
@@ -2120,6 +2098,7 @@ mod tests {
             window_active: true,
             runtime_open: false,
             primary_inheritance_consumed: false,
+            bound_to_display: false,
         };
         let mut model = DisplayStateModel {
             records: vec![future_record.clone()],
@@ -2314,6 +2293,7 @@ mod tests {
                 window_active: true,
                 runtime_open: false,
                 primary_inheritance_consumed: false,
+                bound_to_display: false,
             },
             handle: None,
             runtime: None,
@@ -2336,6 +2316,7 @@ mod tests {
                 window_active: true,
                 runtime_open: false,
                 primary_inheritance_consumed: false,
+                bound_to_display: false,
             },
             handle: None,
             runtime: None,
@@ -2357,6 +2338,7 @@ mod tests {
                 window_active: true,
                 runtime_open: false,
                 primary_inheritance_consumed: false,
+                bound_to_display: false,
             },
             handle: None,
             runtime: None,
@@ -2549,6 +2531,7 @@ mod tests {
                 window_active: true,
                 runtime_open: false,
                 primary_inheritance_consumed: false,
+                bound_to_display: false,
             },
             handle: None,
             runtime: None,
@@ -2579,6 +2562,7 @@ mod tests {
                 window_active: true,
                 runtime_open: false,
                 primary_inheritance_consumed: false,
+                bound_to_display: false,
             },
             handle: None,
             runtime: None,
@@ -2600,6 +2584,7 @@ mod tests {
                 window_active: true,
                 runtime_open: false,
                 primary_inheritance_consumed: false,
+                bound_to_display: false,
             },
             handle: None,
             runtime: None,
@@ -2668,6 +2653,7 @@ mod tests {
                 window_active: true,
                 runtime_open: false,
                 primary_inheritance_consumed: false,
+                bound_to_display: false,
             },
             DisplayRecord {
                 key: DisplayKey::Identity(external_identity.clone()),
@@ -2676,6 +2662,7 @@ mod tests {
                 window_active: false,
                 runtime_open: false,
                 primary_inheritance_consumed: false,
+                bound_to_display: false,
             },
             DisplayRecord {
                 key: DisplayKey::Identity(disconnected_identity),
@@ -2684,6 +2671,7 @@ mod tests {
                 window_active: true,
                 runtime_open: false,
                 primary_inheritance_consumed: false,
+                bound_to_display: false,
             },
         ]);
 

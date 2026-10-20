@@ -4477,6 +4477,123 @@ Eigen::Vector3f NodePointInScene(SceneNode& node, float x, float y) {
     return (node.ModelTrans() * Eigen::Vector4d(x, y, 0.0, 1.0)).head<3>().cast<float>();
 }
 
+TEST(ScriptRuntimeCompat, RotateObjectSpaceComposesRadiansOnCurrentLocalAxesAcrossAngleUpdates) {
+    for (const auto& ending : { std::string("return thisLayer.angles;"), std::string() }) {
+        SCOPED_TRACE(ending.empty() ? "native write only" : "returned angles");
+        auto runtime = CreateSceneRuntimeContext(SceneRuntimeBootstrap {});
+        auto parent = std::make_shared<SceneNode>();
+        parent->SetTranslate(Eigen::Vector3f(50, -20, 10));
+        parent->SetRotation(Eigen::Vector3f(-0.2f, 0.5f, -0.4f));
+        parent->SetScale(Eigen::Vector3f(0.8f, 1.2f, 0.9f));
+        auto node = std::make_shared<SceneNode>();
+        const Eigen::Vector3f origin(10, 20, 30);
+        const Eigen::Vector3f scale(-2, 3, 0.5f);
+        const Eigen::Vector3f initial(0.4f, -0.3f, 0.8f);
+        node->SetTranslate(origin);
+        node->SetScale(scale);
+        node->SetRotation(initial);
+        parent->AppendChild(node);
+        runtime->RegisterNode("parent", parent.get());
+        runtime->RegisterNode("rotor", node.get());
+        runtime->RegisterNodeRotation("rotor", node.get(), ResolveVec3Setting(*runtime, {
+            {"value", {initial.x(), initial.y(), initial.z()}},
+            {"script", R"JS(
+export function update(value) {
+    value.x = 0.25;
+    value.y = -0.17;
+    value.z = 0.31;
+    thisLayer.rotateObjectSpace(value);
+)JS" + ending + "\n}"},
+        }, "rotor", Vec3SettingSemantic::AnglesDegrees));
+
+        const auto rotate = [](const Eigen::Vector3f& angles) {
+            return SceneNode::LocalTransOf(Eigen::Vector3f::Zero(), Eigen::Vector3f::Ones(), angles);
+        };
+        Eigen::Matrix4d expected_rotation = rotate(initial);
+        const Eigen::Matrix4d increment = rotate(Eigen::Vector3f(0.25f, -0.17f, 0.31f));
+        const Eigen::Matrix4d translation = SceneNode::LocalTransOf(
+            origin, Eigen::Vector3f::Ones(), Eigen::Vector3f::Zero());
+        const Eigen::Matrix4d scaling = SceneNode::LocalTransOf(
+            Eigen::Vector3f::Zero(), scale, Eigen::Vector3f::Zero());
+        for (int frame = 0; frame < 6; ++frame) {
+            SCOPED_TRACE(frame);
+            expected_rotation = (expected_rotation * increment).eval();
+            runtime->Tick(1.0 / 30.0);
+            node->UpdateTrans();
+            const Eigen::Matrix4d expected = parent->GetLocalTrans() * translation *
+                                             expected_rotation * scaling;
+            EXPECT_TRUE(node->ModelTrans().isApprox(expected, 2.0e-5));
+            EXPECT_EQ(node->Translate(), origin);
+            EXPECT_EQ(node->Scale(), scale);
+            EXPECT_EQ(runtime->scriptErrorCount(), 0u);
+        }
+    }
+}
+
+TEST(ScriptRuntimeCompat, RotateObjectSpaceAcceptsRadiansAndReadsBackDegreesWithoutMutatingInput) {
+    auto runtime = CreateSceneRuntimeContext(SceneRuntimeBootstrap {});
+    auto node = std::make_shared<SceneNode>();
+    auto marker = std::make_shared<SceneNode>();
+    runtime->RegisterNodeRotation("rotor", node.get(),
+        std::make_unique<DynamicValue>(Eigen::Vector3f(0.0f, 0.0f, 0.0f)));
+    runtime->RegisterNode("marker", marker.get());
+    runtime->RegisterSceneScript(R"JS(
+export function init() {
+    const layer = thisScene.getLayer('rotor');
+    layer.angles = new Vec3(15, 0, 0);
+    const delta = new Vec3(Math.PI / 2, 0, 0);
+    const result = layer.rotateObjectSpace(delta);
+    if (result !== undefined || !delta.equals(new Vec3(Math.PI / 2, 0, 0))) {
+        throw new Error('rotateObjectSpace must return nothing and leave its input alone');
+    }
+    thisScene.getLayer('marker').origin = layer.angles;
+}
+)JS", "");
+    runtime->Tick(0.0);
+    EXPECT_TRUE(marker->Translate().isApprox(Eigen::Vector3f(105, 0, 0), 1.0e-5f));
+    const Eigen::Vector3f rotated = node->Rotation();
+    EXPECT_NEAR(rotated.x(), 105.0f * 3.14159265358979323846f / 180.0f, 1.0e-6f);
+    EXPECT_NEAR(rotated.y(), 0.0f, 1.0e-6f);
+    EXPECT_NEAR(rotated.z(), 0.0f, 1.0e-6f);
+    runtime->Tick(0.1);
+    EXPECT_TRUE(node->Rotation().isApprox(rotated));
+    EXPECT_EQ(runtime->scriptErrorCount(), 0u);
+}
+
+TEST(ScriptRuntimeCompat, RotateObjectSpacePreservesAnchorsAndComposesThroughEulerSingularities) {
+    constexpr float half_pi = 1.5707963267948966f;
+    for (const Eigen::Vector3f& initial : {
+             Eigen::Vector3f(0.4f, -0.3f, 0.8f),
+             Eigen::Vector3f(0.2f, half_pi, -0.6f),
+             Eigen::Vector3f(-0.5f, -half_pi, 0.7f),
+             Eigen::Vector3f(0.3f, half_pi + 0.01f, 0.4f) }) {
+        auto runtime = CreateSceneRuntimeContext(SceneRuntimeBootstrap {});
+        auto node = std::make_shared<SceneNode>();
+        node->SetRotation(initial);
+        node->SetScale(Eigen::Vector3f(2, 3, 0.5f));
+        runtime->RegisterNode("rotor", node.get());
+        runtime->RegisterNodeSize("rotor", Eigen::Vector2f(20, 10));
+        const Eigen::Vector3f anchor(100, 50, 30);
+        runtime->SetNodeAnchorAlignment("rotor", "bottom right", anchor);
+        runtime->RegisterSceneScript(R"JS(
+export function update() {
+    thisLayer.rotateObjectSpace(new Vec3(0.3, -0.2, 0.4));
+}
+)JS", "rotor");
+        const Eigen::Matrix4d expected = SceneNode::LocalTransOf(
+            Eigen::Vector3f::Zero(), Eigen::Vector3f::Ones(), initial) *
+            SceneNode::LocalTransOf(Eigen::Vector3f::Zero(), Eigen::Vector3f::Ones(),
+                                   Eigen::Vector3f(0.3f, -0.2f, 0.4f));
+        runtime->Tick(0.01);
+        const Eigen::Matrix4d actual = SceneNode::LocalTransOf(
+            Eigen::Vector3f::Zero(), Eigen::Vector3f::Ones(), node->Rotation());
+        EXPECT_TRUE(node->Rotation().allFinite());
+        EXPECT_TRUE(actual.isApprox(expected, 1.0e-5));
+        EXPECT_TRUE(NodePointInScene(*node, 10, -5).isApprox(anchor, 1.0e-5f));
+        EXPECT_EQ(runtime->scriptErrorCount(), 0u);
+    }
+}
+
 // Alignment names the layer's pivot in its own axes: a turned layer keeps the
 // named edge on its origin instead of sliding along the scene's axes.
 TEST(ScriptRuntimeCompat, RotatedAnchoredLayerTurnsAboutItsAnchor) {
@@ -5639,7 +5756,8 @@ export function init(value) {
 }
 )JS";
     runtime->RegisterNodeVisibility("character", node.get(), ResolveBoolSetting(*runtime, {
-        { "value", true }, { "script", script } }, "character", 1));
+        { "value", true }, { "script", script } }, "character",
+        PropertyScriptObject { .animation_layer_index = 1 }));
     runtime->Tick(0.01);
     EXPECT_DOUBLE_EQ(layer.frame(1), 3.0) << "the bound animation layer started at its offset";
     EXPECT_DOUBLE_EQ(layer.frame(0), 0.0) << "its sibling was left alone";
@@ -6808,7 +6926,8 @@ export function init(value) {
   check('a name no layer has', ghost.name === 'nothing' && ghost === thisLayer.getAnimationLayer('nothing'));
   return value;
 }
-)JS" } }, "character", 1));
+)JS" } }, "character",
+        PropertyScriptObject { .animation_layer_index = 1 }));
     runtime->Tick(0.01);
     for (const auto& error : runtime->scriptErrors()) ADD_FAILURE() << error;
 }

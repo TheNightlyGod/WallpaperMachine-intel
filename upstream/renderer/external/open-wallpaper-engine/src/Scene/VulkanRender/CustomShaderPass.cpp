@@ -136,10 +136,12 @@ CustomShaderPass::CustomShaderPass(const Desc& desc) {
     m_desc.node            = desc.node;
     m_desc.visibility_node = desc.visibility_node;
     m_desc.textures        = desc.textures;
+    m_desc.texture_covers  = desc.texture_covers;
     m_desc.output          = desc.output;
     m_desc.camera_override = desc.camera_override;
     m_desc.submesh_index   = desc.submesh_index;
     m_desc.material_slot   = desc.material_slot;
+    m_desc.blend_override  = desc.blend_override;
     m_desc.sample_count    = desc.sample_count;
     m_desc.presentation_format = desc.presentation_format;
     m_desc.presents_through_final_viewport = desc.presents_through_final_viewport;
@@ -478,6 +480,13 @@ void CustomShaderPass::prepare(Scene& scene, const Device& device, RenderingReso
         }
         m_desc.vk_textures[i] = img_slots;
     }
+    // A slot that shows a cover over its render target starts on the target;
+    // the frame's update binds the cover whenever one is published.
+    m_desc.vk_cover_targets.assign(m_desc.textures.size(), ImageSlotsRef {});
+    m_desc.vk_cover_images.assign(m_desc.textures.size(), ImageSlotsRef {});
+    for (usize i = 0; i < m_desc.texture_covers.size() && i < m_desc.textures.size(); i++) {
+        if (! m_desc.texture_covers[i].empty()) m_desc.vk_cover_targets[i] = m_desc.vk_textures[i];
+    }
     {
         auto& tex_name = m_desc.output;
         if (! IsSpecTex(tex_name)) {
@@ -641,7 +650,7 @@ void CustomShaderPass::prepare(Scene& scene, const Device& device, RenderingReso
             if (m_desc.write_alpha) colorMask |= VK_COLOR_COMPONENT_A_BIT;
             color_blend.colorWriteMask = colorMask;
 
-            auto blendmode = material->blenmode;
+            auto blendmode = m_desc.blend_override.value_or(material->blenmode);
             SetBlend(blendmode, color_blend, m_desc.sample_count);
             m_desc.blending          = color_blend.blendEnable;
             m_desc.alpha_to_coverage = blendmode == BlendMode::AlphaToCoverage &&
@@ -698,7 +707,8 @@ void CustomShaderPass::prepare(Scene& scene, const Device& device, RenderingReso
             if (! presentation_pass.has_value()) return;
             pipeline.setSampleCount(VK_SAMPLE_COUNT_1_BIT);
             // Presentation may be single-sample even when the offscreen pass is not.
-            SetBlend(material->blenmode, color_blend, VK_SAMPLE_COUNT_1_BIT);
+            SetBlend(m_desc.blend_override.value_or(material->blenmode), color_blend,
+                     VK_SAMPLE_COUNT_1_BIT);
             pipeline.setColorBlendStates(spanone { color_blend });
             pipeline.multisample.alphaToCoverageEnable = VK_FALSE;
             if (! pipeline.create(device, *presentation_pass, m_presentation_pipeline)) return;
@@ -843,6 +853,9 @@ void CustomShaderPass::prepare(Scene& scene, const Device& device, RenderingReso
     auto& video_update_failure_reported = m_desc.video_update_failure_reported;
     auto& vk_textures     = m_desc.vk_textures;
     auto& vk_texture_image_keys = m_desc.vk_texture_image_keys;
+    auto& texture_covers  = m_desc.texture_covers;
+    auto& vk_cover_targets = m_desc.vk_cover_targets;
+    auto& vk_cover_images = m_desc.vk_cover_images;
     auto  camera_override = m_desc.camera_override;
     auto  material_slot   = m_desc.material_slot;
 
@@ -861,6 +874,9 @@ void CustomShaderPass::prepare(Scene& scene, const Device& device, RenderingReso
                         &video_update_failure_reported,
                         &vk_textures,
                         &vk_texture_image_keys,
+                        &texture_covers,
+                        &vk_cover_targets,
+                        &vk_cover_images,
                         camera_override,
                         material_slot,
                         memo,
@@ -970,6 +986,32 @@ void CustomShaderPass::prepare(Scene& scene, const Device& device, RenderingReso
             vk_textures[i] = device_ptr->tex_cache().ReplaceTex(*image, previous_key);
             if (i >= vk_texture_image_keys.size()) vk_texture_image_keys.resize(i + 1);
             vk_texture_image_keys[i] = image->key;
+        }
+        // A slot whose authored texture is a render target -- another layer's
+        // composite, a default cover -- shows the cover over it while one is
+        // published, and the target again once the cover is cleared or before
+        // a track has one. The cover last uploaded stays with the slot, so the
+        // next one retires it whichever of the two is bound in between.
+        for (usize i = 0; i < texture_covers.size(); ++i) {
+            const auto& cover = texture_covers[i];
+            if (cover.empty() || i >= vk_textures.size() || i >= vk_cover_targets.size() ||
+                i >= vk_cover_images.size() || i >= vk_texture_image_keys.size()) {
+                continue;
+            }
+            vk_textures[i] = vk_cover_targets[i];
+            if (runtime_images == nullptr) continue;
+            auto image = runtime_images->Parse(cover);
+            if (image == nullptr || image->header.isVideo ||
+                wallpaper::RuntimeImageSource::IsEmptyCover(*image)) {
+                continue;
+            }
+            if (vk_texture_image_keys[i] != image->key || vk_cover_images[i].slots.empty()) {
+                auto uploaded = device_ptr->tex_cache().ReplaceTex(*image, vk_texture_image_keys[i]);
+                if (uploaded.slots.empty()) continue;
+                vk_cover_images[i]       = std::move(uploaded);
+                vk_texture_image_keys[i] = image->key;
+            }
+            vk_textures[i] = vk_cover_images[i];
         }
         if (update_dyn_buf_op) writes_ok = update_dyn_buf_op() && writes_ok;
         return writes_ok;
@@ -1109,6 +1151,12 @@ StaticPassDesc CustomShaderPass::staticPassDesc(const Scene& scene) const {
                 break;
             }
         }
+    }
+    // So may a cover bound over a render target: the target alone can be a
+    // still picture, and the pass would keep it after a track brought a cover.
+    if (std::any_of(m_desc.texture_covers.begin(), m_desc.texture_covers.end(),
+                    [](const std::string& cover) { return ! cover.empty(); })) {
+        reasons |= DynamicReason::RuntimeImage;
     }
     desc.dynamic_reasons = reasons;
     return desc;
@@ -1544,6 +1592,8 @@ void CustomShaderPass::destory(const Device&, RenderingResources& rr) {
     m_desc.ubo_buf = {};
     m_desc.fb.reset();
     m_desc.vk_textures.clear();
+    m_desc.vk_cover_targets.clear();
+    m_desc.vk_cover_images.clear();
     m_desc.vk_texture_bindings.clear();
     m_desc.vk_texture_image_keys.clear();
     m_desc.vk_output = {};

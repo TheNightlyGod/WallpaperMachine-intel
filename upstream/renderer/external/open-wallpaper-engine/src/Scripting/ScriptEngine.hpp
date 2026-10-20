@@ -2,10 +2,12 @@
 
 #include "Project/ProjectProperties.hpp"
 #include "Runtime/DynamicValue.hpp"
+#include "Runtime/PropertyScriptObject.hpp"
 
 #include <Eigen/Dense>
 
 #include <map>
+#include <optional>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -75,7 +77,7 @@ public:
         ScriptHostContext host_context, JSRuntime* shared_runtime, JSContext* shared_context,
         std::string exports_object_name, std::string script_properties_name,
         PropertyScriptValueSemantic semantic = PropertyScriptValueSemantic::Generic,
-        int animation_layer_index = -1);
+        PropertyScriptObject object = {});
     ~PropertyScriptProgram();
 
     PropertyScriptProgram(const PropertyScriptProgram&)            = delete;
@@ -83,11 +85,26 @@ public:
 
     bool                  Valid() const;
     const ScriptProgramCapabilities& Capabilities() const noexcept { return m_capabilities; }
+    /// Runs `init` with the property's current value, once, and answers what it
+    /// returned as the property's value from then on (null when it returned
+    /// nothing). The scene starts every script this way before it tells any of
+    /// them the user properties: one script's first `applyUserProperties` may
+    /// call what another script's `init` set up.
+    DynamicValueUniquePtr Start(const ScriptHostContext& host_context,
+                                const DynamicValue&      current_value);
+    /// The first `applyUserProperties`, with every property, once `init` ran.
+    void                  DeliverInitialUserProperties();
+    /// Starts the script and delivers the properties first if nothing has, then
+    /// runs `update`.
     DynamicValueUniquePtr Evaluate(const ScriptHostContext& host_context,
                                    const DynamicValue&      current_value);
     /// Whether the last `Evaluate` got a value from `update()`. When it did not
     /// (it returned nothing, or threw), `Evaluate` hands back the current value.
     bool                  UpdateReturnedValue() const noexcept { return m_update_returned_value; }
+    /// What the script last wrote to its effect's `visible`, once, when it is an
+    /// effect's visibility (`PropertyScriptObject::effect_visibility`) and wrote
+    /// it since this was last asked; nothing otherwise.
+    std::optional<bool>   TakeOwnVisibilityWrite();
     void                  ApplyProjectProperties(const ProjectProperties& project_properties,
                                                   const ProjectProperties& changed_properties);
     void                  DispatchCursorClick(const ScriptHostContext& host_context);
@@ -127,11 +144,16 @@ private:
     bool                                 m_owns_context = false;
     bool                                 m_valid        = false;
     bool                                 m_init_called  = false;
+    bool                                 m_user_properties_delivered = false;
     bool                                 m_update_returned_value = false;
     bool                                 m_destroyed    = false;
-    // The animation layer this script is attached to (`animationlayers[i]`), or -1
-    // when it is attached to the layer itself. `thisObject` is that animation layer.
-    int                                  m_animation_layer_index = -1;
+    // What `thisObject` is beyond the layer: the animation layer the script is
+    // attached to (`animationlayers[i]`), the effect whose visibility it decides,
+    // the timeline bound to its setting.
+    PropertyScriptObject                 m_object;
+    // Where an effect's `thisObject` keeps the `visible` the script wrote, until
+    // `TakeOwnVisibilityWrite` takes it. Empty for any other script.
+    std::string                          m_own_state_name;
 };
 
 class SceneScriptProgram {
@@ -203,7 +225,7 @@ public:
         std::map<std::string, DynamicValue*> script_properties, DynamicValue initial_value,
         ScriptHostContext           host_context,
         PropertyScriptValueSemantic semantic = PropertyScriptValueSemantic::Generic,
-        int                         animation_layer_index = -1);
+        PropertyScriptObject        object = {});
     std::unique_ptr<SceneScriptProgram>
     CreateSceneScriptProgram(SceneRuntimeContext& runtime, std::string script_source,
                              std::string current_layer_name, ProjectProperties project_properties,

@@ -274,6 +274,9 @@ struct ParseContext {
     std::unordered_map<std::string, uint32_t>               layer_name_counts;
     std::unordered_map<int32_t, std::string>                object_runtime_names;
     std::unordered_map<std::string, uint32_t>               text_name_counts;
+    /// Sound objects the scene builds. Each is a layer scripts list and address
+    /// like a plain group, with its sound registered under the same key.
+    std::unordered_set<int32_t>                             sound_layer_ids;
     std::unordered_set<int32_t>                             referenced_layer_ids;
     /// The card each text layer shows, for a composite registered only once
     /// a later consumer turns out to sample the layer.
@@ -578,10 +581,12 @@ void PrewarmParticleSystems(ParseContext& context) {
     context.pending_prewarms.clear();
 }
 
+// `node_kind` takes an object of a kind that has no node of its own (a sound)
+// as a plain group.
 bool ParseLayerObject(const nlohmann::json& json, const nlohmann::json& objects,
-                      RawLayerObject& layer) {
+                      RawLayerObject& layer, bool node_kind = false) {
     GET_JSON_NAME_VALUE_NOWARN(json, "id", layer.id);
-    if (! IsLayerObject(json) &&
+    if (! node_kind && ! IsLayerObject(json) &&
         (! IsSchemaOnlyObject(json) || layer.id == 0 || ! HasChildObject(objects, layer.id)))
         return false;
 
@@ -610,7 +615,8 @@ void ParseLayerNodes(ParseContext& context, const nlohmann::json& objects) {
         }
 
         RawLayerObject layer;
-        if (ParseLayerObject(object, objects, layer)) {
+        if (ParseLayerObject(
+                object, objects, layer, context.sound_layer_ids.contains(object_id))) {
             layers.push_back(std::move(layer));
         }
     }
@@ -1369,12 +1375,14 @@ bool LoadMaterial(fs::VFS& vfs, const wpscene::WPMaterial& wpmat, Scene* pScene,
     const ProjectProperties* properties =
         pScene != nullptr && pScene->runtime != nullptr ? &pScene->runtime->projectProperties()
                                                         : nullptr;
+    std::vector<std::string> texture_covers;
     ApplySystemUserTextures(base_textures,
                             wpmat.usertextures,
                             properties,
                             pScene != nullptr
                                 ? dynamic_cast<RuntimeImageSource*>(pScene->imageParser.get())
-                                : nullptr);
+                                : nullptr,
+                            &texture_covers);
     // The slot is decided here and a built material is not rebuilt, so a running
     // scene holds the property at this value.
     if (pScene != nullptr && pScene->runtime != nullptr) {
@@ -1533,6 +1541,15 @@ bool LoadMaterial(fs::VFS& vfs, const wpscene::WPMaterial& wpmat, Scene* pScene,
 
     for (uint i = 0; i < material.textures.size(); i++) {
         if (! exists(sd_units[1].preprocess_info.active_tex_slots, i)) material.textures[i].clear();
+    }
+    // Only a slot that still samples its render target can show a cover over it.
+    texture_covers.resize(material.textures.size());
+    for (usize i = 0; i < texture_covers.size(); ++i) {
+        if (material.textures[i].empty()) texture_covers[i].clear();
+    }
+    if (std::any_of(texture_covers.begin(), texture_covers.end(),
+                    [](const std::string& cover) { return ! cover.empty(); })) {
+        material.texture_covers = std::move(texture_covers);
     }
 
     for (const auto& el : pWPShaderInfo->baseConstSvs) {
@@ -2142,8 +2159,11 @@ void RegisterScriptedEffectVisibility(ParseContext& context,
     effect->visible = source.visible;
     if (! source.scripted_visible || context.scene->runtime == nullptr) return;
     auto& runtime = *context.scene->runtime;
+    // The script's `thisObject` is the effect: the `visible` it writes is this
+    // effect's, not its layer's.
     runtime.RegisterEffectVisibility(
-        effect, ResolveBoolSetting(runtime, source.visible_setting, runtime_name));
+        effect, ResolveBoolSetting(runtime, source.visible_setting, runtime_name,
+                                   PropertyScriptObject { .effect_visibility = true }));
 }
 
 // The keys of a text object that are baked into the card's pixels when the layer
@@ -2595,14 +2615,15 @@ nlohmann::json MaterialConstantSettingJson(const wpscene::WPConstantShaderValue&
 std::unique_ptr<DynamicValue>
 MakeMaterialConstantDynamicValue(SceneRuntimeContext& context,
                                  const wpscene::WPConstantShaderValue& source,
-                                 std::string_view current_layer_name) {
+                                 std::string_view current_layer_name,
+                                 PropertyScriptObject object = {}) {
     if (source.script.empty()) return MakeMaterialConstantValue(source);
     const auto setting = MaterialConstantSettingJson(source);
     // Without an authored value there is no component count to preserve.
     if (source.value.empty()) {
-        return ResolveStringSetting(context, setting, current_layer_name);
+        return ResolveStringSetting(context, setting, current_layer_name, object);
     }
-    return ResolveVectorSetting(context, setting, source.value.size(), current_layer_name);
+    return ResolveVectorSetting(context, setting, source.value.size(), current_layer_name, object);
 }
 
 void LoadMaterialConstantShaderValuesImpl(SceneMaterial& material, const wpscene::WPMaterial& wpmat,
@@ -2751,14 +2772,6 @@ void RegisterMaterialConstants(ParseContext& context, std::shared_ptr<SceneMater
         const auto glname = ResolveConstvalueGlName(name, info);
         if (glname.empty()) continue;
 
-        auto dynamic_value =
-            MakeMaterialConstantDynamicValue(*context.scene->runtime, value, runtime_name);
-        if (value.script.empty()) {
-            if (auto* property_value = context.scene->runtime->FindPropertyValue(value.user);
-                property_value != nullptr) {
-                dynamic_value->connect(property_value);
-            }
-        }
         std::shared_ptr<const MaterialConstantAnimation> animation;
         if (const auto source = animations.find(name); source != animations.end()) {
             auto resolved             = std::make_shared<MaterialConstantAnimation>();
@@ -2775,6 +2788,22 @@ void RegisterMaterialConstants(ParseContext& context, std::shared_ptr<SceneMater
                 }
             }
             animation = std::move(resolved);
+        }
+        // A script on a keyed constant reaches the constant's own timeline as
+        // `thisObject.getAnimation()`, not the first unnamed one of its layer
+        // (an origin or another constant).
+        PropertyScriptObject object;
+        if (animation != nullptr && animation->playback != nullptr && ! value.script.empty()) {
+            object.property_animation =
+                context.scene->runtime->RegisterPropertyAnimation(animation->playback);
+        }
+        auto dynamic_value = MakeMaterialConstantDynamicValue(*context.scene->runtime, value,
+                                                              runtime_name, object);
+        if (value.script.empty()) {
+            if (auto* property_value = context.scene->runtime->FindPropertyValue(value.user);
+                property_value != nullptr) {
+                dynamic_value->connect(property_value);
+            }
         }
         context.scene->runtime->RegisterMaterialConstant(
             material, glname, std::move(dynamic_value), std::move(animation));
@@ -3292,26 +3321,27 @@ void BindPuppetAnimationLayerSettings(ParseContext& context, const std::string& 
         const auto& setting = wpimgobj.puppet_layer_settings[index];
         if (! setting.is_object()) continue;
         const i32 layer_index = static_cast<i32>(index);
+        const PropertyScriptObject animation_layer { .animation_layer_index = layer_index };
         const auto is_dynamic = [](const nlohmann::json& value) {
             return value.is_object() && (value.contains("user") || value.contains("script"));
         };
         if (setting.contains("visible") && is_dynamic(setting.at("visible"))) {
             runtime.RegisterDynamicValueListener(
-                ResolveBoolSetting(runtime, setting.at("visible"), runtime_name, layer_index),
+                ResolveBoolSetting(runtime, setting.at("visible"), runtime_name, animation_layer),
                 [layer, layer_index](const DynamicValue& value) mutable {
                     layer.setVisible(layer_index, value.getBool());
                 });
         }
         if (setting.contains("rate") && is_dynamic(setting.at("rate"))) {
             runtime.RegisterDynamicValueListener(
-                ResolveFloatSetting(runtime, setting.at("rate"), runtime_name, layer_index),
+                ResolveFloatSetting(runtime, setting.at("rate"), runtime_name, animation_layer),
                 [layer, layer_index](const DynamicValue& value) mutable {
                     layer.setRate(layer_index, value.getFloat());
                 });
         }
         if (setting.contains("blend") && is_dynamic(setting.at("blend"))) {
             runtime.RegisterDynamicValueListener(
-                ResolveFloatSetting(runtime, setting.at("blend"), runtime_name, layer_index),
+                ResolveFloatSetting(runtime, setting.at("blend"), runtime_name, animation_layer),
                 [layer, layer_index](const DynamicValue& value) mutable {
                     layer.setBlend(layer_index, value.getFloat());
                 });
@@ -4040,6 +4070,9 @@ void ResolveLoadOnlySceneSetting(SceneRuntimeContext& runtime, const nlohmann::j
     if (! HasDynamicSetting(setting)) return;
     if constexpr (std::is_same_v<T, bool>) {
         value = ResolveBoolSetting(runtime, setting)->getBool();
+    } else if constexpr (std::is_same_v<T, std::array<float, 3>>) {
+        const auto vector = ResolveVec3Setting(runtime, setting)->getVec3();
+        value = { vector.x(), vector.y(), vector.z() };
     } else {
         value = ResolveFloatSetting(runtime, setting)->getFloat();
     }
@@ -4065,7 +4098,6 @@ void InitContext(ParseContext& context, fs::VFS& vfs, wpscene::WPScene& sc) {
     scene.opaque_first = ! sc.general.isOrtho && sc.general.transparentsorting;
     scene.light_config = ParseSceneLightConfig(sc.general.lightconfig);
     scene.fog_distance = sc.general.fogdistance;
-    scene.fog_height   = sc.general.fogheight;
     if (context.request != nullptr && context.request->project_properties != nullptr) {
         SceneRuntimeBootstrap bootstrap {
             .canvas_width       = scene.ortho[0],
@@ -4082,6 +4114,20 @@ void InitContext(ParseContext& context, fs::VFS& vfs, wpscene::WPScene& sc) {
                 *scene.runtime, sc.general.clearcolor_setting, {}, Vec3SettingSemantic::Generic));
         }
         auto& g = sc.general;
+        const auto lighting = [&](const char* key, auto& value) {
+            const auto setting = g.lighting_settings.find(key);
+            if (setting != g.lighting_settings.end()) {
+                ResolveLoadOnlySceneSetting(*scene.runtime, *setting, value);
+            }
+        };
+        lighting("ambientcolor", g.ambientcolor);
+        lighting("skylightcolor", g.skylightcolor);
+        lighting("fogheight", g.fogheight);
+        lighting("fogheightstart", g.fogheightstart);
+        lighting("fogheightend", g.fogheightend);
+        lighting("fogheightcolor", g.fogheightcolor);
+        lighting("fogheightstartdensity", g.fogheightstartdensity);
+        lighting("fogheightenddensity", g.fogheightenddensity);
         ResolveLoadOnlySceneSetting(*scene.runtime, g.bloom_setting, g.bloom);
         ResolveLoadOnlySceneSetting(*scene.runtime, g.cameraparallax_setting, g.cameraparallax);
         ResolveLoadOnlySceneSetting(*scene.runtime, g.cameraparallaxamount_setting,
@@ -4106,6 +4152,7 @@ void InitContext(ParseContext& context, fs::VFS& vfs, wpscene::WPScene& sc) {
                                     setting(g.camerashakeroughness_setting, g.camerashakeroughness)));
         }
     }
+    scene.fog_height = sc.general.fogheight;
     // Wallpaper Engine renders in HDR only when the scene asks for HDR and has
     // bloom on (its bloom switch read above, a bound one at its property's
     // value); an HDR scene without bloom is drawn as an ordinary one.
@@ -4426,11 +4473,22 @@ void ParseImageObj(ParseContext& context, wpscene::WPImageObject& img_obj) {
         RegisterImageComposite(context, wpimgobj, *spImgNode);
     }
 
+    // A card with no area (a size of 0 on one axis) draws nothing on screen.
+    // A layer that draws into targets of its own -- its effects' buffers, the
+    // composite another layer samples -- fills them all the same, as any card
+    // fills the targets made at its render extent: an audio widget's spectrum
+    // buffer, 64 wide and 0 high, carried nothing into the composite its bars
+    // read. Such a card takes the render extent and is drawn only there.
+    const bool card_has_no_area = ! (wpimgobj.size[0] > 0.0f) || ! (wpimgobj.size[1] > 0.0f);
+    const bool card_fills_own_targets =
+        card_has_no_area && (hasEffect || context.referenced_layer_ids.contains(wpimgobj.id));
     // A compose layer that only copies the background behind it adds nothing on
     // screen. Sampled by another layer, though, its card is that background --
     // a mask over later layers paints it back -- so it is drawn there alone.
+    // With effects, it is the chain's last pass that is drawn there alone.
     const bool composite_only =
-        isCompose && ! hasEffect && context.referenced_layer_ids.contains(wpimgobj.id);
+        ! hasEffect && ((isCompose && context.referenced_layer_ids.contains(wpimgobj.id)) ||
+                        card_fills_own_targets);
     spImgNode->SetCompositeOnly(composite_only);
     const bool skipComposeRender = isCompose && ! hasEffect && ! composite_only;
     if (skipComposeRender) {
@@ -4599,6 +4657,11 @@ void ParseImageObj(ParseContext& context, wpscene::WPImageObject& img_obj) {
                     context, spImgNode.get(), wpimgobj, *puppet, baseConstSvs, svData);
             }
         }
+        std::array<uint16_t, 2> card { (uint16_t)wpimgobj.size[0], (uint16_t)wpimgobj.size[1] };
+        if (card_fills_own_targets) {
+            const auto extent = ResolveImageRenderExtent(wpimgobj, context);
+            card = { (uint16_t)extent[0], (uint16_t)extent[1] };
+        }
         if (! puppet) {
             if (passthrough_card != nullptr) {
                 // Laid out from the layer's own transform for now, and again from
@@ -4611,11 +4674,9 @@ void ParseImageObj(ParseContext& context, wpscene::WPImageObject& img_obj) {
                     .card = passthrough_card,
                 });
             } else {
-                GenCardMesh(
-                    mesh, { (uint16_t)wpimgobj.size[0], (uint16_t)wpimgobj.size[1] }, mapRate);
+                GenCardMesh(mesh, card, mapRate);
             }
-            GenCardMesh(effct_final_mesh,
-                        { (uint16_t)wpimgobj.size[0], (uint16_t)wpimgobj.size[1] });
+            GenCardMesh(effct_final_mesh, card);
         }
     }
     // material blendmode for last step to use
@@ -4702,6 +4763,7 @@ void ParseImageObj(ParseContext& context, wpscene::WPImageObject& img_obj) {
             }
             imgEffectLayer->FinalMesh().ChangeMeshDataFrom(effct_final_mesh);
             imgEffectLayer->FinalNode().CopyTrans(*spImgNode);
+            imgEffectLayer->SetFinalCompositeOnly(card_fills_own_targets);
             if (! render_as_compose) {
                 spImgNode->SetRenderTransformOverride(Eigen::Matrix4d::Identity());
             } else {
@@ -6113,7 +6175,8 @@ std::string_view wallpaper::UserTexturePropertyName(const wpscene::WPUserTexture
 void wallpaper::ApplySystemUserTextures(std::vector<std::string>&                  textures,
                                         const std::vector<wpscene::WPUserTexture>& usertextures,
                                         const ProjectProperties*                   properties,
-                                        RuntimeImageSource*                        covers) {
+                                        RuntimeImageSource*                        covers,
+                                        std::vector<std::string>* target_covers) {
     // Anything neither the runtime nor the wallpaper's own properties supply is
     // left on the authored texture in that position rather than replaced by a
     // blank one.
@@ -6125,9 +6188,15 @@ void wallpaper::ApplySystemUserTextures(std::vector<std::string>&               
             // The authored texture stays in the slot until the runtime has a
             // cover to put there: a cover layer shows its own art while nothing
             // plays. A render target or another layer's composite is not a
-            // picture the source can hold, so such a slot samples the cover alone.
-            if (covers != nullptr && index < textures.size() && ! textures[index].empty() &&
-                ! IsSpecTex(textures[index])) {
+            // picture the source can hold, so the slot keeps the target and the
+            // renderer binds the cover over it while one is published.
+            const bool authored = index < textures.size() && ! textures[index].empty();
+            if (authored && IsSpecTex(textures[index]) && target_covers != nullptr) {
+                if (target_covers->size() <= index) target_covers->resize(index + 1);
+                (*target_covers)[index] = std::move(replacement);
+                continue;
+            }
+            if (covers != nullptr && authored && ! IsSpecTex(textures[index])) {
                 replacement = covers->BindCoverSlot(replacement, textures[index]);
             }
         } else if (properties != nullptr && ! UserTexturePropertyName(user_texture).empty()) {
@@ -6251,10 +6320,15 @@ std::shared_ptr<Scene> WPSceneParser::Parse(const SceneParseRequest& request,
     context.layer_name_counts.clear();
     context.object_runtime_names.clear();
     context.text_name_counts.clear();
+    context.sound_layer_ids.clear();
     for (const auto& obj : wp_objs) {
         std::visit(visitor::overload {
                        [&context](const wpscene::WPImageObject& object) {
                            CountNodeRuntimeName(context.layer_name_counts, object);
+                       },
+                       [&context](const wpscene::WPSoundObject& object) {
+                           CountNodeRuntimeName(context.layer_name_counts, object);
+                           if (object.id != 0) context.sound_layer_ids.insert(object.id);
                        },
                        [&context](const wpscene::WPParticleObject& object) {
                            CountNodeRuntimeName(context.layer_name_counts, object);
@@ -6313,6 +6387,14 @@ std::shared_ptr<Scene> WPSceneParser::Parse(const SceneParseRequest& request,
                            context.object_runtime_names[object.id] =
                                NodeRuntimeName(object.name, object.id, count);
                        },
+                       [&context](const wpscene::WPSoundObject& object) {
+                           if (object.id == 0) return;
+                           const auto count = object.name.empty()
+                                                  ? 0u
+                                                  : context.layer_name_counts[object.name];
+                           context.object_runtime_names[object.id] =
+                               NodeRuntimeName(object.name, object.id, count);
+                       },
                        [](const auto&) {
                        },
                    },
@@ -6339,6 +6421,7 @@ std::shared_ptr<Scene> WPSceneParser::Parse(const SceneParseRequest& request,
     // duplicate authored names to cross-layer scripts in declaration order.
     // Register before compiling scripts so module-level lookups work too.
     if (context.scene->runtime != nullptr) {
+        auto& runtime = *context.scene->runtime;
         for (const auto& object : *context.object_list) {
             if (!object.is_object() || (object.contains("name") && !object.at("name").is_string()))
                 continue;
@@ -6349,9 +6432,38 @@ std::shared_ptr<Scene> WPSceneParser::Parse(const SceneParseRequest& request,
             const auto id = object.value("id", 0);
             if (const auto key = context.object_runtime_names.find(id);
                 key != context.object_runtime_names.end()) {
-                context.scene->runtime->RegisterLayerAlias(name, key->second);
+                runtime.RegisterLayerAlias(name, key->second);
             } else if (IsLayerObject(object) && id != 0) {
-                context.scene->runtime->RegisterLayerAlias(name, NodeRuntimeName(name, id, count->second));
+                runtime.RegisterLayerAlias(name, NodeRuntimeName(name, id, count->second));
+            }
+        }
+        // A layer registered under a generated key (its name is shared, or
+        // empty) is still called what the scene file calls it. A script
+        // compiles as its layer is parsed, and the layer object it builds then
+        // (its `thisLayer`, a layer it looks up at module level) keeps the
+        // name it was built with, so the names are on record before the first
+        // script compiles, under the key each kind of layer will be given.
+        const auto record_name = [&runtime](const std::string& name, const std::string& key) {
+            if (! key.empty() && key != name) runtime.RegisterLayerAuthoredName(key, name);
+        };
+        for (const auto& obj : wp_objs) {
+            std::visit(visitor::overload {
+                           [&](const wpscene::WPTextObject& object) {
+                               record_name(object.name, TextRuntimeName(context, object));
+                           },
+                           [&](const wpscene::WPLightObject& object) {
+                               record_name(object.name, LightRuntimeName(context, object));
+                           },
+                           [&](const auto& object) {
+                               record_name(object.name, LayerRuntimeName(context, object));
+                           },
+                       },
+                       obj);
+        }
+        for (const auto& object : *context.object_list) {
+            RawLayerObject layer;
+            if (IsLayerObject(object) && ParseLayerObject(object, *context.object_list, layer)) {
+                record_name(layer.name, LayerRuntimeName(context, layer));
             }
         }
     }
@@ -6434,8 +6546,11 @@ std::shared_ptr<Scene> WPSceneParser::Parse(const SceneParseRequest& request,
                            ParseParticleObj(context, obj);
                        },
                        [&context, &sm](wpscene::WPSoundObject& obj) {
-                           WPSoundParser::Parse(
-                               obj, *context.vfs, sm, context.scene->runtime.get());
+                           WPSoundParser::Parse(obj,
+                                                *context.vfs,
+                                                sm,
+                                                context.scene->runtime.get(),
+                                                LayerRuntimeName(context, obj));
                        },
                        [&context](wpscene::WPLightObject& obj) {
                            ParseLightObj(context, obj);

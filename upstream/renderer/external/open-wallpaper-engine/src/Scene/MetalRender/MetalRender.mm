@@ -1470,6 +1470,12 @@ struct MetalRender::Impl
         std::vector<id<MTLTexture>> slots;
         /// The content version each slot holds; zero means "never filled".
         std::vector<uint64_t>       slot_versions;
+        /// Whether each slot holds a track's cover rather than the empty texel
+        /// a cover name starts as. Read only where a cover is bound over a
+        /// render target (`ScenePassDescription::cover_keys`), and taken from
+        /// the image uploaded into that slot, so the choice and the pixels
+        /// always agree.
+        std::vector<bool>           slot_covers;
         /// The newest version seen, which is what the reuse analysis folds in.
         uint64_t                    version { 0 };
         uint32_t                    width { 0 };
@@ -1806,6 +1812,11 @@ struct MetalRender::Impl
     /// means the first, which is what every non-sprite texture has.
     id<MTLTexture> resolveTexture(Scene& scene, const std::string& key,
                                   id<MTLSamplerState>* sampler_out, int image_slot = -1);
+    /// The cover slot `slot` of `desc` shows over its render target this frame
+    /// (`ScenePassDescription::cover_keys`), with its sampler; nil while no
+    /// cover is published, when the slot samples the target it names.
+    id<MTLTexture> publishedCover(const ScenePassDescription& desc, std::size_t slot,
+                                  id<MTLSamplerState>* sampler_out);
     /// Names the replaceable images this graph binds. Called once per compiled
     /// graph, because the answer cannot change inside one.
     void collectRuntimeImageKeys(Scene& scene);
@@ -2105,15 +2116,19 @@ void MetalRender::Impl::collectRuntimeImageKeys(Scene& scene)
         dynamic_cast<const RuntimeImageSource*>(scene.imageParser.get());
     if (runtime_images == nullptr) return;
 
-    for (const auto& desc : descriptions) {
-        for (const auto& key : desc.texture_keys) {
-            if (key.empty() || IsSpecTex(key)) continue;
-            if (! runtime_images->IsRuntimeImage(key)) continue;
-            if (std::find(runtime_image_keys.begin(), runtime_image_keys.end(), key) ==
-                runtime_image_keys.end()) {
-                runtime_image_keys.push_back(key);
-            }
+    const auto collect = [&](const std::string& key) {
+        if (key.empty() || IsSpecTex(key)) return;
+        if (! runtime_images->IsRuntimeImage(key)) return;
+        if (std::find(runtime_image_keys.begin(), runtime_image_keys.end(), key) ==
+            runtime_image_keys.end()) {
+            runtime_image_keys.push_back(key);
         }
+    };
+    for (const auto& desc : descriptions) {
+        for (const auto& key : desc.texture_keys) collect(key);
+        // A cover a slot shows over its render target is uploaded like any
+        // other, though the slot itself names the target.
+        for (const auto& key : desc.cover_keys) collect(key);
     }
 }
 
@@ -2184,6 +2199,7 @@ void MetalRender::Impl::refreshRuntimeImages(Scene& scene)
             if (rebuilt.size() != kFramesInFlight) continue;
             ring.slots           = std::move(rebuilt);
             ring.slot_versions.assign(kFramesInFlight, 0);
+            ring.slot_covers.assign(kFramesInFlight, false);
             ring.width           = width;
             ring.height          = height;
             ring.format          = format;
@@ -2201,8 +2217,22 @@ void MetalRender::Impl::refreshRuntimeImages(Scene& scene)
         // buffer is still reading. A level the image does not hold stays as it was.
         if (! UploadImageLevels(ring.slots[slot], source, bytes_per_pixel, block_bytes)) continue;
         ring.slot_versions[slot] = version;
+        ring.slot_covers[slot]   = ! RuntimeImageSource::IsEmptyCover(*parsed);
         ++runtime_image_uploads;
     }
+}
+
+id<MTLTexture> MetalRender::Impl::publishedCover(const ScenePassDescription& desc,
+                                                 std::size_t slot,
+                                                 id<MTLSamplerState>* sampler_out)
+{
+    if (slot >= desc.cover_keys.size() || desc.cover_keys[slot].empty()) return nil;
+    const auto ring = runtime_image_rings.find(desc.cover_keys[slot]);
+    if (ring == runtime_image_rings.end() || ring->second.slots.empty()) return nil;
+    const std::size_t frame = static_cast<std::size_t>(frame_slot) % kFramesInFlight;
+    if (frame >= ring->second.slot_covers.size() || ! ring->second.slot_covers[frame]) return nil;
+    if (sampler_out != nullptr) *sampler_out = samplerFor(ring->second.sample);
+    return ring->second.slots[frame];
 }
 
 id<MTLTexture> MetalRender::Impl::resolveTexture(Scene& scene, const std::string& key,
@@ -3806,6 +3836,10 @@ void MetalRender::Impl::computeDemandReasons(Scene& scene, rg::RenderGraph& grap
                     }
                 }
             }
+            if (std::any_of(desc.cover_keys.begin(), desc.cover_keys.end(),
+                            [](const std::string& cover) { return ! cover.empty(); })) {
+                reasons |= vulkan::DynamicReason::RuntimeImage;
+            }
             // A sheet with more than one frame and a mesh the runtime rewrites
             // both change the picture without any uniform this reflection
             // names. Reported here so on-demand updating keeps the clock
@@ -4092,6 +4126,12 @@ void MetalRender::Impl::compileStaticCache(Scene& scene)
                 if (runtime_images != nullptr && runtime_images->IsRuntimeImage(key))
                     reasons |= vulkan::DynamicReason::RuntimeImage;
             }
+            // A cover bound over a render target changes the picture whenever
+            // a track brings one, though the target alone may be still.
+            if (std::any_of(desc.cover_keys.begin(), desc.cover_keys.end(),
+                            [](const std::string& cover) { return ! cover.empty(); })) {
+                reasons |= vulkan::DynamicReason::RuntimeImage;
+            }
             // A mesh the runtime rewrites every frame -- a particle system --
             // is never reusable. Its geometry is uploaded per frame and the
             // upload happens only for a pass that executes, so a skipped one
@@ -4223,13 +4263,15 @@ vulkan::StaticPassSample MetalRender::Impl::frameSample(Scene& scene, std::size_
     // only moving input is that image would otherwise be called unchanged and
     // keep showing the previous picture.
     if (! runtime_image_rings.empty()) {
-        for (const auto& key : desc.texture_keys) {
-            if (key.empty()) continue;
+        const auto fold = [&](const std::string& key) {
+            if (key.empty()) return;
             const auto ring = runtime_image_rings.find(key);
-            if (ring == runtime_image_rings.end()) continue;
+            if (ring == runtime_image_rings.end()) return;
             hash = vulkan::StaticHashBytes(hash, key.data(), key.size());
             hash = vulkan::StaticHashMix(hash, ring->second.version);
-        }
+        };
+        for (const auto& key : desc.texture_keys) fold(key);
+        for (const auto& key : desc.cover_keys) fold(key);
     }
 
     // The sprite frame as it will actually be sampled, not its index: two
@@ -5226,6 +5268,14 @@ bool MetalRender::drawFrame(Scene& scene, bool* presented)
                     if (const auto sprite = pass.sprites.find(t);
                         sprite != pass.sprites.end() && sprite->second.numFrames() > 0) {
                         image_slot = sprite->second.GetCurFrame().imageId;
+                    }
+                    // A cover published over the slot's render target is bound
+                    // in its place, sampled as a cover is.
+                    id<MTLSamplerState> cover_sampler = nil;
+                    if (id<MTLTexture> cover = impl.publishedCover(desc, t, &cover_sampler);
+                        cover != nil) {
+                        bind_texture(slot, cover, cover_sampler);
+                        continue;
                     }
                     bind_texture(slot,
                                  impl.resolveTexture(scene, desc.texture_keys[t], nullptr,

@@ -34,6 +34,13 @@ public:
 
     std::string              name;
     std::vector<std::string> textures;
+    /// Per texture slot, in slot order: the now-playing cover (`$mediaThumbnail`,
+    /// `$mediaPreviousThumbnail`) a slot shows in place of its authored render
+    /// target -- another layer's composite, the default cover a layer of its own
+    /// draws -- while a cover is published (`RuntimeImageSource::HoldsCover`).
+    /// Empty for every other slot. The slot keeps the target in `textures`, so
+    /// the graph still draws the target before this pass reads it.
+    std::vector<std::string> texture_covers;
     std::vector<std::string> defines;
 
     bool hasSprite { false };

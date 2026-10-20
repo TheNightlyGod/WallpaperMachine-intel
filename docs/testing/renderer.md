@@ -847,9 +847,10 @@ into private textures; the three that draw skip visibly without a Metal device.
   MSAA by default, from its `msaa` setting); a camera path's `camerafade` fade,
   the planar `_rt_Reflection` pass and `customsortorder` are not implemented
   (the model flags are under their own entry below); and
-  `general` fog keys bound to user properties keep the value the scene loaded
-  with. Wallpaper Engine's user-level post-processing quality (off, LDR, HDR,
-  display HDR) is fixed at its highest SDR level.
+  `general` distance-fog keys bound to user properties keep their authored values.
+  Height fog and ambient/skylight colours resolve property values at load; preview
+  edits are deferred to the existing apply/reload path. Wallpaper Engine's user-level
+  post-processing quality (off, LDR, HDR, display HDR) is fixed at its highest SDR level.
 - **Fog reaches an effect layer only where its own material takes fog.** The pass
   that fogs an effect layer where it sits (`effectpassthrough_4`, ending the chain)
   stands in for the fog the layer's own material (its `FOG` combo) would have taken,
@@ -885,9 +886,10 @@ into private textures; the three that draw skip visibly without a Metal device.
   `color` timeline holds the authored colour, and a timeline on a setting that also has
   a script or a user property is dropped (the script or property is its only writer),
   even when the script is only an event handler that calls `getAnimation().play()`: that
-  start-paused timeline is neither shown at its first frame nor played, because the
-  script's no-name `getAnimation()` resolves the layer's unnamed alpha clock, not the
-  setting's (it needs a `getAnimation` scoped to the property).
+  start-paused timeline is neither shown at its first frame nor played, and with no
+  timeline of its own the script's no-name `getAnimation()` finds the layer's first
+  unnamed clock. A shader constant keeps its timeline beside its script, and there the
+  no-name call is the constant's own timeline.
   That a start-paused timeline shows its first frame before anything plays follows the
   origin and shader-constant timelines here and the editor's start-paused flag being a
   play state beside the curves; no frame of Wallpaper Engine showing a paused scale or
@@ -1237,20 +1239,14 @@ into private textures; the three that draw skip visibly without a Metal device.
   many spawns with a long start time in one frame costs that many times as much;
   spreading the work over frames is not done, because it would change what the
   instance looks like when it first appears.
-- **A cover slot's fallback is a picture, not a render target.** A slot bound to the
-  now-playing cover (`$mediaThumbnail`, `$mediaPreviousThumbnail`) shows its authored
-  texture until a cover arrives, but only when that is a colour picture. Where the
-  author left another layer's composite in it (a default cover drawn by a layer of its
-  own and sampled by the cover layer), the slot stays the transparent texel until a
-  cover arrives, where Wallpaper Engine's frame shows that composite; substituting it
-  needs a pass binding that moves between a render target and a runtime image in both
-  renderers' pass setup. The layer colour of a layer that binds a cover stays white
-  (`WPImageObject`), so the art, or the engine's own white placeholder a layer leaves
-  in the slot, draws untinted while nothing plays; whether Wallpaper Engine tints it
-  with the layer's colour is not established, and no local scene sets a colour on such
-  a layer. A cover layer that Wallpaper Engine hides while nothing plays through a
-  `mediaPlaybackChanged` script stays visible here until the host delivers an idle
-  playback state, so it now draws its art or placeholder in that state.
+- **A cover layer while nothing plays.** The layer colour of a layer that binds a
+  cover stays white (`WPImageObject`), so the art, or the engine's own white
+  placeholder a layer leaves in the slot, draws untinted while nothing plays; whether
+  Wallpaper Engine tints it with the layer's colour is not established, and no local
+  scene sets a colour on such a layer. A cover layer that Wallpaper Engine hides while
+  nothing plays through a `mediaPlaybackChanged` script stays visible here until the
+  host delivers an idle playback state, so it now draws its art or placeholder in that
+  state.
 - **Layer calls a script can make that this renderer lacks.** `getTransformMatrix()` is
   there; `getChildren`, `setParent`, `rotateObjectSpace`, `lookAt`, `lookAtYaw` and
   `getAttachment*` (the layer binding Wallpaper Engine registers beside it) are not, so a

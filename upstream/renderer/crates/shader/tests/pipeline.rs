@@ -62,6 +62,79 @@ fn float_remainder_reaches_both_backends_without_repeating_operands() {
     }
 }
 
+/// Compiles a fragment shader that reads `v_TexCoord` for both backends.
+fn compile_fragment_for_both_backends(name: &str, fragment: &str) {
+    for target in [ShaderTarget::VulkanSpirv, ShaderTarget::MetalMsl] {
+        let request = ShaderProgramRequest::builder(ShaderName::new(name).unwrap())
+            .target(target)
+            .stage(ShaderStageSource::new(ShaderStageKind::Vertex, concat!(
+                "attribute vec2 a_Position;\n",
+                "varying vec2 v_TexCoord;\n",
+                "void main() {\n",
+                "  v_TexCoord = a_Position;\n",
+                "  gl_Position = vec4(a_Position, 0.0, 1.0);\n",
+                "}\n",
+            )))
+            .stage(ShaderStageSource::new(ShaderStageKind::Fragment, fragment))
+            .build().unwrap();
+        if let Err(error) = pipeline().compile(&request) {
+            panic!("{name} should compile for {target:?}: {error:?}");
+        }
+    }
+}
+
+#[test]
+fn array_suffix_declares_only_its_own_declarator() {
+    // `float color[4], f;` declares one array and one scalar. Naga applied the
+    // suffix to every later name in the list, so `f + vec2` failed validation.
+    compile_fragment_for_both_backends("array_declarator_lists", concat!(
+        "const float WEIGHTS[2] = float[2](0.25, 0.75), SCALE = 2.0;\n",
+        "varying vec2 v_TexCoord;\n",
+        "void main() {\n",
+        "  float color[4], f;\n",
+        "  float3 tints[2], tint = float3(0.5, 0.5, 0.5);\n",
+        "  float a, b[2], c[3], d;\n",
+        "  for (int i = 0; i < 4; i++) {\n",
+        "    f = float(i);\n",
+        "    color[i] = (vec2(v_TexCoord.x, pow(v_TexCoord.y, 2)) + f).x;\n",
+        "  }\n",
+        "  tints[1] = tint;\n",
+        "  a = color[3];\n",
+        "  b[1] = a;\n",
+        "  c[2] = b[1];\n",
+        "  d = c[2] * SCALE * WEIGHTS[1];\n",
+        "  gl_FragColor = vec4(tints[1] * d, color[0]);\n",
+        "}\n",
+    ));
+}
+
+#[test]
+fn integer_clamp_keeps_integer_literals() {
+    // Integer literals in `clamp` become floats for float operands, which the
+    // legacy shaders rely on; an `int` or `uint` operand selects the integer
+    // overload instead, and a float literal there fails validation.
+    compile_fragment_for_both_backends("integer_clamp", concat!(
+        "uniform float g_AudioSpectrum64Left[64];\n",
+        "const int BANDS = 64;\n",
+        "varying vec2 v_TexCoord;\n",
+        "float band(int index, int maxBand) {\n",
+        "  index = abs(index);\n",
+        "  if (index > maxBand) { index = maxBand - (index - maxBand); }\n",
+        "  index = clamp(index, 0, BANDS - 1);\n",
+        "  return g_AudioSpectrum64Left[index];\n",
+        "}\n",
+        "void main() {\n",
+        "  ivec2 cell = ivec2(v_TexCoord * 10.0);\n",
+        "  cell = clamp(cell, 0, 5);\n",
+        "  int row = clamp(int(v_TexCoord.y * 9.0), 0, 5);\n",
+        "  uint level = clamp(uint(v_TexCoord.y * 9.0), 0, 5);\n",
+        "  level = max(level, 1) + min(level, 3);\n",
+        "  float x = clamp(v_TexCoord.x, 0, 1);\n",
+        "  gl_FragColor = vec4(band(int(x * 63.0), 48), float(cell.x + row), float(level), 1.0);\n",
+        "}\n",
+    ));
+}
+
 /// Wallpaper Engine's installed `assets/shaders` directory. Honors the same
 /// `WALLPAPER_MACHINE_ASSETS_ROOT` override the bridge uses
 /// (`crates/bridge/src/paths.rs`), falling back to the standard Steam location

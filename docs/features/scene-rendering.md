@@ -92,11 +92,20 @@ Scripts list the scene's layers through `thisScene`. `getLayer(index)`,
 one order, the scene file's object order followed by the layers scripts made, and a
 sort moves a layer in it as well as in the draw order among its siblings.
 `layer.name` is the name the scene file gives the layer, empty for an unnamed one,
-whatever key the engine files it under. Only layers the parser built are counted:
-an object the scene file marks statically invisible, which nothing can show, is
-never built, so it has no index or id and the count differs from the object list
-by those. `destroyLayer` removes the layers a script made below the layer too.
-A scene script's `init` runs once the scene is built, so it sees all of that.
+whatever key the engine files it under, from the moment any script can reach the
+layer, its own script compiling with it included. A sound object is a layer in that
+order like any other, found by its id and played through the object
+`enumerateLayers()` hands out; a music widget finds its tracks there by name. Only
+layers the parser built are counted: an object the scene file marks statically
+invisible, which nothing can show, is never built, so it has no index or id and the
+count differs from the object list by those. `destroyLayer` removes the layers a
+script made below the layer too. A scene script's `init` runs once the scene is
+built, so it sees all of that. Property scripts start on the scene's first tick:
+every one runs `init`, in the scene's order, before any of them is told the user
+properties, and that before any `update`, because a widget's options layer may call
+from its first `applyUserProperties` what a later layer's `init` set up. What `init`
+returns is the property's value from then on, as what `update` returns is: a drag
+handle hides itself there, and a typing text starts empty.
 `applyGeneralSettings({ language })` is always told `en-us`: the host does not
 yet pass the interface language on. `parallaxDepth` set on a layer reaches the
 layer, its effect passes and the layers below it (a layer drawn through effects
@@ -128,7 +137,11 @@ animated setting, shader constants and light intensity included); `single` stops
 for frames, so a scene whose only motion it was can go idle. A timeline with
 `startpaused` shows its first frame from the first frame of the scene, not the
 authored value, until a script plays it, and `getAnimation(name)` finds it by its
-`name`. Settings the editor keyed together (`options.parent`: an origin and the angles
+`name`. The script of a setting that keeps its timeline beside it (a shader constant)
+gets that timeline from `thisObject.getAnimation()` with no name, as Wallpaper
+Engine's `IThisPropertyObject` does; it got the layer's first unnamed timeline, which
+on a layer that also slides is its origin's, so a cross-fade a new cover restarts
+restarted the slide and never faded. Settings the editor keyed together (`options.parent`: an origin and the angles
 that turn with it) are one animation on the first one's clock, so playing or holding
 it moves them all. A script or a property bound to the same setting is its only
 writer. A colour timeline tints the layer's own material and each of its effect passes
@@ -297,6 +310,13 @@ composite, which does not look at `copybackground`, and not seen in a frame: the
 local fogged scene has no such layer. Compose, fullscreen and puppet layers, a layer
 that blends onto the screen by colour blend mode, text layers, and a layer whose
 material takes no fog keep what they drew.
+
+Height fog is read whenever its JSON fields are present, including older package
+containers. Ambient/skylight colours and height-fog settings resolve user-property
+values at scene load; preview edits are deferred to the existing apply/reload path
+rather than adding per-frame uniform work. SceneScript `rotateObjectSpace(Vec3)` composes a
+radians Euler increment around the layer's local axes; the `angles` property
+continues to read and write degrees.
 
 Shadow maps, spot cookies and
 volumetric light shafts are not drawn: a light that casts a shadow lights as if
@@ -750,12 +770,25 @@ authored texture, whatever the number of layers that share them). The native
 renderer uploads it as the file holds it, block-compressed and mipmapped, and both
 renderers sample it as the file says and a cover clamped, as before. Nothing is
 substituted, and the slot stays the transparent texel the cover starts as, when no
-texture is authored in it, or when the authored one is a video, a sprite sheet, a
-render target or another layer's composite, or a one- or two-channel picture (a mask
-or a normal map: the material's shader reads those through other channels than a
-cover's). The layer colour stays white on a layer that binds a cover, as it was, so
-the art is drawn untinted: whether Wallpaper Engine tints it with the layer's colour
-while nothing plays is not established.
+texture is authored in it, or when the authored one is a video, a sprite sheet, or a
+one- or two-channel picture (a mask or a normal map: the material's shader reads
+those through other channels than a cover's). The layer colour stays white on a layer
+that binds a cover, as it was, so the art is drawn untinted: whether Wallpaper Engine
+tints it with the layer's colour while nothing plays is not established.
+
+Where the texture authored in a cover slot is a render target, another layer's
+composite (a default cover a layer of its own draws, which a cover layer, a blurred
+background and a cross-fade all sample), the slot keeps sampling that target until a
+cover is published, again after the clear, and in the previous-cover slot until a
+track has a predecessor; the slot was the transparent texel instead, so a cross-fade
+that writes the previous cover's alpha drew nothing at all and a background built on
+it was the clear colour. A target is not a picture the image source can hold, so the
+material keeps the target in the slot, which keeps the graph drawing it first, and
+carries the cover's name beside it (`SceneMaterial::texture_covers`); each renderer
+binds the cover's image there instead while the image it uploaded for that frame is a
+cover and not the empty texel. Such a pass reads an image the runtime replaces, so it
+is never reused as a still target. The slot's size uniforms stay the target's, as a
+picture slot's stay its art's.
 
 An image layer's own render targets, the pair its effects run through and the
 composite another layer reads, are point-sampled when the layer says
@@ -764,7 +797,19 @@ file, not from what an earlier layer happened to load), wrapped when the layer s
 `clampuvs` is off, and clamped and linear otherwise. A texture file whose header asks
 for point sampling is also sampled with its mip level picked by point, as the
 reference's sampler for that flag does; a texture without the flag, and a render
-target, keep the blend of mip levels they always had. Whether the cursor reaches a layer follows Wallpaper
+target, keep the blend of mip levels they always had. What a layer drawn through
+effects leaves in that composite is its chain's result as the chain wrote it, the way
+every pass of a chain writes into its buffers: the chain's last pass also puts the
+layer onto the scene with the layer's own blending, but drawn into the composite it
+replaces, so a translucent result keeps its colour instead of coming out multiplied by
+its alpha, and a data buffer that keeps numbers in all four channels (an audio widget's
+spectrum, which other layers read as bars) keeps them. A layer whose saved size is 0 on
+one axis has a card with no area, which draws nothing on screen; its render targets are
+made at the size an invalid axis takes from the scene's canvas, and when it draws into
+targets of its own (through effects, or into the composite another layer reads) its card
+takes that size too and is drawn only there, so what its effects made reaches the layer
+that reads it. A layer only 1 or 2 units thin is not such a card and keeps its size.
+Whether the cursor reaches a layer follows Wallpaper
 Engine's walk: only image, text and model layers that are `solid` (the default) are
 tested, a plain group or a particle layer is not, and a visible layer under the cursor
 with `disablepropagation` hides every layer behind it, which hears no enter, leave or
@@ -906,7 +951,10 @@ property loads with the property's current value, saved choices included. A prev
 load-only property at the value the scene read, for every layer that uses it, and
 reports it as deferred; only loading the scene applies it. An effect whose
 `visible` a script decides is different: it is built with its layer and
-follows the script, as Wallpaper Engine's effect object does. A switch resolves
+follows the script, as Wallpaper Engine's effect object does. That script's
+`thisObject` is the effect: writing `thisObject.visible`, from an event handler
+as from `init` or `update`, switches the effect and leaves its layer as it is (it
+showed or hid the whole layer, over a property that had hidden it). A switch resolves
 the layer's effect chain again over the effects that run and rebuilds the render
 graph before the next frame, so nothing is paid per frame. While a script has
 every effect of a layer off, the chain ends in a passthrough: Wallpaper Engine

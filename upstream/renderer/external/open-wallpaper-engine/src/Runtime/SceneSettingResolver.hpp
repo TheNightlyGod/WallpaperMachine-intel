@@ -2,6 +2,7 @@
 
 #include "Runtime/CameraPath.hpp"
 #include "Runtime/DynamicValue.hpp"
+#include "Runtime/PropertyScriptObject.hpp"
 #include "Runtime/ScalarAnimation.hpp"
 
 #include <nlohmann/json_fwd.hpp>
@@ -42,24 +43,25 @@ enum class Vec3SettingSemantic
     AnglesDegrees,
 };
 
-// `animation_layer_index` is the animation layer of the layer a setting belongs
-// to when it is one of that animation layer's own (`animationlayers[i]`): its
-// script's `thisObject` is that animation layer. -1 for a setting of the layer.
+// `object` is what the setting's script has as `thisObject` beyond the layer:
+// the animation layer the setting belongs to (`animationlayers[i]`), the effect
+// whose visibility it decides, and the timeline bound to the setting itself.
 std::unique_ptr<DynamicValue> ResolveBoolSetting(
     SceneRuntimeContext& context,
     const nlohmann::json& value,
     std::string_view current_layer_name = {},
-    int animation_layer_index = -1);
+    PropertyScriptObject object = {});
 std::unique_ptr<DynamicValue> ResolveFloatSetting(
     SceneRuntimeContext& context,
     const nlohmann::json& value,
     std::string_view current_layer_name = {},
-    int animation_layer_index = -1);
+    PropertyScriptObject object = {});
 std::unique_ptr<DynamicValue> ResolveVec3Setting(
     SceneRuntimeContext& context,
     const nlohmann::json& value,
     std::string_view current_layer_name = {},
-    Vec3SettingSemantic semantic = Vec3SettingSemantic::Generic);
+    Vec3SettingSemantic semantic = Vec3SettingSemantic::Generic,
+    PropertyScriptObject object = {});
 // Resolves a setting at the component count the shader declares. Handing a two-
 // or four-component constant to a property script as a string loses the vector:
 // the script reads `.x` off that string and hands back NaN.
@@ -67,11 +69,13 @@ std::unique_ptr<DynamicValue> ResolveVectorSetting(
     SceneRuntimeContext& context,
     const nlohmann::json& value,
     std::size_t components,
-    std::string_view current_layer_name = {});
+    std::string_view current_layer_name = {},
+    PropertyScriptObject object = {});
 std::unique_ptr<DynamicValue> ResolveStringSetting(
     SceneRuntimeContext& context,
     const nlohmann::json& value,
-    std::string_view current_layer_name = {});
+    std::string_view current_layer_name = {},
+    PropertyScriptObject object = {});
 std::vector<CameraPath> ParseCameraPaths(const nlohmann::json& json);
 
 // What a bool setting reads before anything runs: its authored value, which a script's first

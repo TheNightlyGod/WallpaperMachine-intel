@@ -115,7 +115,9 @@ The Worker:
 - deletes rows older than 180 days.
 
 The data is kept in its own D1 database, `wallpapermachine-telemetry`, separate from
-accounts so it can never be joined to them. The IP is used only as a rate-limit key,
+accounts so it can never be joined to them. A maintainer (the website's `OWNER_EMAIL`)
+reads it as totals on the website's `/account/telemetry/` page; no install id leaves
+the database there. The IP is used only as a rate-limit key,
 and Cloudflare's request logs keep it for up to 7 days. The website's
 [privacy notice](https://www.wallpapermachine.app/privacy/) says all of this.
 

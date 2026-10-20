@@ -1956,41 +1956,6 @@ fn reserved_identifier_strategy_limits_for_initializer_scope_after_nested_loop_b
 }
 
 #[test]
-fn promotes_vec4_texture_initializers_assigned_to_scalar_variables() {
-    let source = concat!(
-        "uniform sampler2D g_Texture1;\n",
-        "void main() {\n",
-        "    float alpha = texture2D(g_Texture1, vec2(0.5));\n",
-        "    gl_FragColor = vec4(alpha);\n",
-        "}\n",
-    );
-
-    let legalized = legalize(ShaderStageKind::Fragment, source);
-
-    assert!(legalized.source().contains(
-        "float alpha = (texture(sampler2D(g_Texture1, _we_Sampler_g_Texture1), vec2(0.5))).x;"
-    ));
-}
-
-#[test]
-fn scalar_texture_promotion_wraps_the_full_initializer_rhs() {
-    let source = concat!(
-        "uniform sampler2D g_Texture1;\n",
-        "void main() {\n",
-        "    float alpha = texture2D(g_Texture1, vec2(0.5)) + vec4(0.25);\n",
-        "    gl_FragColor = vec4(alpha);\n",
-        "}\n",
-    );
-
-    let legalized = legalize(ShaderStageKind::Fragment, source);
-
-    assert!(legalized.source().contains(
-        "float alpha = (texture(sampler2D(g_Texture1, _we_Sampler_g_Texture1), vec2(0.5)) + \
-         vec4(0.25)).x;"
-    ));
-}
-
-#[test]
 fn workshop_3611439897_sharpen_style_vec4_rhs_is_reduced_before_scalar_assignment() {
     let source = concat!(
         "uniform sampler2D g_Texture1;\n",

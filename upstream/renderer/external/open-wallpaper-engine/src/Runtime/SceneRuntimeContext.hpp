@@ -205,7 +205,8 @@ public:
     /// which is what a script's `layer.name` reads. A layer whose authored name is
     /// shared or empty is registered under a generated key; this is its own
     /// name (possibly empty). A layer with no authored name on record answers
-    /// with the name it is registered under.
+    /// with the name it is registered under. The name may be recorded before
+    /// the layer is registered; unregistering the layer forgets it.
     void          RegisterLayerAuthoredName(std::string runtime_name, std::string authored_name);
     std::string   LayerAuthoredName(std::string_view runtime_name) const;
     /// Puts the registered layers in the scene file's declaration order. Names
@@ -376,6 +377,11 @@ public:
     // `scene.getAnimation(name)` is not scoped to a layer: the authored name is
     // matched across every registered timeline.
     ScalarAnimationPlayback* FindAnimationByName(std::string_view animation_name) const;
+    /// Gives the timeline bound to one setting a handle of its own, which the
+    /// setting's script reaches as `thisObject.getAnimation()` with no name
+    /// (`PropertyScriptObject::property_animation`). Never 0.
+    uint64_t                 RegisterPropertyAnimation(std::shared_ptr<ScalarAnimationPlayback> playback);
+    ScalarAnimationPlayback* FindPropertyAnimation(uint64_t handle) const;
     void RegisterSceneScript(std::string script_source, std::string layer_name);
     void RegisterNodeVideoTexture(std::string name, std::string texture_key);
     void RegisterSoundLayer(std::string name, std::shared_ptr<WPSoundStream> stream);
@@ -895,6 +901,8 @@ private:
         std::shared_ptr<ScalarAnimationPlayback> playback;
     };
     std::vector<ScalarAnimationBinding> m_scalar_animations;
+    /// `RegisterPropertyAnimation`: handle - 1 is the index.
+    std::vector<std::weak_ptr<ScalarAnimationPlayback>> m_property_animations;
     std::shared_ptr<ScalarAnimationPlayback> m_scene_zoom_animation;
     struct CameraShotBinding {
         SceneNode*         node { nullptr };
@@ -967,6 +975,8 @@ private:
     std::unordered_map<std::string, std::weak_ptr<WPSoundStream>>  m_sound_layers;
     std::shared_ptr<void>                                          m_scripted_value_registry { std::make_shared<char>() };
     std::vector<ScriptedDynamicValue*>                             m_scripted_values;
+    /// How many of `m_scripted_values`, from the front, `Tick` has started.
+    std::size_t                                                    m_scripted_values_started { 0 };
     std::unordered_map<ScriptedDynamicValue*, bool>                m_scripted_value_cursor_inside;
     // Who took each button's press, so its release reaches them wherever the
     // cursor has since gone. A button that shrinks while held -- these
