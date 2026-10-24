@@ -90,7 +90,7 @@ struct DisplaysCardSearch {
     typealias S = DisplaysSettingsSection
     switch disclosure?.id {
     case nil:
-      return [S.enable, S.mode, rows.isMirror ? S.mirrorSource : S.wallpaper]
+      return [S.enable, S.mode] + (rows.isMirror ? [S.mirrorSource] : [S.wallpaper, S.desktops])
         + (rows.isMirror ? [] : [S.playlist]) + (rows.hasPeers ? [S.transfer] : [])
         + [S.automation, S.playback]
     case S.playlist.id:
@@ -117,7 +117,7 @@ struct DisplaysCardSearch {
       switch rows.automationMode {
       case .off: body = []
       case .appearance: body = [S.automationLight, S.automationDark]
-      case .spaces: body = [S.automationSpaces]
+      case .spaces: body = []
       case .schedule: body = [S.automationSchedule]
       }
       return [S.automationMode] + body + [S.automationFooter]

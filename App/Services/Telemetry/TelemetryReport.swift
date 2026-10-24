@@ -84,6 +84,8 @@ struct TelemetryReport: Codable, Equatable {
         var source: Source
         var kind: Kind
         var backend: String
+        /// Always false since Native Metal became the only scene renderer. The key stays so a report keeps
+        /// the shape the receiving end already reads.
         var fallback: Bool
         var mode: String
         var seconds: Double
@@ -168,7 +170,7 @@ enum TelemetryWallpaper {
 
 /// The fixed words a report may carry where the app's own value is a string.
 enum TelemetryVocabulary {
-    static let backends: Set<String> = ["native_metal", "legacy_vulkan"]
+    static let backends: Set<String> = ["native_metal"]
     static let modes: Set<String> = ["continuous", "waiting_for_event", "waiting_for_deadline"]
 
     static func backend(_ value: String) -> String { backends.contains(value) ? value : "unknown" }

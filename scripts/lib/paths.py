@@ -18,8 +18,15 @@ TESTS = ROOT / "Tests"
 # Swift bindings written by `uniffi-bindgen` during `scripts/build.py`.
 GENERATED_BRIDGE = APP / "Bridge/Generated"
 
-# Vendored third-party renderer; see upstream/provenance.json.
-RENDERER = ROOT / "upstream/renderer"
+# The renderer: the Rust workspace (Shader, Core, Bridge; cargo's target/ is here) and
+# the C++ areas, among them the scene engine the core crate builds with CMake.
+RENDERER = ROOT / "Renderer"
+ENGINE = RENDERER / "Engine"
+
+# Vendored third-party code only, each item with its own license; provenance.json
+# records where every vendored item and the project's imported code came from.
+THIRD_PARTY = ROOT / "ThirdParty"
+PROVENANCE = THIRD_PARTY / "provenance.json"
 
 PROJECT_YML = ROOT / "project.yml"
 XCODEPROJ = ROOT / "WallpaperMachine.xcodeproj"

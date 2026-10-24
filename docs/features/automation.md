@@ -25,7 +25,7 @@ choices across multiple independent displays.
 | Off | Leaves the wallpaper and any existing playlist under their usual controls. |
 | Time schedule | Up to 64 rules, each with weekdays, a clock time or sunrise/sunset plus a −180…180 minute offset, and a wallpaper or saved playlist. |
 | Follow system appearance | Separate choices for the system's light and dark appearance; an empty choice leaves the display as it is. The panel's own theme is independent. |
-| Follow desktop Space | Experimental choices by desktop UUID, reloaded after entering that desktop; an empty choice keeps the current wallpaper. See [Space-based choices](spaces.md) for pause/Focus behavior and native lock-screen limits. |
+| Different wallpaper for each desktop | Choices by desktop UUID, made on the display's card or by applying a wallpaper on that desktop, and loaded after entering it, or run on where they paused when the desktop was visited before. A desktop without a choice follows Desktop 1's; only when Desktop 1 has none either does the display keep the current wallpaper. Only the current desktop plays: in Mission Control the others show a still picture. See [a wallpaper for each desktop](spaces.md) for pause/Focus behavior and native lock-screen limits. |
 
 A wallpaper target turns that display's playlist off after successful activation.
 A saved playlist copies its current settings, then the existing playlist scheduler

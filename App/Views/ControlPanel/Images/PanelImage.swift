@@ -29,11 +29,17 @@ struct PanelImage: View {
 
   @Environment(\.panelImages) private var images
   @Environment(\.displayScale) private var displayScale
-  @State private var loaded: (request: Request, image: DecodedPanelImage)?
+  @State private var state = ImageState()
 
-  private struct Request: Hashable {
+  fileprivate struct Request: Hashable {
     let source: PanelImageSource
     let pixels: Int
+  }
+
+  // A reference keeps old SwiftUI view snapshots from retaining a previous decoded image.
+  @Observable fileprivate final class ImageState {
+    var loaded: (request: Request, image: DecodedPanelImage)?
+    var isActive = true
   }
 
   private var request: Request? {
@@ -41,8 +47,8 @@ struct PanelImage: View {
   }
 
   private var displayed: DecodedPanelImage? {
-    guard let request else { return nil }
-    if let loaded, loaded.request == request { return loaded.image }
+    guard state.isActive, let request else { return nil }
+    if let loaded = state.loaded, loaded.request == request { return loaded.image }
     return images?.cachedImage(for: request.source, maxPixelSize: request.pixels)
   }
 
@@ -57,15 +63,27 @@ struct PanelImage: View {
       }
       .clipped()
       .task(id: request) { await load() }
+      // Lazy grids keep row state after disappearance; only the bounded cache should keep pixels.
+      // Reactivating on appear, not in the task, lets a returning row show a cached still in its
+      // first frame instead of the placeholder.
+      .onAppear { state.isActive = true }
+      .onDisappear {
+        state.isActive = false
+        state.loaded = nil
+      }
   }
 
   private func load() async {
-    guard let request, let images else { return }
-    if loaded?.request == request { return }
-    if images.cachedImage(for: request.source, maxPixelSize: request.pixels) != nil { return }
+    guard !Task.isCancelled else { return }
+    guard let request, let images else {
+      state.loaded = nil
+      return
+    }
+    if state.loaded?.request == request { return }
+    state.loaded = nil
     guard let image = try? await images.image(for: request.source, maxPixelSize: request.pixels)
     else { return }
     guard !Task.isCancelled else { return }
-    loaded = (request, image)
+    state.loaded = (request, image)
   }
 }

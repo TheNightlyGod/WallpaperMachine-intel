@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unit tests for the capture queue, scene clock and image handling in scripts/we_reference.py."""
+"""Unit tests for the capture queue, Workshop fetch and unpack, scene clock and image handling in scripts/we_reference.py."""
 from __future__ import annotations
 
 from http.server import ThreadingHTTPServer
@@ -13,6 +13,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 import urllib.error
 import urllib.request
 
@@ -69,6 +70,12 @@ class CaptureServerTests(unittest.TestCase):
         self.assertEqual(json.loads(self.request("/next")[1]), {"done": True})
         self.assertTrue(self.run.drained.is_set())
 
+    def test_the_poller_installer_points_the_vm_at_this_server(self):
+        status, script = self.request("/install-poller.ps1")
+        self.assertEqual(status, 200)
+        self.assertIn(b"'http://vm-host'", script)
+        self.assertNotIn(b"__SERVER__", script)
+
     def test_only_files_inside_a_queued_wallpaper_are_served(self):
         self.assertEqual(self.request("/file/111/materials/a%20b.json"), (200, b"{}"))
         self.assertEqual(self.request("/file/111/..%2Fsecret.txt")[0], 404)
@@ -95,6 +102,88 @@ class CaptureServerTests(unittest.TestCase):
         self.assertEqual(self.run.aborted, "wallpaper64.exe not found")
 
 
+FAKE_STEAMCMD = """#!/bin/sh
+echo "$@" > "$HOME/../args"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    +force_install_dir) dir="$2";;
+    +workshop_download_item) item="$3";;
+  esac
+  shift
+done
+%s
+"""
+
+
+class FetchTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        root = Path(self.temp.name)
+        self.home, self.into = root / "home", root / "artifacts/issue-1"
+        (self.home / "SteamCMD/MacOS").mkdir(parents=True)
+        (self.home / "SteamSession/Library/Application Support/Steam").mkdir(parents=True)
+        (self.home / "SteamSession/account").write_text("someone\n")
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def steamcmd(self, body):
+        tool = self.home / "SteamCMD/MacOS/steamcmd"
+        tool.write_text(FAKE_STEAMCMD % body)
+        tool.chmod(0o755)
+
+    def test_an_item_is_downloaded_with_the_saved_sign_in_and_no_copy_of_it_is_left(self):
+        self.steamcmd('mkdir -p "$dir/steamapps/workshop/content/431960/$item" && '
+                      'echo {} > "$dir/steamapps/workshop/content/431960/$item/project.json"')
+        folder = we_reference.fetch_item("111", self.into, app_home=self.home)
+        self.assertEqual(folder, self.into / "111")
+        self.assertTrue((folder / "project.json").is_file())
+        self.assertEqual(sorted(p.name for p in self.into.iterdir()), ["111", "args"])
+        self.assertIn("+login someone +workshop_download_item 431960 111", (self.into / "args").read_text())
+
+    def test_an_expired_sign_in_is_reported_and_never_answered(self):
+        self.steamcmd('printf "Cached credentials not found.\\npassword: "; exit 5')
+        with self.assertRaisesRegex(RuntimeError, "signs in again"):
+            we_reference.fetch_item("111", self.into, app_home=self.home)
+        self.assertEqual([p.name for p in self.into.iterdir()], ["args"])
+
+    def test_without_a_saved_sign_in_nothing_runs(self):
+        (self.home / "SteamSession/account").unlink()
+        with self.assertRaises(SystemExit):
+            we_reference.fetch_item("111", self.into, app_home=self.home)
+        self.assertFalse(self.into.exists())
+
+
+def package(entries: list[tuple[str, bytes]]) -> bytes:
+    def text(value: str) -> bytes:
+        raw = value.encode()
+        return len(raw).to_bytes(4, "little") + raw
+    header, body = text("PKGV0019") + len(entries).to_bytes(4, "little"), b""
+    for name, content in entries:
+        header += text(name) + len(body).to_bytes(4, "little") + len(content).to_bytes(4, "little")
+        body += content
+    return header + body
+
+
+class UnpackTests(unittest.TestCase):
+    def test_a_package_is_extracted_entry_by_entry(self):
+        with tempfile.TemporaryDirectory() as temp:
+            pkg = Path(temp) / "scene.pkg"
+            pkg.write_bytes(package([("scene.json", b'{"objects": []}'), ("particles/fire.json", b"{}")]))
+            names = we_reference.unpack_pkg(pkg, Path(temp) / "out")
+            self.assertEqual(names, ["scene.json", "particles/fire.json"])
+            self.assertEqual((Path(temp) / "out/scene.json").read_bytes(), b'{"objects": []}')
+            self.assertEqual((Path(temp) / "out/particles/fire.json").read_bytes(), b"{}")
+
+    def test_an_entry_outside_the_folder_is_refused(self):
+        with tempfile.TemporaryDirectory() as temp:
+            pkg = Path(temp) / "scene.pkg"
+            pkg.write_bytes(package([("../escaped.json", b"{}")]))
+            with self.assertRaises(SystemExit):
+                we_reference.unpack_pkg(pkg, Path(temp) / "out")
+            self.assertFalse((Path(temp) / "escaped.json").exists())
+
+
 class MainCheckoutTests(unittest.TestCase):
     def test_a_worktree_shares_the_frames_of_the_checkout_it_was_made_from(self):
         from lib.paths import main_checkout
@@ -109,6 +198,30 @@ class MainCheckoutTests(unittest.TestCase):
             self.assertEqual(main_checkout(main), main)
             self.assertEqual(main_checkout(linked), main)
             self.assertEqual(main_checkout(Path(directory)), Path(directory))
+
+
+class CaptureDelayTests(unittest.TestCase):
+    def jobs_for(self, argv):
+        """The shot delays the worker is handed when capture runs with argv."""
+        handed = []
+        class Stop(Exception):
+            pass
+        def fake_run(folders, shots, delays):
+            handed.append(list(delays))
+            raise Stop
+        with tempfile.TemporaryDirectory() as root:
+            folder = wallpaper(Path(root), "333")
+            with mock.patch.object(we_reference, "CaptureRun", fake_run), self.assertRaises(Stop):
+                we_reference.main(["--shots", root, "capture", *argv, str(folder)])
+        return handed[0]
+
+    def test_the_first_shot_waits_long_enough_for_a_heavy_scene_to_appear(self):
+        first, second = self.jobs_for([])
+        self.assertGreaterEqual(first, 30)
+        self.assertGreater(second, 0)
+
+    def test_the_delays_can_be_set_for_one_capture(self):
+        self.assertEqual(self.jobs_for(["--delays", "40", "20"]), [40.0, 20.0])
 
 
 class SceneClockTests(unittest.TestCase):

@@ -42,6 +42,8 @@ final class PanelController {
   let collections: WallpaperCollectionStore
   let presets: WallpaperPresetStore
   let backup: WallpaperBackupStore
+  /// Where the library and the downloads are kept, and a move of them (Settings › Storage).
+  let libraryLocation: StorageLocationStore
   let imagePlacement: StillImagePlacementStore
   let compatibility: WallpaperCompatibilityStore
   let letterbox: VideoLetterboxStore
@@ -250,6 +252,7 @@ final class PanelController {
     collections: WallpaperCollectionStore? = nil,
     presets: WallpaperPresetStore? = nil,
     backup: WallpaperBackupStore? = nil,
+    libraryLocation: StorageLocationStore? = nil,
     imagePlacement: StillImagePlacementStore? = nil,
     compatibility: WallpaperCompatibilityStore? = nil,
     letterbox: VideoLetterboxStore? = nil,
@@ -296,6 +299,7 @@ final class PanelController {
     self.collections = collections
     self.presets = presets
     self.backup = backup ?? WallpaperBackupStore(defaults: defaults)
+    self.libraryLocation = libraryLocation ?? StorageLocationStore()
     self.imagePlacement = imagePlacement
     self.compatibility = compatibility ?? WallpaperCompatibilityStore()
     self.letterbox = letterbox ?? Self.letterboxStore(for: store)

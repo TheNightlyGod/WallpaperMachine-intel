@@ -102,8 +102,9 @@ def build_mediaremote_adapter(build_env):
     if framework.exists():
         return framework
     mra_dir.mkdir(parents=True, exist_ok=True)
-    run_cmd(["cmake", "-S", str(ROOT / "upstream/mediaremote-adapter"), "-B", str(mra_dir),
-             "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_OSX_ARCHITECTURES=x86_64"], cwd=ROOT, env=build_env)
+    mra_source = ROOT / "ThirdParty/mediaremote-adapter"
+    run_cmd(["cmake", "-S", str(mra_source), "-B", str(mra_dir),
+             "-DCMAKE_BUILD_TYPE=Release", f"-DCMAKE_OSX_ARCHITECTURES={platform.machine()}"], cwd=ROOT, env=build_env)
     run_cmd(["cmake", "--build", str(mra_dir), "--config", "Release"], cwd=ROOT, env=build_env)
     run_cmd(["codesign", "--force", "--sign", "-", str(framework)], cwd=ROOT, env=build_env)
     return framework
@@ -167,21 +168,18 @@ def build_app_bundle(configuration="Release", env=None):
         "-target", "x86_64-apple-macos15.0",
         "-import-objc-header", str(EXTENSION / "WallpaperExtensionBridge.h"),
         "-I", str(GENERATED_BRIDGE),
-        "-I", str(RENDERER / "external/open-wallpaper-engine/src/Platform/Apple"),
+        "-I", str(RENDERER / "Engine/src/Platform/Apple"),
         "-Xcc", f"-fmodule-map-file={GENERATED_BRIDGE / 'WallpaperBridgeFFI.modulemap'}",
+        "-Xcc", f"-fmodule-map-file={RENDERER / 'Media/Apple/WallpaperMedia.modulemap'}",
         "-L", str(RENDERER / "target/release"),
-        f"-L{prefix}/opt/mwe-ffmpeg/lib",
         f"-L{prefix}/lib",
         f"-L{prefix}/opt/quickjs-ng/lib",
-        f"-L{prefix}/opt/glslang/lib",
         "-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks",
         "-Xlinker", "-rpath", "-Xlinker", "@executable_path/../../../../Frameworks",
-        f"-Xlinker", "-rpath", "-Xlinker", f"{prefix}/opt/mwe-ffmpeg/lib",
         f"-Xlinker", "-rpath", "-Xlinker", f"{prefix}/lib",
         f"-Xlinker", "-rpath", "-Xlinker", f"{prefix}/opt/quickjs-ng/lib",
-        "-lwallpaper_bridge", "-lc++", "-lvulkan", "-llz4", "-lfreetype",
-        "-lavformat", "-lavcodec", "-lavutil", "-lswresample", "-lavfilter", "-lavdevice", "-lswscale",
-        "-lqjs", "-lglslang", "-lSPIRV", "-lglslang-default-resource-limits", "-liconv",
+        "-lwallpaper_bridge", "-lc++", "-llz4", "-lfreetype",
+        "-lqjs", "-liconv",
         "-framework", "WebKit", "-framework", "AppKit", "-framework", "Foundation",
         "-framework", "CoreGraphics", "-framework", "Metal", "-framework", "QuartzCore",
         "-framework", "IOSurface", "-framework", "CoreVideo", "-framework", "CoreMedia",
@@ -234,21 +232,18 @@ def build_app_bundle(configuration="Release", env=None):
         "-target", "x86_64-apple-macos15.0",
         "-import-objc-header", str(APP / "Bridge/WallpaperPreviewBridge.h"),
         "-I", str(GENERATED_BRIDGE),
-        "-I", str(RENDERER / "external/open-wallpaper-engine/src/Platform/Apple"),
+        "-I", str(RENDERER / "Engine/src/Platform/Apple"),
         "-Xcc", f"-fmodule-map-file={GENERATED_BRIDGE / 'WallpaperBridgeFFI.modulemap'}",
+        "-Xcc", f"-fmodule-map-file={RENDERER / 'Media/Apple/WallpaperMedia.modulemap'}",
         "-L", str(RENDERER / "target/release"),
-        f"-L{prefix}/opt/mwe-ffmpeg/lib",
         f"-L{prefix}/lib",
         f"-L{prefix}/opt/quickjs-ng/lib",
-        f"-L{prefix}/opt/glslang/lib",
         "-F", str(BUILD / "MediaRemoteAdapter"),
         "-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks",
-        f"-Xlinker", "-rpath", "-Xlinker", f"{prefix}/opt/mwe-ffmpeg/lib",
         f"-Xlinker", "-rpath", "-Xlinker", f"{prefix}/lib",
         f"-Xlinker", "-rpath", "-Xlinker", f"{prefix}/opt/quickjs-ng/lib",
-        "-lwallpaper_bridge", "-lc++", "-lvulkan", "-llz4", "-lfreetype",
-        "-lavformat", "-lavcodec", "-lavutil", "-lswresample", "-lavfilter", "-lavdevice", "-lswscale",
-        "-lqjs", "-lglslang", "-lSPIRV", "-lglslang-default-resource-limits", "-liconv",
+        "-lwallpaper_bridge", "-lc++", "-llz4", "-lfreetype",
+        "-lqjs", "-liconv",
         "-framework", "WebKit", "-framework", "AppKit", "-framework", "Foundation",
         "-framework", "CoreGraphics", "-framework", "Metal", "-framework", "QuartzCore",
         "-framework", "IOSurface", "-framework", "CoreVideo", "-framework", "CoreMedia",
@@ -271,8 +266,8 @@ def build_app_bundle(configuration="Release", env=None):
         shutil.copytree(ROOT / "Resources/ReleaseBanners", resources / "ReleaseBanners", dirs_exist_ok=True)
     shutil.copytree(ROOT / "Resources/StarterWallpaper", resources / "StarterWallpaper", dirs_exist_ok=True)
     shutil.copy2(ROOT / "CHANGELOG.md", resources / "CHANGELOG.md")
-    shutil.copy2(ROOT / "upstream/mediaremote-adapter/bin/mediaremote-adapter.pl", resources / "mediaremote-adapter.pl")
-    shutil.copy2(ROOT / "upstream/mediaremote-adapter/LICENSE", resources / "LICENSE")
+    shutil.copy2(ROOT / "ThirdParty/mediaremote-adapter/bin/mediaremote-adapter.pl", resources / "mediaremote-adapter.pl")
+    shutil.copy2(ROOT / "ThirdParty/mediaremote-adapter/LICENSE", resources / "LICENSE")
 
     convert_xcstrings(APP / "Resources/Localizable.xcstrings", resources)
 

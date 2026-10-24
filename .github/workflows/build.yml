@@ -126,7 +126,7 @@ jobs:
             # shellcheck disable=SC2046 # keychain paths carry no spaces on the runner
             security list-keychains -d user -s "${keychain}" $(security list-keychains -d user | tr -d '"')
 
-            identity="$(security find-identity -p codesigning "${keychain}" | grep -o '".*"' | head -n 1 | tr -d '"' || true)"
+            identity="$(security find-identity -v -p codesigning "${keychain}" | grep -o '".*"' | head -n 1 | tr -d '"' || true)"
             if [ -n "${identity}" ]; then
               echo "Using code signing identity: ${identity}"
               echo "SIGN_IDENTITY=${identity}" >> "$GITHUB_ENV"

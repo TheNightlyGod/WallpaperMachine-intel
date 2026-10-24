@@ -172,10 +172,11 @@ source of the notes: write them for the reader
 
 The instructions also carry the project's rules on claims, because CI commits the
 notes without review: no energy, battery or power-saving claims, nothing called
-fully supported or fully compatible, and opt-in features (native video, content
-pacing, on-demand scene idle, the animated lock screen) keep their optional,
-experimental or off-by-default qualifier in every language; Native Metal is the
-default renderer and is never called optional. The model groups many commits about
+fully supported or fully compatible, and opt-in features (direct video plane sampling,
+on-demand scene idle, the animated lock screen) keep their optional, experimental
+or off-by-default qualifier in every language; Native Metal is the default
+renderer and native video is the default video player, and neither is ever called
+optional. The model groups many commits about
 one area (text layers, particles, lighting) into one bullet that names what users
 see, keeping each section to about 15 bullets, and is told whether the version is a
 feature release, which decides whether it writes highlights. Places in
@@ -384,7 +385,12 @@ artifact.
    temporary keychain ([build.md](build.md#release-signing)), then runs
    `python3 scripts/package.py --configuration Release --require-deployment-target
    --sign-identity "WallpaperMachine Code Signing"`, which fails if a bundled
-   library needs a newer macOS than the deployment target. Packaging proves the
+   library needs a newer macOS than the deployment target. It also generates
+   `THIRD-PARTY-NOTICES.txt` into the bundle; a component whose license text
+   cannot be found is named in the log and marked in the file, and
+   `--require-notices` (not yet passed here: see
+   [../LICENSING.md](../LICENSING.md#notice-payload)) would fail on it.
+   Packaging proves the
    disk image, not the build tree: it mounts the image read-only and requires
    `app.wallpapermachine` at the bundle's version, a passing
    `codesign --verify --deep --strict`, the signed entitlements and Info.plist
@@ -420,23 +426,22 @@ summary.
 
 **`prepare-build` and the caches.** The composite action selects the newest
 non-beta `/Applications/Xcode_26*.app`, `brew install --quiet`s the
-XcodeGen/CMake/renderer package set with `dav1d` and `ccache`, and restores three
+XcodeGen/CMake/renderer package set with `ccache`, and restores two
 `actions/cache` entries. Every key carries the runner's macOS (`<os>` below is
-`macos-15` or `macos-26`), because bottles, the FFmpeg keg and compiled objects
+`macos-15` or `macos-26`), because bottles and compiled objects
 differ between releases; `build` and the Test workflow therefore keep separate entries.
 
 | Cache | Path | Key | What a hit saves |
 |---|---|---|---|
-| LGPL FFmpeg | `/opt/homebrew/Cellar/mwe-ffmpeg` | `mwe-ffmpeg-<os>-<dav1d version>-<hash of Formula/mwe-ffmpeg.rb>` | the FFmpeg source build; the action restores the keg's `opt` link and `scripts/install_ffmpeg.py` finds the keg current |
 | C++ objects | `~/.ccache` | `ccache-<os>-<run>`, restored by the `ccache-<os>-` prefix | recompiling the scene engine. A checkout gives every file a new mtime, so CMake rebuilds the whole engine even from a restored build tree; ccache hashes content and returns the previous objects. Test's three jobs share a run's key, so only `renderer`, which compiles the engine and its C++ tests, saves it; `rust` and `native` pass `save-object-cache: "false"` and only restore it |
-| Renderer | `~/.cargo/registry`, `~/.cargo/git`, `upstream/renderer/target` | `renderer-ccache-<os>-<hash of Cargo.lock, rust-toolchain.toml, provenance.json>`, restored by prefix | crate downloads, and Rust compilation while the nightly toolchain is unchanged |
+| Renderer | `~/.cargo/registry`, `~/.cargo/git`, `Renderer/target` | `renderer-ccache-<os>-<hash of Cargo.lock, rust-toolchain.toml, provenance.json>`, restored by prefix | crate downloads, and Rust compilation while the nightly toolchain is unchanged |
 
 The `CMAKE_<LANG>_COMPILER_LAUNCHER=ccache` variables only take effect on a build
 tree's first CMake configure, so change the renderer key's prefix whenever the
 launcher setup changes: no tree configured the old way may be restored. Each
 macOS job prints `ccache --show-stats` at the end; hits against misses there is
 the evidence the cache worked. The toolchain is an unpinned `nightly`
-(`upstream/renderer/rust-toolchain.toml`), and a new nightly invalidates every
+(`Renderer/rust-toolchain.toml`), and a new nightly invalidates every
 compiled crate, so the Rust half of the renderer build is only reused between
 builds on the same nightly.
 
@@ -547,7 +552,7 @@ on Linux. Swift runs on `macos-26`: `prepare-build` and
 `scripts/build.py --swift-only` with the `--xcode-setting` overrides CodeQL's own
 Swift autobuild uses (no signing, no compilation cache, no integrated driver), so
 the extractor sees every Swift compile. C/C++ (only vendored third-party code is
-visible to it), Ruby (only the FFmpeg formula) and JavaScript/TypeScript (none since
+visible to it), Ruby (the repository has none) and JavaScript/TypeScript (none since
 the SwiftUI control panel; CodeQL fails a language with no code) are deliberately not
 analyzed.
 Removing a language from the matrix does not remove its configuration: **Security ->

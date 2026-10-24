@@ -94,7 +94,7 @@ extension PanelController {
     Set(store.librarySnapshot.wallpapers.lazy.filter(\.supported).map(\.id))
   }
 
-  /// The problem report of an installed wallpaper: GitHub's new-issue form with the app version and
+  /// The problem report of an installed wallpaper: GitHub's bug report form with the app version and
   /// the backend drawing it, and `failure` when applying it just failed. Nil for a wallpaper that
   /// is not installed or when the repository address cannot carry the draft.
   func issueReportURL(for id: String, failure: String? = nil) -> URL? {

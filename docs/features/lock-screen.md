@@ -77,6 +77,79 @@ A position outside 0 to 1 is refused with the usual invalid-playback-configurati
 error rather than drawn somewhere else. Web wallpapers fill their page and carry no
 position, and a display that mirrors another is published centred, as on the desktop.
 
+### Scene renderer
+
+The extension draws scenes with Native Metal, the only scene renderer (see [scene
+rendering](scene-rendering.md#scene-renderer)), so a scene costs the lock screen what it
+costs the desktop. There is nothing to configure: the app no longer publishes a renderer
+choice, and a `sceneRenderer` key in a configuration an older app wrote is read past, whatever
+it names. After the first frame the extension logs `Backend display=… drew=native Metal`.
+
+A scene the native renderer cannot draw is held, as on the
+desktop ([scene rendering](scene-rendering.md#when-native-metal-cannot-draw-a-scene)):
+the engine puts no other renderer behind it, and the surface keeps what it shows,
+the last frame or, when it has drawn nothing yet, the project's preview picture (a
+sublayer of the surface's Metal layer, so it is part of the context WallpaperAgent
+hosts). The extension listens to the engine's first-frame and render-failure edges, which
+a held scene raises too, instead of waiting out the 30-second first-frame deadline, and
+replies that the surface is ready: the lock screen stays on the picture. It logs
+`Held display=… stage=<stage> reason=<reason>` once, and writes the failure
+into the readiness file as `held`, a note in the extension's own language. It is not an
+`error`, which would make the app restore the original wallpaper: the app waits for the
+frame as usual, keeps the lock screen on, and appends the note to the lock screen's
+status line ("Enabled for 1 display(s) — Native Metal can't draw this wallpaper: …"). A
+scene whose frame fails after it drew has nothing to replace, since the surface already
+shows the last frame; the extension logs it the same way and the note reaches the app
+with the next readiness it waits for. Snapshot requests for a held scene that has drawn
+nothing answer with the extension's usual "frame is not ready" error.
+
+### Plain video wallpapers
+
+A plain video plays on the lock screen and as the screen saver with the same players as the
+desktop, and with nothing else: the scene engine is never given a video. The app publishes a
+video project as `plainVideo` and, when it finds the clip, its file as `nativeVideoFile` (a path
+inside the project, only for a regular file that lies in it; a scene, a web page, a missing file
+or a configuration an older app wrote has none, and a copy of the extension that predates the
+keys ignores them). The extension plays the clip in an AVFoundation layer in its own layer
+tree, decoded in hardware. The configuration version is unchanged.
+
+The players take a clip only where the desktop's do: it is judged by the same
+admission rule (`NativeVideoAdmission`, compiled into both targets), which is about the file
+alone. The clip plays at its own frame rate whatever rate the lock screen was given, because an
+AVFoundation layer cannot be capped. A clip AVFoundation cannot open is tried with the app's own
+Matroska reader: a WebM or Matroska file it plays (H.264, HEVC and VP9 in it, and AV1 with
+hardware decoding) is played by `LockScreenWebMPlayer`, the desktop's `WebMPlayer` without sound
+in the extension's layer tree (the extension logs `Backend display=… drew=WebM video`), with the
+same planner and deadline as the AVFoundation layer.
+
+A clip neither player takes (VP8, a damaged or unreadable file, a file the app could not find) is
+held, like the desktop's failed video: the surface keeps the frame it shows (nothing, when it
+never showed one), the host is told a picture exists so it does not wait out its deadline, and
+the extension logs `Held display=… stage=video reason=…` once and puts the same reason, in its
+own language, in the readiness the app reads, where it appears as the lock screen's note.
+Whether the sandboxed extension can use VideoToolbox's supplemental VP9 decoder has not been
+checked on a lock screen; if it cannot, a VP9 clip is held the same way. The same happens if a
+player fails after it started, or a resumed player does not advance within four seconds: the
+player is stopped and the last frame stays. The attempt, from the decision to the first frame,
+has its own 10-second deadline, well inside the 30-second first-frame deadline, so the failure is
+reported while the host is still waiting. A held clip is not retried while its scene is
+unchanged; a different file, a replaced revision or a new frame rate that replaces the renderer
+tries the players again. A failure that arrives before the surface has taken its handler is held
+and delivered when it does. A change of the frame rate keeps a player, since the clip does not
+follow it; a change of the file replaces it.
+
+The clip is never heard. The player (either one) is built from the video track alone, so no audio is decoded,
+no audio output or session is opened, it is muted as well, and it asks neither to keep the display
+awake nor to become the system's playing media. The picture is placed by `NativeVideoLayout`, the
+rule the desktop's native player and the scene engine share (Fit, Fill, Stretch, Original size,
+the scale factor), and, like the desktop's native player, it applies the position the app
+publishes as `framing`. The surface pauses the player exactly when it pauses the scene engine,
+for the same reasons, and a paused player decodes nothing and keeps its last frame on the layer.
+The frame the system asks for in a snapshot, and the one held behind the layer, are read through
+an image generator for that one request (for a WebM clip, decoded from one key frame of the file);
+nothing is read between requests. The extension reads the
+file through the exchange-directory access it already has.
+
 ### Display changes
 
 Topology refreshes stage the next complete configuration before
@@ -86,7 +159,12 @@ mapping's first frame is acknowledged (or deactivation rolls a real failure back
 disabled). If Core Graphics temporarily cannot resolve a display the bridge still
 names, during wake or a lid change, the committed manifest and native selection stay
 untouched and that gap is not an error: while no earlier error is pending, the
-status monitor retries the same scene set once the topology settles. A real earlier
+status monitor retries the same scene set once the topology settles. While the Mac
+is locked or no display is awake, a committed display the bridge no longer names keeps
+its lock screen too: Core Graphics lists no sleeping display as active, and an
+external display can drop off while it sleeps, so applying that departure would hand
+its lock screen back to macOS just before the user wakes it. The first check after
+the Mac is unlocked with a display awake applies a departure that is still there. A real earlier
 compatibility or restoration error is left in place and the monitor stays stopped
 until an explicit retry succeeds. Removing the last wallpaper, disabling both modes,
 and shared publication or renderer failure recovery clear the manifest. If macOS
@@ -113,7 +191,7 @@ the original deadline (35 seconds), and only a confirmed activation saves the se
 for the next launch. The extension answers macOS only once that frame exists, and
 WallpaperAgent abandons an extension that has not answered after about 31 seconds
 (observed on macOS 27.2), so a scene must reach its first frame well inside that; see
-[startup costs](../testing/runtime-regressions.md#startup-and-staging-buffers).
+[startup costs](../testing/runtime-regressions.md#startup).
 
 ## Use wallpaper as screen saver
 
@@ -122,8 +200,7 @@ display follows its applied wallpaper and committed properties, including scene,
 video, web and still-image/pixiv projects. Committed means saved: a property edit
 that the desktop only shows while it is made ([edits on the
 desktop](wallpaper-properties.md#showing-edits-on-the-desktop)) reaches the lock screen and
-the screen saver with **Apply changes**. Choosing the native desktop video backend
-does not exclude a video from native presentation.
+the screen saver with **Apply changes**.
 
 This control owns only the system's **Idle** selection. **Animate lock screen** owns
 **Desktop**; either can be enabled or disabled without changing the other's
@@ -191,7 +268,7 @@ tree; it does not resume playback the user paused. Web projects remain unsupport
 
 ## Caveats
 
-- **Follow desktop Space** and animated lock-screen wallpaper require different
+- **Different wallpaper for each desktop** and animated lock-screen wallpaper require different
   Desktop ownership. Settings prevents enabling both for an active independent
   display; choose another automatic mode or turn animated lock-screen wallpaper off.
   Screen-saver-only mode can still use the currently applied content. See
@@ -377,6 +454,14 @@ In `extension.log`:
   names are recorded, never what they hold: no paths, titles, identifiers or sizes; dictionary
   keys and set members, which are data, are left out, and a name that is not a plain
   identifier shows as `?`. The line is capped in length.
+- `Held display=… stage=… reason=…`: the scene engine could not draw the scene with Native
+  Metal (nothing else may), or the extension's players could not play a video (`stage=video`),
+  so the surface holds its last frame or its preview picture. Once per failure. See [Scene
+  renderer](#scene-renderer) and [Plain video wallpapers](#plain-video-wallpapers).
+- `Backend display=… drew=native Metal`: once per surface after its first frame.
+- `Backend display=… drew=AVFoundation video`: the first frame of a plain video came from the
+  AVFoundation player (`drew=WebM video` for the WebM player); `Held display=… stage=video
+  reason=…` says why a clip neither could play is held.
 
 In the app log (the [diagnostics report](diagnostics.md#diagnostics-report) includes it):
 `Native lock screen: first frame acknowledged after 4.2 s (waited from selection reload)`
@@ -426,6 +511,30 @@ recalculates its asset fingerprints: changed bytes produce a new immutable
 publication, while identical scene records keep the current revision and do not
 reload the extension.
 
+A failure a later attempt can get past does not hand the wallpapers back when it
+hits modes that are already committed and still requested: WallpaperAgent rewriting
+its store between the app's read and write, WallpaperAgent between a restart and its
+relaunch, or no first frame within the readiness wait. The committed selection stays
+on the lock screen and the monitor publishes again after 2, 4, 8, 16 and 32 seconds,
+the status keeping its last progress text. A sixth failure in a row is reported and
+restored like any other, with **Retry**. A first activation, a switch change and every
+other failure report at once, as before. A write that lost the race to WallpaperAgent
+wrote nothing, so the selection's next attempt does not count the fields it was about
+to take as its own (it would read them as changed outside the app); the recovery
+journal keeps them on disk.
+
+macOS keeps a lock-screen renderer whose process ended (a crash, or a process ended
+from outside) as its wallpaper and never asks for it again: every update to it fails
+and the lock screen stays black. The extension names its process in each readiness
+file (`processID`), and the app watches the processes that acknowledged the committed
+lock screen with a process-exit source, never by polling. When one exits, the app
+publishes the same scenes as a new revision, which makes WallpaperAgent load the
+renderer again, and waits for its first frame. A process macOS started in its place
+that has already drawn the committed revision is watched instead. More than three
+exits within ten minutes restore the system wallpaper with "The lock-screen renderer
+stopped repeatedly" and **Retry**. An extension copy older than the field is not
+watched.
+
 Repeated checks do not rewrite an unchanged recovery journal. New Spaces, choices made
 in System Settings and wallpaper-service reloads all rewrite the system wallpaper
 store, so each check compares only the store file's identity (device, inode, size,
@@ -455,6 +564,12 @@ directory (see [User-selected files](user-files.md)
 for chosen files); web projects receive a separate read-grant root containing only
 that project's referenced managed files.
 
+Snapshot paths are relative to enumeration depth, not the textual spelling of
+the source root. System directory aliases and linked ancestors therefore keep
+nested asset names intact instead of duplicating part of the project path.
+The source directory itself and enumerated assets still cannot be symbolic
+links or special files; this does not broaden the extension's read grant.
+
 ## Verification
 
 The offscreen suites (service, selection journal, extension registration, frame
@@ -469,7 +584,13 @@ completing without an error in WallpaperAgent's log, what the timing, connection
 request-shape lines report after a real activation (see [What the logs
 record](#what-the-logs-record)) and a moved picture appearing at its position on the lock
 screen and as the screen saver (the extension logs `Framing display=… panX=… panY=…` each
-time it builds a renderer) still require an authorized desktop check.
+time it builds a renderer) and the extension drawing with Native Metal (the
+`Backend display=…` line) still require an authorized desktop check. So do
+a plain video playing in the AVFoundation layer on a real lock screen and as the screen saver
+(that the sandboxed extension may open the clip, hardware decode, the picture hosted in the
+compositor's remote layer tree, resuming after sleep) and the held frame and note for a clip
+the players cannot open; only the decision, the layout, the failure of the open and the
+publication are covered offscreen.
 
 ### After sleep, wake, lock and unlock
 

@@ -76,12 +76,13 @@ struct InspectorArtwork: View {
     }
     .shadow(color: .black.opacity(0.18), radius: 10, y: 4)
     .accessibilityHidden(true)
-    .task(id: row.animationSource) { await loadAnimation() }
+    // Hidden, the request becomes nil and the animation's bytes go; the still stays under it.
+    .task(id: isVisible ? row.animationSource : nil) { await loadAnimation() }
   }
 
   private func loadAnimation() async {
     animation = nil
-    guard let source = row.animationSource else { return }
+    guard isVisible, let source = row.animationSource else { return }
     // A preview that is a single frame, or too large to animate, keeps its still.
     let data = try? await controller.images.animation(for: source)
     guard !Task.isCancelled else { return }

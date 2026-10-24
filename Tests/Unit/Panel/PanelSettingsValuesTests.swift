@@ -12,14 +12,12 @@ final class PanelSettingsValuesTests: PanelTestCase {
     try await withRecordingPanel { panel, _ in
       let settings = BridgeSnapshotFixtures.settings(
         displays: panel.store.settingsSnapshot.displays, batteryMode: .reducedQuality,
-        videoBackend: "native_preferred",
         videoBackends: [
           BridgeVideoBackendReport(
             displayId: 2, displayName: "Display 2", wallpaperId: "beach", wallpaperTitle: "Beach",
             backend: "legacy", fallbackReason: "29.97 fps is below the 30 fps target")
         ],
-        contentPacingEnabled: true, sharedVideoDecodeEnabled: true, sharedVideoDecodeSessions: 1,
-        sharedVideoDecodeConsumers: 3, renderScale: 0.75, preferredRenderScale: 1, frameRateCap: 45,
+        renderScale: 0.75, preferredRenderScale: 1, frameRateCap: 45,
         batteryRenderScale: 0.75, batteryTargetFps: 30, onBatteryPower: true)
       panel.store.settingsSnapshot = settings
       let playback = panel.controller.playback
@@ -29,10 +27,6 @@ final class PanelSettingsValuesTests: PanelTestCase {
       playback.addRule(bundleIdentifier: "com.example.sample", name: "Sample")
 
       let performance = panel.controller.performanceSettings
-      XCTAssertEqual(performance.videoBackend, .nativePreferred)
-      XCTAssertTrue(performance.contentPacing)
-      XCTAssertTrue(performance.sharedVideoDecode)
-      XCTAssertEqual(performance.sharedDecode, SharedDecodeReport(sessions: 1, consumers: 3))
       XCTAssertEqual(performance.quality.renderScale, 0.75)
       XCTAssertEqual(performance.quality.preferredRenderScale, 1)
       XCTAssertTrue(performance.quality.renderScaleSupported)

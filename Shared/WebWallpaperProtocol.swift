@@ -251,9 +251,13 @@ enum WebWallpaperProtocol {
       };
       let listener = null;
       let lastPaused = null;
+      // The pause state the page last took in.
+      let pausedTakenIn = null;
       // What the host has told this document about each watched directory, so a
-      // listener registered after the files arrived still sees them.
+      // listener registered after the files arrived still sees them, and which of
+      // those files the page has taken in.
       const directories = new Map();
+      const filesTakenIn = new Map();
       // True only when the listener has the function and it returned without throwing.
       const call = (name, ...args) => {
         if (listener && typeof listener[name] === "function") {
@@ -265,12 +269,12 @@ enum WebWallpaperProtocol {
       // property and afterwards only with the properties whose values changed;
       // applyGeneralProperties follows the same rule. The host resends the whole
       // set on every apply (and the screen saver on every reconcile), so the
-      // difference is computed here, per listener. `latest` is always the full
-      // set, for replay to a listener that registers later; `delivered` is what
-      // the current listener last accepted, as canonical strings so that the key
-      // order of the host's JSON never reads as a change. A listener that lacks
-      // the function, or throws, leaves `delivered` as it was, so the next
-      // apply is measured against the last values the page really took in.
+      // difference is computed here. `latest` is always the full set, for replay
+      // to a listener that registers later; `delivered` is what the page last
+      // accepted, through whichever listener it had then, as canonical strings so
+      // that the key order of the host's JSON never reads as a change. A listener
+      // that lacks the function, or throws, leaves `delivered` as it was, so the
+      // next apply is measured against the last values the page really took in.
       const canonical = value => {
         if (value === null || typeof value !== "object") return String(JSON.stringify(value));
         if (Array.isArray(value)) return "[" + value.map(canonical).join(",") + "]";
@@ -283,40 +287,85 @@ enum WebWallpaperProtocol {
       // `restaged` names properties the host restaged: the value reads the same but
       // the bytes behind it are new (a file reselected after it was edited, or
       // another folder's file of the same name), so they count as changed once.
+      // The deliver functions return whether the page took something in.
       const deliverProperties = (name, properties, restaged) => {
         const set = propertySets[name];
         set.latest = properties;
-        if (!listener || typeof listener[name] !== "function") return;
+        const again = new Set(Array.isArray(restaged) ? restaged : []);
+        // A restaged property the page did not take in, for want of a handler or
+        // because it threw, is still owed to it.
+        const owe = () => {
+          if (set.delivered) for (const key of again) set.delivered.delete(key);
+          return false;
+        };
+        if (!listener || typeof listener[name] !== "function") return owe();
         const source = properties !== null && typeof properties === "object" ? properties : {};
         const snapshot = new Map(Object.keys(source).map(key => [key, canonical(source[key])]));
-        const again = new Set(Array.isArray(restaged) ? restaged : []);
         let payload = properties;
         if (set.delivered) {
           const changed = Object.keys(source).filter(key => again.has(key) || set.delivered.get(key) !== snapshot.get(key));
-          if (changed.length === 0) return;
+          if (changed.length === 0) return false;
           payload = Object.fromEntries(changed.map(key => [key, source[key]]));
         }
-        if (call(name, payload)) set.delivered = snapshot;
-        // A restaged property the handler failed to take in is still owed to it.
-        else if (set.delivered) for (const key of again) set.delivered.delete(key);
+        if (!call(name, payload)) return owe();
+        set.delivered = snapshot;
+        return true;
       };
-      // Wallpaper Engine only calls a listener that exists when the page has
-      // loaded. Replaying the last values to a late listener is strictly more
-      // forgiving, so bundled pages that register asynchronously still start.
+      const deliverPaused = () => {
+        if (!call("setPaused", lastPaused)) return false;
+        pausedTakenIn = lastPaused;
+        return true;
+      };
+      // A change the handler did not take in is owed again, even for a file it had.
+      const deliverDirectoryFiles = (property, files) => {
+        if (!filesTakenIn.has(property)) filesTakenIn.set(property, new Set());
+        const takenIn = filesTakenIn.get(property);
+        const accepted = call("userDirectoryFilesAddedOrChanged", property, files);
+        for (const file of files) accepted ? takenIn.add(file) : takenIn.delete(file);
+        return accepted;
+      };
+      // Wallpaper Engine calls whichever listener is there when it delivers, and
+      // assigning one is not a delivery: a listener that replaces one which took
+      // the values in hears nothing until a value changes. A page that assigns its
+      // listener while it renders, as a React component body does, would otherwise
+      // set state inside its own render on every pass, which loops until the
+      // framework gives up and leaves the page blank. What the page has not taken
+      // in (it had no listener or handler yet, or the handler threw) is replayed
+      // once the turn that assigned the listener is over: strictly more forgiving
+      // than Wallpaper Engine, so bundled pages that register asynchronously still
+      // start.
+      let replayQueued = false;
+      let reassigned = false;
+      const queueReplay = () => { replayQueued = true; queueMicrotask(replayOwed); };
+      const replayOwed = () => {
+        reassigned = false;
+        let tookIn = false;
+        try {
+          for (const name of ["applyGeneralProperties", "applyUserProperties"]) {
+            if (propertySets[name].latest && deliverProperties(name, propertySets[name].latest)) tookIn = true;
+          }
+          if (lastPaused !== null && lastPaused !== pausedTakenIn && deliverPaused()) tookIn = true;
+          for (const [property, files] of directories) {
+            const takenIn = filesTakenIn.get(property);
+            const owed = files.filter(file => !(takenIn && takenIn.has(file)));
+            if (owed.length && deliverDirectoryFiles(property, owed)) tookIn = true;
+          }
+        } finally {
+          // Cleared only now: a listener assigned during the pass is noted, not queued.
+          replayQueued = false;
+        }
+        // That listener may have a handler the one before it lacked. It gets another
+        // pass, but only after a pass the page took something in from, so a handler
+        // that throws and assigns a listener cannot loop.
+        if (reassigned && tookIn) queueReplay();
+      };
       Object.defineProperty(window, "wallpaperPropertyListener", {
         configurable: true,
         get() { return listener; },
         set(value) {
           listener = value;
-          // A new or re-assigned listener starts from nothing: it gets the whole set.
-          for (const name of ["applyGeneralProperties", "applyUserProperties"]) {
-            propertySets[name].delivered = null;
-            if (propertySets[name].latest) deliverProperties(name, propertySets[name].latest);
-          }
-          if (lastPaused !== null) call("setPaused", lastPaused);
-          for (const [property, files] of directories) {
-            if (files.length) call("userDirectoryFilesAddedOrChanged", property, files.slice());
-          }
+          if (replayQueued) reassigned = true;
+          else queueReplay();
         },
       });
       // Right clicks are forwarded to the page, never to WebKit's own context
@@ -387,7 +436,7 @@ enum WebWallpaperProtocol {
           resizePending = true;
           queueMicrotask(() => { resizePending = false; nativeDispatch.call(window, new NativeEvent("resize")); });
         },
-        setPaused(paused) { lastPaused = !!paused; call("setPaused", lastPaused); },
+        setPaused(paused) { lastPaused = !!paused; deliverPaused(); },
         deliverAudio(bins) {
           if (!audioListener) return false;
           try { audioListener(bins); return true; } catch (error) { console.error("wallpaperRegisterAudioListener callback failed", error); return false; }
@@ -414,11 +463,13 @@ enum WebWallpaperProtocol {
         userDirectoryFilesAddedOrChanged(property, files) {
           const known = directories.get(property) || [];
           directories.set(property, known.concat(files.filter(file => !known.includes(file))));
-          call("userDirectoryFilesAddedOrChanged", property, files);
+          deliverDirectoryFiles(property, files);
         },
         userDirectoryFilesRemoved(property, files) {
           const known = directories.get(property);
           if (known) directories.set(property, known.filter(file => !files.includes(file)));
+          const takenIn = filesTakenIn.get(property);
+          if (takenIn) for (const file of files) takenIn.delete(file);
           call("userDirectoryFilesRemoved", property, files);
         },
       });

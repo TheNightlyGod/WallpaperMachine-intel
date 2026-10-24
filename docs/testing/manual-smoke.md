@@ -329,8 +329,7 @@ reuse, or visual behavior, which is why these items are manual.
       show a scene or video whose shape differs from the display with **Fill**, then drag
       **Horizontal position** and **Vertical position** across 0 to 100%. The visible part
       follows the thumb while it is dragged, smoothly enough to steer by, and slides on the
-      display without the wallpaper restarting, once on each scene renderer
-      (Compatibility and Native Metal preferred) and with Compatibility video playback.
+      display without the wallpaper restarting, once with a scene and once with a video.
       Releasing keeps it where it stopped, a drag back to where it began returns to that
       position, and the lock screen and the Mission Control picture do not change until the
       release. With **Fit** and a **Scale factor** below 1 the picture slides inside the
@@ -343,9 +342,11 @@ reuse, or visual behavior, which is why these items are manual.
 - [ ] Position is remembered: relaunch and it returns; the same wallpaper on another display and
       another wallpaper on the same display keep their own; the lock screen and screen saver
       (when enabled) draw it; the Mission Control picture is retaken after a move.
-- [ ] With **Video playback** on Native video preferred and a supported clip, the Position
-      block shows the native-player note and **Open Performance** and the video stays
-      centred; choosing Compatibility lets the sliders move it.
+- [ ] With a supported clip larger than the display (an MP4 and a WebM), the Position sliders
+      move the video: it stays where it was while a slider is dragged and moves when the drag
+      settles; the Mission Control picture matches; **Center** puts it back; a mirror of it
+      stays centred. The Position block has no note about the player, and the **Frame rate**
+      row is absent on the display a plain video plays on.
 
 ## Wallpaper switching
 
@@ -399,8 +400,7 @@ describes what should happen and the log lines to read afterwards.
       at once (`released ... (host ready)` without the half-second wait) and the failed page
       and its Retry are what the display shows. Remove a display's web wallpaper while its
       page is still loading: the log says `released ... (window closed)`.
-- [ ] Native video backend (**Video playback** set to **Native video preferred**, a plain
-      video that **In use now** lists as `native`): switch from one clip to another. The first
+- [ ] Plain video (a clip that **In use now** lists): switch from one clip to another. The first
       clip keeps playing until the second one's window is up, which opens with the held
       picture over it and fades it out on the clip's first frame, with no black or system
       picture in between. The log has `frame captured`, `adopted by host` and `released ...
@@ -409,10 +409,12 @@ describes what should happen and the log lines to read afterwards.
 - [ ] Switch from a scene to a native clip, and from a clip to a scene: the system picture may
       show for as long as the clip's metadata read takes after a scene (the engine closes the
       scene's window first); a clip to a scene behaves like any scene switch.
-- [ ] Apply a video the native backend refuses (no video track, or a frame rate above the
-      target rate): the held picture stays until the scene engine's fallback has drawn, the
-      log has `veil on scene layer` and `released ... (scene first frame)`, and no clip
-      window appears.
+- [ ] Apply a VP9 WebM or an H.264 Matroska video (macOS cannot open them; the app's own WebM
+      player plays them): the clip's window appears like any other native clip's, the held picture
+      goes when its first frame is ready, it loops without a visible or audible seam, pause and
+      volume follow the controls, and a WebM with Opus or Vorbis sound is heard. A VP8 WebM
+      is refused with a message naming the format, and the display keeps the picture it had (no
+      clip window); nothing else draws it.
 - [ ] Apply a clip stored on a slow or sleeping external drive: the old clip keeps playing
       through the read. If the read outlasts 8 seconds the clip's window opens without a
       picture over it and the log says `no window took it`.
@@ -438,9 +440,11 @@ describes what should happen and the log lines to read afterwards.
       moved on; with it off they keep the last settled frame.
 - [ ] With an animated wallpaper that has played for over a minute, swipe
       quickly between several Desktops and open Mission Control: every
-      thumbnail shows the wallpaper as it looked within the last two minutes, and
-      a Desktop created in the middle of the swipes has a picture at once. After
-      two more minutes, swipe once more and check the thumbnails moved on.
+      thumbnail shows the wallpaper as it looked once it settled, and a Desktop
+      created in the middle of the swipes has a picture at once. With verbose
+      logging on, keep swiping, waking the Mac and pausing and resuming playback
+      for a few minutes: the log says `kept the settled poster` and no new
+      `poster-*.jpg` appears in `DesktopPosters`.
 - [ ] Turn off **Use the wallpaper as the macOS desktop picture** with a wallpaper
       playing: within a few seconds every Desktop shows the user's own picture in
       Mission Control and the Spaces bar, the five-minute row is disabled, and
@@ -521,17 +525,16 @@ earlier wallpaper (select it again in System Settings once).
 macOS refuses screenshots while locked, so the final lock-screen appearance and
 smoothness cannot be captured and have to be judged by eye.
 
-## Native video backend (experimental, opt-in)
+## Native video backend
 
-Set **Video playback** to **Native video preferred** and apply a plain video that
-**In use now** lists as `native`. The rows below are what no headless test can show about
-the native player on a real desktop; the tests cover the rules and the media tests the
-player on synthetic clips ([coverage](coverage.md#nativevideo) lists what is not covered).
+Every plain video is played by the app's own players now, so apply a plain video (an MP4 for
+AVFoundation, a VP9 WebM for the WebM player). The rows below are what no headless test can show about
+the players on a real desktop; the tests cover the rules and the media tests the
+players on synthetic clips ([coverage](coverage.md#nativevideo) lists what is not covered).
 Turn on **Detailed logging** ([diagnostics](../features/diagnostics.md#levels-and-detailed-logging))
 and read the log after each row. With every result, write down the macOS version and build,
-the display and its refresh rate, and whether Compatibility behaves the same on the same
-clip: a difference between the backends is the case to report, and the same behavior on
-both is the system's.
+the display and its refresh rate, and the container and codec of the clip: a difference between the
+AVFoundation player and the WebM player on the same content is the case to report.
 
 ### Sleep, wake, lock and unlock
 
@@ -554,7 +557,7 @@ counters (`nativeVideoPlaybackStalled`, `nativeVideoPlaybackKick`,
 - [ ] With two displays, sleep and wake: both pictures move, and each display's check is
       logged under its own wallpaper.
 - [ ] Whenever a stall is logged, note whether the kick was enough, whether a rebuild was
-      needed and whether the clip ended on Compatibility (the reason is in **In use now**).
+      needed and whether the display ended up failed (the reason is in the wallpaper's state).
       A stall that ends there is the case to report.
 
 ### The menu bar and switching
@@ -572,12 +575,11 @@ after a switch.
 - [ ] Switch wallpaper from the menu bar item (**Next Wallpaper**, **Previous Wallpaper**
       or an entry under **Recently used**) without touching any other app: the new
       picture appears at once, not only after another app or window is clicked. Repeat
-      from the panel's Apply, and for native to native, native to Compatibility and
-      Compatibility to native.
+      from the panel's Apply, and for clip to clip, clip to scene and scene to clip.
 - [ ] Press **Next Wallpaper** several times in a row over native clips: only the last
       one appears on the desktop, with no flash of the ones in between. The log says
       `superseded while its metadata was read` for any that were overtaken.
-- [ ] Repeat the first two rows with the same clip on Compatibility.
+- [ ] Repeat the first two rows with the same clip as a WebM (the WebM player) and as an MP4 (AVFoundation).
 
 A failure here does not justify making the window non-opaque (an alpha just below 1) or
 forcing a re-commit of the window or layer after a switch. Each of those changes costs
@@ -616,11 +618,11 @@ unit-tested; how the menu draws and reads on real screens is not.
 ### Scaling and posters
 
 - [ ] With a landscape clip, set each **Scaling mode** (Fill, Fit, Stretch, Original size),
-      then a **Scale factor** above and below 1, once on Native and once on Compatibility
-      on the same display: the picture covers the same area with the same crop and the
+      then a **Scale factor** above and below 1, once with an MP4 and once with a WebM of the
+      same picture on the same display: the picture covers the same area with the same crop and the
       same black bars. Original size shows one video pixel per point, so a 1920x1080 clip covers
       1920x1080 points of a Retina display. An anamorphic clip is the one documented
-      difference ([performance](../features/performance.md#video-backend)).
+      difference ([performance](../features/performance.md#video-playback)).
 - [ ] Change the mode and the factor while the clip plays: the picture moves without the
       clip restarting or going black, and the log (detailed) has a `scaling … -> …` line
       for the change.
@@ -665,8 +667,8 @@ closed lid has not been seen on a desktop
 ### Slow storage and cost
 
 - [ ] If a wallpaper's video file can be put on a spun-down external disk, a network share
-      or an evicted cloud file, apply it on Native. Either it plays once the volume
-      answers, or it lands on Compatibility and **In use now** names the storage and the
+      or an evicted cloud file, apply it. Either it plays once the volume
+      answers, or the display is reported as failed and its state names the storage and the
       step (the metadata read or the first frame). The other displays' videos are held up
       no longer than the metadata limit (8, 30 or 60 seconds by storage). Record the
       storage, the time taken, and the `nativeVideoProbeTimeout` and
@@ -683,7 +685,7 @@ closed lid has not been seen on a desktop
 - [ ] Play and pause music in another app and check shader, script and particle
       response.
 - [ ] Verify that mute affects wallpaper playback only.
-- [ ] With a scene, a video (Native and Compatibility) and a Web wallpaper that all make
+- [ ] With a scene, a video (an MP4 and a WebM with sound) and a Web wallpaper that all make
       sound, press **Mute Wallpapers** in the menu bar: every one goes silent at once while
       the pictures keep playing, the item is ticked, and Settings → Playback & Power
       shows **Mute all wallpapers** on (and the Quick Settings Mute All tile is lit). Choose it again, or use `wallpapermachine://unmute`:

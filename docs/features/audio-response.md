@@ -53,11 +53,12 @@ not whether the content happens to differ.
 Capture is rebuilt when the default output device changes, for example when
 headphones or a USB audio interface are connected or removed. The change is
 reported after 300 ms without further changes, so a Bluetooth device that
-announces a switch several times produces one rebuild. Only a running tap is
-rebuilt: nothing happens while capture is stopped, paused or waiting for
-permission, and a paused display starts a tap on the current device when it
-resumes. A rebuild never asks for permission again. The app watches for the change
-only while capture is wanted, from the moment a scene that reads audio or a web page
+announces a switch several times produces one rebuild. Only a running tap or its
+pending recovery is rebuilt: device changes never start a cleanly stopped tap or
+one waiting for its first permission grant. A paused display starts a tap on the
+current device when it resumes. A rebuild never asks for permission again. The app
+watches for the change only while capture is wanted, from the moment a scene that
+reads audio or a web page
 starts it until the last one stops or capture is suspended, so a Mac whose wallpapers
 never read audio has no watcher and a device switch writes nothing to the log.
 
@@ -68,6 +69,16 @@ could not be rebuilt, and it starts again at the next scene or demand change; no
 alert is shown. These steps are written to the application log with the
 `[wallpaper-core audio]` prefix. While the tap is down, the analysis treats the
 input as stale after 250 ms and the spectrum falls to zero.
+
+Healthy capture and unfinished teardown are tracked separately. A failed callback,
+aggregate-device or tap release retains its resources for retry but does not report
+usable capture. Disabling demand retries remaining cleanup; reactivation or a rebuild
+finishes that cleanup before creating another tap, without repeating successful
+release operations. Permission is checked before starting a replacement, and repeated
+healthy demand keeps the same tap. A failed suspension restores the previous desired
+demand and attempts to restore actual capture; if cleanup prevents that rollback, the
+error includes both failures. Removed scenes stay removed, even if teardown fails.
+The scene/demand and rebuild retry paths recover capture when cleanup later succeeds.
 
 ## What wallpapers receive
 

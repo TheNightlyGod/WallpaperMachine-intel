@@ -8,7 +8,7 @@ see [power-benchmark.md](../testing/power-benchmark.md#runtime-counters).
 
 One log for the whole process. Swift (`App/Logging/AppLog.swift`), the Rust bridge
 and core, and the C++ renderer all write into the bridge's `ApplicationLogger`
-(`upstream/renderer/crates/bridge/src/logging.rs`). Files live under
+(`Renderer/Bridge/src/logging.rs`). Files live under
 `<app support>/Logs/<session>/<N>.log`. Each launch is one session, named by its
 start time (`20260927-150211`, `-1`, `-2`… for same-second launches).
 
@@ -32,7 +32,7 @@ header:
 
 ```
 … INFO [load#7] backend.rs:93 scene load: display 1 3456x2234 @2x 120Hz, fps 60, scaling fit x1, render native, paused false; project title="Rain" type="scene" version=3 workshop=123456 file="scene.json" at …/123456/project.json
-… INFO [load#7] SceneWallpaper.cpp:1540 scene backend: legacy_vulkan; fell back: …
+… INFO [load#7] SceneWallpaper.cpp:1540 scene backend: native_metal
 ```
 
 - **Scene and video wallpapers on the scene engine**: the header is written by
@@ -89,8 +89,7 @@ the load.
 ### What each session starts with
 
 - The logger's own line: process id and level in force.
-- The saved preferences that decide how wallpapers render: scene renderer, video
-  backend, render scale, battery mode, frame-rate limit, scene optimisation,
+- The saved preferences that decide how wallpapers render: render scale, battery mode, frame-rate limit, scene optimisation,
   on-demand updating and the experimental switches.
 - `environment:` lines from Swift (`DiagnosticEnvironment`): app version and
   build, macOS, hardware model, CPU, core count, memory, GPU, low-power and
@@ -103,7 +102,8 @@ the load.
 
 The same facts, as numbers and fixed words and without names, paths or the time zone,
 are what [Send performance data](telemetry.md) reports when the user has turned it on.
-Each upload, failed upload and deletion request leaves a `telemetry:` line.
+Each upload, failed upload and deletion request leaves a `telemetry:` line, and so does
+each day's [active count](telemetry.md#daily-active-count), sent or not.
 
 Each time the quality settings are applied (a battery-mode, frame-rate-limit or
 battery-profile change, a power-source change in reduced-quality mode, or a change
@@ -157,7 +157,7 @@ frames. The handler is chained, so one installed earlier still runs, and it writ
 exception's name (not the reason, which may hold paths) to the ledger.
 
 What the ledger does not do: it installs no handlers for crash signals (those could clash
-with the ones MoltenVK and FFmpeg install, or alter the crash report; SIGTERM and SIGHUP are
+with the ones other libraries install, or alter the crash report; SIGTERM and SIGHUP are
 a separate matter, see [signals](crash-recovery.md#signals)), writes no
 heartbeat, and is not part of the diagnostics report: the line in the log is.
 A normal session writes the file three times, at launch, at the start of a quit and
@@ -267,10 +267,13 @@ The first is a `WARN` line, the second an `INFO` line.
 - **Rate**: the same level repeated within 5 seconds is one line, measured from the line
   that was written. A change of level is always a line.
 
-The app only records. It does not unload, pause or lower a wallpaper in response, and
-nothing reads a threshold: a limit would need footprints measured on real Macs and a way
-to tell which scene to give up, and stopping a wallpaper unprompted is more intrusive
-than the problem it guards against. The event source is cancelled when the app quits
+The app does not unload, pause or lower a wallpaper on screen in response, and nothing
+reads a threshold: a limit would need footprints measured on real Macs and a way to tell
+which scene to give up, and stopping a wallpaper unprompted is more intrusive than the
+problem it guards against. The one thing pressure frees is what is not on screen: the
+wallpapers a display keeps paused for its other desktops
+([different wallpaper for each desktop](spaces.md#keeping-each-desktops-wallpaper)) are
+let go while it lasts, which the log says in a `space parking:` line. The event source is cancelled when the app quits
 and nothing polls. The lock-screen extension is a separate process, and neither
 its footprint nor its pressure events are recorded.
 
@@ -322,7 +325,7 @@ reveals it in Finder. It is built off the main actor by `DiagnosticsBundle`
 | `load-journal.json` | The crash-loop guard's journal, [crash-recovery.md](crash-recovery.md): the strikes per wallpaper and the scenes that were opening when the app last stopped. Wallpaper ids, display numbers, times, the build and an opaque session id; no paths. The file exists once a scene has been opened; without it the report notes that it was not present |
 | `crash-reports/*.ips` | Up to 5 macOS crash reports from the last 14 days whose name starts with `WallpaperMachine` (app and extension) |
 | `diagnostic-reports/*.diag`, `*.spin`, `*.hang` | Up to 5 macOS resource, spin and hang reports from the last 14 days whose name starts with `WallpaperMachine`, newest first across both report folders. See [below](#macos-resource-spin-and-hang-reports) |
-| `environment.txt` | The environment lines above, read at export time, plus the saved renderer preferences with the reasons Reduced quality holds and the frame-rate ceiling in force, the backend and live mode of each running scene (`mode stopped_after_failure` for a scene whose renderer stopped after a failure, apart from `user_paused` and `policy_suspended`; see [scene rendering](scene-rendering.md#a-scene-that-stops-drawing)), the state of each wallpaper window with whether the displays have separate Spaces ([below](#wallpaper-window-state)), and the app's memory footprint at export time ([above](#memory-pressure)) |
+| `environment.txt` | The environment lines above, read at export time, plus the saved render settings with the reasons Reduced quality holds and the frame-rate ceiling in force, the backend and live mode of each running scene (`mode stopped_after_failure` for a scene whose renderer stopped after a failure, apart from `user_paused` and `policy_suspended`; see [scene rendering](scene-rendering.md#a-scene-that-stops-drawing)), the state of each wallpaper window with whether the displays have separate Spaces ([below](#wallpaper-window-state)), and the app's memory footprint at export time ([above](#memory-pressure)) |
 | `README.txt` | What is included, what was missing or skipped, and what was redacted |
 
 Everything except `README.txt` passes through `DiagnosticsRedactor` first:
@@ -370,9 +373,9 @@ Older macOS releases wrote them to the user folder, so the export looks in both.
   processes that were running, which a bug report should not carry.
 
 Bug reports on GitHub use the issue form in
-`.github/ISSUE_TEMPLATE/bug_report.yml`. It asks for the Workshop ID and the
-exported report, and points to Detailed logging for problems that are hard to
-reproduce.
+`.github/ISSUE_TEMPLATE/bug_report.yml`. It asks for the Workshop ID and requires
+what the reporter did, what went wrong, what they expected and the exported
+report. It points to Detailed logging for problems that are hard to reproduce.
 
 ### Wallpaper window state
 
@@ -518,11 +521,11 @@ Advanced), then pick the page from the **Develop** menu's submenu for this Mac.
 ## Verification
 
 - Rust:
-  - `tests::wake_revalidation` (`upstream/renderer/crates/bridge/src/tests/`): which scenes
+  - `tests::wake_revalidation` (`Renderer/Bridge/src/tests/`): which scenes
     the wake check probes and repairs, against scripted frame counters.
-  - `logging::tests` (`upstream/renderer/crates/bridge/src/logging.rs`): line format, load tag, session and
+  - `logging::tests` (`Renderer/Bridge/src/logging.rs`): line format, load tag, session and
     file retention.
-  - `log_context::tests` (`upstream/renderer/crates/core/src/log_context.rs`): scope nesting, project summary.
+  - `log_context::tests` (`Renderer/Core/src/log_context.rs`): scope nesting, project summary.
   - `settings_intents::verbose_logging_persists_across_relaunch_and_can_be_turned_off`.
 - Swift: `AppLogRouterTests`, `DiagnosticsRedactorTests`, `DiagnosticsBundleTests`,
   `SessionLedgerTests`, `CrashReportIndexTests`, `UncaughtExceptionLogTests`,

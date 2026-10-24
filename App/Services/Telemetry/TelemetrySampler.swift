@@ -13,7 +13,6 @@ struct TelemetryFrameContext: Equatable {
         var wallpaperID: String
         var kind: TelemetryReport.Kind
         var backend: String
-        var fallback: Bool
         var mode: String?
     }
 
@@ -123,7 +122,7 @@ final class TelemetrySampler {
                 source: TelemetryWallpaper.source(scene.wallpaperID),
                 kind: scene.kind,
                 backend: TelemetryVocabulary.backend(scene.backend),
-                fallback: scene.fallback,
+                fallback: false,
                 mode: TelemetryVocabulary.mode(scene.mode),
                 seconds: (seconds * 10).rounded() / 10,
                 tickHz: hertz(surface.tickIntervalMicros),

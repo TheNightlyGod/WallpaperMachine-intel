@@ -11,11 +11,13 @@ struct CompatibilityState: Equatable {
   let isChecking: Bool
   /// The result for exactly this wallpaper and display, empty until a check ran.
   let checks: [WallpaperCompatibilityCheck]
-  /// The backend that draws the wallpaper on this display now and why it fell back, from the live
-  /// report of this wallpaper on this display's physical id. A preference is not evidence, and the
-  /// absence of a report is never read as Compatibility.
+  /// The backend that draws the wallpaper on this display now, from the live report of this wallpaper
+  /// on this display's physical id. The absence of a report is never read as a backend.
   let backend: String?
   let fallbackReason: String?
+  /// Why the wallpaper is held and not drawn when Native Metal could not draw it. Then `backend` is the
+  /// engine's "unknown": nothing is drawing it.
+  var failure: SceneFailureReport? = nil
   /// Checking is possible: the target is an enabled independent display with the wallpaper's
   /// options loaded and a frame rate to certify.
   let canCheck: Bool
@@ -54,6 +56,7 @@ extension PanelController {
     let physicalID = ResolvedDisplayTitles.liveDisplayID(
       context.displayID, title: display?.title ?? "")
     var report: (backend: String, reason: String?)?
+    var failure: SceneFailureReport?
     if let video = settings.videoBackends.first(where: {
       $0.wallpaperId == context.wallpaperID && $0.displayId == physicalID
     }) {
@@ -61,12 +64,16 @@ extension PanelController {
     } else if let scene = settings.sceneRenderers.first(where: {
       $0.wallpaperId == context.wallpaperID && $0.displayId == physicalID
     }) {
-      report = (scene.backend, scene.fallbackReason)
+      report = (scene.backend, nil)
+      failure = scene.failureStage.map {
+        SceneFailureReport(stage: SceneFailureStage(name: $0), reason: scene.failureReason)
+      }
     }
     return CompatibilityState(
       wallpaperID: context.wallpaperID, displayID: context.displayID, kind: context.kind,
       isChecking: current && compatibility.checking, checks: current ? compatibility.checks : [],
-      backend: report?.backend, fallbackReason: report?.reason, canCheck: context.targetAvailable)
+      backend: report?.backend, fallbackReason: report?.reason, failure: failure,
+      canCheck: context.targetAvailable)
   }
 
   /// `compatibilityCheck`: reads the wallpaper's files again and re-runs the checks. Leaves the banner
@@ -125,7 +132,6 @@ extension PanelController {
     return WallpaperCompatibilityContext(
       wallpaperID: id, displayID: displayID, kind: kind, supported: entry.supported,
       targetFPS: fps, targetAvailable: available && options != nil && fps > 0,
-      videoBackend: settings.videoBackend, sceneRenderer: settings.sceneRenderer,
       libraryRevision: store.libraryRefreshRevision, assetsConfiguration: assetsConfiguration)
   }
 }

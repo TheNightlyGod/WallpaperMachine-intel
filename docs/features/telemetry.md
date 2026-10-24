@@ -4,13 +4,16 @@
 once a day so slow wallpapers, slow Macs and crashes can be found from real use. It is
 off until the user turns it on: in the welcome guide's Preferences page, in Settings, or
 in the one-time question the panel asks someone who finished the guide before it had
-the switch. While it is off nothing is recorded, nothing is written to disk and no task
-or timer exists.
+the switch. While it is off the report records nothing, writes nothing to disk and has
+no task or timer.
+
+Separately, every copy sends a [daily active count](#daily-active-count) with no
+install id, whether or not the switch is on; it has its own task and one preference.
 
 Code: `App/Services/Telemetry/` (`TelemetryService`, `TelemetryReport`,
 `TelemetrySampler`, `TelemetrySpool`, `TelemetryClient`, `TelemetryPreferences`,
-`TelemetryEnvironment`). The receiving end is the website's Worker
-(`/api/telemetry`), which lives in the website's own repository.
+`TelemetryEnvironment`, `TelemetryActiveCount`). The receiving end is the website's
+Worker (`/api/telemetry`), which lives in the website's own repository.
 
 ## What a report holds
 
@@ -102,17 +105,58 @@ kept in `TelemetryPreferences` until the website answers it, and asked for again
 every launch until then. Turning sending on again makes a new id, so the two periods
 cannot be joined.
 
+## Daily active count
+
+`TelemetryActiveCount` tells the website once a UTC day that this copy ran, so the
+maintainer can see how many Macs use the app each day and each calendar month. It is
+on for everyone and has no switch; it is not part of the report above and carries
+nothing the report does:
+
+```json
+{"schema": 1, "ping": "<random UUID, new each day>", "day": "2026-10-24",
+ "version": "1.6.0", "source": false, "monthFirst": true}
+```
+
+- `ping` is made fresh each UTC day and kept only until that day is counted. A
+  failed ping is tried again an hour later with the same `ping`, so the website can
+  ignore a retry it already counted. Nothing stays the same from one day to the next,
+  so two days' counts cannot be joined to one Mac.
+- `day` is this Mac's UTC day; the website keeps it when it is within a day of its
+  own, so a ping just after midnight is counted on the right day.
+- `monthFirst` is true for the first counted day in a UTC month (`month` in the
+  state). A month's active Macs are the sum of these.
+- `source` is the report's `app.source`.
+
+The first ping goes a minute after launch. Once the website has it, the task sleeps
+until a random moment in the first 15 minutes of the next UTC day, so a Mac that runs
+over midnight is counted on both days. The wait runs on the continuous clock, which
+keeps counting while the Mac sleeps. The state (`day`, `ping`, `counted`, `month`) is
+the `WallpaperMachine.telemetry.active` preference. A run with
+`WALLPAPER_MACHINE_HOME` or `WALLPAPER_MACHINE_DEFAULTS_SUITE` set (the UI tests, a
+development run with its own home) sends nothing, and hosted unit tests start no
+services at all.
+
+The website adds the counts up per day, version and build kind and keeps nothing
+else: each day's `ping`s only for two days, to recognise retries, and the totals with
+no age limit. The maintainer's page shows yesterday, today so far, the average day, this
+and last month, a bar per day and the last 13 months, or every month under All
+time. The version and Apple-chip
+filters do not apply to it, since the count carries neither a chip nor anything that
+ties a later report to it.
+
 ## Website side
 
 `POST https://www.wallpapermachine.app/api/telemetry` takes the report as JSON with a
-`WallpaperMachine/<version>` user agent; any 2xx counts as sent.
+`WallpaperMachine/<version>` user agent; any 2xx counts as sent. The daily active
+count goes to `/api/telemetry/active` the same way, and a ping already counted also
+answers 204.
 
 The Worker:
 
 - validates every field against the same contract and drops rows that fail;
 - stores the UTC day it received the report, never the time and never the IP;
 - keeps one report per install per day;
-- deletes rows older than 180 days.
+- keeps reports with no age limit, until the install asks for their deletion.
 
 The data is kept in its own D1 database, `wallpapermachine-telemetry`, separate from
 accounts so it can never be joined to them. A maintainer (the website's `OWNER_EMAIL`)
@@ -136,8 +180,12 @@ and Cloudflare's request logs keep it for up to 7 days. The website's
   - rows are deltas between the two readings;
   - paused, covered, switched and invalidated windows report nothing;
   - counting is always turned off again.
-- `TelemetryClientTests`: the request is one POST with the app's user agent, and
-  anything but a 2xx is a failure.
+- `TelemetryClientTests`: each request is one POST with the app's user agent to its
+  own path, and anything but a 2xx is a failure.
+- `TelemetryActiveCountTests`: one ping a UTC day with no install id, the same `ping`
+  on a retry and a new one each day, `monthFirst` only on a month's first counted
+  day, nothing again after a relaunch the same day, the hourly retry and the wait
+  into the next UTC day, and no count from a run with its own home or preferences.
 - `SupportPromptStoreTests` and `PanelPerformanceDataTests`: the one-time question,
   through the panel's presenter; the Settings switch round-trips, **Show in Finder**
   writes the report it would send, and the guide answers the question only once its

@@ -23,7 +23,7 @@ final class QuickSettingsTileTests: PanelTestCase {
         tiles(panel).map(\.key),
         [
           .launchAtLogin, .wallpapersMuted, .lockScreenEnabled, .screenSaverEnabled,
-          .writeDesktopPicture, .hideAfterActivating, .livePropertyEdits,
+          .writeDesktopPicture, .desktopWallpapers, .hideAfterActivating, .livePropertyEdits,
         ], "One display has no other to pause")
 
       panel.configureDisplays()
@@ -31,7 +31,8 @@ final class QuickSettingsTileTests: PanelTestCase {
         tiles(panel).map(\.key),
         [
           .launchAtLogin, .wallpapersMuted, .lockScreenEnabled, .screenSaverEnabled,
-          .writeDesktopPicture, .playOnlyOnActiveDisplay, .hideAfterActivating, .livePropertyEdits,
+          .writeDesktopPicture, .desktopWallpapers, .playOnlyOnActiveDisplay, .hideAfterActivating,
+          .livePropertyEdits,
         ])
 
       // While it is on it stays, so it can be turned off with one display left.
@@ -56,6 +57,59 @@ final class QuickSettingsTileTests: PanelTestCase {
       controller.playback.writesDesktopPicture = false
       XCTAssertFalse(try tile(.writeDesktopPicture, in: tiles(panel)).isOn)
     }
+  }
+
+  // MARK: Wallpaper per Desktop
+
+  /// One display, `primary`, whose renderer title names display 1, with two desktops.
+  private func desktopsPanel(available: Bool = true) throws -> (PanelFixture, WallpaperSpaceMonitor) {
+    let topology: [String: WallpaperDisplaySpaces]? = available ? [
+      "1": .init(
+        displayUUID: "screen", spaces: [.init(id: "space-a", number: 1), .init(id: "space-b", number: 2)],
+        current: "space-a")
+    ] : nil
+    let spaces = WallpaperSpaceMonitor(provider: { topology })
+    spaces.refresh()
+    let panel = try makeController(spaces: spaces)
+    panel.store.settingsSnapshot.displays = [OrganizationFixtures.display("primary", title: "Main (1 - Primary)")]
+    panel.store.librarySnapshot.wallpapers = [OrganizationFixtures.wallpaper("a")]
+    panel.store.monitorInformationSnapshot.rows = [OrganizationFixtures.monitor("primary", wallpaper: "a")]
+    return (panel, spaces)
+  }
+
+  func testTheWallpaperPerDesktopTileSwitchesTheTargetDisplayLikeItsCard() async throws {
+    let (panel, spaces) = try desktopsPanel()
+    defer { spaces.stop(); Task { await panel.shutdown() } }
+    let controller = panel.controller
+    var desktops = try tile(.desktopWallpapers, in: tiles(panel))
+    XCTAssertFalse(desktops.isOn, "Off by default")
+    XCTAssertTrue(desktops.isEnabled)
+    XCTAssertNil(desktops.note, "One display needs no name")
+
+    await controller.settings.set(.desktopWallpapers, to: true)?.value
+    XCTAssertEqual(panel.automations.configuration(for: "primary").mode, .spaces)
+    XCTAssertEqual(controller.automationState(for: "primary").mode, .spaces, "the display's card reads the same")
+    desktops = try tile(.desktopWallpapers, in: tiles(panel))
+    XCTAssertTrue(desktops.isOn)
+
+    // Turned off on the card, the tile follows.
+    try await controller.setDesktopWallpapers(false, display: "primary")
+    XCTAssertFalse(try tile(.desktopWallpapers, in: tiles(panel)).isOn)
+  }
+
+  func testTheWallpaperPerDesktopTileNamesTheDisplayBesideAnotherAndWaitsForDesktops() async throws {
+    try pinPanelLanguageToEnglish()
+    let (panel, spaces) = try desktopsPanel()
+    defer { spaces.stop(); Task { await panel.shutdown() } }
+    panel.store.settingsSnapshot.displays.append(OrganizationFixtures.display("secondary", title: "Side (2)"))
+    XCTAssertEqual(try tile(.desktopWallpapers, in: tiles(panel)).note, "Off · Main",
+                   "With two displays the tile says which one it switches")
+
+    let (unavailable, noSpaces) = try desktopsPanel(available: false)
+    defer { noSpaces.stop(); Task { await unavailable.shutdown() } }
+    let desktops = try tile(.desktopWallpapers, in: tiles(unavailable))
+    XCTAssertFalse(desktops.isEnabled, "Without desktop information there is nothing to switch on")
+    XCTAssertEqual(desktops.note, "Unavailable")
   }
 
   func testTheMuteTileChangesItsGlyphWhileMuted() async throws {
@@ -151,7 +205,7 @@ final class QuickSettingsTileTests: PanelTestCase {
     }
     XCTAssertEqual(SettingsRegistry.problems(in: SettingsRegistry.items), [])
     XCTAssertEqual(
-      QuickSettingsSection.items.map(\.id).filter { $0.hasPrefix("quick.tile-") }.count, 8,
-      "Eight tiles are declared; the search lists the same ones the page draws")
+      QuickSettingsSection.items.map(\.id).filter { $0.hasPrefix("quick.tile-") }.count, 9,
+      "Nine tiles are declared; the search lists the same ones the page draws")
   }
 }

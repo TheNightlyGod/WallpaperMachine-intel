@@ -193,10 +193,10 @@ final class InspectorPolicyTests: InspectorTestCase {
           id: "tool", title: "Tool", kind: .unknown, supported: false, active: false,
           selected: false, previewPath: nil),
       ]
-      func body(_ url: URL?) throws -> String {
+      func details(_ url: URL?) throws -> String {
         let components = try XCTUnwrap(
           URLComponents(url: XCTUnwrap(url), resolvingAgainstBaseURL: false))
-        return try XCTUnwrap(components.queryItems?.first { $0.name == "body" }?.value)
+        return try XCTUnwrap(components.queryItems?.first { $0.name == "app-details" }?.value)
       }
       panel.sceneAssets.available = true
       panel.workshop.refreshSceneAssetsReadiness()
@@ -204,11 +204,11 @@ final class InspectorPolicyTests: InspectorTestCase {
       let tool = try XCTUnwrap(controller.libraryRow(id: "tool"))
 
       XCTAssertNil(controller.inspectorIssueReportURL(for: tool))
-      XCTAssertFalse(try body(controller.inspectorIssueReportURL(for: ghost)).contains("**Error:**"))
+      XCTAssertFalse(try details(controller.inspectorIssueReportURL(for: ghost)).contains("**Error:**"))
 
       controller.activationFailures["ghost"] = "The scene file is damaged."
       XCTAssertTrue(
-        try body(controller.inspectorIssueReportURL(for: ghost))
+        try details(controller.inspectorIssueReportURL(for: ghost))
           .contains("**Error:** The scene file is damaged."), "the menu's report carries the failure")
       XCTAssertEqual(
         controller.inspectorIssueReport(for: ghost),
@@ -252,9 +252,9 @@ final class InspectorPolicyTests: InspectorTestCase {
     }
   }
 
-  // MARK: Position
+  // MARK: Frame rate
 
-  func testOnlyTheDisplayTheNativePlayerDrawsOnSaysSoAndOffersPerformance() {
+  func testADisplayTheNativePlayerDrawsOnHasNoFrameRateToSet() {
     let snapshot = BridgeSnapshotFixtures.options(
       wallpaperId: "clip", kind: .video,
       displayConfigurations: [
@@ -264,7 +264,9 @@ final class InspectorPolicyTests: InspectorTestCase {
     var inputs = InspectorOptions.Inputs()
     inputs.nativePlayerDisplays = [1]
     let displays = InspectorOptions.make(snapshot, inputs: inputs).displays
-    XCTAssertEqual(displays.map(InspectorPolicy.positionNote(for:)), [.nativePlayer, .explains])
+    XCTAssertEqual(
+      displays.map(InspectorPolicy.offersFrameRate(for:)), [false, true],
+      "a clip plays at its own rate on the native player; another display of it keeps the row")
   }
 
   func testFitWithBlurredBackdropIsOfferedWhereAScalingModeMovesThePicture() {

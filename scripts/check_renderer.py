@@ -10,64 +10,90 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 
 from build import build_environment, cargo_environment
-from lib.paths import RENDERER, RENDERER_ARTIFACTS, ROOT
+from lib.paths import ENGINE, RENDERER, RENDERER_ARTIFACTS, ROOT
 from lib.xcode import skipped_test_lines
 
 GENERATED_CASE_COUNT = 12
 # One registry owns the build/run/verdict and the Metal-device prerequisite.
 # VideoToolbox codec prerequisites, if unavailable, are reported by those tests.
 REGRESSION_BINARIES = {
-    "render_target_lifetime_test": False, "text_object_runtime_test": False,
-    "shader_cache_metadata_test": False, "video_decode_pump_test": False,
+    "render_target_lifetime_test": False, "text_object_runtime_test": False, "text_object_behavior_test": False,
+    "video_decode_pump_test": False,
     "video_color_conversion_test": False, "video_frame_pacing_test": False,
-    "video_conversion_budget_test": False, "video_source_input_test": False,
-    "shared_video_session_test": False, "render_scale_test": False,
-    "static_subgraph_cache_test": False, "texture_prefetch_test": False,
+    "video_source_input_test": False, "video_probe_test": False, "vt_frame_decoder_test": False, "webm_reader_test": False,
+    "synthetic_video_test": False,
+    "render_scale_test": False,
+    "static_subgraph_cache_test": False,
     "scene_mesh_tests": False, "particle_rope_geometry_test": False,
     "particle_mouse_controlpoint_test": False, "particle_parity_test": False,
+    "particle_override_tint_test": False,
+    "particle_billboard_size_test": False, "particle_control_point_test": False,
+    "particle_override_test": False, "particle_rope_pieces_test": False,
     "layer_texture_reference_test": False,
-    "project_property_preview_test": False, "scenescript_sound_layer_smoke": False,
-    "scenescript_media_event_smoke": False, "media_thumbnail_texture_smoke": False,
-    "scene_schema_tests": False, "script_runtime_compat_test": False,
-    "mouse_input_test": False, "mdl_schema_tests": False, "tex_schema_tests": False,
-    "timer_tests": False, "playback_gpu_test": True, "metal_backend_test": False,
+    "project_property_preview_test": False,
+    "scenescript_media_event_smoke": False, "scenescript_behavior_test": False, "media_thumbnail_texture_smoke": False,
+    "scene_schema_tests": False, "scene_schema_fixtures_selftest": False, "scene_schema_part01_test": False,
+    "scene_schema_part02_test": False, "scene_schema_part03_test": False, "scene_schema_part04_test": False,
+    "scene_schema_part05_test": False, "scene_schema_part06_test": False, "scene_schema_part07_test": False, "scene_schema_part08_test": False,
+    "scene_schema_part09_test": False, "scene_schema_part10_test": False, "scene_schema_part11_test": False,
+    "script_runtime_compat_test": False,
+    "sound_layer_cursor_behavior_test": False, "media_event_behavior_test": False,
+    "texture_slot_behavior_test": False, "material_constant_behavior_test": False,
+    "create_layer_behavior_test": False, "script_host_behavior_test": False,
+    "shader_updater_behavior_test": False,
+    "mouse_input_test": False, "cursor_input_state_test": False, "mdl_schema_tests": False, "tex_schema_tests": False,
+    "mdl_parse_tests": False, "puppet_pose_tests": False, "tex_container_tests": False,
+    "timer_tests": False, "metal_backend_test": False,
     "metal_scene_draw_smoke": True, "metal_poster_capture_test": True,
-    "metal_video_texture_test": True, "unchanged_present_test": True,
+    "metal_video_texture_test": True, "unchanged_present_test": True, "scene_failure_policy_test": True,
+    "scene_load_sound_test": True,
+    "scene_harness_selftest": True, "backdrop_scene_test": True, "horizontal_flip_pointer_test": True,
+    "scene_placeholder_picture_test": True, "scene_passthrough_layout_test": True,
+    "scene_fullscreen_parallax_test": True, "scene_layer_size_test": False,
+    "layer_composite_render_test": True, "cover_slot_composite_test": True, "perspective_image_layer_test": True, "model_parallax_test": True, "unbound_texture_slot_test": True, "scene_lighting_fog_test": True,
+    "metal_memory_test": True, "scene_video_input_test": False,
     "audio_tests": False, "miniaudio_failure_paths_test": False, "sprite_animation_test": False,
-    "vulkan_sample_count_smoke": False, "rendergraph_smoke": False,
-    "rust_shader_bridge_test": False, "stb_image_regression_test": False,
+    "rendergraph_smoke": False,
+    "workshop_snapshot_test": False, "workshop_corpus_stamps_test": False,
+    "stb_image_regression_test": False,
     "surface_health_test": False, "wallpaper_scaling_test": False,
-    "shader_preprocessor_compat_test": False, "unpack_shader_compile_smoke": False,
-    "video_texture_submission_smoke": False, "vulkan_render_batch_planner_smoke": False,
-    "version_tests": False,
+    "backdrop_geometry_test": False,
+    "shader_preprocessor_compat_test": False,
+    "rust_shader_bridge_behavior_test": False, "shader_program_cache_behavior_test": False,
+    "shader_dialect_compat_test": False, "shader_corpus_test": False,
+    "video_texture_submission_smoke": False,
+    # Renderer/Media/tests: the project's own container readers, pure C++ and headless.
+    "media_core_tests": False, "media_isobmff_tests": False, "media_matroska_tests": False,
+    # Renderer/Sound/tests: the project's own remix, resample and loop path, pure C++ and headless.
+    "sound_core_tests": False, "sound_apple_tests": False, "sound_vorbis_tests": False,
+    "sound_matroska_tests": False,
+    # Renderer/Surface/tests: the still a wallpaper that cannot be drawn shows, headless (a plain CALayer).
+    "surface_path_tests": False, "surface_still_tests": False,
 }
 # Executables in tests/CMakeLists.txt that the check neither builds nor runs, and
-# why. Every other one is registered above or is one of the two probes below.
+# why. Every other one is registered above, a probe, or the diagnostic benchmark below.
 MANUAL_BINARIES = {
     "wpdump": "inspection tool, not a test: dumps one workshop item's parse to JSON",
 }
 OFFSCREEN_PROBE = "offscreen_scene_probe"
 RELOAD_PROBE = "scene_reload_cycle_probe"
 TIMER_PROBE = "timer-precision"
+TIMER_DELIVERY_BENCHMARK = "timer_delivery_benchmark"
 # Tests whose assertions count frames, ticks or expiries against short
 # wall-clock waits. Hosted macOS VMs deliver a 10 ms wait 50-100 ms late, so
 # these are skipped by name only when the timer probe proves that host.
 REALTIME_TESTS = {
     "timer_tests": (
         "FrameTimerTest.ABurstOfWakeOnceAtTheCeilingDoesNotAddCallbacks",
-        "FrameTimerTest.ADrawSlightlyLongerThanTheIntervalDoesNotHalveTheRate",
         "ThreadTimerTest.CadenceKeepsItsPeriodDespiteWakeSlack",
         "ThreadTimerTest.RequestsAfterALongWaitStillRespectTheCeiling",
     ),
     "unchanged_present_test": (
-        "UnchangedPresent.APlainVideoPresentsEveryNewFrameAndNothingElse",
-        "UnchangedPresent.TheSkipPresentsTheSameVideoFramesInTheSameOrder",
-        "UnchangedPresent.ARepeatedVideoFramePresentsAgainOnlyWhenSomethingChanges",
         "UnchangedPresent.AStaticSceneStopsPresentingOnceEveryPassIsReused",
-        "UnchangedPresent.OutputChangesOnAHeldVideoFramePresentOnceEach",
         "UnchangedPresent.APropertyPreviewShowsOnAStillSceneAndWakesAnIdleOneForOneFrame",
         "UnchangedPresent.AHistoryLoopKeepsTheClockRunningWithoutATimeUniform",
         "UnchangedPresent.ADrawFailureAfterTheFirstFrameIsReportedOnceAndASurfaceRebuildHealsIt",
@@ -113,7 +139,7 @@ def foreground_test_process():
 
 def run(command, log, env, timeout=180, cwd=ROOT):
     command = list(map(str, command))
-    is_test = Path(command[0]).name in (*REGRESSION_BINARIES, OFFSCREEN_PROBE, RELOAD_PROBE, TIMER_PROBE)
+    is_test = Path(command[0]).name in (*REGRESSION_BINARIES, OFFSCREEN_PROBE, RELOAD_PROBE, TIMER_PROBE, TIMER_DELIVERY_BENCHMARK)
     if is_test:
         # Match application scheduling for real-time assertions, even when the
         # invoking CI agent inherited background/latency throttling.
@@ -123,6 +149,76 @@ def run(command, log, env, timeout=180, cwd=ROOT):
                               stdout=stream, stderr=subprocess.STDOUT,
                               preexec_fn=foreground_test_process if is_test else None,
                               timeout=timeout, check=False).returncode
+
+
+def parse_timer_delivery_benchmark(text):
+    """Validate one measurement, without imposing a delivery-rate threshold."""
+    marker = "TIMER_DELIVERY_BENCHMARK"
+    lines = [line for line in text.splitlines() if line.startswith(marker)]
+    if len(lines) != 1:
+        raise ValueError(f"expected one {marker} line, found {len(lines)}")
+    if not lines[0].startswith(marker + " "):
+        raise ValueError(f"missing space after {marker}")
+
+    def unique_fields(pairs):
+        result = {}
+        for name, value in pairs:
+            if name in result:
+                raise ValueError(f"duplicate benchmark field: {name}")
+            result[name] = value
+        return result
+
+    def invalid_constant(value):
+        raise ValueError(f"invalid JSON constant: {value}")
+
+    payload = json.loads(lines[0][len(marker) + 1:], object_pairs_hook=unique_fields,
+                         parse_constant=invalid_constant)
+    if not isinstance(payload, dict):
+        raise ValueError("benchmark payload must be a JSON object")
+    expected = {"schema": 1, "requested_fps": 60, "busy_work_ns": 18_000_000,
+                "requested_warmup_ns": 200_000_000, "requested_window_ns": 1_000_000_000}
+    for name in (*expected, "window_start_ns", "window_end_ns", "count_before", "count_after", "delivered"):
+        if name not in payload:
+            raise ValueError(f"missing benchmark field: {name}")
+        if type(payload[name]) is not int:
+            raise ValueError(f"benchmark field must be an integer, not a boolean: {name}")
+    for name, value in expected.items():
+        if payload[name] != value:
+            raise ValueError(f"unexpected benchmark {name}: {payload[name]}")
+    if payload["window_end_ns"] <= payload["window_start_ns"]:
+        raise ValueError("benchmark outer window must have positive duration")
+    if payload["count_before"] < 0 or payload["count_after"] < payload["count_before"]:
+        raise ValueError("benchmark counters must be nonnegative and nondecreasing")
+    if payload["delivered"] != payload["count_after"] - payload["count_before"]:
+        raise ValueError("benchmark delivered count does not match the counter difference")
+    return payload
+
+
+def collect_timer_delivery_benchmark(build, out, env):
+    """Run the diagnostic once; collection errors remain gate tooling failures."""
+    log = out / (TIMER_DELIVERY_BENCHMARK + ".log")
+    result = {"exit": None, "status": "tooling-failure", "diagnostic_only": True, "log": str(log)}
+    try:
+        result["exit"] = run([build / "tests" / TIMER_DELIVERY_BENCHMARK], log, env, 30)
+    except subprocess.TimeoutExpired:
+        result.update(exit="timeout", error="benchmark exceeded its 30 second timeout")
+        return result
+    except OSError as error:
+        result.update(exit="error", error=f"benchmark invocation failed: {error}")
+        return result
+    if result["exit"] != 0:
+        result["error"] = f"benchmark exited with status {result['exit']}"
+        return result
+    try:
+        payload = parse_timer_delivery_benchmark(log.read_text())
+        duration_ns = payload["window_end_ns"] - payload["window_start_ns"]
+        rate = payload["delivered"] * 1_000_000_000 / duration_ns
+    except (OSError, ValueError, OverflowError) as error:
+        result["error"] = f"benchmark measurement unavailable: {error}"
+        return result
+    result.update(status="collected", measurement=payload, actual_outer_duration_ns=duration_ns,
+                  delivered_per_second=rate)
+    return result
 
 
 def record_skips(report, name, log):
@@ -472,6 +568,25 @@ def check_generated_pixels(data, index):
     return pixel(180, 136) != background
 
 
+def discard_foreign_build_tree(build, source):
+    """Delete a CMake build tree configured from a source directory other than `source`.
+
+    CMake refuses to reconfigure such a tree, which happens to every tree made before
+    the engine moved (it was under upstream/renderer/external/open-wallpaper-engine).
+    """
+    cache = build / "CMakeCache.txt"
+    if not cache.is_file():
+        return False
+    for line in cache.read_text(errors="replace").splitlines():
+        if line.startswith("CMAKE_HOME_DIRECTORY:"):
+            configured = Path(line.split("=", 1)[1])
+            if configured.resolve() == Path(source).resolve():
+                return False
+            break
+    shutil.rmtree(build)
+    return True
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--assets", type=Path, default=Path.home() / "Library/Application Support/WallpaperMachine/SceneAssets")
@@ -489,12 +604,14 @@ def main(argv=None):
     env = build_environment()
     build = RENDERER_ARTIFACTS / "bin"
     if not args.skip_build:
-        # Cargo must run inside the renderer tree: rustup resolves
-        # rust-toolchain.toml from the working directory, not --manifest-path.
+        if discard_foreign_build_tree(build, ENGINE):
+            print(f"Removed {build}: it was configured from another engine source directory")
+        # Cargo must run inside the workspace it builds (Renderer/ for the shader layer):
+        # rustup resolves rust-toolchain.toml from the working directory, not --manifest-path.
         steps = [
-            (["cargo", "build", "-p", "shader", "--features", "ffi", "--release"], "shader-build", RENDERER),
-            (["cmake", "-S", RENDERER / "external/open-wallpaper-engine", "-B", build, "-DCMAKE_BUILD_TYPE=Release", "-DBUILD_TESTS=ON", "-DRUST_SHADER_FFI=ON", "-DRUST_SHADER_STATICLIB=" + str(RENDERER / "target/release/libshader.a")], "configure", ROOT),
-            (["cmake", "--build", build, "--target", OFFSCREEN_PROBE, RELOAD_PROBE, *REGRESSION_BINARIES, "-j", "6"], "build", ROOT),
+            (["cargo", "build", "-p", "wm-shader", "--features", "ffi", "--release", "--locked"], "shader-build", RENDERER),
+            (["cmake", "-S", ENGINE, "-B", build, "-DCMAKE_BUILD_TYPE=Release", "-DBUILD_TESTS=ON", "-DRUST_SHADER_FFI=ON", "-DRUST_SHADER_STATICLIB=" + str(RENDERER / "target/release/libwm_shader.a")], "configure", ROOT),
+            (["cmake", "--build", build, "--target", OFFSCREEN_PROBE, RELOAD_PROBE, TIMER_DELIVERY_BENCHMARK, *REGRESSION_BINARIES, "-j", "6"], "build", ROOT),
         ]
         for command, name, cwd in steps:
             # Cargo gets the environment without the deployment-target pin:
@@ -536,7 +653,7 @@ def main(argv=None):
             report["skips"][name] = ["compiled Metal-device probe reported no device (exit 77)"]
         print("::warning::No Metal device; unverified GPU targets: " + ", ".join(skipped), flush=True)
     # video_decode_pump_test and video_color_conversion_test need no GPU at all;
-    # playback_gpu_test imports synthetic video frames into private textures.
+    # metal_video_texture_test imports synthetic video frames into private textures.
     for binary, needs_gpu in REGRESSION_BINARIES.items():
         if needs_gpu and not gpu_available:
             continue
@@ -552,6 +669,14 @@ def main(argv=None):
         record_skips(report, binary, out / (binary + ".log"))
         report_skips(report, binary, [f"{name}: timer probe exit 77, 10 ms waits overshoot a period ({timer_evidence})"
                                       for name in realtime])
+    benchmark = collect_timer_delivery_benchmark(build, out, env)
+    report[TIMER_DELIVERY_BENCHMARK] = benchmark
+    if benchmark["status"] == "collected":
+        print(f"{TIMER_DELIVERY_BENCHMARK} (diagnostic only): delivered={benchmark['measurement']['delivered']}; "
+              f"actual_outer_duration_ns={benchmark['actual_outer_duration_ns']}; "
+              f"delivered_per_second={benchmark['delivered_per_second']:.3f}", flush=True)
+    else:
+        print(f"{TIMER_DELIVERY_BENCHMARK} tooling failure: {benchmark['error']}; see {benchmark['log']}", flush=True)
     generated_projects = ([*fixtures(out / "fixtures"), alpha_composite_fixture(out / "fixtures"),
                  perspective_animation_fixture(out / "fixtures"),
                  origin_animation_fixture(out / "fixtures"),
@@ -623,6 +748,7 @@ def main(argv=None):
     print(f"reload cycles ({len(reload_projects)} projects x2): {report['scene_reload_cycle_probe']}", flush=True)
     print(f"Evidence: {out}")
     return int(any(report[k] not in (0, "skipped-no-gpu") for k in (*REGRESSION_BINARIES, RELOAD_PROBE))
+               or report[TIMER_DELIVERY_BENCHMARK]["status"] != "collected"
                or any(not c["pixels_equal"] for c in report["cases"])
                or any(c["diagnostics"] or not c.get("expected_pixels", False)
                       for c in report["cases"][:GENERATED_CASE_COUNT]))

@@ -99,6 +99,7 @@ final class WallpaperSwitchHold {
     private let layers: @MainActor (UInt32) -> [CALayer]
     private let shouldHold: @MainActor (UInt32) -> Bool
     private let reduceMotion: @MainActor () -> Bool
+    private let concealed: @MainActor (UInt32) -> Bool
     private let sleep: @Sendable (Duration) async throws -> Void
     private let now: @MainActor () -> ContinuousClock.Instant
     private let configuration: Configuration
@@ -106,14 +107,18 @@ final class WallpaperSwitchHold {
     private var tickets: [UInt32: Ticket] = [:]
     private var captures: [UInt32: Capture] = [:]
     private var generation: UInt64 = 0
+    /// Called once a display's veil is gone, faded or not.
+    var onReleased: (@MainActor (UInt32) -> Void)?
 
     /// `layers` lists a display's live wallpaper content layers, the front one first;
     /// `shouldHold` says whether anyone can see the display (a suspended one is not held, and a
-    /// suspended surface may not answer the request); `reduceMotion` is the person's setting.
+    /// suspended surface may not answer the request); `reduceMotion` is the person's setting;
+    /// `concealed` says a display's windows are hidden, so its veil goes without a fade.
     init(center: NotificationCenter = .default,
          layers: @escaping @MainActor (UInt32) -> [CALayer],
          shouldHold: @escaping @MainActor (UInt32) -> Bool,
          reduceMotion: @escaping @MainActor () -> Bool,
+         concealed: @escaping @MainActor (UInt32) -> Bool = { _ in false },
          sleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
          now: @escaping @MainActor () -> ContinuousClock.Instant = { ContinuousClock.now },
          configuration: Configuration = Configuration()) {
@@ -121,6 +126,7 @@ final class WallpaperSwitchHold {
         self.layers = layers
         self.shouldHold = shouldHold
         self.reduceMotion = reduceMotion
+        self.concealed = concealed
         self.sleep = sleep
         self.now = now
         self.configuration = configuration
@@ -130,6 +136,9 @@ final class WallpaperSwitchHold {
     var activeDisplayIDs: Set<UInt32> {
         Set(tickets.filter { $0.value.phase != .dismissing }.keys)
     }
+
+    /// Whether a still is being taken for the display or a veil still covers it.
+    func isHolding(_ display: UInt32) -> Bool { captures[display] != nil || tickets[display] != nil }
 
     func stateForTest(display: UInt32) -> Phase? {
         captures[display] != nil ? .capturing : tickets[display]?.phase
@@ -281,7 +290,10 @@ final class WallpaperSwitchHold {
     /// held picture goes.
     func cancel(displays: [UInt32]) {
         for display in displays {
-            if let capture = captures.removeValue(forKey: display) { capture.grab.cancel() }
+            if let capture = captures.removeValue(forKey: display) {
+                capture.grab.cancel()
+                if tickets[display] == nil { onReleased?(display) }
+            }
             dismiss(display, because: "cancelled")
         }
     }
@@ -295,11 +307,13 @@ final class WallpaperSwitchHold {
         captures[display] = nil
         guard !Task.isCancelled else { return }
         guard let frame else {
+            defer { onReleased?(display) }
             AppLog.warn("switch hold: display \(display) poster not delivered within "
                 + "\(configuration.grabTimeout.wholeMilliseconds) ms; not holding")
             return
         }
         guard let image = frame.cgImage() else {
+            defer { onReleased?(display) }
             AppLog.warn("switch hold: display \(display) poster frame \(frame.width)x\(frame.height) "
                 + "could not be used; not holding")
             return
@@ -365,8 +379,8 @@ final class WallpaperSwitchHold {
         }
     }
 
-    /// Fades the veil out and forgets the display; at once when it is not on a window or the
-    /// person asked for less motion.
+    /// Fades the veil out and forgets the display; at once when it is not on a window, nobody
+    /// sees the window or the person asked for less motion.
     private func dismiss(_ display: UInt32, because reason: String) {
         guard let ticket = tickets[display], ticket.phase != .dismissing else { return }
         ticket.phase = .dismissing
@@ -375,7 +389,7 @@ final class WallpaperSwitchHold {
         let seconds = Double(ticket.heldAt.duration(to: now()).wholeMilliseconds) / 1_000
         AppLog.info("switch hold: display \(display) released after "
             + "\(String(format: "%.1f", seconds)) s (\(reason))")
-        guard ticket.veil.isAttached, configuration.fade > 0, !reduceMotion() else {
+        guard ticket.veil.isAttached, configuration.fade > 0, !reduceMotion(), !concealed(display) else {
             remove(display)
             return
         }
@@ -396,6 +410,7 @@ final class WallpaperSwitchHold {
         guard let ticket = tickets.removeValue(forKey: display) else { return }
         ticket.cancelTasks()
         ticket.veil.detach()
+        onReleased?(display)
     }
 }
 

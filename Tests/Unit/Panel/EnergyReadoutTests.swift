@@ -54,7 +54,7 @@ final class EnergyReadoutTests: PanelTestCase {
     XCTAssertNil(video.levelTitle)
     XCTAssertNil(video.batteryPercentPerHour)
     XCTAssertEqual(video.caveats, [.nativeVideo])
-    XCTAssertEqual(EnergyReadout.Caveat.nativeVideo.title, "Native video not counted")
+    XCTAssertEqual(EnergyReadout.Caveat.nativeVideo.title, "Video not counted")
 
     let shared = readout(ready(cpu: 800, gpu: 200, contended: true))
     XCTAssertNil(shared.level)

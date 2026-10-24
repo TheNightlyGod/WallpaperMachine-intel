@@ -4,6 +4,8 @@ import WebKit
 @MainActor
 protocol WebWallpaperSurface: AnyObject {
     var page: WebWallpaperPage { get }
+    /// The window server's number for the surface's window.
+    var windowNumber: Int { get }
     var frame: NSRect { get }
     var posterLayer: CALayer? { get }
     func setScreenFrame(_ frame: NSRect)

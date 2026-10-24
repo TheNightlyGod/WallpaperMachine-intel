@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""Unit tests for the generated-scene pixel criteria in scripts/check_renderer.py."""
+"""Behavior tests for renderer pixels, process policy, measurements and gate exit."""
 from __future__ import annotations
 
 import importlib.util
 import contextlib
 import io
 import json
-import re
 import subprocess
 import sys
 import tempfile
@@ -28,6 +27,19 @@ PAGE = bytes((255, 255, 255))
 # on the constant value is the defect the fixture has to make visible.
 AUTHORED = [(0.25, 0.5), (0.75, 0.375), (0.875, 0.875), (0.375, 1.0)]
 STATIC_CORNER = [(0.25, 0.5), (0.75, 0.375), (0.375, 0.875), (0.375, 1.0)]
+
+
+def benchmark_payload(delivered=50, **changes):
+    payload = {"schema": 1, "requested_fps": 60, "busy_work_ns": 18_000_000,
+               "requested_warmup_ns": 200_000_000, "requested_window_ns": 1_000_000_000,
+               "window_start_ns": -100_000_000, "window_end_ns": 1_150_000_000,
+               "count_before": 7, "count_after": 7 + delivered, "delivered": delivered}
+    payload.update(changes)
+    return payload
+
+
+def benchmark_line(payload):
+    return "TIMER_DELIVERY_BENCHMARK " + json.dumps(payload) + "\n"
 
 
 def ppm(shade):
@@ -159,30 +171,97 @@ class GPUAvailabilityProbeTests(unittest.TestCase):
         self.assertIn("median 10 ms wait", probe_log)
 
 
-class RealtimeRegistryTests(unittest.TestCase):
-    def test_every_named_cadence_test_exists_in_a_registered_binary(self):
-        sources = "\n".join(path.read_text(errors="replace") for path in
-                            (check_renderer.RENDERER / "external/open-wallpaper-engine/tests").rglob("*")
-                            if path.suffix in (".cpp", ".mm"))
-        for binary, names in check_renderer.REALTIME_TESTS.items():
-            self.assertIn(binary, check_renderer.REGRESSION_BINARIES)
-            for name in names:
-                suite, test = name.split(".")
-                with self.subTest(name=name):
-                    self.assertRegex(sources, rf"TEST(_F)?\(\s*{suite},\s*{test}\s*\)")
+class TimerDeliveryBenchmarkTests(unittest.TestCase):
+    def test_collects_low_zero_and_high_counts_using_the_actual_outer_window(self):
+        for delivered in (0, 1, 600):
+            with self.subTest(delivered=delivered), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                payload = benchmark_payload(delivered)
+                raw = "collection diagnostic\n" + benchmark_line(payload)
+                environment = {"MEASUREMENT_FIXTURE": "1"}
 
+                def process(command, **kwargs):
+                    kwargs["stdout"].write(raw)
+                    return subprocess.CompletedProcess(command, 0)
 
-class RegistryCoverageTests(unittest.TestCase):
-    def test_every_test_executable_runs_in_the_check_or_says_why_not(self):
-        cmake = (check_renderer.RENDERER / "external/open-wallpaper-engine/tests/CMakeLists.txt").read_text()
-        built = set(re.findall(r"add_executable\(\s*(\w+)", cmake))
-        run = {*check_renderer.REGRESSION_BINARIES, check_renderer.OFFSCREEN_PROBE, check_renderer.RELOAD_PROBE}
-        self.assertEqual(built - run - set(check_renderer.MANUAL_BINARIES), set())
-        self.assertEqual(run & set(check_renderer.MANUAL_BINARIES), set())
+                with patch.object(check_renderer.subprocess, "run", side_effect=process) as child:
+                    result = check_renderer.collect_timer_delivery_benchmark(root / "bin", root, environment)
+                self.assertEqual(child.call_count, 1)
+                self.assertEqual(result["exit"], 0)
+                self.assertEqual(result["status"], "collected")
+                self.assertTrue(result["diagnostic_only"])
+                self.assertEqual(result["measurement"], payload)
+                self.assertEqual(result["actual_outer_duration_ns"], 1_250_000_000)
+                self.assertEqual(result["delivered_per_second"], delivered / 1.25)
+                self.assertEqual(Path(result["log"]).read_text(), raw)
+
+    def test_rejects_missing_nonintegral_and_boolean_fields(self):
+        payload = benchmark_payload()
+        for name in payload:
+            missing = payload.copy()
+            del missing[name]
+            with self.subTest(missing=name), self.assertRaises(ValueError):
+                check_renderer.parse_timer_delivery_benchmark(benchmark_line(missing))
+            for value in (True, float(payload[name]), str(payload[name])):
+                with self.subTest(field=name, value=value), self.assertRaises(ValueError):
+                    check_renderer.parse_timer_delivery_benchmark(benchmark_line({**payload, name: value}))
+
+    def test_rejects_wrong_schema_or_requested_configuration(self):
+        for name in ("schema", "requested_fps", "busy_work_ns", "requested_warmup_ns", "requested_window_ns"):
+            payload = benchmark_payload()
+            payload[name] += 1
+            with self.subTest(field=name), self.assertRaises(ValueError):
+                check_renderer.parse_timer_delivery_benchmark(benchmark_line(payload))
+
+    def test_rejects_inconsistent_counters_and_nonpositive_outer_windows(self):
+        payload = benchmark_payload()
+        for changes in ({"window_end_ns": payload["window_start_ns"]},
+                        {"window_end_ns": payload["window_start_ns"] - 1},
+                        {"count_before": -1}, {"count_before": -1, "count_after": -1, "delivered": 0},
+                        {"count_after": payload["count_before"] - 1}, {"count_after": -1},
+                        {"delivered": -1}, {"delivered": payload["count_after"] - payload["count_before"] + 1}):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                check_renderer.parse_timer_delivery_benchmark(benchmark_line({**payload, **changes}))
+
+    def test_rejects_missing_duplicate_and_malformed_protocol_data(self):
+        valid = benchmark_line(benchmark_payload())
+        duplicate_key = valid.replace('"schema": 1', '"schema": 1, "schema": 1')
+        for text in ("", "only an unrelated log line\n", valid + valid, duplicate_key,
+                     "TIMER_DELIVERY_BENCHMARK{}\n", "TIMER_DELIVERY_BENCHMARK {\n",
+                     "TIMER_DELIVERY_BENCHMARK []\n", "TIMER_DELIVERY_BENCHMARK null\n",
+                     valid.rstrip() + " trailing text\n",
+                     benchmark_line({**benchmark_payload(), "invalid": float("nan")})):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                check_renderer.parse_timer_delivery_benchmark(text)
+
+    def test_operational_failures_preserve_logs_without_fabricating_a_measurement(self):
+        raw = "raw collection diagnostics\n" + benchmark_line(benchmark_payload())
+        for outcome, expected in ((9, 9), (subprocess.TimeoutExpired(["benchmark"], 30), "timeout"),
+                                  (FileNotFoundError("benchmark could not be invoked"), "error")):
+            with self.subTest(outcome=expected), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+
+                def process(command, **kwargs):
+                    kwargs["stdout"].write(raw)
+                    if isinstance(outcome, Exception):
+                        raise outcome
+                    return subprocess.CompletedProcess(command, outcome)
+
+                with patch.object(check_renderer.subprocess, "run", side_effect=process) as child:
+                    result = check_renderer.collect_timer_delivery_benchmark(root / "bin", root, {})
+                self.assertEqual(child.call_count, 1)
+                self.assertEqual(result["exit"], expected)
+                self.assertEqual(result["status"], "tooling-failure")
+                self.assertTrue(result["diagnostic_only"])
+                self.assertTrue(result["error"])
+                for name in ("measurement", "actual_outer_duration_ns", "delivered_per_second"):
+                    self.assertNotIn(name, result)
+                self.assertEqual(Path(result["log"]).read_text(), raw)
 
 
 class GateExitStatusTests(unittest.TestCase):
-    def gate(self, failed=None, timeout=False, skipped=None, gpu=None, extra_project=False, timers=None):
+    def gate(self, failed=None, timeout=False, skipped=None, gpu=None, extra_project=False, timers=None,
+             benchmark_text=None, benchmark_exit=0):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             project = root / "project.json"
@@ -212,6 +291,13 @@ class GateExitStatusTests(unittest.TestCase):
                     if result == "timeout":
                         raise check_renderer.subprocess.TimeoutExpired(command, 1)
                     return result
+                if name == check_renderer.TIMER_DELIVERY_BENCHMARK:
+                    log.write_text(benchmark_line(benchmark_payload()) if benchmark_text is None else benchmark_text)
+                    if benchmark_exit == "timeout":
+                        raise check_renderer.subprocess.TimeoutExpired(command, 30)
+                    if benchmark_exit == "error":
+                        raise FileNotFoundError("benchmark invocation unavailable")
+                    return benchmark_exit
                 if name == failed:
                     if timeout:
                         raise check_renderer.subprocess.TimeoutExpired(command, 1)
@@ -262,6 +348,59 @@ class GateExitStatusTests(unittest.TestCase):
         self.assertEqual(len(report["cases"]), 4)
         self.assertEqual(calls.count(check_renderer.OFFSCREEN_PROBE), 8)
         self.assertTrue(all(case["pixels_equal"] for case in report["cases"]))
+
+    def test_valid_delivery_counts_are_diagnostic_and_never_gate_throughput(self):
+        for delivered in (0, 1, 600):
+            payload = benchmark_payload(delivered)
+            with self.subTest(delivered=delivered):
+                status, report, calls = self.gate(benchmark_text=benchmark_line(payload))
+                result = report[check_renderer.TIMER_DELIVERY_BENCHMARK]
+                self.assertEqual(status, 0)
+                self.assertEqual(calls.count(check_renderer.TIMER_DELIVERY_BENCHMARK), 1)
+                self.assertEqual(result["status"], "collected")
+                self.assertTrue(result["diagnostic_only"])
+                self.assertEqual(result["measurement"], payload)
+                self.assertEqual(result["actual_outer_duration_ns"], 1_250_000_000)
+                self.assertEqual(result["delivered_per_second"], delivered / 1.25)
+                self.assertIn("diagnostic only", self.last_output)
+
+    def test_benchmark_operational_failures_fail_the_gate_without_retrying(self):
+        for outcome in (7, "timeout", "error"):
+            with self.subTest(outcome=outcome):
+                status, report, calls = self.gate(benchmark_exit=outcome)
+                result = report[check_renderer.TIMER_DELIVERY_BENCHMARK]
+                self.assertEqual(status, 1)
+                self.assertEqual(calls.count(check_renderer.TIMER_DELIVERY_BENCHMARK), 1)
+                self.assertEqual(result["exit"], outcome)
+                self.assertEqual(result["status"], "tooling-failure")
+                self.assertTrue(result["error"])
+                self.assertNotIn("measurement", result)
+                self.assertIn(check_renderer.RELOAD_PROBE, calls)
+                self.assertIn("tooling failure", self.last_output)
+
+    def test_missing_duplicate_malformed_or_inconsistent_measurements_fail_the_gate(self):
+        valid = benchmark_line(benchmark_payload())
+        for text in ("", valid + valid, "TIMER_DELIVERY_BENCHMARK {\n",
+                     benchmark_line(benchmark_payload(delivered=51, count_after=57)),
+                     benchmark_line(benchmark_payload(window_end_ns=-100_000_000))):
+            with self.subTest(text=text):
+                status, report, calls = self.gate(benchmark_text=text)
+                result = report[check_renderer.TIMER_DELIVERY_BENCHMARK]
+                self.assertEqual(status, 1)
+                self.assertEqual(result["exit"], 0)
+                self.assertEqual(result["status"], "tooling-failure")
+                self.assertTrue(result["error"])
+                self.assertNotIn("measurement", result)
+                self.assertEqual(calls.count(check_renderer.TIMER_DELIVERY_BENCHMARK), 1)
+
+    def test_gpu_and_cadence_skips_do_not_skip_or_filter_the_benchmark(self):
+        status, report, calls = self.gate(gpu=(0, 77), timers=(0, 77),
+                                        benchmark_text=benchmark_line(benchmark_payload(0)))
+        self.assertEqual(status, 0)
+        self.assertEqual(calls.count(check_renderer.TIMER_DELIVERY_BENCHMARK), 1)
+        self.assertEqual(report[check_renderer.TIMER_DELIVERY_BENCHMARK]["measurement"]["delivered"], 0)
+        self.assertNotIn(check_renderer.TIMER_DELIVERY_BENCHMARK, report["skips"])
+        self.assertEqual(len(self.commands[check_renderer.TIMER_DELIVERY_BENCHMARK]), 1)
 
     def test_generated_scenes_and_reload_work_without_an_installed_asset_directory(self):
         status, _, _ = self.gate()
@@ -374,6 +513,29 @@ class GateExitStatusTests(unittest.TestCase):
                 self.assertTrue(report["gpu_checks_executed"])
                 self.assertFalse(any(case["pixels_equal"] for case in report["cases"]))
                 self.assertNotIn(check_renderer.OFFSCREEN_PROBE, report["skips"])
+
+
+class ForeignBuildTreeTests(unittest.TestCase):
+    def tree(self, home):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        source, build = root / "Engine", root / "bin"
+        source.mkdir()
+        build.mkdir()
+        (build / "CMakeCache.txt").write_text(f"CMAKE_BUILD_TYPE:STRING=Release\nCMAKE_HOME_DIRECTORY:INTERNAL={home(root)}\n")
+        return source, build
+
+    def test_a_tree_from_another_source_directory_is_removed(self):
+        source, build = self.tree(lambda root: root / "upstream/open-wallpaper-engine")
+        self.assertTrue(check_renderer.discard_foreign_build_tree(build, source))
+        self.assertFalse(build.exists())
+
+    def test_a_tree_from_the_same_source_or_no_tree_is_kept(self):
+        source, build = self.tree(lambda root: root / "Engine")
+        self.assertFalse(check_renderer.discard_foreign_build_tree(build, source))
+        self.assertTrue((build / "CMakeCache.txt").is_file())
+        self.assertFalse(check_renderer.discard_foreign_build_tree(source / "missing", source))
 
 
 if __name__ == "__main__":

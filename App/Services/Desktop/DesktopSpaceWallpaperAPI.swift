@@ -17,6 +17,8 @@ struct DesktopPictureTarget: Hashable, Codable {
 /// https://gist.github.com/RhetTbull/86394ac9c2cc1096e510775dee14ae08
 /// These optional HIServices/CoreGraphics APIs target an inactive Space directly.
 /// Do not replace them with Space switching, plist edits, or process restarts.
+/// Only a full restoration edits the store, for choices these APIs cannot write
+/// back (`DesktopWallpaperStoreRestoration`).
 @MainActor
 final class DesktopSpaceWallpaperAPI {
     private typealias Connection = @convention(c) () -> Int32
@@ -172,6 +174,23 @@ final class SystemDesktopPictureWorkspace: DesktopPictureWorkspace {
         self.storeURL = storeURL
     }
 
+    func storeContents() throws -> Data? {
+        guard FileManager.default.fileExists(atPath: storeURL.path) else { return nil }
+        return try Data(contentsOf: storeURL)
+    }
+
+    func replaceStore(_ data: Data, expected: Data) throws {
+        // A choice made in System Settings since the store was read is never overwritten.
+        guard try Data(contentsOf: storeURL) == expected else { throw DesktopPictureUnconfirmed() }
+        try data.write(to: storeURL, options: .atomic)
+    }
+
+    /// WallpaperAgent reads the store only as it starts, so it is restarted to
+    /// show the replaced selections.
+    func reloadStore() throws {
+        try LockScreenWallpaperSelection.reloadWallpaperAgent()
+    }
+
     func referencedPictureURLs(targets: [DesktopPictureTarget]) throws -> Set<URL> {
         guard !targets.isEmpty, FileManager.default.fileExists(atPath: storeURL.path) else { return [] }
         let displays = Set(targets.compactMap { target -> String? in
@@ -252,15 +271,21 @@ final class SystemDesktopPictureWorkspace: DesktopPictureWorkspace {
     private func screen(_ display: String) -> NSScreen? { NSScreen.screens.first { Self.id($0) == display } }
 
     func currentPicture(target: DesktopPictureTarget) throws -> DesktopPicture? {
-        if target.space != nil { return try spaces?.picture(target: target) }
-        guard let screen = screen(target.display), let url = NSWorkspace.shared.desktopImageURL(for: screen) else { return nil }
+        if target.space != nil {
+            return try spaces?.picture(target: target)
+        }
+        guard let screen = screen(target.display),
+              let url = NSWorkspace.shared.desktopImageURL(for: screen) else { return nil }
         let options = NSWorkspace.shared.desktopImageOptions(for: screen) ?? [:]
-        let color = (options[.fillColor] as? NSColor)?.usingColorSpace(.sRGB)
-            ?? NSColor(srgbRed: 0, green: 0, blue: 0, alpha: 1)
-        return DesktopPicture(url: url,
-                              scaling: (options[.imageScaling] as? NSNumber)?.intValue ?? Int(NSImageScaling.scaleProportionallyUpOrDown.rawValue),
-                              allowClipping: (options[.allowClipping] as? NSNumber)?.boolValue ?? true,
-                              fill: [color.redComponent, color.greenComponent, color.blueComponent, color.alphaComponent])
+        let scaling = (options[.imageScaling] as? NSNumber)?.intValue
+            ?? Int(NSImageScaling.scaleProportionallyUpOrDown.rawValue)
+        let clipping = (options[.allowClipping] as? NSNumber)?.boolValue ?? true
+        var fill: [Double] = [0, 0, 0, 1]
+        if let color = (options[.fillColor] as? NSColor)?.usingColorSpace(.sRGB) {
+            fill = [Double(color.redComponent), Double(color.greenComponent),
+                    Double(color.blueComponent), Double(color.alphaComponent)]
+        }
+        return DesktopPicture(url: url, scaling: scaling, allowClipping: clipping, fill: fill)
     }
 
     func setPicture(_ picture: DesktopPicture, target: DesktopPictureTarget) throws {

@@ -129,13 +129,15 @@ final class WorkshopPreviewCoordinator {
           hasStill: stills[tile.id] == true)
       },
       stillsSettled: settled, isHidden: isHidden)
-    for tile in tiles {
-      let attached = scheduler.isAttached(tile.id)
-      if attached, animationTasks[tile.id] == nil, animations[tile.id] == nil, let source = tile.still {
+    // Released by key, not by the current tiles: a tile that left the page is detached too, and its
+    // bytes must not outlive it.
+    for id in Array(animationTasks.keys) where !scheduler.isAttached(id) {
+      animationTasks.removeValue(forKey: id)?.cancel()
+    }
+    for id in animations.keys.filter({ !scheduler.isAttached($0) }) { animations[id] = nil }
+    for tile in tiles where scheduler.isAttached(tile.id) {
+      if animationTasks[tile.id] == nil, animations[tile.id] == nil, let source = tile.still {
         start(tile.id, source)
-      } else if !attached {
-        animationTasks.removeValue(forKey: tile.id)?.cancel()
-        if animations[tile.id] != nil { animations[tile.id] = nil }
       }
     }
   }

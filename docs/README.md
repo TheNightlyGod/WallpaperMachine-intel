@@ -23,6 +23,8 @@ live under `testing/`.
 |---|---|
 | [architecture.md](architecture.md) | Runtime architecture and module boundaries, including the SwiftUI control panel's controller, actions and window hosting |
 | [repository-layout.md](repository-layout.md) | Directory map and where new code goes |
+| [container-readers.md](container-readers.md) | `Renderer/Media`: the project's own MP4 and Matroska/WebM readers, what they parse and refuse, their limits, and how they are tested |
+| [sound-decoding.md](sound-decoding.md) | `Renderer/Sound`: how a scene's sounds are decoded, remixed, resampled and looped for the output device, which decoder serves which file, and how that is tested |
 | [localization.md](localization.md) | Language resolution, the string catalogs and the panel's live language switch, how to add or remove a language |
 
 ## Process
@@ -34,8 +36,8 @@ live under `testing/`.
 | [../CHANGELOG.md](../CHANGELOG.md) | Published versions, newest first; written by `scripts/release_notes.py` |
 | [development-tools.md](development-tools.md) | Optional diagnostic tools (Peekaboo, Instruments, `xctrace`), the safe setup check, and when a desktop run needs authorization |
 | [../AGENTS.md](../AGENTS.md) / [../CLAUDE.md](../CLAUDE.md) | Agent rules; CLAUDE.md is a symlink, not a separate policy |
-| [../LICENSING.md](../LICENSING.md) | GPL-2.0-only source policy, Supporter model (free signed download; sponsor place and priority support), Mac App Store questions, component licenses, distribution blockers |
-| [../LICENSE](../LICENSE) | GNU GPL version 2 text, the license of this repository's source |
+| [../LICENSING.md](../LICENSING.md) | GPL-3.0-only source policy, Supporter model (free signed download; sponsor place and priority support), Mac App Store questions, component licenses, distribution blockers |
+| [../LICENSE](../LICENSE) | GNU GPL version 3 text, the license of this repository's source |
 
 ## Testing
 
@@ -51,6 +53,7 @@ live under `testing/`.
 | [testing/verification-log.md](testing/verification-log.md) | Dated verification history, ten newest entries |
 | [testing/archive/](testing/archive/) | Retired verification-log entries, one file per month, written by `scripts/log_verification.py`; historical only |
 | [testing/wallpaper-corpus.md](testing/wallpaper-corpus.md) | Local regression corpus checklist |
+| [testing/wallpaper-fixes.md](testing/wallpaper-fixes.md) | Triaging and fixing a wallpaper that looks wrong: download, Wallpaper Engine frames, probe scenes, test-first fix, before/after comparison, cleanup |
 | [testing/wallpaper-engine-reference.md](testing/wallpaper-engine-reference.md) | Comparing a wallpaper with Wallpaper Engine's own frames from a Parallels Windows VM (`scripts/we_reference.py`): capture, render, compare, noise floor |
 
 ## Archive
@@ -71,12 +74,13 @@ file; pass `rg -u` to search them deliberately.
 | [features/control-panel.md](features/control-panel.md) | The native window: language, tabs, toolbar, grid and inspector, pages and Settings, selection versus apply, Now Playing, target display, filtering and local collections, recently used, deleting, downloads and import |
 | [features/first-run.md](features/first-run.md) | The first-run guide over the window, the one-time support prompt after the first downloaded wallpaper, the later star prompt and the performance data question |
 | [features/wallpaper-properties.md](features/wallpaper-properties.md) | Inspector properties, live preview, property presets, image placement, the compatibility check and the black-bar check |
+| [features/library-location.md](features/library-location.md) | Settings → Storage → Wallpaper library location: moving the library and downloads to another folder or an external drive and back, what moves, the copy now and the switch at the next launch, a drive that is not connected |
 | [features/backup-restore.md](features/backup-restore.md) | The Settings → Storage backup package (settings, allowlisted preferences, chosen user files) and restoring it |
 | [features/updates.md](features/updates.md) | In-app update checks, download and verification, installing, and the What's New window |
 | [features/workshop-downloads.md](features/workshop-downloads.md) | Discover, SteamCMD setup, download queue |
 | [features/automation.md](features/automation.md) | Weekday/time/solar/appearance rules, temporary Focus choices, global shortcuts, Shortcuts actions for wallpapers/playlists/presets, and `wallpapermachine://` links |
 | [features/display-layouts.md](features/display-layouts.md) | Saved multi-display wallpaper arrangements, copy/swap, preflight and recovery, Shortcuts, backup, mirror sets, AirPlay and a closed lid, and the per-Space boundary |
-| [features/spaces.md](features/spaces.md) | Experimental wallpaper/playlist choices by desktop UUID, visit/manual/Focus semantics, scoped poster ownership and verification limits |
+| [features/spaces.md](features/spaces.md) | A different wallpaper for each desktop: choices by desktop UUID, windows kept on their desktop, saved posters for the others, visit/manual/Focus semantics and verification limits |
 | [features/wallpaper-switching.md](features/wallpaper-switching.md) | The switch hold: the previous picture stays on screen, then fades, while a newly chosen wallpaper loads; which switches it covers, its limits and Reduce Motion |
 | [features/desktop-picture.md](features/desktop-picture.md) | The static desktop picture macOS shows (Mission Control, after quit): posters, the journal of originals, refused writes, macOS 27, restoring on quit |
 | [features/playlists.md](features/playlists.md) | Per-display rotation and day/night selection, local collection sources, reusable named plans, scheduling and storage |
@@ -87,8 +91,8 @@ file; pass `rg -u` to search them deliberately.
 | [features/media-integration.md](features/media-integration.md) | Now-playing metadata and covers for scene and web wallpapers: the bundled MediaRemote adapter first, AppleScript as fallback |
 | [features/lock-screen.md](features/lock-screen.md) | Experimental animated lock screen and wallpaper-as-screen-saver |
 | [features/appearance.md](features/appearance.md) | Theme, accent and tone, the window's native materials, the app icon, and brand asset generation |
-| [features/performance.md](features/performance.md) | Energy readout and per-wallpaper ratings, quality and playback settings, video backend, experimental switches, and background work only while it has a consumer |
-| [features/scene-rendering.md](features/scene-rendering.md) | Scene renderer choice (Compatibility or Native Metal preferred), scene render optimisation, skipping frames that would repeat, renderer memory and repeated-work reduction |
+| [features/performance.md](features/performance.md) | Energy readout and per-wallpaper ratings, quality and playback settings, video playback, experimental switches, and background work only while it has a consumer |
+| [features/scene-rendering.md](features/scene-rendering.md) | The scene renderer (Native Metal only, and what a scene it cannot draw does), scene render optimisation, skipping frames that would repeat, renderer memory and repeated-work reduction |
 | [features/crash-recovery.md](features/crash-recovery.md) | The load journal (a wallpaper that was being opened when the app died twice in a row is held back at launch, how strikes, the settle window and release by Apply, the panel's Try again or an update work, the banner and menu line), SIGTERM and SIGHUP as a quit, broken pipes, the one-copy-per-library lock and what a second launch does, and the limits |
 | [features/telemetry.md](features/telemetry.md) | Send performance data: what a report holds (no free text, Workshop ids only), the daily upload, 60 s frame windows and their cost, local files, deletion when turned off, and the website endpoint |
 | [features/diagnostics.md](features/diagnostics.md) | Application log format, load tagging and the line each wallpaper activation leaves, detailed logging, retention, how the log says the previous session ended, and the diagnostics report users attach to bug reports |

@@ -96,7 +96,10 @@ final class WallpaperAutomationScheduler {
     }
 
     /// An explicit selection lasts until the next event. During Focus, preserve it on exit too.
-    func noteManualChoice(_ display: String) {
+    /// On a display that has a wallpaper for each desktop, a wallpaper chosen by hand becomes the
+    /// current desktop's own: it stays when the person leaves and comes back.
+    func noteManualChoice(_ display: String, wallpaperID: String? = nil) {
+        if let wallpaperID, assignCurrentDesktop(display, to: wallpaperID) { return }
         let resolution = desired(on: display)
         if store.focusRestore[display] != nil, !resolution.focused {
             do { try store.forgetFocus(on: display) }
@@ -104,6 +107,25 @@ final class WallpaperAutomationScheduler {
         } else { store.preserveManualWallpaper(on: display) }
         if let event = resolution.event { store.markHandled(event.key, on: display) }
         else if store.errors[display] != nil { store.markHandled("manual", on: display) }
+    }
+
+    /// Saves `wallpaperID` as the current desktop's choice. False when the display does not follow
+    /// desktops, the desktop is unknown, or a Focus filter decides its wallpaper now.
+    private func assignCurrentDesktop(_ display: String, to wallpaperID: String) -> Bool {
+        let configuration = store.configuration(for: display)
+        guard configuration.mode == .spaces, store.focusRestore[display] == nil,
+              !desired(on: display).focused, let visit = spaceVisit(display) else { return false }
+        let target = WallpaperAutomationTarget(kind: .wallpaper, id: wallpaperID)
+        guard target.isValid else { return false }
+        if configuration.spaces[visit.spaceID] != target {
+            do { try store.update(display) { $0.spaces[visit.spaceID] = target } } catch {
+                AppLog.error("could not keep the wallpaper for this desktop: \(error.localizedDescription)")
+                return false
+            }
+        }
+        // What the desktop now asks for is already on screen.
+        if let event = desired(on: display).event { store.markHandled(event.key, on: display) }
+        return true
     }
 
     func evaluate() {
@@ -156,6 +178,19 @@ final class WallpaperAutomationScheduler {
         return resolution.event.map { store.handled[display] == $0.key } ?? true
     }
 
+    /// The choice this display is about to change to, while that change waits or runs; nil once
+    /// it is handled or while a Focus restoration decides instead.
+    func pendingTarget(on display: String) -> WallpaperAutomationTarget? {
+        let resolution = desired(on: display)
+        guard store.focusRestore[display] == nil || resolution.focused,
+              let event = resolution.event, store.handled[display] != event.key else { return nil }
+        return event.target
+    }
+
+    /// Whether this display's change has been admitted and is running now, rather than waiting
+    /// for playback to be able to run it.
+    func isApplying(on display: String) -> Bool { inFlight.contains(display) }
+
     private func desired(on display: String) -> Resolution {
         let time = now()
         let configuration = store.configuration(for: display)
@@ -175,8 +210,11 @@ final class WallpaperAutomationScheduler {
         if configuration.mode == .spaces {
             let visit = spaceVisit(display)
             resolved.baseAvailable = visit != nil
-            if let visit, let target = configuration.spaces[visit.spaceID] {
-                resolved.event = .init(key: "space:\(configuration.revision):\(visit.spaceID):\(visit.token)", date: time, target: target)
+            if let visit, let target = configuration.desktopTarget(visit.spaceID, firstDesktop: visit.firstSpaceID) {
+                // The target is part of the event: a desktop that follows Desktop 1 changes target
+                // within one visit when the desktops are reordered and another one becomes first.
+                let key = "space:\(configuration.revision):\(visit.spaceID):\(visit.token):\(target.kind.rawValue):\(target.id)"
+                resolved.event = .init(key: key, date: time, target: target)
             }
         }
         if let selection = focus.selection {

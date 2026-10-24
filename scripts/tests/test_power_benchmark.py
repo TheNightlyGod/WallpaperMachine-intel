@@ -84,10 +84,11 @@ class ParserTests(unittest.TestCase):
 
     def test_vendored_revisions_are_keyed_by_the_directory_they_ship_from(self):
         revisions = power_benchmark.provenance()
-        self.assertIn("upstream/renderer", revisions)
-        self.assertIn("upstream/renderer/external/open-wallpaper-engine", revisions)
+        self.assertIn("ThirdParty/naga", revisions)
+        self.assertIn("ThirdParty/mediaremote-adapter", revisions)
         self.assertTrue(all(revisions.values()), "a recorded entry must carry its pinned revision")
-        self.assertNotIn("App", revisions, "first-party directories pin no upstream revision")
+        for first_party in ("App", "Renderer", "Renderer/Engine"):
+            self.assertNotIn(first_party, revisions, "first-party directories pin no vendored revision")
 
     def test_a_card_without_displays_contributes_nothing(self):
         original = power_benchmark.command_output

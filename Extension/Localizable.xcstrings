@@ -1,6 +1,12 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
+    "Steam authentication information retained on this device could not be updated (%@); you may need to sign in again later." : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "이 기기에 보관된 Steam 인증 정보를 업데이트할 수 없었습니다(%@). 나중에 다시 로그인해야 할 수 있습니다."}}, "en": {"stringUnit": {"state": "translated", "value": "Steam authentication information retained on this device could not be updated (%@); you may need to sign in again later."}}, "ja": {"stringUnit": {"state": "translated", "value": "このデバイスに保持されているSteam認証情報を更新できなかったため（%@）、後で再度ログインが必要になる場合があります。"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "无法更新此设备保留的 Steam 身份验证信息（%@）；之后可能需要重新登录。"}}, "zh-Hant": {"stringUnit": {"state": "translated", "value": "無法更新此裝置保留的 Steam 驗證資訊（%@）；之後可能需要重新登入。"}}}
+    },
+    "This Steam sign-in did not provide reusable authentication information, so you may be asked to sign in again later." : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "이번 Steam 로그인에서는 재사용할 수 있는 인증 정보가 제공되지 않았으므로 나중에 다시 로그인하라는 요청을 받을 수 있습니다."}}, "en": {"stringUnit": {"state": "translated", "value": "This Steam sign-in did not provide reusable authentication information, so you may be asked to sign in again later."}}, "ja": {"stringUnit": {"state": "translated", "value": "今回のSteamログインでは再利用できる認証情報が得られなかったため、後で再度ログインを求められる場合があります。"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "本次 Steam 登录未提供可重复使用的身份验证信息，因此之后可能会要求您重新登录。"}}, "zh-Hant": {"stringUnit": {"state": "translated", "value": "本次 Steam 登入未提供可重複使用的驗證資訊，因此之後可能會要求您重新登入。"}}}
+    },
     "The web wallpaper entry or asset is outside its published folder." : {
       "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "웹 배경화면의 진입 파일 또는 리소스가 게시된 폴더 외부에 있습니다."}}, "en" : {"stringUnit" : {"state" : "translated", "value" : "The web wallpaper entry or asset is outside its published folder."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "Web壁紙のエントリまたはアセットが公開済みフォルダの外にあります。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "网页壁纸的入口或资源位于已发布的文件夹之外。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "網頁桌布的進入點或資源位於已發佈的資料夾之外。"}}}
     },
@@ -105,6 +111,30 @@
     },
     "WallpaperMachine does not handle debug requests." : {
       "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "WallpaperMachine은 디버그 요청을 처리하지 않습니다."}}, "en" : {"stringUnit" : {"state" : "translated", "value" : "WallpaperMachine does not handle debug requests."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "WallpaperMachineはデバッグリクエストを処理しません。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "WallpaperMachine 不处理调试请求。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "WallpaperMachine 不處理除錯請求。"}}}
+    },
+    "it uses something Native Metal can't draw" : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "네이티브 Metal로 그릴 수 없는 요소가 포함되어 있습니다"}}, "en" : {"stringUnit" : {"state" : "translated", "value" : "it uses something Native Metal can't draw"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "ネイティブMetalで描画できない要素が含まれています"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "其中包含原生 Metal 无法绘制的内容"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "其中包含原生 Metal 無法繪製的內容"}}}
+    },
+    "Native Metal couldn't start" : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "네이티브 Metal을 시작할 수 없었습니다"}}, "en" : {"stringUnit" : {"state" : "translated", "value" : "Native Metal couldn't start"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "ネイティブMetalを開始できませんでした"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "原生 Metal 无法启动"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "原生 Metal 無法啟動"}}}
+    },
+    "its shaders didn't compile for Metal" : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "셰이더가 Metal용으로 컴파일되지 않았습니다"}}, "en" : {"stringUnit" : {"state" : "translated", "value" : "its shaders didn't compile for Metal"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "シェーダがMetal用にコンパイルされませんでした"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "其着色器无法编译为 Metal"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "其著色器無法編譯為 Metal"}}}
+    },
+    "a frame failed in Native Metal" : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "네이티브 Metal에서 프레임 그리기에 실패했습니다"}}, "en" : {"stringUnit" : {"state" : "translated", "value" : "a frame failed in Native Metal"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "ネイティブMetalでフレームの描画に失敗しました"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "原生 Metal 绘制某一帧失败"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "原生 Metal 繪製某個影格失敗"}}}
+    },
+    "Native Metal couldn't take the new display" : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "네이티브 Metal이 새 디스플레이를 이어받지 못했습니다"}}, "en" : {"stringUnit" : {"state" : "translated", "value" : "Native Metal couldn't take the new display"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "ネイティブMetalが新しいディスプレイを引き継げませんでした"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "原生 Metal 无法接管新的显示器"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "原生 Metal 無法接手新的顯示器"}}}
+    },
+    "(reason: %@)" : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "(이유: %@)"}}, "en" : {"stringUnit" : {"state" : "translated", "value" : "(reason: %@)"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "（理由：%@）"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "（原因：%@）"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "（原因：%@）"}}}
+    },
+    "Native Metal can't draw this wallpaper: %@. The lock screen shows its last frame, or its preview picture when it has drawn nothing yet." : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "네이티브 Metal로 이 배경화면을 그릴 수 없습니다: %@. 잠금 화면에는 마지막 프레임(아직 아무것도 그리지 않았다면 미리보기 이미지)이 표시됩니다."}}, "en" : {"stringUnit" : {"state" : "translated", "value" : "Native Metal can't draw this wallpaper: %@. The lock screen shows its last frame, or its preview picture when it has drawn nothing yet."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "ネイティブMetalではこの壁紙を描画できません：%@。ロック画面には最後のフレーム（まだ何も描画していない場合はプレビュー画像）が表示されます。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "原生 Metal 无法绘制此壁纸：%@。锁屏会显示最后一帧（尚未绘制任何内容时则显示预览图）。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "原生 Metal 無法繪製此桌布：%@。鎖定畫面會顯示最後一個影格（尚未繪製任何內容時則顯示預覽圖）。"}}}
+    },
+    "This video can't be played: %@. The lock screen keeps its last frame." : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "이 동영상을 재생할 수 없습니다: %@. 잠금 화면에는 마지막 프레임이 유지됩니다."}}, "en" : {"stringUnit" : {"state" : "translated", "value" : "This video can't be played: %@. The lock screen keeps its last frame."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "この動画は再生できません：%@。ロック画面には最後のフレームが保持されます。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "无法播放此视频：%@。锁屏会保留最后一帧。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "無法播放此影片：%@。鎖定畫面會保留最後一個影格。"}}}
     },
     "Coordinates" : {
       "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "좌표"}}, "en" : {"stringUnit" : {"state" : "translated", "value" : "Coordinates"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "座標"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "经纬度"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "經緯度"}}}

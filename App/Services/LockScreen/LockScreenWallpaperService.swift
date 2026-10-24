@@ -50,6 +50,11 @@ final class LockScreenWallpaperService {
   @ObservationIgnored private var work: Task<Void, Never>?
   @ObservationIgnored private var extensionPreparation: Task<Void, Error>?
   @ObservationIgnored private var copyRecoveryAttempted = false
+  /// What the extension said about scenes it holds because Native Metal is the only renderer and could not
+  /// draw them (`LockScreenReadiness.held`), by display, for the revision it was read for. The extension
+  /// words it in its own language, so it is shown as written. Not a failure: the surface exists and shows
+  /// a picture, so the lock screen stays on it and the note rides on the status.
+  @ObservationIgnored private var heldNotices: (revision: String, byDisplay: [UInt32: String]) = ("", [:])
   /// The last activation stopped because macOS has the renderer switched off, so a Retry may
   /// switch it on again. Cleared by any other outcome and when nothing is requested any more.
   @ObservationIgnored private var electionRepairOffered = false
@@ -71,8 +76,24 @@ final class LockScreenWallpaperService {
   /// up. A refresh that interrupts the wait waits on for the same revision until that deadline.
   @ObservationIgnored private var unconfirmed: (revision: String, deadline: Date)?
   @ObservationIgnored private var lockScreenActivationError: String?
+  /// The next update publishes a new revision even with unchanged scenes: the renderer that drew
+  /// the committed one is gone, or that publication failed part way.
+  @ObservationIgnored private var forceRepublish = false
+  /// Consecutive transient failures that kept a committed selection, and the monitor ticks to
+  /// let pass before the next attempt.
+  @ObservationIgnored private var transientFailures = 0
+  @ObservationIgnored private var retrySkipsRemaining = 0
+  /// Exit watches on the extension processes that acknowledged the committed lock screen. macOS
+  /// keeps a renderer whose process died as its wallpaper and shows nothing, never reloading it.
+  @ObservationIgnored private var rendererWatches: [Int32: () -> Void] = [:]
+  @ObservationIgnored private var rendererLosses: [ContinuousClock.Instant] = []
+  @ObservationIgnored private var rendererFailure: String?
+  @ObservationIgnored private let watchProcessExit: (Int32, @escaping @MainActor () -> Void) -> () -> Void
+  @ObservationIgnored private let displaysAreAway: () -> Bool
 
-  convenience init(bridge: WallpaperBridge, contentRevision: @escaping () -> UInt64 = { 0 }) {
+  convenience init(
+    bridge: WallpaperBridge, contentRevision: @escaping () -> UInt64 = { 0 }
+  ) {
     let registration = LockScreenExtensionRegistration(processes: .live)
     self.init(
       prepareExtension: { try await registration.prepare() },
@@ -85,7 +106,8 @@ final class LockScreenWallpaperService {
       scenes: { try await bridge.lockScreenScenes() },
       selection: LockScreenWallpaperSelection(
         folder: ClientPaths.supportURL.appendingPathComponent("LockScreen")),
-      exchange: LockScreenConfiguration.exchangeDirectory, contentRevision: contentRevision)
+      exchange: LockScreenConfiguration.exchangeDirectory,
+      displaysAreAway: LockScreenWallpaperService.displaysAreAway, contentRevision: contentRevision)
   }
 
   init(
@@ -105,6 +127,10 @@ final class LockScreenWallpaperService {
       "Contents/Extensions/WallpaperMachineExtension.appex"),
     runningExtensionBundles: @escaping () -> [URL] = LockScreenExtensionDiagnostics.runningExtensionBundles,
     readinessTimeout: TimeInterval = 35,
+    watchProcessExit: @escaping (Int32, @escaping @MainActor () -> Void) -> () -> Void =
+      LockScreenWallpaperService.watchProcessExit,
+    // The app passes `displaysAreAway`; a test's displays are never away unless it says so.
+    displaysAreAway: @escaping () -> Bool = { false },
     contentRevision: @escaping () -> UInt64 = { 0 }
   ) {
     self.scenes = scenes
@@ -120,6 +146,8 @@ final class LockScreenWallpaperService {
     self.expectedExtensionBundle = expectedExtensionBundle
     self.runningExtensionBundles = runningExtensionBundles
     self.readinessTimeout = readinessTimeout
+    self.watchProcessExit = watchProcessExit
+    self.displaysAreAway = displaysAreAway
     self.contentRevision = contentRevision
   }
 
@@ -128,6 +156,26 @@ final class LockScreenWallpaperService {
       let uuid = CGDisplayCreateUUIDFromDisplayID(displayID)?.takeRetainedValue()
     else { return nil }
     return CFUUIDCreateString(nil, uuid) as String
+  }
+
+  /// The session is locked, or no display is awake. Core Graphics lists no sleeping display as
+  /// active, so the bridge names none while they sleep.
+  nonisolated static func displaysAreAway() -> Bool {
+    if (CGSessionCopyCurrentDictionary() as? [String: Any])?["CGSSessionScreenIsLocked"] as? Bool
+      == true
+    {
+      return true
+    }
+    var count: UInt32 = 0
+    return CGGetActiveDisplayList(0, nil, &count) == .success && count == 0
+  }
+
+  nonisolated static func watchProcessExit(_ pid: Int32, _ exited: @escaping @MainActor () -> Void) -> () -> Void {
+    // Fires at once for a process that is already gone.
+    let source = DispatchSource.makeProcessSource(identifier: pid, eventMask: .exit, queue: .main)
+    source.setEventHandler { MainActor.assumeIsolated { exited() } }
+    source.resume()
+    return { source.cancel() }
   }
 
   /// Always recover before either native or PNG providers are allowed to start.
@@ -155,6 +203,7 @@ final class LockScreenWallpaperService {
 
   func setEnabled(_ enabled: Bool) {
     guard !stopping else { return }
+    resetAutomaticRecovery()
     isRequested = enabled
     dropRepairOfferIfNothingIsRequested()
     updateMonitor()
@@ -166,6 +215,7 @@ final class LockScreenWallpaperService {
     guard !stopping else { return }
     cancelExtensionPreparation()
     copyRecoveryAttempted = false
+    resetAutomaticRecovery()
     screenSaverRequested = enabled
     dropRepairOfferIfNothingIsRequested()
     updateMonitor()
@@ -178,8 +228,18 @@ final class LockScreenWallpaperService {
   /// click on that button, not for the monitor, a snapshot refresh, a relaunch or a switch.
   func retry(lockScreen: Bool) {
     guard !stopping else { return }
+    resetAutomaticRecovery()
     electionRepairArmed = electionRepairOffered
     refresh(retryingLockScreen: lockScreen)
+  }
+
+  /// A switch or a Retry click starts over: no retry back-off, renderer loss count or pending
+  /// renderer failure carries into it.
+  private func resetAutomaticRecovery() {
+    transientFailures = 0
+    retrySkipsRemaining = 0
+    rendererLosses.removeAll()
+    rendererFailure = nil
   }
 
   /// The offer belongs to a failure shown in a row; with both modes off no row shows one.
@@ -221,12 +281,22 @@ final class LockScreenWallpaperService {
     monitor = scheduleMonitor { [weak self] in
       guard let self, self.canRefreshAutomatically, !self.stopping, !self.isBusy
       else { return }
+      // A transient failure is retried after a growing number of ticks.
+      if self.retrySkipsRemaining > 0 {
+        self.retrySkipsRemaining -= 1
+        return
+      }
       // The bridge applies battery policy without opening the control panel.
       self.refresh()
     }
   }
 
   static let monitorInterval: TimeInterval = 2
+  /// Monitor ticks skipped before each retry of a transient failure: 2, 4, 8, 16 and 32 s.
+  static let transientRetrySkips = [0, 1, 3, 7, 15]
+  /// Renderer exits recovered within `rendererRecoveryWindow` before the next one is a failure.
+  static let rendererRecoveryLimit = 3
+  static let rendererRecoveryWindow: Duration = .seconds(600)
 
   static func scheduleMonitorTimer(_ callback: @escaping @MainActor () -> Void) -> Timer {
     let timer = Timer.scheduledTimer(withTimeInterval: monitorInterval, repeats: true) { _ in
@@ -242,6 +312,7 @@ final class LockScreenWallpaperService {
   func shutdown(restoringDesktop: () async throws -> Void = {}) async throws {
     stopping = true
     updateMonitor()
+    cancelRendererWatches()
     generation &+= 1
     cancelExtensionPreparation()
     work?.cancel()
@@ -304,9 +375,12 @@ final class LockScreenWallpaperService {
         }
         try publish(committed)
         try applySelection(committed, inputs: lastInputs)
-        if !committed.lockScreenEnabled, ownsDesktopProvider {
-          ownsDesktopProvider = false
-          try afterDeactivation?()
+        if !committed.lockScreenEnabled {
+          cancelRendererWatches()
+          if ownsDesktopProvider {
+            ownsDesktopProvider = false
+            try afterDeactivation?()
+          }
         }
         updateStatuses(committed, hasWebWallpapers: lastHasWebWallpapers)
       }
@@ -317,9 +391,23 @@ final class LockScreenWallpaperService {
         updateStatuses(LockScreenConfiguration(scenes: []))
         return
       }
+      if let failure = rendererFailure {
+        rendererFailure = nil
+        throw LockScreenWallpaperFailure(message: failure)
+      }
       let records = try await scenes()
       try Task.checkCancellation()
       guard generation == revision else { return }
+      // A display that sleeps or drops off while the Mac is locked or dark is not removed:
+      // that would hand its lock screen back to macOS just before the user wakes it.
+      if let lastInputs, displaysAreAway() {
+        let named = Set(records.map(\.displayId))
+        let departed = lastInputs.map(\.displayID).filter { !named.contains($0) }
+        if !departed.isEmpty {
+          AppLog.debug("Native wallpaper topology held: display(s) \(departed) left while the Mac is locked or its displays sleep")
+          return
+        }
+      }
       var inputs: [LockScreenPublishInput] = []
       for record in records {
         guard let uuid = displayUUID(record.displayId) else {
@@ -344,7 +432,8 @@ final class LockScreenWallpaperService {
       }
       inputs.sort { $0.displayID < $1.displayID }
       let currentContentRevision = contentRevision()
-      if inputs == lastInputs, let published, unconfirmed?.revision != published.revision,
+      if inputs == lastInputs, !forceRepublish, let published,
+        unconfirmed?.revision != published.revision,
         lastContentRevision == currentContentRevision,
         lastLockScreenRequested == isRequested,
         lastScreenSaverRequested == screenSaverRequested
@@ -406,7 +495,7 @@ final class LockScreenWallpaperService {
         try Task.checkCancellation()
         guard generation == revision, anyRequested else { return }
       }
-      if let published, published.scenes == configuration.scenes,
+      if !forceRepublish, let published, published.scenes == configuration.scenes,
          published.lockScreenEnabled == configuration.lockScreenEnabled,
          published.screenSaverEnabled == configuration.screenSaverEnabled {
         lastInputs = inputs
@@ -445,7 +534,9 @@ final class LockScreenWallpaperService {
         status = String(localized: "Waiting for the system wallpaper renderer…")
         do {
           try await awaitReadiness(configuration)
-        } catch let error as RendererUnavailable where configuration.screenSaverEnabled {
+        } catch let error as RendererUnavailable
+          where configuration.screenSaverEnabled && !mayRetryTransient(error)
+        {
           // Idle selection is valid without an acquired surface. A missing
           // Desktop acknowledgement must not take that independent choice down.
           configuration.revision = UUID().uuidString
@@ -453,6 +544,7 @@ final class LockScreenWallpaperService {
           try publish(configuration)
           try applySelection(configuration, inputs: inputs)
           ownsDesktopProvider = false
+          cancelRendererWatches()
           try afterDeactivation?()
           lockScreenActivationError = error.localizedDescription
           AppLog.error("Native lock screen: \(error.localizedDescription)")
@@ -468,6 +560,10 @@ final class LockScreenWallpaperService {
       updateStatuses(configuration, hasWebWallpapers: prepared.hasWebWallpapers)
       copyRecoveryAttempted = false
       electionRepairOffered = false
+      forceRepublish = false
+      transientFailures = 0
+      retrySkipsRemaining = 0
+      if !configuration.lockScreenEnabled { cancelRendererWatches() }
       if isEnabled { defaults.set(true, forKey: Self.preference) }
       if screenSaverEnabled { defaults.set(true, forKey: Self.screenSaverPreference) }
     } catch is CancellationError {
@@ -491,6 +587,19 @@ final class LockScreenWallpaperService {
           return
         } catch { failure = error }
       }
+      if mayRetryTransient(failure) {
+        // The committed selection stays: the lock screen keeps what it shows while a later
+        // attempt publishes again, instead of falling back to macOS's wallpaper.
+        transientFailures += 1
+        retrySkipsRemaining = Self.transientRetrySkips[transientFailures - 1]
+        forceRepublish = true
+        AppLog.error(
+          "Native wallpaper: \(failure.localizedDescription) Keeping the committed selection; "
+            + "attempt \(transientFailures) of \(Self.transientRetrySkips.count)")
+        return
+      }
+      transientFailures = 0
+      retrySkipsRemaining = 0
       lockScreenActivationError = nil
       electionRepairOffered = (failure as? LockScreenWallpaperFailure)?.reason == .extensionTurnedOff
       var message = failure.localizedDescription
@@ -536,11 +645,21 @@ final class LockScreenWallpaperService {
         : hasWebWallpapers
           ? String(localized: "Not applicable — web wallpapers have no lock-screen support")
           : String(localized: "Waiting for an applied video or live scene on a connected display")
+    if isEnabled, errorMessage == nil, let held = heldNotice(for: configuration) {
+      status += " — " + held
+    }
     let count = configuration.scenes.count
     screenSaverStatus = !screenSaverRequested ? String(localized: "Off") : screenSaverEnabled
       ? String(localized: "Selected for \(count) display(s) — starts when macOS is idle")
       : String(localized: "Waiting for an applied wallpaper on a connected display")
     screenSaverError = nil
+  }
+
+  /// The first note a display of `configuration` is held with, in display order, when the extension wrote one.
+  private func heldNotice(for configuration: LockScreenConfiguration) -> String? {
+    guard heldNotices.revision == configuration.revision else { return nil }
+    let notices = heldNotices.byDisplay
+    return configuration.scenes.lazy.compactMap { notices[$0.displayID] }.first
   }
 
   private func checkReadinessFailures(_ configuration: LockScreenConfiguration) throws {
@@ -572,6 +691,8 @@ final class LockScreenWallpaperService {
   /// the poster sync suspended; the first error is rethrown afterwards.
   private func deactivate() throws {
     cancelExtensionPreparation()
+    cancelRendererWatches()
+    forceRepublish = false
     isEnabled = false
     screenSaverEnabled = false
     lastInputs = nil
@@ -589,6 +710,77 @@ final class LockScreenWallpaperService {
     extensionPreparation = nil
   }
 
+  /// Whether a failure may keep the committed selection and be tried again: one a later attempt
+  /// can get past, of an update that keeps modes already committed as they are.
+  private func mayRetryTransient(_ error: Error) -> Bool {
+    guard lastInputs != nil, lastLockScreenRequested == isRequested,
+      lastScreenSaverRequested == screenSaverRequested,
+      transientFailures < Self.transientRetrySkips.count
+    else { return false }
+    return error is RendererUnavailable
+      || (error as? LockScreenWallpaperFailure)?.reason == .transient
+  }
+
+  private func readiness(displayID: UInt32, revision: String) -> LockScreenReadiness? {
+    let file = exchange.appendingPathComponent("ready-\(displayID).json")
+    guard let data = try? Data(contentsOf: file),
+      let state = try? JSONDecoder().decode(LockScreenReadiness.self, from: data),
+      state.revision == revision, state.displayID == displayID
+    else { return nil }
+    return state
+  }
+
+  /// Watches the processes that acknowledged `configuration`'s lock-screen scenes, and only
+  /// those. An extension copy that does not report its process is not watched.
+  private func armRendererWatches(_ configuration: LockScreenConfiguration) {
+    let processes = Set(
+      configuration.scenes.lazy.filter { $0.webEntryFile == nil }.compactMap {
+        self.readiness(displayID: $0.displayID, revision: configuration.revision)?.processID
+      }.filter { $0 > 0 })
+    for pid in rendererWatches.keys where !processes.contains(pid) {
+      rendererWatches.removeValue(forKey: pid)?()
+    }
+    for pid in processes where rendererWatches[pid] == nil {
+      rendererWatches[pid] = watchProcessExit(pid) { [weak self] in self?.rendererExited(pid) }
+    }
+  }
+
+  private func cancelRendererWatches() {
+    rendererWatches.values.forEach { $0() }
+    rendererWatches.removeAll()
+  }
+
+  private func rendererExited(_ pid: Int32) {
+    guard let cancel = rendererWatches.removeValue(forKey: pid) else { return }
+    cancel()
+    guard !stopping, isEnabled, let published, published.lockScreenEnabled else { return }
+    let lockScenes = published.scenes.filter { $0.webEntryFile == nil }
+    let serving = lockScenes.compactMap {
+      readiness(displayID: $0.displayID, revision: published.revision)?.processID
+    }
+    // macOS can start another process that has already drawn the committed revision.
+    if serving.count == lockScenes.count, !serving.contains(pid),
+      serving.allSatisfy({ kill($0, 0) == 0 || errno == EPERM })
+    {
+      armRendererWatches(published)
+      return
+    }
+    let now = ContinuousClock.now
+    rendererLosses = rendererLosses.filter { now - $0 < Self.rendererRecoveryWindow } + [now]
+    if rendererLosses.count > Self.rendererRecoveryLimit {
+      rendererLosses.removeAll()
+      AppLog.error(
+        "Native lock screen: the renderer process \(pid) exited after \(Self.rendererRecoveryLimit) "
+          + "recoveries in \(Self.rendererRecoveryWindow); restoring the system wallpaper")
+      rendererFailure = String(localized: "The lock-screen renderer stopped repeatedly. The original wallpaper has been restored.")
+    } else {
+      AppLog.info("Native lock screen: the renderer process \(pid) exited; publishing again so macOS reloads it")
+      forceRepublish = true
+    }
+    // A running update leaves either for the monitor's next tick.
+    if !isBusy { refresh() }
+  }
+
   private struct RendererUnavailable: LocalizedError {
     var errorDescription: String? {
       String(localized: "macOS did not load the lock-screen renderer. The original wallpaper has been restored. Check for another wallpaper app or a conflicting system-wide wallpaper selection.")
@@ -604,6 +796,7 @@ final class LockScreenWallpaperService {
     do {
       try await awaitFrames(configuration, until: deadline)
       unconfirmed = nil
+      armRendererWatches(configuration)
       AppLog.info(
         "Native lock screen: first frame acknowledged after \(waited(until: deadline)) s "
           + "(waited from selection reload)")
@@ -627,6 +820,7 @@ final class LockScreenWallpaperService {
       try Task.checkCancellation()
       try checkExtensionFailure(configuration)
       var ready = true
+      var noted: [UInt32: String] = [:]
       for scene in configuration.scenes where scene.webEntryFile == nil {
         let file = exchange.appendingPathComponent("ready-\(scene.displayID).json")
         guard let data = try? Data(contentsOf: file),
@@ -637,8 +831,12 @@ final class LockScreenWallpaperService {
           continue
         }
         if let error = state.error { throw LockScreenWallpaperFailure(message: error) }
+        if let held = state.held { noted[scene.displayID] = held }
       }
-      if ready { return }
+      if ready {
+        heldNotices = (configuration.revision, noted)
+        return
+      }
       try await Task.sleep(for: .milliseconds(100))
     }
     try Task.checkCancellation()
@@ -797,6 +995,8 @@ private enum LockScreenAssetPublisher {
           projectRevision: projectRevision, properties: properties, exchange: exchange, reused: &sources)
         assetsRevision = projectRevision
       }
+      let isVideo = type.lowercased() == "video"
+      let nativeVideoFile = isVideo ? nativeVideoMedia(in: source, metadata: metadata) : nil
       scenes.append(
         LockScreenScene(
           displayID: input.displayID, title: input.title,
@@ -805,11 +1005,28 @@ private enum LockScreenAssetPublisher {
           fps: input.fps, scalingMode: input.scalingMode, scalingFactor: input.scalingFactor,
           propertiesJSON: properties, paused: input.paused, webEntryFile: webEntry,
           // A web page fills its window, so it has no position to carry.
-          framing: isWeb ? nil : input.framing))
+          framing: isWeb ? nil : input.framing,
+          plainVideo: isVideo ? true : nil, nativeVideoFile: nativeVideoFile))
     }
     return Prepared(
       configuration: LockScreenConfiguration(scenes: scenes),
       referencedRevisions: Set(sources.values), hasWebWallpapers: hasWebWallpapers)
+  }
+
+  /// The media file of a video project the extension may open natively: the project's `file`
+  /// when it names a regular file, not a link, inside the project folder. Anything else is nil,
+  /// and the extension holds that video and reports that the clip is missing.
+  private static func nativeVideoMedia(in project: URL, metadata: [String: Any]) -> String? {
+    guard let file = metadata["file"] as? String, !file.isEmpty, !file.hasPrefix("/") else {
+      return nil
+    }
+    let parts = file.split(separator: "/", omittingEmptySubsequences: false)
+    guard !parts.contains(".."), !parts.contains("."), !parts.contains("") else { return nil }
+    let url = project.appendingPathComponent(file)
+    guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey]),
+      values.isRegularFile == true, values.isSymbolicLink != true
+    else { return nil }
+    return file
   }
 
   /// WebKit's read grant covers exactly this project and its referenced imports,
@@ -1071,9 +1288,21 @@ private enum LockScreenAssetPublisher {
           message: String(localized: "Native wallpaper assets cannot contain symbolic links or special files: \(file.path)")
         )
       }
+      // Enumeration may resolve an ancestor alias differently from source.path.
+      // Depth identifies the relative suffix without copying path-component arrays.
+      let path = file.path
+      var relativeStart = path.endIndex
+      for _ in 0..<enumerator.level {
+        guard let separator = path[..<relativeStart].lastIndex(of: "/") else {
+          throw LockScreenWallpaperFailure(
+            message: String(localized: "Cannot enumerate wallpaper assets: \(source.path)"))
+        }
+        relativeStart = separator
+      }
+      let relative = String(path[path.index(after: relativeStart)...])
       result.append(
         Item(
-          relative: String(file.path.dropFirst(source.path.count + 1)),
+          relative: relative,
           directory: values.isDirectory == true, size: values.fileSize ?? 0,
           modified: values.contentModificationDate ?? .distantPast))
     }

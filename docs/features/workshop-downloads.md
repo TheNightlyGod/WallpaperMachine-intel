@@ -176,9 +176,12 @@ the first frame.
 The panel never reads animation pixels back: frames go from ImageIO to the screen,
 and the bright still is chosen once, in the cache. Scrolling a tile offscreen, hiding
 the window or leaving Discover releases its animation, and returning to a visible tile
-reuses the disk cache; flipping to another page drops pending animation requests. An
-installed copy shows the library's still and never animates. The inspector shows
-Steam's 512 px still for the selected item, with its animation played over it.
+reuses the disk cache; flipping to another page drops pending animation requests and
+releases the animations of tiles that left. An installed copy shows the library's
+still and never animates. The inspector shows Steam's 512 px still for the selected
+item, with its animation played over it while the window is on screen; hiding the
+window releases the animation's bytes and showing it again reloads them from the disk
+cache.
 
 ## Collections, authors and subscriptions
 
@@ -593,8 +596,9 @@ work.
   assets are missing and no shared-resource job is running. Cancelling discards
   this job's partial data; removing a waiting request prevents it from starting.
 - **Persistence.** Pending, paused and failed jobs keep their order in
-  `Downloads/Workshop/queue.json` under the app support directory; prerequisite
-  requests use `Downloads/workshop-requests.json`. Quitting pauses active and
+  `Downloads/Workshop/queue.json` beside the library (`ClientPaths.storageURL`, the
+  app support directory unless the [library was moved](library-location.md));
+  prerequisite requests use `Downloads/workshop-requests.json` in app support. Quitting pauses active and
   queued downloads after stopping their child processes, and relaunch restores
   them as paused, without starting a login or transfer automatically. Checkpoints
   contain only `steamapps` and `wallpaper-engine` download content; passwords,
@@ -699,7 +703,9 @@ the Steam-issued cached credentials and machine-authentication files of the last
 account at `~/Library/Application Support/WallpaperMachine/SteamSession`. The next
 download, including after an app restart, restores only that account's cache and
 pre-fills its login name. Cache directories are restricted to `0700` and files to
-`0600`. Submitted passwords and Steam Guard codes are sent only to the private
+`0600`. A run's SteamCMD home, where that cache is restored, stays beside it on this
+Mac even when the library is on another disk; only the content SteamCMD fetches is
+written beside the library ([library location](library-location.md)). Submitted passwords and Steam Guard codes are sent only to the private
 terminal and are never saved. Downloaded content, runtime programs and logs are
 not retained in the sign-in cache. The sign-in cache is also marked as excluded
 from Time Machine and other backups of this Mac (`ClientPaths.excludeFromBackup`,

@@ -1,0 +1,75 @@
+[package]
+name = "wallpaper-bridge"
+version = "0.1.2"
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "wallpaper_bridge"
+crate-type = ["staticlib", "rlib"]
+path = "src/lib.rs"
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/uniffi.rs"
+
+[dependencies]
+wallpaper-core = { path = "../Core" }
+anyhow = { workspace = true }
+arc-swap = "1.9.1"
+async-channel = "2"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+crossbeam-queue = "0.3"
+dirs = "5"
+fs2 = "0.4"
+futures-util = "0.3"
+# Image decoding, with only the formats the bridge reads switched on
+# (gif, jpeg, png). Default features are off on purpose so the static
+# library does not carry codecs it never uses.
+image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png"] }
+
+# The bridge actor is built on kameo. `log` is the workspace-wide facade, so
+# every crate writes through the same backend and the same level filters,
+# and its version is pinned once in the workspace manifest.
+kameo = "0.20.0"
+log = { workspace = true }
+
+# Saved settings are TOML and JSON, so both formats are needed, with serde to
+# derive them. The `preserve_order` feature keeps JSON key order as read,
+# which keeps a re-saved file close to the one it replaced.
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+toml = "0.8"
+
+# Temporary files, and the error type behind `BridgeError`. Both are also used
+# by the tests, so they appear again under the dev-dependencies below.
+tempfile = "3"
+thiserror = "1"
+
+# The async runtime. The listed features are the ones the bridge uses:
+# the multi-thread scheduler, the attribute macros, file and stream I/O,
+# the synchronisation primitives and timers.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "sync", "time", "io-util"] }
+
+# UniFFI generates the Swift bindings from the exported records. The `cli`
+# feature builds the generator into this package's own `uniffi-bindgen`
+# binary, so the bindings are always made by the version that is locked.
+uniffi = { version = "0.28", features = ["cli"] }
+
+# Apple frameworks used for the login item (ServiceManagement) and for bundle
+# and string handling. As in the core crate, the objc2 crates
+# are versioned together.
+objc2 = "0.6.4"
+objc2-core-foundation = "0.3.2"
+objc2-foundation = "0.3.2"
+objc2-service-management = "0.3.2"
+objc2-io-kit = "0.3.2"
+
+[build-dependencies]
+uniffi = { version = "0.28", features = ["build"] }
+
+[dev-dependencies]
+pretty_assertions = "1"
+tempfile = "3"
+tokio = { version = "1", features = ["test-util"] }
+wallpaper-core = { path = "../Core", features = ["bridge-contract-tests"] }

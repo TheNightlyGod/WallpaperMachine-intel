@@ -24,6 +24,56 @@ final class PanelStorageActionsTests: PanelTestCase {
     }
   }
 
+  func testMovingTheLibraryNeedsAFolderAndAYesAndWaitsForTheNextLaunch() async throws {
+    try await withRecordingPanel { panel, _ in
+      let controller = panel.controller
+      let location = controller.libraryLocation
+      // Outside the fixture's home, which is the app-support folder.
+      let drive = FileManager.default.temporaryDirectory.appendingPathComponent("drive-\(UUID().uuidString)", isDirectory: true)
+      try FileManager.default.createDirectory(at: drive, withIntermediateDirectories: true)
+      defer { try? FileManager.default.removeItem(at: drive) }
+      XCTAssertTrue(location.isOnThisMac)
+
+      // Cancel in the folder picker, then No in the confirmation: nothing is prepared.
+      try await controller.moveLibrary()
+      XCTAssertTrue(panel.dialogs.confirmations.isEmpty)
+      panel.dialogs.chosenURL = drive
+      try await controller.moveLibrary()
+      XCTAssertEqual(panel.dialogs.confirmations.count, 1)
+      XCTAssertNil(location.pending)
+      XCTAssertFalse(FileManager.default.fileExists(atPath: drive.appendingPathComponent(StorageLocation.folderName).path))
+
+      panel.dialogs.confirmAnswer = true
+      try await controller.moveLibrary()
+      let pending = try XCTUnwrap(location.pending)
+      XCTAssertEqual(pending.target?.path, drive.appendingPathComponent(StorageLocation.folderName).resolvingSymlinksInPath().path)
+      XCTAssertFalse(location.isCopying)
+      XCTAssertEqual(location.current.path, ClientPaths.storageURL.path, "this run keeps using the library where it is")
+
+      try await controller.cancelLibraryMove()
+      XCTAssertNil(location.pending)
+      XCTAssertFalse(FileManager.default.fileExists(atPath: drive.appendingPathComponent(StorageLocation.folderName).path))
+    }
+  }
+
+  func testAFolderThatCannotHoldTheLibraryIsRefusedBeforeAnythingIsAsked() async throws {
+    try await withRecordingPanel { panel, _ in
+      panel.dialogs.chosenURL = panel.root.appendingPathComponent("Library", isDirectory: true)
+      panel.dialogs.confirmAnswer = true
+      try FileManager.default.createDirectory(at: panel.dialogs.chosenURL!, withIntermediateDirectories: true)
+      do {
+        try await panel.controller.moveLibrary()
+        XCTFail("a folder inside WallpaperMachine's own is refused")
+      } catch is StorageMoveError {}
+      XCTAssertTrue(panel.dialogs.confirmations.isEmpty)
+      XCTAssertNil(panel.controller.libraryLocation.pending)
+      do {
+        try await panel.controller.moveLibraryToThisMac()
+        XCTFail("the library is already on this Mac")
+      } catch is StorageMoveError {}
+    }
+  }
+
   func testClearingTheShaderCacheAndLogsNeedsAYesAndOnlyThenReachesTheEngine() async throws {
     try pinPanelLanguageToEnglish()
     try await withRecordingPanel { panel, bridge in

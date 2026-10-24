@@ -14,8 +14,8 @@ struct TelemetryUploadError: LocalizedError, Equatable {
 }
 
 /// Posts to the website's telemetry endpoint. One request at a time and no retries: a
-/// failed upload waits for the next day's turn, so a Mac that is offline wakes nothing.
-struct TelemetryClient: TelemetryUploading {
+/// failed upload waits for its caller's next turn, so a Mac that is offline wakes nothing.
+struct TelemetryClient: TelemetryUploading, TelemetryActiveSending {
     static let endpoint = URL(string: "https://www.wallpapermachine.app/api/telemetry")!
 
     let endpoint: URL
@@ -40,6 +40,10 @@ struct TelemetryClient: TelemetryUploading {
     func delete(install: String) async throws {
         let body = try JSONEncoder().encode(["install": install])
         try await post(body, to: endpoint.appendingPathComponent("delete"))
+    }
+
+    func sendActive(_ ping: Data) async throws {
+        try await post(ping, to: endpoint.appendingPathComponent("active"))
     }
 
     private func post(_ body: Data, to url: URL) async throws {

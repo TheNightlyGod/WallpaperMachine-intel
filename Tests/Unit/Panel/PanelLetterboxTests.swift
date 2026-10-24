@@ -356,8 +356,7 @@ final class PanelLetterboxTests: PanelTestCase {
       XCTAssertEqual(LetterboxState.layout(of: card.bars), .topAndBottom(percent: 13))
       XCTAssertEqual(card.suggestion, .factor(1.35))
       XCTAssertEqual(card.stage, .init(isAvailable: true, isApplied: false, isPending: false))
-      // Whichever video backend plays the clip, the factor can be set.
-      fixture.store.settingsSnapshot.videoBackend = "native_preferred"
+      // Whichever video player plays the clip, the factor can be set.
       XCTAssertTrue(try barsCard(fixture.card()).stage.isAvailable)
 
       try await fixture.stage()
@@ -639,12 +638,11 @@ final class PanelLetterboxTests: PanelTestCase {
     }
   }
 
-  func testStagingDoesNotDependOnWhichVideoBackendPlaysTheClip() async throws {
+  func testStagingDoesNotDependOnWhichVideoPlayerPlaysTheClip() async throws {
     try await withFixture(frames: { LetterboxFixtures.frames(left: 40, right: 40) }) { fixture in
       try await fixture.check()
-      // Both backends apply the scale factor, so neither the preference nor a running report that
-      // names the native player holds the button back.
-      fixture.store.settingsSnapshot.videoBackend = "native_preferred"
+      // Both players apply the scale factor, so a running report that names the native player
+      // does not hold the button back.
       fixture.store.settingsSnapshot.videoBackends = [
         .init(
           displayId: 7, displayName: "Display", wallpaperId: "one", wallpaperTitle: "one", backend: "native",

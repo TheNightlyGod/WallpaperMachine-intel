@@ -17,8 +17,8 @@ struct AutomationState: Equatable, Sendable {
   let isFocused: Bool
   /// Why the last automatic change failed; Retry clears it.
   let error: String?
-  /// Whether Follow desktop Space can be chosen: Space information is read for this display and no
-  /// animated lock screen owns the desktop.
+  /// Whether Different wallpaper for each desktop can be chosen: Space information is read for
+  /// this display and no animated lock screen owns the desktop.
   let spacesAvailable: Bool
   /// The animated lock screen is requested or owns the desktop, which Space choices conflict with.
   let spacesBlocked: Bool
@@ -34,7 +34,11 @@ struct AutomationState: Equatable, Sendable {
     /// label and keeps the choice.
     let id: String
     let number: Int
+    /// The desktop's own choice.
     let target: WallpaperAutomationTarget?
+    /// Desktop 1's choice, which this desktop shows while it has none of its own; nil for
+    /// Desktop 1 itself.
+    var firstDesktopTarget: WallpaperAutomationTarget? = nil
   }
 
   struct MissingDesktop: Identifiable, Equatable, Sendable {
@@ -42,7 +46,7 @@ struct AutomationState: Equatable, Sendable {
     let target: WallpaperAutomationTarget
   }
 
-  /// Why Follow desktop Space cannot be chosen, when it cannot.
+  /// Why Different wallpaper for each desktop cannot be chosen, when it cannot.
   var spacesUnavailableReason: SpacesUnavailableReason? {
     if spacesAvailable { return nil }
     return spacesBlocked ? .lockScreenOwnsDesktop : .noInformation

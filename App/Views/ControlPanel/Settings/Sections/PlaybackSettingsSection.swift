@@ -281,16 +281,13 @@ struct PlaybackSettingsSection: View {
         "In Low Power Mode, when the Mac is hot or when the battery is low, Reduced quality keeps wallpapers running at the lower render scale and frame rate instead of pausing them, and never goes above your own quality settings. If the Mac gets very hot, wallpapers pause instead. It promises no measured power saving."
       )
       Text(
-        "A quality preset sets the frame-rate limit and render scale together. The frame-rate limit caps every display without rewriting the frame rate saved for each wallpaper. Internal render scale sets how many pixels are rendered before the image is scaled to fit."
-      )
-      Text(
-        "Video playback picks a backend for each wallpaper. Native is used only for videos it supports; the rest play in Compatibility."
+        "A quality preset sets the frame-rate limit and render scale together. The frame-rate limit caps scenes and web wallpapers on every display without rewriting the frame rate saved for each wallpaper; a video plays at its own frame rate. Internal render scale sets how many pixels are rendered before the image is scaled to fit."
       )
       Text(
         "Scene render optimisation reuses work inside a scene and produces the same picture. It only affects scene wallpapers."
       )
       Text(
-        "Content pacing, shared video decode and direct video plane sampling are experimental. Shared decode merges only the decoding; each screen still draws its own frames. Direct plane sampling skips a color conversion when a layer’s shader can handle it; otherwise the picture is produced as before."
+        "Direct video plane sampling is experimental. It skips a color conversion when a layer’s shader can handle it; otherwise the picture is produced as before."
       )
     }
   }

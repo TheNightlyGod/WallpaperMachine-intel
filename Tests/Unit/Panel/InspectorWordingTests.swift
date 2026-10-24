@@ -204,6 +204,20 @@ final class InspectorWordingTests: InspectorTestCase {
       "the absence of a report is never read as a backend")
   }
 
+  /// A scene held by Native Metal only has no backend drawing it, so the card says so, with the stage in
+  /// words and the renderer's reason, instead of naming "unknown" as if it were a renderer.
+  func testTheBackendLineOfAHeldSceneSaysItIsNotDrawnAndWhy() {
+    var state = compatibility([], backend: "unknown")
+    state.failure = SceneFailureReport(stage: .compile, reason: "the shader did not link")
+    XCTAssertEqual(
+      InspectorWording.backendLine(state),
+      "Not drawn — its shaders didn't compile for Metal (reason: the shader did not link). Showing its last picture.")
+    state.failure = SceneFailureReport(stage: .unsupported, reason: nil)
+    XCTAssertEqual(
+      InspectorWording.backendLine(state),
+      "Not drawn — it uses something Native Metal can't draw. Showing its last picture.")
+  }
+
   /// Port of `ControlPanelLibraryTests.testCompatibilityCardOffersReinstallOnlyWhenTheInstalledFilesAreWhatIsUnavailable`:
   /// only the installed files are what a fresh copy repairs, for a wallpaper whose type is known.
   func testReinstallIsOfferedOnlyForUnavailableInstalledFiles() {

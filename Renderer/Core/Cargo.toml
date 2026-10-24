@@ -1,0 +1,68 @@
+[package]
+name = "wallpaper-core"
+version = "0.2.0"
+edition.workspace = true
+license.workspace = true
+
+[features]
+bridge-contract-tests = []
+
+[dependencies]
+arc-swap = "1.9.1"
+kameo = "0.20.0"
+libc = "0.2"
+# Logging goes through the workspace-wide `log` facade, so the crates share
+# one backend and one set of level filters. The version is pinned in the
+# workspace manifest and is not repeated here.
+log = { workspace = true }
+
+# Objective-C runtime and the AppKit side of the wallpaper window. The objc2
+# family is versioned together, so these minor versions move as a group.
+# None of them takes extra feature flags.
+objc2 = "0.6.4"
+objc2-app-kit = "0.3.2"
+objc2-foundation = "0.3.2"
+
+# System audio capture for audio-responsive wallpapers: the tap, its stream
+# format, and the CoreFoundation containers used to describe it.
+# These crates are only used by the audio code.
+objc2-core-audio = "0.3.2"
+objc2-core-audio-types = "0.3.2"
+objc2-core-foundation = "0.3.2"
+
+# Presentation: display queries, video frames, IOSurface-backed textures and
+# the CAMetalLayer a scene draws into. Like the rest of the objc2 crates
+# they use their default features.
+objc2-core-graphics = "0.3.2"
+objc2-core-video = "0.3.2"
+objc2-io-surface = "0.3.2"
+objc2-quartz-core = "0.3.2"
+
+# Serialisation of the identity and event types that cross into pages and
+# saved settings. Only the derive macros are needed here, not any format.
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+wm-shader = { path = "../Shader", features = ["ffi"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
+async-channel = "2"
+block2 = "0.6.2"
+crossbeam-queue = "0.3"
+dispatch2 = { version = "0.3", default-features = false, features = ["alloc"] }
+
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt"] }
+
+# Unattached Core Animation layers are exercised on the process's main thread.
+[[test]]
+name = "wallpaper_background"
+harness = false
+
+[[test]]
+name = "first_frame_scaling"
+harness = false
+
+[build-dependencies]
+cmake = "0.1.58"
+bindgen = "0.72.1"

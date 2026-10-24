@@ -54,13 +54,23 @@ unattached `CAMetalLayer`s and injected notification and encoding services:
   without visiting it; the newer frame wins whatever order encodes finish in;
   late frames and encodes from another Space or an old layer are rejected; a
   frame identical to the poster is neither encoded nor written.
-- Capture timing: a Space change applies the existing poster at once and asks for
-  a fresh frame only when the poster is older than the freshness floor or was
-  taken before the wallpaper settled (displays judged separately; Space-scoped
-  posters, a backwards clock and a frame that failed to encode never count as
-  fresh); a resume retakes only such displays; settling captures after a new
-  wallpaper; periodic captures only while enabled and regardless of the floor;
-  later captures skip displays that are not presenting.
+- Capture timing: an animated wallpaper gets new poster files only as a new or
+  changed wallpaper settles, not through hours of Space changes, wakes, resumes,
+  `refresh(capture: .unsettled)` calls and renderers that start again; a snapshot
+  passed to `snapshotApplied` retakes every poster only when its `DesktopPosterLayout`
+  differs from the last one, and that layout stays equal when frame rates, volume,
+  mute or titles change and differs for a display's wallpaper, mirror target,
+  scaling, scaling factor, enabled state, mode, screen size or scale, and the
+  wallpapers' files; a frame dropped for another request's context still answers
+  its request; a Space change
+  applies the existing poster at once and asks for a fresh frame only when the
+  poster has not settled (displays judged separately; Space-scoped posters, a frame
+  a paused display answered with and a frame that failed to encode never settle it),
+  however long ago a settled one was taken; a Space change or snapshot during
+  settling leaves the capture to the settle sequence; a resume retakes only displays
+  without a settled poster; a frame nobody asked for never replaces a settled poster
+  and settles a new surface like a new wallpaper; periodic captures only while
+  enabled; later captures skip displays that are not presenting.
 - Unsaved looks: a display that draws property edits nobody applied is asked for
   nothing by a new wallpaper, a settle capture or a Space change, a frame already on
   its way is dropped, the poster stays the saved look, and it is retaken once the
@@ -99,7 +109,9 @@ unattached `CAMetalLayer`s and injected notification and encoding services:
 
 Not covered: what Mission Control actually shows and its refresh latency, and
 macOS accepting or restoring native selections. Both are on
-[manual-smoke.md](manual-smoke.md). Behavior: [desktop picture](../features/desktop-picture.md).
+[manual-smoke.md](manual-smoke.md). Nor is `AppDelegate`'s wiring: that every engine
+snapshot reaches `snapshotApplied`, and that `desktopPosterLayout()` fills the layout
+from the store's snapshots and `NSScreen`. Behavior: [desktop picture](../features/desktop-picture.md).
 
 ### Wallpaper activation
 
@@ -107,7 +119,7 @@ macOS accepting or restoring native selections. Both are on
 application preflight and recovery, not decoded frames or desktop playback.
 Missing, empty and non-file video entries are rejected before any change; an
 original synthetic H.264 Matroska clip applies through Apply and Apply changes
-with either backend preference; decoder failures keep the error and leave the
+(the playable-format refusal applies to every video now: an AVI is refused with its format named); decoder failures keep the error and leave the
 library usable for retry; history changes only after a successful activation;
 playback-environment changes (suspend/resume, unload/reload, audio, reduced quality) and library
 refreshes wait for an in-flight apply and the reverse, while explicit Pause still
@@ -331,11 +343,17 @@ a desktop run).
 ### Spaces
 
 `WallpaperSpaceMonitorTests`, the Space scenarios in
-`WallpaperAutomationSchedulerTests`, store and backup migration checks, and
+`WallpaperAutomationSchedulerTests`, `WallpaperSpacePinningTests` (windows kept on the desktops
+of their wallpaper, hidden while loading), `WallpaperSpaceParkingTests` (the wallpapers each
+display keeps, memory pressure), the renderer's `space_parking_tests` and the bridge's
+`tests::space_parking` (parked scenes), the kept clips and pages in `NativeVideoWallpaperHostTests`
+and `WebWallpaperHostLifecycleTests`, the Wallpaper per Desktop tile in `QuickSettingsTileTests`,
+store and backup migration checks, and
 `PanelAutomationActionsTests` and `DisplaysSettingsModelTests` (Panel). `DesktopWallpaperTests` covers
-Space-scoped writes, late frames and encodes, replacement gaps and restoration.
-Not covered: real Space transitions and installed desktop behavior; see
-[Spaces](../features/spaces.md).
+Space-scoped writes, saved posters for the other desktops, late frames and encodes, replacement
+gaps and restoration; `DesktopSpacePosterCacheTests` the saved posters themselves.
+Not covered by tests: real Space transitions and installed desktop behavior; what one desktop
+run checked is in [Spaces](../features/spaces.md#storage-and-verification).
 
 ### Display layouts and transfer
 
@@ -409,7 +427,9 @@ per-Space assignments; see
   pressure, the 5-second collapse of repeats, an unreadable footprint staying unknown
   rather than zero, one test pinning the wording of the two lines the diagnostics doc
   shows, and the footprint of the test process growing with the memory it touches.
-  A real pressure transition is not provoked.
+  The footprint-growth case touches a fresh anonymous mapping, not reusable heap
+  pages already charged to the host; its 32 MB growth margin and bounded attempts
+  stay unchanged. A real pressure transition is not provoked.
 - `EnergyUsageMonitorTests` and `WallpaperEnergyRatingsTests` — coalition
   readings, contention, before/after comparisons, grades, battery share and the
   rating recorder; two `testKernelCounters…` cases read the test process's real
@@ -671,6 +691,25 @@ or depend on a second physical monitor.
   from switching a mode off and on again; a scene or video publishes its display's position
   and a web page none, and moving the picture publishes a new revision that reuses the
   project while the same position publishes nothing.
+- `LockScreenVideoPlannerTests` — which player plays a plain video on the lock screen: the
+  AVFoundation layer when admission accepts the clip (the frame rate it was given takes no
+  part), the WebM player for a file AVFoundation cannot open that the project's reader takes,
+  and `unplayable` with the reason for every refusal (not playable, unreadable), for a clip
+  that is missing, and for a path that leaves the project, never another renderer; that
+  nothing that is not a plain video takes a video player; that a file AVFoundation cannot open
+  (garbage bytes, a missing file) fails the player's `prepare()`, which is what makes the
+  surface hold the clip with the reason; that the attempt's deadline expires on an injected
+  clock without waiting and is bounded below the surface's 30 seconds; and that a player
+  failure that beats the handler's assignment is delivered once when it is assigned.
+  `LockScreenHeldFailureTests` covers the engine's stages and the `video` stage the extension
+  itself reports. The surface wiring lives in the extension target, which no unit test
+  compiles, so it is checked by building it. `LockScreenWallpaperTests` also covers the
+  configuration keys `plainVideo` and `nativeVideoFile` (round trip with and without, which
+  changes replace a renderer, and that a changed frame rate replaces neither a video player
+  nor the scene engine), that a `sceneRenderer` key an older app wrote is read past whatever
+  it names and that none is written now, and the service tests that a video project is always
+  published as a video, with its media file when the app finds it, and that a refresh that
+  changes nothing publishes nothing. Not covered: a real lock screen, the player playing a clip there.
 - `LockScreenExtensionRegistrationTests` use synthetic app bundles and an
   injected registry: current-copy selection, duplicate and removed-copy cleanup,
   symlink aliases, invalid inventory rejection, cancellation, command failures;
@@ -735,14 +774,41 @@ need an authorized runtime check
 
 ## NativeVideo
 
-- `NativeVideoAdmissionTests` — the frame-rate rules (whole-number and NTSC
-  rates against the target, variable-rate clips judged by their fastest interval,
-  a zero target not meaning unlimited) and refusal of corrupt, missing, audio-only
-  and interlaced content.
-- `NativeVideoWallpaperHostTests` — startup waits for surface readiness, refused
-  wallpapers are handed back to the scene engine with their reason, re-evaluation
-  when the target rate changes, one surface per display, mirrors judged by their
-  group's strictest target, hidden-display and user-pause handling, a clip stopped
+- `NativeVideoAdmissionTests` — a clip is admitted at every rate it was written at
+  (including 120 fps) and as a variable-rate clip, since it plays at its own rate; refusal
+  of corrupt, missing, audio-only and unplayable content.
+- `NativeVideoLoopRangeTests` — one pass of the loop is the video track's range: a clip
+  whose audio runs past its picture loops with the picture, a silent clip loops all of it,
+  and a clip with no readable picture loops the whole item. `NativeVideoPlayerMediaTests`
+  (opt-in) check that every copy the looper queues stops at the end of the picture.
+- `VideoFormatSupportTests` — the container told from the first bytes (the extension is not
+  trusted over them; a file whose bytes show none is named by its extension), codec names, and
+  the rule: a playable clip with a video track is supported, AV1 is refused without hardware
+  decode and named as AV1, a file nothing opens (or with no video track) is refused with its
+  container and codec named, Matroska and WebM that AVFoundation cannot open are tried with the
+  app's own reader (playable ones are `supportedWebM` and keep their opened file for the surface, the
+  rest are left to the scene engine), an unreadable file refuses nothing; real files: an H.264 clip supported, garbage
+  named by its extension, an audio-only file refused, H.264 in Matroska supported by the WebM player, VP8 left to the scene engine. `WallpaperActivationRecoveryTests`
+  checks Apply, Apply changes and an AV1 verdict refuse before the renderer is reached with the
+  format named, and the same wallpaper applies once its file plays.
+- `WebMOpeningTests` — the WebM reader through Swift: the properties of a VP9 file, the sample
+  buffers (decode order, key frames, seeking), Opus audio as float buffers, VP8 named and refused, junk
+  and a cut-off file and a missing file told apart, and the poster. `WebMPlayerTests` — the feeder over
+  recording sinks (the wrap at the end with time continuing, one pass of audio cut where the picture
+  wraps, repositioning to the key frame before a time and dropping sound the clock has passed, a turned
+  clip's axes), and the player on a layer that is not in a window: first picture, running and looping,
+  pause and resume, start paused, a restart that spends its allowance, an upright poster, a decoder
+  that refuses the frames. `LockScreenWebMPlayerTests` (the lock screen's WebM player: the first frame composed at the display's size, pause with a frame still readable, a stop before the first picture ending `prepare`, a held failure delivered once) and the planner's WebM cases (`LockScreenVideoPlannerTests`: an unplayable answer goes to the reader, only that answer, and a file the reader refuses keeps AVFoundation's reason). `WebMVideoWallpaperWindowTests` — the desktop surface for WebM: ready and
+  playing, user pause and suspension as separate reasons, the scaling choice and position moving the
+  picture, a file that cannot be opened failing as a verdict (held until a handler arrives), a window
+  opening its own file, the poster at the display's size, stopping.
+- `NativeVideoWallpaperHostTests` — startup waits for surface readiness, a refused
+  wallpaper is reported as a failed display with its reason (no window, nothing takes the clip
+  over, the failure and its message in the wallpaper's state, read once and not reopened for every
+  snapshot, judged afresh when the file changes; a failure that is not a verdict on the file is
+  restated for its own startup revision and tried again under a newer one), re-evaluation
+  when the admission key (the file) changes, one surface per display, a mirror group
+  judged once under its source's key, hidden-display and user-pause handling, a clip stopped
   by a reading taken while the desktop (or one display) was covered playing again
   once `WallpaperHosts.reconcile` has the host read the bridge again (that
   `AppDelegate` makes the call after each delivery is not run by any test),
@@ -753,10 +819,9 @@ need an authorized runtime check
 - The metadata-read bound, in the host suite with a hand-fired clock
   (`ManualSleeper`) and a read held open by a gate: a read that never returns is
   abandoned after the limit for its storage (8, 30 or 60 seconds, per class) and the
-  wallpaper is handed over with a reason that says the read did not finish; the
-  timeout is not retried in the pass, not cached by the host (the bridge holds the
-  hand-off for the session, which only its own `native_video_routing` tests pin: no
-  test joins the two), and counted as
+  display is reported as failed with a reason that says the read did not finish; the
+  timeout is not retried in the pass, not cached as a verdict (a newer startup revision reads
+  the file again), and counted as
   `nativeVideoProbeTimeout`; each retry is bounded too; the same file has at most one
   read outstanding and is answered at once while it is, and a pass cancelled before a
   retry's read begins leaves no read outstanding; a close queued behind the
@@ -770,19 +835,18 @@ need an authorized runtime check
   classification that never returns counting as unknown after 2 seconds.
 - The first-frame deadline, in the host suite with the same hand-fired clock and a
   fake surface that never reports a frame: the first miss asks the surface to restart
-  and starts a second deadline of the same length, the second miss hands the wallpaper
-  back once, under its admission key, closes the window and ends its startup, a restart
-  the surface refuses hands it back at once (the text of the reason is not pinned),
+  and starts a second deadline of the same length, the second miss reports the display as
+  failed once, under its admission key, closes the window and ends its startup, a restart
+  the surface refuses fails it at once (the text of the reason is not pinned),
   and each missed deadline counts as `nativeVideoFirstFrameTimeout`. The deadline is
   10, 30 or 90 seconds per storage class; a frame before the deadline stops the
-  countdown, and a frame after the hand-off, a replaced surface, a closed surface and a
+  countdown, and a frame after the failure, a replaced surface, a closed surface and a
   shut-down host leave nothing to fire. A display that is hidden (on its own or
   globally) is not judged: the watch parks and starts again with a full deadline only
   when every reason has ended, keeping a restart it had already spent; a user-paused
   clip is still judged, and one display's frame settles only its own watch. A timeout
-  is not remembered by the host as a verdict, so the same key opens again when it is
-  offered, while a decoder failure still is (the bridge's hold on the hand-off is
-  outside this suite). `NativeVideoRecoveryBudgetTests` — two rebuilds per window and a refusal
+  is not remembered by the host as a verdict, so a newer offer of the same key opens again,
+  while a decoder failure still is. `NativeVideoRecoveryBudgetTests` — two rebuilds per window and a refusal
   after that, the allowance returning as old rebuilds leave the window, a stable run
   forgiving the history (measured from its first frame, interrupted only by a
   permitted rebuild, not by a refusal), and a reset.
@@ -821,10 +885,10 @@ need an authorized runtime check
   is open charges nothing and agrees with the real request. The host suite checks that a
   stalled report is counted as `nativeVideoPlaybackStalled` once per check, at its first
   look, and that the host does nothing about a report itself, that healthy and waiting
-  reports are not counted, and that a report from a replaced surface is ignored. A hand-off
+  reports are not counted, and that a report from a replaced surface is ignored. A failure
   after the ladder gave up (an unsettled failure) is not remembered by the host as a
-  verdict, so the same key opens natively when it is offered again, while a settled
-  decoder failure still is (the bridge's hold on the hand-off is outside this suite). A wake
+  verdict, so a newer offer of the same key opens again, while a settled
+  decoder failure still is. A wake
   (displays, Mac or session, each of the three) asks only the surfaces that are playing to
   verify, after a settle and not before; a burst of notifications is one request; a
   surface that stopped playing during the settle is not asked; a host with no surface open
@@ -874,15 +938,17 @@ need an authorized runtime check
   pixel per point; an unusable factor is 1; rounding ties fall on the renderer's
   side), degenerate sizes and absurd factors stay valid, and the plain modes at
   factor 1 stay AVFoundation's gravity while Original size and a factor wait for the
-  picture's size; Fit with blurred backdrop is laid out exactly as Fit, black bars
-  and all, since the player has no blurred fill. The host suite checks the user's mode
-  and factor reach a running
-  surface without reopening or re-probing it, and the desktop-picture poster is drawn
-  with the same layout (Fit leaves black bars, Original size is not scaled to the
-  display, a factor zooms). To regenerate or extend the expected rectangles, compile
-  `upstream/renderer/external/open-wallpaper-engine/src/Presentation/WallpaperScaling.cpp`
-  with a stub `vulkan/vulkan.h` that defines `VkViewport`, `VkRect2D` and their
-  member structs, hand `ComputeWallpaperScalingLayout` the display as
+  picture's size, and a position (the room is divided as the renderer divides it, an unusable
+  one is held to the edge or the middle, and any position but the middle needs an explicit
+  frame because gravity centres); Fit with blurred backdrop is laid out exactly as Fit,
+  black bars and all, since the player has no blurred fill. The host suite checks the user's mode, factor and position reach
+  a running surface without reopening or re-probing it, each display keeping its own, and the
+  desktop-picture poster is drawn with the same layout (Fit leaves black bars, Original size is
+  not scaled to the display, a factor zooms, a position puts the picture in its corner); the
+  player suite places the live layer for a position (flush to each edge, gravity back at the
+  middle, a position that is not a position held to the edge or the middle). To regenerate or extend the expected rectangles, compile
+  `Renderer/Engine/src/Presentation/WallpaperScaling.cpp`
+  directly (it needs no GPU header), hand `ComputeWallpaperScalingLayout` the display as
   `lround(devicePixels / scale)` logical points (as `MetalRender::Impl::scalingLayout`
   does), and print `viewport_px`.
 - `NativeVideoPosterOrientationTests` — which clips cannot take a poster from
@@ -912,14 +978,14 @@ or other-Space poster of a rotated clip as macOS shows it, a side-by-side of
 Fit, Original size and a scale factor on a real display against Compatibility
 (including the composition cost of a large factor), and a genuinely stuck volume (a
 sleeping external disk, an unreachable share, an evicted cloud file) with the restart,
-the hand-off and the reason they produce in **In use now**: the limits and rules are
+the failure and the reason they produce in the wallpaper's state: the limits and rules are
 covered, and the frame-less clip by the opt-in `hev1` test, but no test blocks a real
 `AVAsset` load or starts a clip from a volume that is slow to answer. Also not covered:
 whether a real long suspension, sleep, lock or covered desktop (hours, display sleep, Low
 Power Mode) ever costs a clip its decoder on this Mac, and whether a kick or a rebuild
 brings one back. The check and the ladder are covered, and so is the dead pipeline they
 must recognise (`hev1`, which a kick and a rebuild cannot repair, so it always ends in the
-hand-off), but nothing here reclaims a decoder and no test shows a repair that works on
+failure), but nothing here reclaims a decoder and no test shows a repair that works on
 a stuck pipeline. Those premises are answered by the `nativeVideoPlaybackStalled`,
 `nativeVideoPlaybackKick` and `nativeVideoPlaybackRebuild` counters on a real machine, and
 by the sleep, lock and unlock rows in [manual-smoke](manual-smoke.md#native-video-backend-experimental-opt-in).
@@ -1009,8 +1075,11 @@ never to `.shared`.
   cannot be made falls back once to the downsampled preview, stills decoded to the view's size
   and cached, only https Steam previews and only pixiv's image host and the fixed property hosts
   read, a view that goes away stops waiting without cancelling the shared fetch, animations only
-  from sources that fit the budget), `PanelImageViewTests`, `AnimatedPreviewTests` (GIF, APNG and
-  WebP frames and delays, no timer until asked and never without a window),
+  from sources that fit the budget), `PanelImageViewTests` (offscreen hosting, drawn-size decoding,
+  stable layout, scrolling a lazy list releases both the decoded wrapper and its `CGImage` after
+  cache eviction, scrolling back reloads it, and a cache hit stays alive while visible but is
+  released on disappearance), `AnimatedPreviewTests` (GIF, APNG and WebP frames and delays,
+  no timer until asked and never without a window),
   `PropertyImageCacheTests` (bounded transfers, author images cannot become a network proxy) and
   `LivePreviewSchedulerTests`.
 - Installed and the library: `PanelLibraryActionsTests` (favorites, Show in Finder, selection

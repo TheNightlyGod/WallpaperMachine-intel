@@ -34,6 +34,14 @@ struct DisplayWallpaperAutomation: Codable, Equatable, Sendable {
     var revision: UInt64 = 0
     var spaces: [String: WallpaperAutomationTarget] = [:]
 
+    /// What a desktop shows in the Space mode: its own choice, or else the first desktop's. macOS
+    /// gives a desktop with no picture of its own, a new one too, the first desktop's picture, so
+    /// following it keeps Mission Control and the wallpaper that plays in agreement. Nil when
+    /// neither has a choice: the display keeps what it shows.
+    func desktopTarget(_ space: String, firstDesktop: String?) -> WallpaperAutomationTarget? {
+        spaces[space] ?? firstDesktop.flatMap { spaces[$0] }
+    }
+
     var isValid: Bool {
         rules.count <= 64 && Set(rules.map(\.id)).count == rules.count
             && rules.allSatisfy(\.isValid) && light?.isValid != false && dark?.isValid != false

@@ -1,0 +1,29 @@
+[package]
+name = "wm-shader"
+version = "0.1.0"
+description = "Wallpaper Engine shader text to Metal Shading Language, with reflection"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["rlib", "staticlib"]
+
+[features]
+default = []
+# The C ABI (rs_shader_* functions) declared by include/rs_shader.h.
+ffi = []
+# Retain original translated uniform storage types for a diagnostic reflection document.
+# Changes the compiler/cache identity; never enabled by ordinary builds.
+observer-uniform-layout = []
+
+[dependencies]
+naga.workspace = true
+
+[[test]]
+name = "ffi_abi"
+required-features = ["ffi"]
+
+[[test]]
+name = "c_abi"
+required-features = ["ffi"]

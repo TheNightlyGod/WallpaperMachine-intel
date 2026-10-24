@@ -98,6 +98,11 @@ final class BridgeStore {
     @ObservationIgnored var willSwitchWallpaper: (@MainActor ([UInt32]) async -> Void)?
     @ObservationIgnored var didSettleWallpaperSwitch: (@MainActor ([UInt32]) -> Void)?
     @ObservationIgnored var didAbandonWallpaperSwitch: (@MainActor ([UInt32]) -> Void)?
+    /// Reads a video file's format when it is about to be applied, so one nothing can play is
+    /// refused with its format named before any display changes. A test stands in for the file read.
+    @ObservationIgnored var videoFormatCheck: @Sendable (URL) async -> VideoFormatSupport.Verdict = {
+        await VideoFormatSupport.inspect(url: $0)
+    }
     /// Where the activation lines go: the app's log. A test collects them instead.
     @ObservationIgnored var activationLogWriter: (_ line: String, _ isFailure: Bool) -> Void = ActivationLog.write
     /// Performance data, when the user has turned it on (`TelemetryService`). Each activation
@@ -192,7 +197,6 @@ final class BridgeStore {
         var report = WallpaperDeletionReport()
         for id in ids {
             do {
-                // Validate before stopping playback; never touch an external source folder.
                 _ = try WallpaperDeletionService.wallpaperURL(id: id, library: ClientPaths.libraryURL)
                 let displayIDs = Set(monitorInformationSnapshot.rows.filter {
                     $0.wallpaperId == id && $0.mirrorTargetDisplayId == nil
@@ -368,7 +372,7 @@ final class BridgeStore {
             throw WallpaperActionError(message: String(localized: "No configuration is available for this display. Refresh Displays and retry."))
         }
         try validatePendingWallpaperEdits(id: id, options: options)
-        try validateWallpaperForPlayback(id: id)
+        try await validateWallpaperForPlayback(id: id)
         try await commitPendingWallpaperEditsAsync(id: id)
         // Validation and async draft commits may outlive a display topology change.
         try validateActivationTarget(displayId)
@@ -447,7 +451,7 @@ final class BridgeStore {
             if let options = wallpaperOptionsSnapshot, options.wallpaperId == id {
                 try validatePendingWallpaperEdits(id: id, options: options)
             }
-            try validateWallpaperForPlayback(id: id)
+            try await validateWallpaperForPlayback(id: id)
             try await ejectWallpaperFromDisplayAsync(displayId: displayId, wallpaperId: id)
             try await activateWallpaperAsync(id: id, displayId: displayId, origin: .user,
                                              recordsHistory: false, restarting: true)
@@ -1022,11 +1026,6 @@ final class BridgeStore {
         apply(bundle)
     }
 
-    func setVideoBackendAsync(_ mode: String) async throws {
-        let bundle = try await bridge.setVideoBackend(mode: mode)
-        apply(bundle)
-    }
-
     func setRenderScaleAsync(_ scale: Float) async throws {
         let bundle = try await bridge.setRenderScale(scale: scale)
         apply(bundle)
@@ -1084,16 +1083,6 @@ final class BridgeStore {
         finishSnapshotApply()
     }
 
-    func setContentPacingEnabledAsync(_ enabled: Bool) async throws {
-        let bundle = try await bridge.setContentPacingEnabled(enabled: enabled)
-        apply(bundle)
-    }
-
-    func setSharedVideoDecodeEnabledAsync(_ enabled: Bool) async throws {
-        let bundle = try await bridge.setSharedVideoDecodeEnabled(enabled: enabled)
-        apply(bundle)
-    }
-
     /// Scene subgraph reuse and redundant-pass removal. The engine publishes the saved
     /// preference rather than a reading taken from a running scene, so the snapshot this
     /// returns is what the page reports back.
@@ -1115,13 +1104,6 @@ final class BridgeStore {
     /// what each running scene's video textures actually did.
     func setSceneVideoPlaneSamplingEnabledAsync(_ enabled: Bool) async throws {
         let bundle = try await bridge.setSceneVideoPlaneSamplingEnabled(enabled: enabled)
-        apply(bundle)
-    }
-
-    /// Which renderer draws scene wallpapers. A preference: `sceneRenderers` in the
-    /// returned bundle is what each running scene actually got.
-    func setSceneRendererAsync(_ mode: String) async throws {
-        let bundle = try await bridge.setSceneRenderer(mode: mode)
         apply(bundle)
     }
 
@@ -1148,7 +1130,7 @@ final class BridgeStore {
             $0.wallpaperId == wallpaperId && $0.mirrorTargetDisplayId == nil
         }.map(\.displayId))
         let previousAssignments = independentAssignments()
-        try validateWallpaperForPlayback(id: wallpaperId)
+        try await validateWallpaperForPlayback(id: wallpaperId)
         try await commitPendingWallpaperEditsAsync(id: wallpaperId)
         do {
             try await applyValidatedWallpaperOptionsAsync(wallpaperId: wallpaperId, userInitiated: userInitiated)
@@ -1193,32 +1175,38 @@ final class BridgeStore {
         }
     }
 
-    private func validateWallpaperForPlayback(id wallpaperId: String) throws {
-        let folder = ClientPaths.libraryURL.appendingPathComponent(wallpaperId)
-        let manifest = try JSONSerialization.jsonObject(with: Data(contentsOf: folder.appendingPathComponent("project.json"))) as? [String: Any]
-        if (manifest?["type"] as? String)?.lowercased() == "video" {
-            // AVFoundation admission belongs to the native host, which can hand
-            // unsupported containers/codecs to Compatibility. Applying must let
-            // the chosen backend try decoding and report its own failures.
-            guard let file = manifest?["file"] as? String, !file.isEmpty,
-                  let values = try? folder.appendingPathComponent(file).resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
-                  values.isRegularFile == true, (values.fileSize ?? 0) > 0,
-                  FileManager.default.isReadableFile(atPath: folder.appendingPathComponent(file).path) else {
-                throw NSError(domain: "WallpaperMachine", code: 1, userInfo: [NSLocalizedDescriptionKey: String(localized: "This video cannot be decoded. Import a complete, playable video file before applying it.")])
-            }
+    private func validateWallpaperForPlayback(id wallpaperId: String) async throws {
+        let folder = ClientPaths.libraryURL.appendingPathComponent(wallpaperId, isDirectory: true)
+        let manifestData = try Data(contentsOf: folder.appendingPathComponent("project.json"))
+        let manifest = try JSONSerialization.jsonObject(with: manifestData) as? [String: Any] ?? [:]
+        let entry = manifest["file"] as? String ?? ""
+        func failure(_ code: Int, _ message: String) -> NSError {
+            NSError(domain: "WallpaperMachine", code: code, userInfo: [NSLocalizedDescriptionKey: message])
         }
-        if (manifest?["type"] as? String)?.lowercased() == "scene" {
+        switch (manifest["type"] as? String ?? "").lowercased() {
+        case "video":
+            let file = folder.appendingPathComponent(entry)
+            let values = try? file.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+            guard !entry.isEmpty, FileManager.default.isReadableFile(atPath: file.path),
+                  values?.isRegularFile == true, (values?.fileSize ?? 0) > 0 else {
+                throw failure(1, String(localized: "This video cannot be decoded. Import a complete, playable video file before applying it."))
+            }
+            // A format nothing can play is refused here, before any display changes.
+            if let message = VideoFormatSupport.message(for: await videoFormatCheck(file)) {
+                throw WallpaperActionError(message: message)
+            }
+        case "scene":
             let assets = ClientPaths.assetsURL
             guard ClientPaths.hasSceneAssets(at: assets) else {
-                throw NSError(domain: "WallpaperMachine", code: 2, userInfo: [NSLocalizedDescriptionKey: String(localized: "This wallpaper is downloaded, but Wallpaper Engine’s shared scene resources are not installed. Choose Get shared resources in the wallpaper’s details, or go to Settings → Library & Steam.")])
+                throw failure(2, String(localized: "This wallpaper is downloaded, but Wallpaper Engine’s shared scene resources are not installed. Choose Get shared resources in the wallpaper’s details, or go to Settings → Library & Steam."))
             }
             setenv("WALLPAPER_MACHINE_ASSETS_ROOT", assets.path, 1)
-        }
-        if (manifest?["type"] as? String)?.lowercased() == "web" {
-            guard let file = manifest?["file"] as? String, !file.isEmpty,
-                  FileManager.default.fileExists(atPath: folder.appendingPathComponent(file).path) else {
-                throw NSError(domain: "WallpaperMachine", code: 3, userInfo: [NSLocalizedDescriptionKey: String(localized: "This web wallpaper’s entry page is missing. Import the complete project folder, including its HTML file, before applying it.")])
+        case "web":
+            guard !entry.isEmpty, FileManager.default.fileExists(atPath: folder.appendingPathComponent(entry).path) else {
+                throw failure(3, String(localized: "This web wallpaper’s entry page is missing. Import the complete project folder, including its HTML file, before applying it."))
             }
+        default:
+            break
         }
     }
 
@@ -1295,6 +1283,20 @@ final class BridgeStore {
             try await bridge.setDisplayPresentationSuspended(
                 displayId: String(displayID), suspended: suspended)
         }
+    }
+
+    /// Sets which wallpapers a display keeps loaded and paused when it moves on to another one,
+    /// so one that comes back runs on from where it stopped. An empty list frees them all.
+    /// Waits for an Apply in flight, like every playback-environment change.
+    func setDisplayParkedWallpapersAsync(displayID: UInt32, wallpaperIDs: [String]) async throws {
+        try await updatePlaybackEnvironment {
+            try await bridge.setDisplayParkedWallpapers(displayId: String(displayID), wallpaperIds: wallpaperIDs)
+        }
+    }
+
+    /// The window of every open scene wallpaper, live and kept paused, read without a round trip.
+    func sceneWindows() -> [BridgeSceneWindow] {
+        bridge.sceneWindows()
     }
 
     /// Turns renderer work counting on or off. Off by default; the renderer
@@ -1408,69 +1410,25 @@ final class BridgeStore {
     }
 
     private static func emptySnapshots() -> Snapshots {
-        Snapshots(
-            app: BridgeAppSnapshot(
-                playbackState: .paused,
-                selectedWallpaperId: nil,
-                activeWallpaperIds: [],
-                errors: [],
-                heldWallpaperIds: []
-            ),
-            library: BridgeLibrarySnapshot(
-                wallpapers: [],
-                scanStatus: BridgeLibraryScanStatus(scanning: false, done: 0, total: 0),
-                sceneCount: 0,
-                videoCount: 0,
-                webpageCount: 0,
-                unknownCount: 0
-            ),
-            wallpaperOptions: nil,
-            monitorInformation: BridgeMonitorInformationSnapshot(rows: []),
-            settings: BridgeSettingsSnapshot(
-                displays: [],
-                launchAtLoginAvailable: false,
-                launchAtLoginEnabled: false,
-                launchAtLoginNeedsApproval: false,
-                batteryMode: .keepRunning,
-                verboseLogging: false,
-                gitSha: "",
-                bridgeVersion: "",
-                coreVersion: "",
-                shaderPipelineVersion: "",
-                storage: BridgeStorageStatus(
-                    shaderCacheSizeBytes: 0,
-                    logs: BridgeLogStatus(
-                        logsRoot: "",
-                        activeSession: "",
-                        activeFile: "",
-                        activeFileSizeBytes: 0
-                    )
-                ),
-                videoBackend: "compatibility",
-                videoBackends: [],
-                contentPacingEnabled: false,
-                sharedVideoDecodeEnabled: false,
-                sharedVideoDecodeSessions: 0,
-                sharedVideoDecodeConsumers: 0,
-                sceneOptimizationEnabled: true,
-                sceneOnDemandEnabled: false,
-                sceneVideoPlaneSamplingEnabled: false,
-                sceneRenderer: "native_metal_preferred",
-                sceneResolution: "display",
-                sceneUpdateModes: [],
-                sceneRenderers: [],
-                userAssetsPath: "",
-                renderScale: 1,
-                preferredRenderScale: 1,
-                frameRateCap: nil,
-                batteryRenderScale: 0.75,
-                batteryTargetFps: 30,
-                onBatteryPower: false,
-                qualityThrottle: [],
-                effectiveFrameRateCap: nil,
-                renderScaleSupported: false
-            )
-        )
+        let app = BridgeAppSnapshot(
+            playbackState: .paused, selectedWallpaperId: nil, activeWallpaperIds: [], errors: [], heldWallpaperIds: [])
+        let library = BridgeLibrarySnapshot(
+            wallpapers: [], scanStatus: BridgeLibraryScanStatus(scanning: false, done: 0, total: 0),
+            sceneCount: 0, videoCount: 0, webpageCount: 0, unknownCount: 0)
+        let monitor = BridgeMonitorInformationSnapshot(rows: [])
+        let settings = BridgeSettingsSnapshot(
+            displays: [], launchAtLoginAvailable: false, launchAtLoginEnabled: false,
+            launchAtLoginNeedsApproval: false, batteryMode: .keepRunning, verboseLogging: false,
+            gitSha: "", bridgeVersion: "", coreVersion: "", shaderPipelineVersion: "",
+            storage: BridgeStorageStatus(
+                shaderCacheSizeBytes: 0,
+                logs: BridgeLogStatus(logsRoot: "", activeSession: "", activeFile: "", activeFileSizeBytes: 0)),
+            videoBackends: [], sceneOptimizationEnabled: true, sceneOnDemandEnabled: false,
+            sceneVideoPlaneSamplingEnabled: false, sceneResolution: "display", sceneUpdateModes: [],
+            sceneRenderers: [], userAssetsPath: "", renderScale: 1, preferredRenderScale: 1,
+            frameRateCap: nil, batteryRenderScale: 0.75, batteryTargetFps: 30, onBatteryPower: false,
+            qualityThrottle: [], effectiveFrameRateCap: nil, renderScaleSupported: false)
+        return Snapshots(app: app, library: library, wallpaperOptions: nil, monitorInformation: monitor, settings: settings)
     }
 
     private func apply(_ bundle: BridgeSnapshotBundle) {
@@ -1501,17 +1459,19 @@ final class BridgeStore {
 
     private func finishSnapshotApply() {
         if let options = wallpaperOptionsSnapshot {
-            editorState.reconcile(wallpaperID: options.wallpaperId,
-                textPropertyIDs: Set(options.properties.filter { $0.kind == .textInput && $0.enabled }.map(\.id)))
-            // The inspector shows another wallpaper now, so a drag in the one it left is over. What
-            // the previews showed of it goes back to the draft.
-            for left in editorState.clearPropertyPreviews(except: options.wallpaperId) { propertyDraftEdited(left) }
+            // Drafts for properties that no longer take text are stale.
+            let textProperties = Set(options.properties.filter { $0.kind == .textInput && $0.enabled }.map(\.id))
+            editorState.reconcile(wallpaperID: options.wallpaperId, textPropertyIDs: textProperties)
+            // The inspector moved on to this wallpaper, so a drag left on another is over: that
+            // wallpaper's displays follow its draft again.
+            for other in editorState.clearPropertyPreviews(except: options.wallpaperId).sorted() {
+                propertyDraftEdited(other)
+            }
         }
-        self.snapshotRevision &+= 1
+        snapshotRevision &+= 1
         onSnapshotApplied?()
-        if let message = appSnapshot.errors.last,
-           message != latestBridgeErrorMessage {
-            latestBridgeErrorMessage = message
+        if let newest = appSnapshot.errors.last, newest != latestBridgeErrorMessage {
+            latestBridgeErrorMessage = newest
             latestBridgeErrorRevision &+= 1
         }
     }

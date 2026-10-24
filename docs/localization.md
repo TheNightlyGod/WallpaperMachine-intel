@@ -51,6 +51,11 @@ English. Arguments are format specifiers (`%@` for text, `%lld` for an integer),
 numbered (`%1$@`, `%2$lld`) in a translation that reorders them, and a literal
 `%` is written `%%` wherever the string is read as a format.
 
+Steam session warnings describe unavailable reusable authentication information or
+failure to update retained authentication state; they do not turn a successful sign-in
+into a failed download. The update warning interpolates one opaque error description
+as text, including any percent signs it contains. Both warnings ship in all four languages.
+
 ## The panel's live language
 
 `Bundle.main` keeps the language the process launched in, so the panel resolves
@@ -132,7 +137,7 @@ to extraction.
 
 `scripts/tests/test_localization_catalogs.py` runs in the Python stage of
 `python3 scripts/test.py` and guards the catalogs themselves: `AppLanguage.supported`
-starts with English and lists each language once; each of the three catalogs ships
+starts with English and lists each language once; each of the two catalogs ships
 exactly the registered languages; every key is translated, in the `translated`
 state, into every one of them; no key is duplicated and no value blank; a
 translation takes the same arguments as its key, never mixes numbered and plain

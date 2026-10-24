@@ -1,11 +1,9 @@
 # Everything a macOS job needs before scripts/build.py can run: Xcode 26, the Homebrew
-# packages, the project's LGPL FFmpeg, and the three caches that keep a release from
-# compiling the world. Shared by Build's build job, the Test workflow's jobs and Warm
-# caches, so all of them read and write the same cache entries.
+# packages, and the two caches that keep a release from compiling the world. Shared by
+# Build's build job, the Test workflow's jobs and Warm caches, so all of them read and
+# write the same cache entries.
 #
 # Caches (docs/release.md, "Build (build.yml)"), all scoped to main, which every ref can read:
-# - mwe-ffmpeg: the built keg, keyed on the formula and the dav1d it links. A hit skips
-#   a ~3 minute source build; scripts/install_ffmpeg.py accepts the restored keg.
 # - ccache: the C++ scene engine's objects, hashed by content, so the fresh mtimes of a
 #   checkout (which force CMake to recompile everything) cost cache lookups, not builds.
 #   Saved under a new key every run and restored by prefix. Test's parallel jobs
@@ -35,49 +33,23 @@ runs:
     - name: Install renderer and Xcode project dependencies
       id: brew
       shell: bash
-      # dav1d is mwe-ffmpeg's only runtime dependency. It is installed here, not by the
-      # formula, so its version can key the FFmpeg cache before FFmpeg is looked at.
       run: |
         set -euo pipefail
         prefix="$(brew --prefix)"
         rm -rf "${prefix}/var/homebrew/tmp" /private/tmp/homebrew-unpack* || true
-        packages=(xcodegen cmake quickjs-ng glslang freetype lz4 \
-          vulkan-loader vulkan-headers molten-vk eigen nlohmann-json argparse shaderc \
-          spirv-tools glm dav1d ccache)
+        packages=(xcodegen cmake quickjs-ng freetype lz4 \
+          nlohmann-json argparse ccache)
         if ! brew install --quiet "${packages[@]}"; then
           echo "brew install encountered a transient conflict; cleaning tmp and retrying..."
           rm -rf "${prefix}/var/homebrew/tmp" /private/tmp/homebrew-unpack* || true
           brew cleanup || true
           brew install --quiet "${packages[@]}"
         fi
-        echo "dav1d=$(brew list --versions dav1d | tr ' ' '-')" >> "$GITHUB_OUTPUT"
         echo "prefix=${prefix}" >> "$GITHUB_OUTPUT"
         echo "arch=$(uname -m)" >> "$GITHUB_OUTPUT"
-        # Bottles, FFmpeg and compiled objects differ per macOS release, so every
+        # Bottles and compiled objects differ per macOS release, so every
         # cache key carries the runner's (macos-15, macos-26) and arch.
         echo "os=macos-$(sw_vers -productVersion | cut -d. -f1)-$(uname -m)" >> "$GITHUB_OUTPUT"
-
-    - name: Restore the LGPL FFmpeg build
-      id: ffmpeg
-      uses: actions/cache@v4
-      with:
-        path: ${{ steps.brew.outputs.prefix }}/Cellar/mwe-ffmpeg
-        key: mwe-ffmpeg-${{ steps.brew.outputs.os }}-${{ steps.brew.outputs.dav1d }}-${{ hashFiles('Formula/mwe-ffmpeg.rb') }}
-
-    - name: Install the LGPL FFmpeg build
-      shell: bash
-      # The bundled FFmpeg is the repository's LGPL build, not Homebrew's GPLv3 one
-      # (LICENSING.md). A restored keg only needs its opt link, which Homebrew made
-      # when it was built; the formula is keg-only, so nothing else is linked.
-      run: |
-        set -euo pipefail
-        prefix="${{ steps.brew.outputs.prefix }}"
-        if [ "${{ steps.ffmpeg.outputs.cache-hit }}" = "true" ]; then
-          version="$(ls "${prefix}/Cellar/mwe-ffmpeg" | sort -V | tail -n 1)"
-          ln -sfn "../Cellar/mwe-ffmpeg/${version}" "${prefix}/opt/mwe-ffmpeg"
-        fi
-        python3 scripts/install_ffmpeg.py
-
     - name: Route the C++ compilers through ccache
       shell: bash
       # CMake reads these on the first configure of a build tree; the renderer cache
@@ -122,6 +94,6 @@ runs:
         path: |
           ~/.cargo/registry
           ~/.cargo/git
-          upstream/renderer/target
-        key: renderer-ccache-${{ steps.brew.outputs.os }}-${{ hashFiles('upstream/renderer/Cargo.lock', 'upstream/renderer/rust-toolchain.toml', 'upstream/provenance.json') }}
+          Renderer/target
+        key: renderer-ccache-${{ steps.brew.outputs.os }}-${{ hashFiles('Renderer/Cargo.lock', 'Renderer/rust-toolchain.toml', 'ThirdParty/provenance.json') }}
         restore-keys: renderer-ccache-${{ steps.brew.outputs.os }}-

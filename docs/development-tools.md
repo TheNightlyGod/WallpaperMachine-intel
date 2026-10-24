@@ -67,7 +67,7 @@ local under `artifacts/`, and do not commit them.
 - CPU hot spots and memory growth: Instruments Time Profiler and Allocations.
 - GPU/CPU scheduling and final Metal execution: Instruments Metal System Trace
   and Xcode Metal debugger. Correlate findings with renderer logs; Metal capture
-  does not directly explain all upstream Vulkan/shader translation behavior.
+  does not directly explain the shader translation behavior.
 - Power and energy claims: the procedure and comparison rules in
   [testing/power-benchmark.md](testing/power-benchmark.md).
 

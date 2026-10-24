@@ -47,7 +47,7 @@ extension PanelController {
     return steamDownloadRow(for: item.id)?.isPending != true && downloadRequestRow(for: item.id) == nil
   }
 
-  /// GitHub's new-issue form for a Workshop item whose download failed, filled with the item, its
+  /// GitHub's bug report form for a Workshop item whose download failed, filled with the item, its
   /// type, the app version and the failure. Nothing is sent from here: the browser opens the draft
   /// and the person decides whether to submit it. (An installed wallpaper's report is
   /// `issueReportURL(for:failure:)`.)
@@ -57,12 +57,9 @@ extension PanelController {
       as? String
   ) -> URL? {
     let page = ExternalLink.workshopItem(id: item.id)?.absoluteString ?? item.id
-    let facts = [
-      "**Wallpaper:** \(item.title)", "**Workshop item:** \(page)", "**Type:** \(item.kind.rawValue)",
-      "**App version:** \(version ?? "unknown")", "**Error:** \(failure)",
-    ]
+    let facts = ["**Wallpaper:** \(item.title)", "**Type:** \(item.kind.rawValue)", "**Error:** \(failure)"]
     return ExternalLink.newIssue(
-      title: "[\(item.kind.rawValue)] \(item.title)",
-      body: (facts + ["", "**What went wrong?**", "", ""]).joined(separator: "\n"))
+      title: "[\(item.kind.rawValue)] \(item.title)", wallpaper: page, version: version ?? "unknown",
+      details: facts.joined(separator: "\n"))
   }
 }

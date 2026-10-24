@@ -1,6 +1,9 @@
 name: Wallpaper or app problem
 description: A wallpaper looks or behaves wrong, or the app misbehaves.
 labels: [bug]
+# The app's "Not working? Report on GitHub" link fills in wallpaper, version and app-details by
+# their ids (ExternalLink.newIssue in App/Views/ControlPanel/Model/): rename them together. It
+# never fills a required field, so the reporter always writes those.
 body:
   - type: markdown
     attributes:
@@ -20,20 +23,30 @@ body:
       description: Workshop ID or link (for example `https://steamcommunity.com/sharedfiles/filedetails/?id=123456789`), or the name of a local import. We test with the same wallpaper.
       placeholder: "123456789"
   - type: textarea
-    id: what-happened
-    attributes:
-      label: What happened
-      description: What you expected, what you saw instead, and when (the log times help). Screenshots or a short recording are welcome for visual problems.
-    validations:
-      required: true
-  - type: textarea
     id: steps
     attributes:
-      label: Steps to reproduce
+      label: What you did
+      description: The steps that lead to the problem. If a wallpaper looks wrong as soon as it is applied, say so and on which display.
       placeholder: |
         1. Apply the wallpaper to the built-in display
         2. Wait about a minute
         3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What went wrong
+      description: What you saw, and when (the log times help). Screenshots or a short recording are welcome for visual problems.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+      description: What it should look like or do instead. For a wallpaper, how it looks in Wallpaper Engine if you have seen it there.
+    validations:
+      required: true
   - type: textarea
     id: diagnostics
     attributes:
@@ -41,6 +54,11 @@ body:
       description: Drag the exported `WallpaperMachine-diagnostics-….zip` here. Look inside first if you want to check what is shared.
     validations:
       required: true
+  - type: textarea
+    id: app-details
+    attributes:
+      label: Details from the app
+      description: Filled in when you report from a wallpaper's details in the app (its type, what draws it and any error). Leave it as it is.
   - type: input
     id: version
     attributes:

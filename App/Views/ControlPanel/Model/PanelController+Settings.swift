@@ -13,8 +13,8 @@ import UniformTypeIdentifiers
 /// choices, muting, the low-battery level, app rules, hiding after applying) are not here.
 enum RenderingSetting: String, CaseIterable, Sendable {
   case batteryMode, batteryRenderScale, batteryTargetFps, frameRateCap, qualityPreset, renderScale
-  case videoBackend, contentPacing, sharedVideoDecode, sceneOptimization, sceneOnDemand
-  case sceneVideoPlaneSampling, sceneRenderer, sceneResolution
+  case sceneOptimization, sceneOnDemand
+  case sceneVideoPlaneSampling, sceneResolution
   case lowPowerModeAction, thermalAction, lowBatteryAction
 }
 
@@ -261,21 +261,6 @@ extension PanelController {
     return Float(min(max(scale, Self.renderScaleRange.lowerBound), Self.renderScaleRange.upperBound))
   }
 
-  /// `videoBackend`.
-  func setVideoBackend(_ mode: VideoBackendMode) async throws {
-    try await change(.videoBackend) { try await store.setVideoBackendAsync(mode.rawValue) }
-  }
-
-  /// `contentPacing` (experimental).
-  func setContentPacing(_ enabled: Bool) async throws {
-    try await change(.contentPacing) { try await store.setContentPacingEnabledAsync(enabled) }
-  }
-
-  /// `sharedVideoDecode` (experimental).
-  func setSharedVideoDecode(_ enabled: Bool) async throws {
-    try await change(.sharedVideoDecode) { try await store.setSharedVideoDecodeEnabledAsync(enabled) }
-  }
-
   /// `sceneOptimization`.
   func setSceneOptimization(_ enabled: Bool) async throws {
     try await change(.sceneOptimization) { try await store.setSceneOptimizationEnabledAsync(enabled) }
@@ -291,11 +276,6 @@ extension PanelController {
     try await change(.sceneVideoPlaneSampling) {
       try await store.setSceneVideoPlaneSamplingEnabledAsync(enabled)
     }
-  }
-
-  /// `sceneRenderer`.
-  func setSceneRenderer(_ mode: SceneRendererMode) async throws {
-    try await change(.sceneRenderer) { try await store.setSceneRendererAsync(mode.rawValue) }
   }
 
   /// `sceneResolution`: running 2D scenes resize their render targets in place.

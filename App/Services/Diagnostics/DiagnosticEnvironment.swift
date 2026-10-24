@@ -52,7 +52,9 @@ enum DiagnosticEnvironment {
         var line =
             "running scene: display \(scene.displayId) \"\(scene.displayName)\", wallpaper "
             + "\(scene.wallpaperId) \"\(scene.wallpaperTitle)\", backend \(scene.backend)"
-        if let reason = scene.fallbackReason { line += " (fell back: \(reason))" }
+        if let stage = scene.failureStage {
+            line += " (not drawn, \(stage)\(scene.failureReason.map { ": \($0)" } ?? ""); holding the last picture)"
+        }
         line += ", video path \(scene.videoPath)"
         if let mode { line += ", mode \(mode)" }
         return line

@@ -53,7 +53,7 @@ protocol NativeVideoHealthTarget: AnyObject {
     /// what earns the recovery allowance back.
     func playbackProvedHealthy()
     /// Nothing left to try. The surface reports the wallpaper as unplayable,
-    /// which hands it to the scene engine.
+    /// which the host reports as a failed display.
     func giveUpOnPlayback(trigger: String, detail: String)
 }
 
@@ -66,8 +66,8 @@ protocol NativeVideoHealthTarget: AnyObject {
 /// samples prove the pipeline works or the window ends. Healthy pipelines are
 /// usually proven within a couple of samples, so the common cost of a check is
 /// one short-lived video output and no visible change. A pipeline that is found
-/// stalled climbs the `NativeVideoHealthLadder`: a kick, one rebuild, then the
-/// hand-off, with a fresh look after each.
+/// stalled climbs the `NativeVideoHealthLadder`: a kick, one rebuild, then giving
+/// up (a failed display), with a fresh look after each.
 ///
 /// At most one check runs at a time. A trigger that arrives while the check is
 /// still only looking replaces it, since what the trigger describes is the

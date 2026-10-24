@@ -2,13 +2,15 @@ import Dispatch
 import Foundation
 
 /// Writes the Mac's memory-pressure events to the log, each with how much memory
-/// the app itself was using and how many scenes it was presenting.
+/// the app itself was using and how many scenes it was presenting, and says when
+/// a stretch of pressure begins and ends (`onPressureChanged`).
 ///
-/// Observation only. Nothing here unloads, pauses or stops a wallpaper: the
+/// Nothing here unloads, pauses or stops a wallpaper that is on screen: the
 /// footprint is for the whole process, so it cannot say which scene to blame,
-/// and no threshold for acting on it has been measured. The lines are the data
-/// a later guard would need, and they tell a bug report whether memory was
-/// short when something went wrong.
+/// and no threshold for acting on it has been measured. The one listener is
+/// `WallpaperSpaceParking`, which lets go of the wallpapers it keeps paused for
+/// other desktops while the pressure lasts. The lines tell a bug report whether
+/// memory was short when something went wrong.
 ///
 /// Event-driven: the system tells the source when the pressure level changes,
 /// so there is no timer and no sampling. The lock-screen extension is another
@@ -69,6 +71,11 @@ final class MemoryPressureMonitor {
     private var source: DispatchSourceMemoryPressure?
     /// When the stretch of pressure in progress began; nil while there is none.
     private var pressureBegan: ContinuousClock.Instant?
+    /// Told `true` when the Mac reports pressure after none, and `false` when it reports normal
+    /// again; repeats in between are not passed on.
+    var onPressureChanged: (@MainActor (Bool) -> Void)?
+    /// Whether a stretch of warning or critical pressure is in progress.
+    var underPressure: Bool { pressureBegan != nil }
     private var lastLogged: (level: Level, at: ContinuousClock.Instant)?
 
     /// The closures are optional so their `@MainActor` defaults are built inside
@@ -130,8 +137,12 @@ final class MemoryPressureMonitor {
             lastLogged = (level, at)
             let seconds = Int(((at - began) / .seconds(1)).rounded())
             report(.recovered(afterSeconds: seconds, footprint: footprint()))
+            onPressureChanged?(false)
         case .warning, .critical:
-            if pressureBegan == nil { pressureBegan = at }
+            if pressureBegan == nil {
+                pressureBegan = at
+                onPressureChanged?(true)
+            }
             // A burst of the same level is one line; a change of level is always one.
             if let last = lastLogged, last.level == level, at - last.at < Self.collapseWindow { return }
             lastLogged = (level, at)

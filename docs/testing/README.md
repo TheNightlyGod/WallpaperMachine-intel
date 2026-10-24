@@ -47,9 +47,11 @@ Routine verification **must not**:
 - replace or restart the installed `/Applications/WallpaperMachine.app`.
 
 Each of those requires an explicit user decision, with one standing exception: a
-wallpaper fix may wake the Parallels Windows VM, capture Wallpaper Engine's frames
-in it with Wallpaper Engine muted, and suspend it again
-([wallpaper-engine-reference.md](wallpaper-engine-reference.md)). `python3 scripts/test.py --ui`
+wallpaper fix may download the reported Workshop item with the app's saved Steam
+sign-in (`scripts/we_reference.py fetch`, never a new sign-in), wake the Parallels
+Windows VM, capture Wallpaper Engine's frames in it with Wallpaper Engine muted, and
+suspend it again ([wallpaper-fixes.md](wallpaper-fixes.md),
+[wallpaper-engine-reference.md](wallpaper-engine-reference.md)). `python3 scripts/test.py --ui`
 and the manual smoke checklist take over the desktop and are neither part of
 routine verification nor a required release gate. See
 [../../AGENTS.md](../../AGENTS.md) for the agent-facing form of this rule and
@@ -74,9 +76,11 @@ with an installed newer interpreter (for example, `python3.12`).
 | XCUITest (desktop) | `Tests/UI/` | `python3 scripts/test.py --ui` — opt-in only |
 | Media/device integration | `Tests/Unit/NativeVideo/`, `Tests/Unit/Library/VideoLetterboxProbeMediaTests.swift` | `WALLPAPER_MACHINE_MEDIA_TESTS=1 python3 scripts/test.py` — opt-in only |
 | Live Steam pages / native SteamCMD install | `Tests/Unit/Workshop/WorkshopTests.swift`, `Tests/Unit/Steam/SteamCMDLiveInstallTests.swift` | `WALLPAPER_MACHINE_NETWORK_TESTS=1 python3 scripts/test.py` — opt-in only |
-| Rust crates | `upstream/renderer/crates/` | `python3 scripts/check_rust.py` runs the isolated release checks and reports exclusions/skips; individual Cargo commands remain available |
-| C++ renderer tests | `upstream/renderer/external/open-wallpaper-engine` | `python3 scripts/check_renderer.py` uses one `REGRESSION_BINARIES` registry for build, execution and the verdict, plus image/reload probes. Every test binary the regression docs name is registered, and every other test executable is too or is listed with its reason in `MANUAL_BINARIES`; [renderer.md](renderer.md#ccmake-test-binaries) lists what a registered binary must do without (a window, an audio device, shared temporary files) and how to run one by hand while iterating |
-| Headless GPU probes | same CMake tree | explicitly invoked executables (`offscreen_scene_probe`, `scene_reload_cycle_probe`, `playback_gpu_test`, `wpdump`); see [renderer.md](renderer.md) |
+| Rust crates | `Renderer/Shader`, `Renderer/Core`, `Renderer/Bridge` | `python3 scripts/check_rust.py` runs the isolated release checks and reports exclusions/skips; individual Cargo commands remain available |
+| C++ renderer tests | `Renderer/Engine` | `python3 scripts/check_renderer.py` uses one `REGRESSION_BINARIES` registry for build, execution and the verdict, plus image/reload probes. Every test binary the regression docs name is registered, and every other test executable is too or is listed with its reason in `MANUAL_BINARIES`; [renderer.md](renderer.md#ccmake-test-binaries) lists what a registered binary must do without (a window, an audio device, shared temporary files) and how to run one by hand while iterating |
+| License closure | built app, `Renderer/`, `ThirdParty/` | `python3 scripts/check_licenses.py` lists every Mach-O dependency of the built app (`otool -L`, walked recursively), the code compiled or statically linked into the renderer (a source inventory with a hand-kept license table) and every linked Rust crate (`cargo tree`; a vendored path crate under `ThirdParty/`, such as `naga`, counts as third party with the license its `Cargo.toml` declares), each with its SPDX license, and classifies them against the policy table in the script (GPL-3.0-only: a GPLv3-compatible license passes; GPL-2.0-only, known GPLv3-incompatible licenses such as EPL-1.0 or CDDL-1.0, and unknown licenses fail). Report-only by default; `--enforce` exits 1 on a finding or when the default Release build is missing (an incomplete check is not a pass); `--app` picks the bundle (default: the Release build), `--skip-app` skips the dylib walk as an explicit choice that `--enforce` accepts and the verdict line names. Read-only: it never builds, installs or launches anything. Run it after any dependency, link-line or `Cargo.lock` change; it needs Homebrew and Cargo, so the routine gate does not run it |
+| License notices | built app, cargo registry, Homebrew kegs | `python3 scripts/notices.py` writes `THIRD-PARTY-NOTICES.txt` (default `artifacts/licenses/`): for every third-party component of the same closure `check_licenses.py` reports, its name, version, SPDX license and the license text taken from the component itself (the crate's `LICENSE*` files in the cargo registry or under `ThirdParty/`, the Homebrew keg's license files, a vendored library's file or header notice; a dual `MIT OR Apache-2.0` crate carries the MIT text). A component whose text is not found is marked `LICENSE TEXT NOT FOUND` in the file and named in the output. Report-only by default; `--enforce` exits 1 on a gap; `--app`/`--skip-app` as for `check_licenses.py`. `scripts/package.py` runs the same generator and bundles the file. Needs Homebrew, Cargo and a populated cargo registry (`cargo fetch` or any earlier build), so the routine gate does not run it |
+| Headless GPU probes | same CMake tree | explicitly invoked executables (`offscreen_scene_probe`, `scene_reload_cycle_probe`, `wpdump`); see [renderer.md](renderer.md) |
 
 `python3 scripts/test.py` is the routine gate: it runs the Python script test
 modules side by side (each isolates itself in temporary directories, and every
@@ -90,8 +94,69 @@ result bundle. A green run prints nothing but the verdict; open the log or
 rerun with `--verbose` when the raw stream is the point. `scripts/build.py`
 filters the same way into `artifacts/build/<stage>-<timestamp>.log`.
 Cargo and CMake commands need the Homebrew environment that `scripts/build.py`
-assembles; run the Rust commands from `upstream/renderer`. Build prerequisites
+assembles; run the Rust commands from `Renderer/`. Build prerequisites
 are in [../build.md](../build.md).
+
+Bridge operation regressions in `Renderer/Bridge/src/api/operation_contract_tests.rs`
+exercise the real actor, transport, state/configuration and journal with isolated
+files and controlled engine IO. They distinguish saved, pending, published and live
+state across persistence failures, stale completions, repair and Cancel. Core/prune/
+readiness still share the real serialized facade turn. Out-of-order completion cases
+park the last actually processed render-scale result, at explicitly reduced scale,
+after mutation and lock release—not inside overlapping held core turns or midway
+through audio registration. Narrow test-only observations and initial-value seeds
+do not simulate publication or export the whole actor state. These cases establish
+no native-renderer, visual, hardware or permission fidelity.
+
+The Apply/settings consumer children distinguish an unsaved wallpaper draft from
+property/display reset markers: saved nondefault choices remain resettable even
+when the enclosing options are clean. Clean Apply is not a startup primitive; use
+real Bootstrap for configured startup and actual edits for Apply transitions. A
+controlled live setter must update the direct-template snapshot as well as its
+observation cell, or refresh classification observes a stale scene. Scenario-owned
+request waits retain cancellation and join ownership across timeouts; canceling a
+wait does not replace the real actor drain before disposing owned paths.
+One separately identified `FakeEngineFacade` case preserves synthetic core-blocked
+command admission. It does not model the common readiness/audio exclusion and does
+not replace the real-turn consumer cases or establish native responsiveness.
+
+Power callback cases await the matching actual handoff completion before checking
+unchanged playback/effect vectors; an already-equal vector or an early snapshot is
+not a callback receipt. Watching construction includes a synchronous baseline read,
+distinct from startup policy sampling. The controlled construction test lets that
+baseline return, then holds an actual resample and releases it before joining and
+draining. API projection fixtures also distinguish a missing first-seen monitor
+record (which may inherit Primary) from an explicitly enabled but unassigned row.
+
+The retained bridge suites share independently authored value and observation
+helpers. Profiles keep their own scale, refresh and window/pointer state; a live
+handle-only fixture is not silently converted to a direct wallpaper assignment.
+Exact reconcile waits read the actual recorded-vector length without cloning its
+scene history, retain the caller bound and assert completion. They do not replace
+the separate 3–4-call coalescing contract or the retained cache-storage assertions.
+
+The independent display/config/project/draft contract suites now carry the mapped
+self-mirror, corrupt-file backup, raw rich-text/type and Cancel-baseline assertions
+formerly duplicated in small inherited bridge tests. Constructor-pointer equality,
+record-construction echoes and shallow duplicate default inventories are deliberately
+retired, not counted as replacement lifecycle coverage. Five real consumers in
+`Renderer/Bridge/src/api/small_library_contract_tests.rs` now cover public filter replies
+and later snapshots, hidden inventory across owned concurrent refresh, supported Web
+and Scene beside unsupported Application, cleared selection in both public snapshots,
+and full configuration equality after opening a distinct store. The refresh uses two
+actors with owned paths, never a process-wide HOME change; actor drain precedes root
+deletion. Only assertion-mapped inherited cases are retired. Remaining apply/settings
+cases, contributor corrections and the entire cache-clear storage-observation case
+stay intact; suite membership alone is not evidence for deleting their assertions.
+
+The old Rust project/resource/rendergraph/runtime corpus wrappers are retired,
+together with their hard-coded developer-library paths, generated-data fallback
+and macro registry. Independent disk-manifest, source-resolution and scene-loader
+contracts retain the real type/loading/path-rejection behavior. Nonempty-object
+and default-target inventories were incidental checks, not native graph/runtime
+coverage; they are not recreated. The routine Rust gate excludes only the five
+desktop-window cases explicitly. Other asset skips remain reported, and removing
+the obsolete corpus exclusions does not make real corpus compatibility verified.
 
 An `IDELaunchServicesLauncher` assertion `childPID > 0` (exit 250) can abort
 Xcode before the native test host starts, even after successful compilation
@@ -265,6 +330,8 @@ runs.
 | `artifacts/build/<stage>-<timestamp>.log` | `python3 scripts/build.py` (cargo, bindgen, xcodegen, xcodebuild) |
 | `artifacts/renderer/<run>/` | `python3 scripts/check_renderer.py` |
 | `artifacts/renderer/bin/` | renderer check binaries |
+| `artifacts/licenses/<run>/` | `python3 scripts/check_licenses.py` (`report.json`, `closure.txt`, `cargo-tree.txt`) |
+| `artifacts/licenses/THIRD-PARTY-NOTICES.txt` | `python3 scripts/notices.py` |
 | `build/Build/Products/{Debug,Release}/WallpaperMachine.app` | `python3 scripts/build.py` |
 
 `artifacts/` and `build/` are both Git-ignored and disposable; `python3

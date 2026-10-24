@@ -176,8 +176,13 @@ enum InspectorWording {
     }
   }
 
-  /// "Drawn now by metal", with its fallback reason when it has one.
+  /// "Drawn now by metal", with its fallback reason when it has one, or the held-scene sentence when
+  /// Native Metal is the only renderer and could not draw it: nothing draws it, so no backend is named.
   static func backendLine(_ state: CompatibilityState) -> String? {
+    if let failure = state.failure {
+      let sentence = failure.stage.sentence(reason: failure.reason)
+      return sentence.prefix(1).uppercased() + sentence.dropFirst()
+    }
     guard let backend = state.backend else { return nil }
     if let reason = state.fallbackReason, !reason.isEmpty {
       return L("Drawn now by \(backend) (fallback: \(reason))")

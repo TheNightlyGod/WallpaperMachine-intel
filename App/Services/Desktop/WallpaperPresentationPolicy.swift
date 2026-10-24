@@ -304,13 +304,15 @@ final class WallpaperPresentationPolicy {
     }
 
     /// Every window kind that hosts wallpaper pixels: the renderer's Metal
-    /// window, the web wallpaper window, and the native video window. A backend
+    /// window, the web wallpaper window, and the two native video windows (AVFoundation's and the
+    /// WebM player's). A backend
     /// missing from this list is invisible to occlusion tracking, so its
     /// display would never be suspended or resumed.
     static let wallpaperWindowClassNames = [
         "MWEWallpaperDesktopWindow",
         "MWEWebWallpaperDesktopWindow",
         "MWENativeVideoDesktopWindow",
+        "MWEWebMVideoDesktopWindow",
     ]
 
     static func isWallpaperWindow(_ window: NSWindow) -> Bool {

@@ -108,7 +108,7 @@ final class WallpaperController {
       Self.record(
         LockScreenReadiness(
           revision: configuration.revision, displayID: scene.displayID,
-          error: (error ?? readyError)?.localizedDescription))
+          error: (error ?? readyError)?.localizedDescription, held: surface.heldNotice))
     }
   }
 
@@ -123,6 +123,8 @@ final class WallpaperController {
   }
 
   private static func record(_ readiness: LockScreenReadiness) {
+    var readiness = readiness
+    readiness.processID = getpid()
     do {
       let data = try JSONEncoder().encode(readiness)
       try data.write(

@@ -1,3 +1,4 @@
+import Darwin
 import XCTest
 
 @testable import WallpaperMachine
@@ -48,16 +49,20 @@ final class ProcessFootprintTests: XCTestCase {
     }
 
     func testCurrentFootprintFollowsMemoryTheProcessTouches() throws {
-        // The footprint is the whole process's, and the rest of the test host can hand
-        // memory back between the two reads (a full-gate run saw it fall by 33 MB while
-        // 64 MB was being written). A fall says nothing about the read, so the touch is
-        // repeated: the footprint must follow the touched memory, by the same margin, in
-        // at least one of three tries.
+        // A heap allocation may reuse pages already charged to the process. A fresh
+        // anonymous mapping starts untouched, so writing it creates a new charge.
+        // Other host work can still return memory between reads; retain the bounded
+        // three attempts and the same required growth margin.
         let size = Int(64 * megabyte)
         var readings: [(before: UInt64, after: UInt64)] = []
         for _ in 0..<3 {
-            let block = UnsafeMutableRawPointer.allocate(byteCount: size, alignment: 16)
-            defer { block.deallocate() }
+            let block = try XCTUnwrap(
+                mmap(nil, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0))
+            guard block != MAP_FAILED else {
+                XCTFail("Could not map fresh memory: errno \(errno)")
+                return
+            }
+            defer { XCTAssertEqual(munmap(block, size), 0) }
             let before = try XCTUnwrap(ProcessFootprint.current())
             block.initializeMemory(as: UInt8.self, repeating: 0xA5, count: size)
             let after = try XCTUnwrap(ProcessFootprint.current())

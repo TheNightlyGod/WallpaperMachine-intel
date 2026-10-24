@@ -9,7 +9,7 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
-ADAPTER = ROOT / "upstream/mediaremote-adapter"
+ADAPTER = ROOT / "ThirdParty/mediaremote-adapter"
 
 
 @unittest.skipUnless(sys.platform == "darwin" and shutil.which("xcrun"), "Objective-C fixture requires the macOS SDK")

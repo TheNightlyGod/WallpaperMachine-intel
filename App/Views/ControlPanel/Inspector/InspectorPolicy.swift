@@ -138,22 +138,14 @@ enum InspectorPolicy {
     }
   }
 
-  // MARK: Position
+  // MARK: Frame rate
 
-  /// What the note under a display's Position sliders says.
-  enum PositionNote: Equatable {
-    /// The native video player draws the wallpaper on this display and keeps it centred, with
-    /// **Open Performance** to choose Compatibility instead. The sliders stay: the position is kept
-    /// for when another player draws it.
-    case nativePlayer
-    /// What the sliders do.
-    case explains
-  }
-
-  /// Only the display the native player draws on gets its note; another display of the same
-  /// wallpaper is moved as usual.
-  static func positionNote(for display: InspectorOptions.DisplayRow) -> PositionNote {
-    display.isDrawnByNativePlayer ? .nativePlayer : .explains
+  /// Whether a display's Frame rate row, and the note about the ceiling on it, are shown. The
+  /// native video player plays a clip at the clip's own rate, so neither the display's frame rate
+  /// nor a limit on it applies to what it draws; the row comes back for any other player, which
+  /// the scene engine's own drawing of a clip is.
+  static func offersFrameRate(for display: InspectorOptions.DisplayRow) -> Bool {
+    !display.isDrawnByNativePlayer
   }
 
   // MARK: Fit with blurred backdrop

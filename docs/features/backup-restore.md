@@ -11,7 +11,9 @@ rules and sunrise/sunset settings included), and retained
 [user-selected files](user-files.md). Handled automatic
 events and temporary Focus recovery state remain local and are cleared on
 successful restore; rollback restores their original values. **Include the
-wallpaper library** also copies installed projects. Login sessions, passwords,
+wallpaper library** also copies installed projects, from wherever the library is
+kept; a restore writes them to the library's place on the Mac it runs on, which
+may be [another folder or drive](library-location.md). Login sessions, passwords,
 keychain entries, logs, caches and shared scene resources are excluded, and the
 local scene-assets selection stays local and may need to be selected again. Time
 Machine and other backups of the whole Mac likewise skip the saved Steam sign-in,

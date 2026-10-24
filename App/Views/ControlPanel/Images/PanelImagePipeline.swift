@@ -72,7 +72,7 @@ final class PanelImagePipeline {
   let propertyImages: PropertyImageCache
   /// Resolved on each request, so a library root that moves (a test's temporary home) is followed.
   private let libraryRoot: @Sendable () -> URL
-  private let memory = NSCache<NSString, DecodedPanelImage>()
+  private let memory: NSCache<NSString, DecodedPanelImage>
   /// Covers that could not be made, by source: they show the downsampled preview instead and
   /// are not asked for again until their stamp, and so their key, changes.
   private var brokenCovers = Set<String>()
@@ -87,13 +87,15 @@ final class PanelImagePipeline {
       maxConcurrentFetches: 4, byteLimit: 128 * 1024 * 1024, keepsAnimation: false,
       sourceByteLimit: LibraryPreviewFetcher.maximumBytes),
     propertyImages: PropertyImageCache = PropertyImageCache(),
-    libraryRoot: @escaping @Sendable () -> URL = { ClientPaths.libraryURL }
+    libraryRoot: @escaping @Sendable () -> URL = { ClientPaths.libraryURL },
+    memory: NSCache<NSString, DecodedPanelImage> = NSCache()
   ) {
     self.thumbnailCache = thumbnailCache
     self.pixivThumbnailCache = pixivThumbnailCache
     self.libraryThumbnailCache = libraryThumbnailCache
     self.propertyImages = propertyImages
     self.libraryRoot = libraryRoot
+    self.memory = memory
     memory.totalCostLimit = Self.memoryLimit
   }
 

@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Bundle Homebrew dylibs, configure MoltenVK, collect license notices, sign the local application, and wrap it in a disk image.
+"""Bundle Homebrew dylibs, collect license notices, sign the local application, and wrap it in a disk image.
 
-Nothing in the bundle is touched until the preflight passes: the FFmpeg libraries
-the binaries actually link must be an LGPL build (Formula/mwe-ffmpeg.rb), never a
-`--enable-gpl` / `--enable-version3` / `--enable-nonfree` one, and every bundled
-Homebrew keg must carry license files to ship. The signed bundle then goes into
+Nothing in the bundle is touched until the preflight passes: every bundled
+Homebrew keg must carry license files to ship, and every notice the build places in
+the bundle must match its repository original. The signed bundle then goes into
 `WallpaperMachine-<version>-arm64.dmg`, the drag-to-install image laid out by
 scripts/lib/dmg.py, which is mounted and verified before its `.sha256` sidecar is
 written. The image is for local use; LICENSING.md records why it is not cleared for
@@ -20,30 +19,30 @@ bundle's `LSMinimumSystemVersion` is raised to match, so macOS refuses to open i
 instead of it failing at launch; `--require-deployment-target` makes that an error.
 
 `--check` runs the preflight against the built bundle and exits without changing it.
+
+The preflight also generates `THIRD-PARTY-NOTICES.txt` (scripts/notices.py): the license text of
+every Homebrew library, compiled-in component and linked Rust crate, taken from the component
+itself, bundled as `Contents/Resources/THIRD-PARTY-NOTICES.txt`. A generation failure stops
+packaging; a component whose license text cannot be found is named in the output and marked
+in the file, and `--require-notices` makes it an error too (the gate for a distributed build).
 """
 import argparse
 import hashlib
-import json
 from pathlib import Path
-import re
 import shutil
 import subprocess
 import sys
 
+import check_licenses
 from lib import bundle_contract, dmg
+from lib.homebrew import KEG_LICENSE_FILE, keg_of
 from lib.glyphs import markers
-from lib.paths import RENDERER, ROOT, app_bundle
+from lib.paths import PROVENANCE, ROOT, THIRD_PARTY, app_bundle
+import notices
 
 MARK = markers()
-FFMPEG_LIBRARY = re.compile(r"^lib(avutil|avcodec|avformat|avfilter|avdevice|swscale|swresample|postproc)\.")
-# Written by FFmpeg's configure from exactly the gpl/version3/nonfree switches (`avutil_license()`).
-FFMPEG_LICENSE = re.compile(rb"lib[a-z]+ license: ([^\x00]+)")
-FFMPEG_FORBIDDEN = re.compile(rb"--enable-(?:gpl|version3|nonfree)\b")
-FFMPEG_ACCEPTED_LICENSE = "LGPL version 2.1 or later"
-# Homebrew keeps the upstream tarball's license and notice files at the keg root.
-KEG_LICENSE_FILE = re.compile(r"^(LICENSE|LICENCE|COPYING|COPYRIGHT|NOTICE)", re.IGNORECASE)
-# Statically linked into the renderer; their notices travel with the app binary.
-RENDERER_THIRD_PARTY = RENDERER / "external/open-wallpaper-engine/third_party"
+# The GPLv2 text the imported renderer was received under; see LICENSING.md.
+IMPORTED_RENDERER_LICENSE = THIRD_PARTY / "received-licenses/wallpaper-engine-for-macos.GPL-2.0.txt"
 # Packaging is one-way: it rewrites load commands and fills Contents/Frameworks, and
 # does not record where those dylibs came from. Repackaging therefore needs fresh
 # build output rather than an incremental rebuild, which leaves Frameworks as it was.
@@ -76,10 +75,14 @@ def sign(file, identity, *options):
     if target_identity != "-":
         command.append("--timestamp=none")
     try:
-        run([*command, *options, file])
-    except subprocess.CalledProcessError:
         if target_identity != "-":
-            print(f"{MARK.warn} codesign failed with identity {target_identity!r}, falling back to ad hoc (-)", file=sys.stderr)
+            subprocess.run(list(map(str, [*command, *options, file])), check=True, capture_output=True, text=True)
+        else:
+            run([*command, *options, file])
+    except subprocess.CalledProcessError as e:
+        if target_identity != "-":
+            err = (e.stderr or "").strip()
+            print(f"{MARK.warn} codesign failed with identity {target_identity!r}: {err}; falling back to ad hoc (-)", file=sys.stderr)
             FALLBACK_TO_ADHOC = True
             run(["codesign", "--force", "--sign", "-", *options, file])
         else:
@@ -160,36 +163,6 @@ def raised_minimum(target, minimums):
     return floor, newer
 
 
-def ffmpeg_configuration(data):
-    """The NUL-terminated configure command line embedded in an FFmpeg library, or b""."""
-    index = data.find(b"--prefix=")
-    if index < 0:
-        return b""
-    return data[data.rfind(b"\x00", 0, index) + 1:data.find(b"\x00", index)]
-
-
-def ffmpeg_finding(name, source):
-    """Why a linked FFmpeg library may not be bundled, or None when it is an LGPL build."""
-    data = source.read_bytes()
-    license_match = FFMPEG_LICENSE.search(data)
-    if license_match is None:
-        return f"{name} ({source}): no embedded license string; cannot verify its configuration"
-    license = license_match.group(1).decode(errors="replace")
-    forbidden = sorted(set(FFMPEG_FORBIDDEN.findall(ffmpeg_configuration(data))))
-    if license == FFMPEG_ACCEPTED_LICENSE and not forbidden:
-        return None
-    detail = f"configured {' '.join(flag.decode() for flag in forbidden)}" if forbidden else "configuration string not found"
-    return f"{name} ({source}): {license}; {detail}"
-
-
-def keg_of(source):
-    """The Homebrew keg (`Cellar/<formula>/<version>`) a resolved library belongs to."""
-    parts = source.parts
-    if "Cellar" in parts and len(parts) > parts.index("Cellar") + 3:
-        return Path(*parts[: parts.index("Cellar") + 3])
-    return None
-
-
 def keg_licenses(libraries):
     """Keg -> its license files, for every keg that contributes a bundled library."""
     result = {}
@@ -208,25 +181,45 @@ def keg_licenses(libraries):
     return result
 
 
-def preflight(notices, libraries):
-    """Fail before mutation when the bundle links a GPL FFmpeg or could not carry every notice.
+def preflight(notice_files, libraries):
+    """Fail before mutation when the bundle could not carry every notice.
 
-    `notices` maps each license file Xcode already placed in the build to the
+    `notice_files` maps each license file Xcode already placed in the build to the
     repository file it must match.
     """
-    findings = [finding for name, source in sorted(libraries.items()) if FFMPEG_LIBRARY.match(name) and (finding := ffmpeg_finding(name, source))]
-    if findings:
-        raise PackagingError("Refusing to bundle FFmpeg libraries that are not an LGPL build (install the project's with python3 scripts/install_ffmpeg.py; see LICENSING.md):\n  " + "\n  ".join(findings))
     licenses = keg_licenses(libraries)
-    sources = [ROOT / "LICENSE", ROOT / "LICENSING.md", RENDERER / "LICENSE", ROOT / "upstream/provenance.json", *notices.values()]
+    sources = [ROOT / "LICENSE", ROOT / "LICENSING.md", IMPORTED_RENDERER_LICENSE, PROVENANCE, *notice_files.values()]
     missing = [f"{file} is missing from the repository" for file in sources if not file.is_file()]
-    missing += [f"{file} is missing from the build or differs from {original}" for file, original in notices.items() if original.is_file() and (not file.is_file() or file.read_bytes() != original.read_bytes())]
+    missing += [f"{file} is missing from the build or differs from {original}" for file, original in notice_files.items() if original.is_file() and (not file.is_file() or file.read_bytes() != original.read_bytes())]
     if missing:
         raise PackagingError("Missing license payload:\n  " + "\n  ".join(missing))
     return licenses
 
 
-def write_licenses(resources, licenses):
+def third_party_notices(app, require):
+    """The text of THIRD-PARTY-NOTICES.txt for the closure of `app`.
+
+    A tool failure, or a closure with no components, stops packaging. A component whose license
+    text is not found is reported, and stops packaging only when `require` is set.
+    """
+    try:
+        noticeset = notices.generate(notices.options_for(app), environment=check_licenses.cargo_environment())
+    except check_licenses.ToolError as error:
+        raise PackagingError(f"Third-party notices could not be generated: {error}") from error
+    if not noticeset.notices:
+        raise PackagingError("Third-party notices could not be generated: the license closure is empty")
+    if noticeset.missing:
+        names = [f"{notice.name} {notice.version}".strip() for notice in noticeset.missing]
+        message = f"{notices.NOT_FOUND} for {len(names)} of {len(noticeset.notices)} components: {', '.join(names)}"
+        if require:
+            raise PackagingError(message)
+        print(f"{MARK.missing} {message}; THIRD-PARTY-NOTICES.txt marks them (`--require-notices` makes this an error)")
+    else:
+        print(f"{MARK.ok} Third-party notices: {notices.summary(noticeset)}")
+    return noticeset.text
+
+
+def write_licenses(resources, licenses, third_party):
     """Copy the notices for everything packaged into Resources/Licenses; the directory is rebuilt every run."""
     directory = resources / "Licenses"
     shutil.rmtree(directory, ignore_errors=True)
@@ -235,18 +228,19 @@ def write_licenses(resources, licenses):
         target.mkdir(parents=True)
         for file in files:
             shutil.copy2(file, target / file.name)
-    for file in sorted(RENDERER_THIRD_PARTY.glob("*/LICENSE*")):
+    # The vendored C libraries statically linked into the renderer; their notices travel
+    # with the app binary.
+    for file in sorted(THIRD_PARTY.glob("*/LICENSE*")):
+        if file.parent.name in check_licenses.NOT_ENGINE_VENDORED:
+            continue
         target = directory / "renderer-third-party" / file.parent.name
         target.mkdir(parents=True, exist_ok=True)
         shutil.copy2(file, target / file.name)
     shutil.copy2(ROOT / "LICENSE", resources / "WallpaperMachine-LICENSE.txt")
     shutil.copy2(ROOT / "LICENSING.md", resources / "LICENSING.md")
-    shutil.copy2(RENDERER / "LICENSE", resources / "Renderer-LICENSE.txt")
-    shutil.copy2(ROOT / "upstream/provenance.json", resources / "provenance.json")
-
-
-def icd(depth):
-    return json.dumps({"file_format_version": "1.0.0", "ICD": {"library_path": f"{depth}/Frameworks/libMoltenVK.dylib", "api_version": "1.3.0", "is_portability_driver": True}}, indent=2)
+    shutil.copy2(IMPORTED_RENDERER_LICENSE, resources / "Imported-Renderer-GPL-2.0-LICENSE.txt")
+    shutil.copy2(PROVENANCE, resources / "provenance.json")
+    (resources / "THIRD-PARTY-NOTICES.txt").write_text(third_party)
 
 
 def relocate(file, prefix, rpath):
@@ -276,18 +270,16 @@ def package(args):
     frameworks = app / "Contents/Frameworks"
     resources = app / "Contents/Resources"
     prefix = Path(output(["brew", "--prefix"]).strip())
-    molten = prefix / "opt/molten-vk/lib/libMoltenVK.dylib"
     bundled = sorted(frameworks.glob("*.dylib"))
     if bundled:
-        findings = [finding for file in bundled if FFMPEG_LIBRARY.match(file.name) and (finding := ffmpeg_finding(file.name, file))]
-        gpl = "\nIt also carries FFmpeg libraries that are not an LGPL build (see LICENSING.md):\n  " + "\n  ".join(findings) if findings else ""
-        raise PackagingError(f"{FRESH_BUILD}; Contents/Frameworks already holds: {', '.join(file.name for file in bundled)}{gpl}")
-    libraries = resolve_libraries([binary, *extension_binaries], [molten], prefix)
+        raise PackagingError(f"{FRESH_BUILD}; Contents/Frameworks already holds: {', '.join(file.name for file in bundled)}")
+    libraries = resolve_libraries([binary, *extension_binaries], [], prefix)
     # Notices Xcode already bundles from project.yml; packaging never rewrites them.
-    notices = {resources / "LICENSE": ROOT / "upstream/mediaremote-adapter/LICENSE"}
+    notice_files = {resources / "LICENSE": THIRD_PARTY / "mediaremote-adapter/LICENSE"}
     for extension in extensions:
-        notices[extension / "Contents/Resources/Phosphene-LICENSE.txt"] = ROOT / "Extension/Phosphene-LICENSE.txt"
-    licenses = preflight(notices, libraries)
+        notice_files[extension / "Contents/Resources/Phosphene-LICENSE.txt"] = ROOT / "Extension/Phosphene-LICENSE.txt"
+    licenses = preflight(notice_files, libraries)
+    third_party = third_party_notices(app, args.require_notices)
     info = app / "Contents/Info.plist"
     target = output(["/usr/libexec/PlistBuddy", "-c", "Print :LSMinimumSystemVersion", info]).strip()
     floor, newer = raised_minimum(target, {name: minimum_system_version(source) for name, source in libraries.items()})
@@ -316,12 +308,7 @@ def package(args):
     for file in extension_binaries:
         relocate(file, prefix, "@executable_path/../../../../Frameworks")
 
-    (resources / "MoltenVK_icd.json").write_text(icd(".."))
-    for extension in extensions:
-        extension_resources = extension / "Contents/Resources"
-        extension_resources.mkdir(exist_ok=True)
-        (extension_resources / "MoltenVK_icd.json").write_text(icd("../../../.."))
-    write_licenses(resources, licenses)
+    write_licenses(resources, licenses, third_party)
     if floor != target:
         run(["/usr/libexec/PlistBuddy", "-c", f"Set :LSMinimumSystemVersion {floor}", info])
     for file in frameworks.glob("*.dylib"):
@@ -373,6 +360,7 @@ def main():
     parser.add_argument("--install", action="store_true")
     parser.add_argument("--check", action="store_true", help="Run the license preflight against the built bundle and change nothing.")
     parser.add_argument("--require-deployment-target", action="store_true", help="Fail instead of raising the app's minimum macOS when a bundled library needs a newer one.")
+    parser.add_argument("--require-notices", action="store_true", help="Fail instead of warning when a component's license text cannot be found for THIRD-PARTY-NOTICES.txt.")
     parser.add_argument("--sign-identity", default="-", help="Code-signing identity for the dylibs, extensions and app; `-` (the default) signs ad hoc. Release builds pass the project certificate (docs/build.md).")
     args = parser.parse_args()
     try:

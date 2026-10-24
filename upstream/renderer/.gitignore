@@ -1,9 +1,0 @@
-references/
-build/
-target/
-unpack/
-dist/
-.direnv/
-.idea/
-result
-**/.DS_Store

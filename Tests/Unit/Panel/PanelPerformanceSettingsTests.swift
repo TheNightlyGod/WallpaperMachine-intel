@@ -94,29 +94,6 @@ final class PanelPerformanceSettingsTests: PanelTestCase {
     XCTAssertEqual(DisplaySleepAction.allCases.map(\.rawValue), ["pause", "stop"])
   }
 
-  /// An unknown backend name is refused instead of falling back to Compatibility behind the user's
-  /// back: the typed choice has no way to name one.
-  func testVideoBackendAndSceneRendererOfferOnlyTheNamesTheEngineAccepts() async throws {
-    XCTAssertNil(VideoBackendMode(rawValue: "native"))
-    XCTAssertNil(VideoBackendMode(rawValue: ""))
-    XCTAssertEqual(VideoBackendMode.allCases.map(\.rawValue), ["compatibility", "native_preferred"])
-    for rejected in ["metal", "native_preferred", "NativeMetalPreferred", ""] {
-      XCTAssertNil(SceneRendererMode(rawValue: rejected), rejected)
-    }
-    XCTAssertEqual(
-      SceneRendererMode.allCases.map(\.rawValue), ["compatibility", "native_metal_preferred"])
-
-    try await withRecordingPanel { panel, bridge in
-      try await panel.controller.setVideoBackend(.nativePreferred)
-      XCTAssertEqual(bridge.videoBackendCalls, ["native_preferred"])
-      XCTAssertEqual(panel.controller.performanceSettings.videoBackend, .nativePreferred)
-
-      try await panel.controller.setSceneRenderer(.nativeMetalPreferred)
-      XCTAssertEqual(bridge.sceneRendererCalls, ["native_metal_preferred"])
-      XCTAssertEqual(panel.controller.performanceSettings.sceneRenderer, .nativeMetalPreferred)
-    }
-  }
-
   /// The choice is by the names the engine accepts, ships on the display and comes back as the engine
   /// answered it. A name the typed choice cannot make is not offered, so the engine never has to refuse
   /// one the panel sent.
@@ -180,19 +157,13 @@ final class PanelPerformanceSettingsTests: PanelTestCase {
       XCTAssertFalse(
         shipped.sceneVideoPlaneSampling,
         "A sampling path whose equivalence is bounded rather than total ships off")
-      XCTAssertFalse(shipped.contentPacing)
-      XCTAssertFalse(shipped.sharedVideoDecode)
 
       try await panel.controller.setSceneOnDemand(true)
       try await panel.controller.setSceneVideoPlaneSampling(true)
-      try await panel.controller.setContentPacing(true)
-      try await panel.controller.setSharedVideoDecode(true)
       XCTAssertEqual(bridge.sceneOnDemandCalls, [true])
       XCTAssertEqual(bridge.sceneVideoPlaneSamplingCalls, [true])
-      XCTAssertEqual(bridge.contentPacingCalls, [true])
-      XCTAssertEqual(bridge.sharedVideoDecodeCalls, [true])
       let on = panel.controller.performanceSettings
-      XCTAssertTrue(on.sceneOnDemand && on.sceneVideoPlaneSampling && on.contentPacing && on.sharedVideoDecode)
+      XCTAssertTrue(on.sceneOnDemand && on.sceneVideoPlaneSampling)
     }
   }
 

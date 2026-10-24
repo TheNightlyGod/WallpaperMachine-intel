@@ -21,6 +21,9 @@ struct QuickSettingsSection: View {
     keywords: ["Experimental"])
   static let desktopPicture = SettingsItem(
     id: "quick.tile-desktop-picture", section: .quick, title: "Desktop Picture")
+  static let desktopWallpapers = SettingsItem(
+    id: "quick.tile-desktop-wallpapers", section: .quick, title: "Wallpaper per Desktop",
+    keywords: ["Different wallpaper for each desktop", "Spaces"])
   static let activeDisplayOnly = SettingsItem(
     id: "quick.tile-active-display-only", section: .quick, title: "Active Display Only")
   static let hideAfterApplying = SettingsItem(
@@ -44,13 +47,14 @@ struct QuickSettingsSection: View {
     keywords: ["System (Auto)", "Light", "Dark"])
 
   static let items = [
-    openAtLogin, muteAll, lockScreen, screenSaver, desktopPicture, activeDisplayOnly,
+    openAtLogin, muteAll, lockScreen, screenSaver, desktopPicture, desktopWallpapers, activeDisplayOnly,
     hideAfterApplying, liveEdits, quality, onBattery, covered, appearance,
   ]
 
   private static let tileItems: [SettingsSwitchKey: SettingsItem] = [
     .launchAtLogin: openAtLogin, .wallpapersMuted: muteAll, .lockScreenEnabled: lockScreen,
     .screenSaverEnabled: screenSaver, .writeDesktopPicture: desktopPicture,
+    .desktopWallpapers: desktopWallpapers,
     .playOnlyOnActiveDisplay: activeDisplayOnly, .hideAfterActivating: hideAfterApplying,
     .livePropertyEdits: liveEdits,
   ]

@@ -1,9 +1,9 @@
 """Guard the shipped string catalogs and the language registry without Xcode.
 
 Every language the app ships is declared in `AppLanguage.supported` (Swift) and must be
-translated, completely, in all three catalogs: `App/Resources/Localizable.xcstrings`
-(the app and its SwiftUI panel), `Extension/Localizable.xcstrings` (the lock-screen
-extension) and `App/Resources/InfoPlist.xcstrings`. The catalogs also have to survive being
+translated, completely, in both shipped catalogs: `App/Resources/Localizable.xcstrings`
+(the app and its SwiftUI panel) and `Extension/Localizable.xcstrings` (the lock-screen
+extension). The catalogs also have to survive being
 used as format strings: a translation must take the same arguments as its key, and a literal
 `%` must be escaped exactly where Foundation reads the string as a format. See
 docs/localization.md.
@@ -19,7 +19,6 @@ SOURCE_LANGUAGE = "en"
 CATALOGS = [
     ROOT / "App/Resources/Localizable.xcstrings",
     ROOT / "Extension/Localizable.xcstrings",
-    ROOT / "App/Resources/InfoPlist.xcstrings",
 ]
 # A format argument as the catalogs write one: `%@`, `%lld`, `%d`, `%u`, `%f`, with an optional
 # position (`%2$@`). No flags or widths: those never appear, and without them a raw `% o` in

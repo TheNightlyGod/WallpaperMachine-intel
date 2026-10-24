@@ -6,20 +6,18 @@ enum SteamCMDReportedFailure: String, Sendable {
     case cachedCredentials, steamGuard, connection, rateLimited, credentials, unknown
 
     init(reason: String, cachedCredentialsRejected: Bool = false, awaitingSteamGuard: Bool = false) {
-        // Steam uses both prose ("Service Unavailable") and EResult names ("ServiceUnavailable").
-        let reason = reason.lowercased().filter { $0.isASCII && ($0.isLetter || $0.isNumber) }
-        if cachedCredentialsRejected && reason.contains("cachedcredential") {
+        let key = String(reason.lowercased().filter { $0.isASCII && ($0.isLetter || $0.isNumber) })
+        func mentions(_ words: [String]) -> Bool { words.contains { key.contains($0) } }
+        if cachedCredentialsRejected, key.contains("cachedcredential") {
             self = .cachedCredentials
-        } else if reason.contains("twofactor") || reason.contains("authcode") || reason.contains("steamguard")
-            || (awaitingSteamGuard && (reason.contains("denied") || reason.contains("cancel"))) {
+        } else if mentions(["twofactor", "authcode", "steamguard"])
+                    || (awaitingSteamGuard && mentions(["denied", "cancel"])) {
             self = .steamGuard
-        } else if reason.contains("timeout") || reason.contains("timedout") || reason.contains("connection")
-            || reason.contains("connectfailed") || reason.contains("serviceunavailable") {
+        } else if mentions(["timeout", "timedout", "connection", "connectfailed", "serviceunavailable"]) {
             self = .connection
-        } else if reason.contains("ratelimit") || reason.contains("toomany") {
+        } else if mentions(["ratelimit", "toomany"]) {
             self = .rateLimited
-        } else if reason.contains("invalidpassword") || reason.contains("invalidlogin")
-            || reason.contains("accountlogondenied") {
+        } else if mentions(["invalidpassword", "invalidlogin", "accountlogondenied"]) {
             self = .credentials
         } else {
             self = .unknown

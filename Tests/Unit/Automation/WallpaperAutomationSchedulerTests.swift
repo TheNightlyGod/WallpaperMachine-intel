@@ -94,15 +94,85 @@ final class WallpaperAutomationSchedulerTests: XCTestCase {
         scheduler.evaluate(); await settle(); XCTAssertEqual(states["primary"]?.wallpaperID, "forest")
     }
 
+    func testADesktopWithoutAChoiceShowsDesktop1sAsANewDesktopDoes() async throws {
+        try rules.update("primary") { $0.mode = .spaces; $0.spaces = ["a": target("ocean"), "b": target("forest")] }
+        spaceVisits["primary"] = .init(spaceID: "b", token: "visit1", firstSpaceID: "a")
+        let scheduler = scheduler(); scheduler.start(); defer { scheduler.stop() }; await settle()
+        XCTAssertEqual(states["primary"]?.wallpaperID, "forest")
+
+        spaceVisits["primary"] = .init(spaceID: "new", token: "visit2", firstSpaceID: "a")
+        XCTAssertEqual(scheduler.pendingTarget(on: "primary"), target("ocean"), "the new desktop waits for Desktop 1's")
+        scheduler.evaluate(); await settle()
+        XCTAssertEqual(states["primary"]?.wallpaperID, "ocean")
+        XCTAssertNil(rules.configuration(for: "primary").spaces["new"], "following Desktop 1 saves nothing for the desktop")
+
+        try rules.update("primary") { $0.spaces["a"] = nil }
+        spaceVisits["primary"] = .init(spaceID: "b", token: "visit3", firstSpaceID: "a"); scheduler.evaluate(); await settle()
+        spaceVisits["primary"] = .init(spaceID: "new", token: "visit4", firstSpaceID: "a"); scheduler.evaluate(); await settle()
+        XCTAssertEqual(states["primary"]?.wallpaperID, "forest", "with no choice on Desktop 1 either, the display keeps what it shows")
+    }
+
+    func testADesktopFollowingDesktop1FollowsTheNewDesktop1WhenTheDesktopsAreReordered() async throws {
+        try rules.update("primary") { $0.mode = .spaces; $0.spaces = ["a": target("ocean"), "b": target("forest")] }
+        spaceVisits["primary"] = .init(spaceID: "new", token: "visit1", firstSpaceID: "a")
+        let scheduler = scheduler(); scheduler.start(); defer { scheduler.stop() }; await settle()
+        XCTAssertEqual(states["primary"]?.wallpaperID, "ocean")
+
+        // Desktop b is moved to the front while the person stays on the same desktop.
+        spaceVisits["primary"] = .init(spaceID: "new", token: "visit1", firstSpaceID: "b")
+        scheduler.evaluate(); await settle()
+        XCTAssertEqual(states["primary"]?.wallpaperID, "forest", "the desktop shows the new Desktop 1's wallpaper")
+    }
+
+    func testAWallpaperChosenByHandBecomesTheCurrentDesktopsOwn() async throws {
+        try rules.update("primary") { $0.mode = .spaces; $0.spaces = ["a": target("ocean"), "b": target("forest")] }
+        spaceVisits["primary"] = .init(spaceID: "a", token: "visit1")
+        let scheduler = scheduler(); scheduler.start(); defer { scheduler.stop() }; await settle()
+        XCTAssertEqual(states["primary"]?.wallpaperID, "ocean")
+
+        states["primary"]?.wallpaperID = "manual"
+        scheduler.noteManualChoice("primary", wallpaperID: "manual")
+        await settle()
+        XCTAssertEqual(rules.configuration(for: "primary").spaces["a"], target("manual"))
+        XCTAssertEqual(changes.map { $0.1.id }, ["ocean"], "what was chosen is on screen already")
+
+        spaceVisits["primary"] = .init(spaceID: "b", token: "visit2")
+        scheduler.evaluate(); await settle()
+        XCTAssertEqual(states["primary"]?.wallpaperID, "forest")
+        spaceVisits["primary"] = .init(spaceID: "a", token: "visit3")
+        scheduler.evaluate(); await settle()
+        XCTAssertEqual(states["primary"]?.wallpaperID, "manual", "coming back keeps the desktop's own wallpaper")
+
+        spaceVisits["primary"] = .init(spaceID: "new", token: "visit4")
+        scheduler.evaluate(); await settle()
+        states["primary"]?.wallpaperID = "picked"
+        scheduler.noteManualChoice("primary", wallpaperID: "picked")
+        XCTAssertEqual(rules.configuration(for: "primary").spaces["new"], target("picked"),
+                       "a desktop without a choice gets one")
+    }
+
+    func testAManualChoiceOutsideTheSpaceModeChangesNoDesktop() async throws {
+        try rules.update("primary") { $0.mode = .schedule; $0.spaces = [:] }
+        spaceVisits["primary"] = .init(spaceID: "a", token: "visit1")
+        let scheduler = scheduler(); scheduler.start(); defer { scheduler.stop() }; await settle()
+
+        scheduler.noteManualChoice("primary", wallpaperID: "manual")
+
+        XCTAssertTrue(rules.configuration(for: "primary").spaces.isEmpty)
+    }
+
     func testSpaceChoiceWaitsWhilePausedAndBlocksPosterPublicationUntilSettled() async throws {
         try rules.update("primary") { $0.mode = .spaces; $0.spaces["a"] = target("ocean") }
         spaceVisits["primary"] = .init(spaceID: "a", token: "visit1"); running = false
         let scheduler = scheduler(); scheduler.start(); defer { scheduler.stop() }; await settle()
         XCTAssertTrue(changes.isEmpty)
         XCTAssertFalse(scheduler.selectionIsSettled(on: "primary"))
+        XCTAssertEqual(scheduler.pendingTarget(on: "primary"), target("ocean"), "the desktop's choice waits")
+        XCTAssertFalse(scheduler.isApplying(on: "primary"), "it is not running while paused")
         running = true; scheduler.evaluate(); await settle()
         XCTAssertEqual(states["primary"]?.wallpaperID, "ocean")
         XCTAssertTrue(scheduler.selectionIsSettled(on: "primary"))
+        XCTAssertNil(scheduler.pendingTarget(on: "primary"))
     }
 
     func testFocusEndsOnlyAfterSpaceInformationRecoversAndUsesTheNewDesktopChoice() async throws {

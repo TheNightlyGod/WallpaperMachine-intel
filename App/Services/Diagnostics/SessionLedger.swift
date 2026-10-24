@@ -7,7 +7,7 @@ import os
 /// A run is one record with a phase: `running` from launch, `quitting` once a quit
 /// starts, `ended` as the app's last act. What a launch finds in the file tells how
 /// the run before it ended; see `classify`. There are no handlers for crash signals,
-/// which could clash with the ones MoltenVK and FFmpeg install or alter a crash report
+/// which could clash with the ones other libraries install or alter a crash report
 /// (`TerminationSignalRelay` handles only SIGTERM and SIGHUP), and no heartbeat: a
 /// normal session writes the file three times (launch, quit start, exit).
 ///

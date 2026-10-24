@@ -13,11 +13,10 @@ final class WallpaperCompatibilityTests: XCTestCase {
   override func tearDownWithError() throws { try FileManager.default.removeItem(at: root) }
 
   private func context(id: String = "one", kind: WallpaperCompatibilityContext.Kind = .video,
-                       fps: UInt32 = 60, backend: String = "native_preferred", revision: UInt64 = 0)
+                       fps: UInt32 = 60, revision: UInt64 = 0)
     -> WallpaperCompatibilityContext {
     .init(wallpaperID: id, displayID: "7", kind: kind, supported: true, targetFPS: fps,
-          targetAvailable: true, videoBackend: backend, sceneRenderer: "native_preferred",
-          libraryRevision: revision, assetsConfiguration: "")
+          targetAvailable: true, libraryRevision: revision, assetsConfiguration: "")
   }
 
   @discardableResult private func install(type: String = "video", entry: String = "clip.mp4", bytes: Int = 10) throws -> URL {
@@ -33,26 +32,27 @@ final class WallpaperCompatibilityTests: XCTestCase {
     checks.first { $0.id == id }?.status
   }
 
-  func testFPSConstraintIsAdmissionNotPlaybackSpeedChange() async throws {
+  func testATargetFrameRateNeverRefusesAClip() async throws {
+    // The clip plays at its own frame rate, so the display's target (or a cap on it) takes no part
+    // in whether macOS can play it.
     try install()
     let probe = ProbeRecorder()
     let service = WallpaperCompatibilityService(libraryURL: root, probe: { await probe.read($0) })
     let accepted = await service.check(context())
     let capped = await service.check(context(fps: 30))
     XCTAssertEqual(status(accepted, "nativeVideo"), .ok)
-    XCTAssertEqual(status(capped, "nativeVideo"), .warning)
-    XCTAssertTrue(capped.first { $0.id == "nativeVideo" }!.detail.contains("target frame rate 30"))
+    XCTAssertEqual(status(capped, "nativeVideo"), .ok)
+    XCTAssertFalse(capped.first { $0.id == "nativeVideo" }!.detail.contains("target frame rate"))
   }
 
-  func testAverageOnlyMetadataDoesNotPromiseNativeCompatibility() async throws {
+  func testAFileTheNativePlayerCannotOpenIsAWarning() async throws {
     try install()
     let service = WallpaperCompatibilityService(libraryURL: root, probe: { _ in
-      .probed(.init(isPlayable: true, hasVideoTrack: true, nominalFrameRate: 24,
-                    minFrameDuration: .invalid))
+      .refused(.notPlayable("asset reports itself unplayable"))
     })
     let checks = await service.check(context())
     XCTAssertEqual(status(checks, "nativeVideo"), .warning)
-    XCTAssertTrue(checks.first { $0.id == "nativeVideo" }!.detail.contains("no upper bound"))
+    XCTAssertTrue(checks.first { $0.id == "nativeVideo" }!.detail.contains("unplayable"))
   }
 
   func testCacheSeparatesContentSettingsAndRetry() async throws {
@@ -63,9 +63,9 @@ final class WallpaperCompatibilityTests: XCTestCase {
     _ = await service.check(context())
     var count = await recorder.count
     XCTAssertEqual(count, 1, "Unchanged content/config reuses the metadata verdict")
-    _ = await service.check(context(backend: "compatibility"))
+    _ = await service.check(context(fps: 30))
     count = await recorder.count
-    XCTAssertEqual(count, 2, "The card explains the new backend preference instead of serving stale wording")
+    XCTAssertEqual(count, 2, "A new target frame rate is a new question, not a stale answer")
     try Data(repeating: 2, count: 20).write(to: folder.appendingPathComponent("clip.mp4"))
     _ = await service.check(context())
     count = await recorder.count
@@ -164,8 +164,7 @@ private actor ProbeRecorder {
   private(set) var count = 0
   func read(_ url: URL) -> NativeVideoProbeOutcome {
     count += 1
-    return .probed(.init(isPlayable: true, hasVideoTrack: true, nominalFrameRate: 60,
-                        minFrameDuration: CMTime(value: 1, timescale: 60)))
+    return .probed(.init(isPlayable: true, hasVideoTrack: true))
   }
 }
 
@@ -178,8 +177,7 @@ private actor ProbeGate {
     }
   }
   func release() {
-    pending?.resume(returning: .probed(.init(isPlayable: true, hasVideoTrack: true,
-                          nominalFrameRate: 60, minFrameDuration: CMTime(value: 1, timescale: 60))))
+    pending?.resume(returning: .probed(.init(isPlayable: true, hasVideoTrack: true)))
     pending = nil
   }
 }

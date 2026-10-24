@@ -3,7 +3,7 @@ import XCTest
 
 @testable import WallpaperMachine
 
-/// Automatic wallpaper selection: the nine actions of the page and the state its rows read.
+/// Automatic wallpaper selection: the actions of the page and the state its rows read.
 @MainActor
 final class PanelAutomationActionsTests: PanelTestCase {
   private func makePanel(spaces: WallpaperSpaceMonitor? = nil) throws -> PanelFixture {
@@ -244,6 +244,71 @@ final class PanelAutomationActionsTests: PanelTestCase {
       try await controller.setAutomationDesktop("space-a", to: nil)
       XCTFail("there is nothing left to forget")
     } catch { XCTAssertTrue(error is InvalidControlValue) }
+  }
+
+  func testTurningOnAWallpaperForEachDesktopKeepsTheCurrentOneAndDesktop1sAndReplacesASchedule() async throws {
+    let topology: [String: WallpaperDisplaySpaces]? = [
+      "1": .init(
+        displayUUID: "screen", spaces: [.init(id: "space-a", number: 1), .init(id: "space-b", number: 2)],
+        current: "space-b")
+    ]
+    let spaces = WallpaperSpaceMonitor(provider: { topology })
+    spaces.refresh()
+    defer { spaces.stop() }
+    let panel = try makePanel(spaces: spaces)
+    defer { Task { await panel.shutdown() } }
+    panel.store.monitorInformationSnapshot.rows = [OrganizationFixtures.monitor("primary", wallpaper: "a")]
+    let controller = panel.controller
+    try await controller.setAutomationMode(.schedule)
+
+    try await controller.setDesktopWallpapers(true)
+
+    var configuration = panel.automations.configuration(for: "primary")
+    XCTAssertEqual(configuration.mode, .spaces, "it takes the place of the schedule")
+    XCTAssertEqual(
+      configuration.spaces, ["space-a": wallpaper("a"), "space-b": wallpaper("a")],
+      "the desktop the person is on keeps its wallpaper, and so does Desktop 1, which new desktops follow")
+
+    try await controller.setAutomationDesktop("space-a", to: wallpaper("b"))
+    try await controller.setAutomationDesktop("space-b", to: nil)
+    let desktops = controller.automationState(for: "primary").desktops
+    XCTAssertEqual(desktops.map(\.target), [wallpaper("b"), nil])
+    XCTAssertEqual(desktops.map(\.firstDesktopTarget), [nil, wallpaper("b")],
+                   "a desktop without a choice shows Desktop 1's")
+
+    try await controller.setAutomationDesktop("space-b", to: wallpaper("b"))
+    try await controller.setDesktopWallpapers(false)
+    try await controller.setDesktopWallpapers(true)
+    configuration = panel.automations.configuration(for: "primary")
+    XCTAssertEqual(configuration.spaces["space-b"], wallpaper("b"), "a choice already made is kept")
+
+    try await controller.setDesktopWallpapers(false)
+    XCTAssertEqual(panel.automations.configuration(for: "primary").mode, .off)
+    try await controller.setAutomationMode(.appearance)
+    try await controller.setDesktopWallpapers(false)
+    XCTAssertEqual(panel.automations.configuration(for: "primary").mode, .appearance,
+                   "turning it off leaves another automatic selection alone")
+  }
+
+  func testChoosingAWallpaperForEachDesktopFromTheModeMenuStartsLikeTheSwitch() async throws {
+    let topology: [String: WallpaperDisplaySpaces]? = [
+      "1": .init(
+        displayUUID: "screen", spaces: [.init(id: "space-a", number: 1), .init(id: "space-b", number: 2)],
+        current: "space-b")
+    ]
+    let spaces = WallpaperSpaceMonitor(provider: { topology })
+    spaces.refresh()
+    defer { spaces.stop() }
+    let panel = try makePanel(spaces: spaces)
+    defer { Task { await panel.shutdown() } }
+    panel.store.monitorInformationSnapshot.rows = [OrganizationFixtures.monitor("primary", wallpaper: "a")]
+
+    try await panel.controller.setAutomationMode(.spaces)
+
+    let configuration = panel.automations.configuration(for: "primary")
+    XCTAssertEqual(configuration.mode, .spaces)
+    XCTAssertEqual(configuration.spaces, ["space-a": wallpaper("a"), "space-b": wallpaper("a")],
+                   "the desktop the person is on and Desktop 1 keep the wallpaper shown")
   }
 
   func testWithoutSpaceInformationSpaceModeCannotBeChosenAndNoDesktopCanBeInvented() async throws {

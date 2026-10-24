@@ -52,9 +52,16 @@ enum ControlPanelWindow {
 
     /// Fronts a window, bringing it back from the Dock first when it is minimized, which
     /// `makeKeyAndOrderFront` alone does not do.
+    ///
+    /// `makeKeyAndOrderFront` only fronts the window among the app's own windows while the app
+    /// is inactive, and macOS may decline the activation that follows: after an update the
+    /// helper's `open` relaunches the app while another app is active, so What's New and the
+    /// panel opened behind it, reachable only through Mission Control. `orderFrontRegardless`
+    /// puts the window above the active app either way; it becomes key once the app activates.
     static func bringForward(_ window: NSWindow) {
         if window.isMiniaturized { window.deminiaturize(nil) }
         window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
     }
 
     /// The frame size the window may not shrink below: the minimum content size plus

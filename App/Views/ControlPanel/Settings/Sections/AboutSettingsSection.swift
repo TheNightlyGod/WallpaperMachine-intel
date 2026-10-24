@@ -40,9 +40,9 @@ struct AboutSettingsSection: View {
     keywords: ["Star on GitHub"])
 
   static let creditsItem = SettingsItem(
-    id: "about.credits", section: .about, group: credits, title: "GNU General Public License v2",
+    id: "about.credits", section: .about, group: credits, title: "GNU General Public License v3",
     note:
-      "Not affiliated with Wallpaper Engine or Valve. Built on the GPLv2-only open-source renderer. Workshop browsing is independently implemented. No warranty is provided."
+      "Not affiliated with Wallpaper Engine or Valve. WallpaperMachine itself is open source under GPL-3.0-only. Workshop browsing is independently implemented. No warranty is provided."
   )
 
   static let items = [
@@ -353,7 +353,7 @@ private struct AboutCreditsRow: View {
             .font(.system(size: 12))
             .foregroundStyle(theme.surface.muted.color)
         }
-        Button("GNU General Public License v2") { ExternalLink.open(ExternalLink.gnuGPL2) }
+        Button("GNU General Public License v3") { ExternalLink.open(ExternalLink.gnuGPL3) }
       }
       .frame(maxWidth: .infinity, alignment: .leading)
       .padding(.horizontal, 12)

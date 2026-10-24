@@ -1,11 +1,14 @@
 name: Claude Code Review
 
-# Same-repo PRs are reviewed automatically. Fork PRs get no secrets or OIDC on
-# `pull_request`, so a maintainer opts them in by adding the `claude-review`
-# label: `pull_request_target` runs with this repo's secrets, and the labeler
-# (not the fork author) passes the action's write-access check. Claude only
-# gets the inline-comment tool, so nothing from the PR is executed. Never add a
-# checkout of the PR head here. See the action's docs/security.md.
+# Only fzlzjerry (account id 100508620), whose Claude account the
+# CLAUDE_CODE_OAUTH_TOKEN belongs to, wakes a review: by opening or pushing to a
+# same-repo PR, or by adding the `claude-review` label to any PR. Fork PRs get
+# no secrets or OIDC on `pull_request`, so they need the label:
+# `pull_request_target` runs with this repo's secrets, and the labeler (not the
+# fork author) passes the action's write-access check. Events from anyone else,
+# re-runs included, skip the job; a label someone else added stays on the PR.
+# Claude only gets the inline-comment tool, so nothing from the PR is executed.
+# Never add a checkout of the PR head here. See the action's docs/security.md.
 on:
   pull_request:
     types: [opened, synchronize, ready_for_review, reopened]
@@ -15,10 +18,12 @@ on:
 jobs:
   claude-review:
     if: |
-      (github.event_name == 'pull_request' &&
-        github.event.pull_request.head.repo.full_name == github.repository) ||
-      (github.event_name == 'pull_request_target' &&
-        github.event.label.name == 'claude-review')
+      github.actor_id == '100508620' && github.triggering_actor == github.actor && (
+        (github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name == github.repository) ||
+        (github.event_name == 'pull_request_target' &&
+          github.event.label.name == 'claude-review')
+      )
 
     runs-on: ubuntu-latest
     permissions:

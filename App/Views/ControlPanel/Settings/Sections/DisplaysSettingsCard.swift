@@ -147,6 +147,7 @@ struct DisplaysBasicRows: View {
           .disabled(off || display.wallpaperID == nil)
         }
       }
+      DisplaysDesktopRows(display: display, forced: forced)
     }
   }
 }

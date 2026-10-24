@@ -158,7 +158,7 @@ final class RuntimeDiagnosticsSession {
                     + "imports=\(surface.videoImports) "
                     // Allocation ledger over this surface's video conversion
                     // destination textures, now and at its highest. Decode
-                    // pixel buffers, Vulkan images and the swapchain are not
+                    // pixel buffers and the layer's drawables are not
                     // in it, so neither figure is a residency or footprint
                     // claim; the peak is what a ceiling has to be judged
                     // against, because the current value alone hides the

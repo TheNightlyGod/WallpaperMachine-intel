@@ -15,7 +15,7 @@
 <p align="center">
   <a href="https://github.com/TheNightlyGod/WallpaperMachine-intel/releases/latest"><img src="https://img.shields.io/github/v/release/TheNightlyGod/WallpaperMachine-intel?label=version&color=0a84ff" alt="最新版本"></a>
   <a href="https://github.com/TheNightlyGod/WallpaperMachine-intel/actions/workflows/version.yml"><img src="https://img.shields.io/github/actions/workflow/status/TheNightlyGod/WallpaperMachine-intel/version.yml?branch=main&label=build" alt="构建与发布状态"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/TheNightlyGod/WallpaperMachine-intel?color=blue" alt="许可证：GPL-2.0"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/TheNightlyGod/WallpaperMachine-intel?color=blue" alt="许可证：GPL-3.0"></a>
   <img src="https://img.shields.io/badge/macOS_15%2B-Intel_(x86__64)-111111?logo=apple&logoColor=white" alt="macOS 15 或更高版本，Intel (x86_64)">
   <a href="https://github.com/TheNightlyGod/WallpaperMachine-intel/stargazers"><img src="https://img.shields.io/github/stars/TheNightlyGod/WallpaperMachine-intel" alt="GitHub 星标"></a>
 </p>
@@ -85,20 +85,21 @@
 | [**原生体验**](docs/features/appearance.md) | 和 macOS 的其他部分一样，支持浅色、深色和你的强调色，界面提供 [English、简体中文、繁體中文、日本語和한국어](docs/features/control-panel.md#language)。 |
 | [**导入**](docs/features/control-panel.md#downloads-and-import) | 带入你已有的 Wallpaper Engine 文件夹，或你自己的视频和图片。把它们拖到程序坞图标上，或使用“导入”；应用会复制它们，原文件保持不动。 |
 | [**备份你的设置**](docs/features/backup-restore.md#local-backup-and-restore) | 导出设置和保留的文件，还可以包含整个壁纸库；在下次启动时执行可撤回的恢复之前，先预览冲突。登录信息和密码只留在这台 Mac 上。 |
+| [**外置硬盘**](docs/features/library-location.md) | 把壁纸库和下载放在外置硬盘或其他文件夹中，随时都能移回这台 Mac。设置和 Steam 登录信息仍留在这台 Mac 上。 |
 | [**图片摆放**](docs/features/wallpaper-properties.md#image-placement) | 在每台显示器上分别拖动、定位和缩放导入的图片和保存的 pixiv 页面，不改动原图。 |
 | [**看不见就暂停**](docs/architecture.md#desktop-wallpaper-windows-and-private-api-handling) | 被遮住的显示器会停止播放自己的壁纸，睡眠或锁屏时所有壁纸都会暂停。[播放规则](docs/features/performance.md#playback)还能在其他应用播放声音时、你选择的应用正在运行或位于前台时、电池电量低时、低电量模式下、Mac 过热时或专注模式期间暂停或静音壁纸。有多台显示器时，还可以只让你正在使用的那台继续播放。你自己按下的暂停，始终由你决定。 |
-| [**自动化**](docs/features/automation.md) | 按星期和时间的计划、根据本地日出日落计算、按浅色或深色外观选择、实验性的[桌面空间选择](docs/features/spaces.md)，以及临时的专注模式壁纸或播放列表。键盘快捷键、“快捷指令”、Siri、“聚焦”和链接都能控制播放、让所有壁纸静音、随机选一张壁纸，并应用壁纸、已存播放列表或属性预设。 |
+| [**自动化**](docs/features/automation.md) | 按星期和时间的计划、根据本地日出日落计算、按浅色或深色外观选择、[每个桌面使用不同壁纸](docs/features/spaces.md)，以及临时的专注模式壁纸或播放列表。键盘快捷键、“快捷指令”、Siri、“聚焦”和链接都能控制播放、让所有壁纸静音、随机选一张壁纸，并应用壁纸、已存播放列表或属性预设。 |
 | [**锁定屏幕**](docs/features/lock-screen.md) | 视频和场景壁纸也能让锁屏动起来。实验性功能，默认关闭。 |
 | [**屏幕保护程序**](docs/features/lock-screen.md#use-wallpaper-as-screen-saver) | 把每台显示器当前应用的场景、视频、网页或静态壁纸用作它的屏幕保护程序。与锁屏动画相互独立；在 macOS 26 及更高版本上为实验性功能。 |
 
 ## 为什么值得信任
 
-- **全部开源。** 应用、渲染器和场景引擎都在这个仓库中，以 GPL-2.0 许可证发布。没有闭源核心，也没有付费功能：每个人用到的应用都一样。
+- **全部开源。** 应用、渲染器和场景引擎都在这个仓库中，以 GPL-3.0-only 许可证发布。没有闭源核心，也没有付费功能：每个人用到的应用都一样。
 - **公开构建。** 每个版本都由 [GitHub Actions](docs/release.md#build-buildyml) 从打了标签的提交构建并测试，然后附带 SHA-256 校验和与构建来源证明（build provenance attestation）发布。验证下载的文件确实来自本仓库的工作流：
   ```sh
   gh attestation verify WallpaperMachine-*-x86_64.dmg --repo TheNightlyGod/WallpaperMachine-intel
   ```
-- **没有追踪。** 应用只在你需要时联网：Steam 用于创意工坊，pixiv 在你打开它时使用，GitHub 用于检查更新；只有在你打开[发送性能数据](docs/features/telemetry.md)后，才会每天发送一份小报告，内容是加载耗时、帧率和你的 Mac 型号。报告不包含名称、文件或账户信息，关闭后会删除已发送的数据。登录信息和密码保存在你的 Mac 上。
+- **没有追踪。** 应用只在你需要时联网：Steam 用于创意工坊，pixiv 在你打开它时使用，GitHub 用于检查更新；只有在你打开[发送性能数据](docs/features/telemetry.md)后，才会每天发送一份小报告，内容是加载耗时、帧率和你的 Mac 型号。报告不包含名称、文件或账户信息，关闭后会删除已发送的数据。除此之外，应用每天会发送一次[使用计数](docs/features/telemetry.md#daily-active-count)，只说明它当天运行过，带有版本号，不带安装 ID，用来统计有多少台 Mac 在用。登录信息和密码保存在你的 Mac 上。
 - **可校验的更新。** 内置更新程序只安装 SHA-256 与发布版本一致的磁盘映像；无法验证的会被[拒绝，绝不会未经校验就安装](docs/features/updates.md#downloading)。
 - **持续维护。** 新版本发布频繁，每一版都以英文和简体中文写进[更新日志](CHANGELOG.md)。
 - **问题有处可报。** 任意壁纸详情中的**无法正常使用？在 GitHub 上反馈**会打开一个预先填好的 [issue](https://github.com/TheNightlyGod/WallpaperMachine-intel/issues)；[诊断报告](docs/features/diagnostics.md)会在你分享之前移除你的个人文件夹路径、Mac 用户名和 Steam 账户名。
@@ -108,9 +109,9 @@
 | 层 | 作用 |
 | --- | --- |
 | **Swift 外壳** | AppKit 应用。控制面板是原生 SwiftUI 界面（[`App/Views/ControlPanel`](App/Views/ControlPanel)），[网页壁纸](docs/features/web-wallpapers.md)在各自的 web view 中运行。 |
-| **Rust 核心** | 内置的渲染器（[`upstream/renderer`](upstream/renderer)）：负责显示器、壁纸窗口、视频解码和音频捕获，通过 uniffi 桥接到 Swift。 |
-| **C++ 场景引擎** | Open Wallpaper Engine，静态链接进 Rust 核心，负责绘制场景壁纸。 |
-| **Metal** | 场景直接用原生 Metal 渲染，原生渲染器无法绘制的场景会回退为经由 MoltenVK 在 Metal 上运行的 Vulkan。AVFoundation 视频可在[设置 → 性能](docs/features/performance.md)中选择开启，场景渲染器也可在那里改为兼容模式。 |
+| **Rust 核心** | 渲染器（[`Renderer/`](Renderer)）：负责显示器、壁纸窗口、视频解码和音频捕获，通过 uniffi 桥接到 Swift。 |
+| **C++ 场景引擎** | 本项目的场景引擎（[`Renderer/Engine`](Renderer/Engine)），静态链接进 Rust 核心，负责绘制场景壁纸。 |
+| **Metal** | 场景直接用原生 Metal 渲染，原生渲染器无法绘制的场景不会被绘制：它保留最后一帧画面，原因显示在[设置 → 性能](docs/features/performance.md)中。视频壁纸由应用自带的播放器播放（AVFoundation，WebM 和 Matroska 文件使用自带的 WebM 播放器）。 |
 | **锁定屏幕** | 一个沙盒化的 ExtensionKit 扩展（[`Extension/`](Extension)）。 |
 
 各部分如何协作：[docs/architecture.md](docs/architecture.md)。每个文件放在哪里：[docs/repository-layout.md](docs/repository-layout.md)。
@@ -191,10 +192,9 @@ WallpaperMachine 支持场景、视频和网页渲染。兼容性因壁纸而异
 
 ## 开源与自行构建
 
-完整源代码就在这里。构建需要搭载 Intel 处理器（x86_64）的 Mac、macOS 15 Sequoia 或更高版本，可以使用完整 Xcode 或仅使用 Xcode Command Line Tools（`xcode-select --install`），以及 Rust、CMake 与[先决条件](docs/build.md#prerequisites)中列出的 Homebrew 软件包；渲染器和场景引擎内置在[`upstream/`](upstream) 中，而不是以子模块引入。
+完整源代码就在这里。构建需要搭载 Intel 处理器（x86_64）的 Mac、macOS 15 Sequoia 或更高版本，可以使用完整 Xcode 或仅使用 Xcode Command Line Tools（`xcode-select --install`），以及 Rust、CMake 与[先决条件](docs/build.md#prerequisites)中列出的 Homebrew 软件包；渲染器和场景引擎位于 [`Renderer/`](Renderer)，第三方代码内置在 [`ThirdParty/`](ThirdParty) 中，而不是以子模块引入。
 
 ```sh
-python3 scripts/install_ffmpeg.py                  # 本项目的 LGPL FFmpeg 构建
 python3 scripts/build.py --configuration Release   # 渲染器、绑定、Xcode 项目和应用
 ```
 
@@ -227,7 +227,7 @@ python3 scripts/build.py --configuration Release   # 渲染器、绑定、Xcode 
 
 <!-- supporters:start: written by scripts/update_sponsors.py from the website's sponsor wall; edits here are overwritten -->
 <p align="center">
-  <a href="https://www.wallpapermachine.app/#sponsors"><img src="https://www.wallpapermachine.app/sponsors/wall?v=8baa903db4aa" width="100%" alt="WallpaperMachine Supporters: xwei12, umitsurumi, ReinforceZwei, hahagei2580. 4 Supporters on the wall. 1 more supports privately."></a>
+  <a href="https://www.wallpapermachine.app/#sponsors"><img src="https://www.wallpapermachine.app/sponsors/wall?v=f31d29c41b85" width="100%" alt="WallpaperMachine Supporters: xwei12, umitsurumi, ReinforceZwei, hahagei2580, 你识认我. 5 Supporters on the wall. 1 more supports privately."></a>
 </p>
 <!-- supporters:end -->
 
@@ -235,13 +235,23 @@ python3 scripts/build.py --configuration Release   # 渲染器、绑定、Xcode 
 
 本节为译文，如有出入，以英文 [README](README.md#license) 和 [LICENSE](LICENSE) 为准。
 
-源代码以 GNU 通用公共许可证第 2 版（仅限该版本）提供（[LICENSE](LICENSE)）。内置的渲染器采用 GPL-2.0-only，应用外壳由它衍生而来；上游代码保留其各自的版权和许可声明，记录在 [upstream/provenance.json](upstream/provenance.json) 中。无论是否为支持者，每位接收者都享有 GPL 授予的全部权利。
+源代码以 GNU 通用公共许可证第 3 版（仅限该版本）提供（[LICENSE](LICENSE)）。内置的第三方代码保留其各自的版权和许可声明，记录在 [ThirdParty/provenance.json](ThirdParty/provenance.json) 中。无论是否为支持者，每位接收者都享有 GPL 授予的全部权利。
 
-**目前还没有任何二进制文件获准分发。** Apache-2.0 组件（MoltenVK、Vulkan loader、SPIRV-Tools、部分 glslang、内置的 spirv_reflect，以及渲染器链接的若干 Rust crate，例如 codespan-reporting 和 miette）存在于每个构建的链接闭包中，与 GPLv2 不兼容。[LICENSING.md](LICENSING.md) 记录了相关政策、支持者模式、每个组件的许可证、尚未解决的障碍以及解决办法。创意工坊壁纸归其创作者所有，场景资源来自你所拥有的 Wallpaper Engine；应用两者都不附带。
+[LICENSING.md](LICENSING.md) 说明了代码的来源、每个第三方组件的许可证、支持者模式，以及在任何分发之前仍待完成的事项；本 README 不声称任何二进制文件已获准分发或已通过法律审查。构建过去所链接的 Apache-2.0 与 GPL-3.0 组件（MoltenVK、Vulkan loader、SPIRV-Tools、glslang、内置的 spirv_reflect，以及 spirv Rust crate）已于 2026-10-17 在早先的 GPL-2.0-only 政策下移除，这些组件与 GPLv3 兼容。创意工坊壁纸归其创作者所有，场景资源来自你所拥有的 Wallpaper Engine；应用两者都不附带。
 
 ## 友情链接
 
 - [linux.do](https://linux.do) —— 一切可能，从这里开始
+
+## Star 历史
+
+<a href="https://www.star-history.com/?repos=wallpapermachine%2Fwallpapermachine&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=wallpapermachine/wallpapermachine&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=wallpapermachine/wallpapermachine&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=wallpapermachine/wallpapermachine&type=date&legend=top-left" />
+ </picture>
+</a>
 
 <br>
 

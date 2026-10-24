@@ -8,12 +8,12 @@
 # ones CodeQL's own Swift autobuild uses: the extractor has to see every
 # swift-frontend call, which Xcode's integrated driver and compilation cache hide.
 #
-# The other languages need no build. C/C++ is left out on purpose: the only C/C++
-# CodeQL can see is vendored third-party code under upstream/renderer/external/,
-# and CodeQL does not analyze Objective-C. Ruby is left out because its only file
-# is the FFmpeg Homebrew formula. JavaScript/TypeScript is left out because the
-# repository has none since the control panel became SwiftUI, and CodeQL fails a
-# language it finds no code for.
+# The other languages need no build. C/C++ is left out: the renderer's C/C++
+# (Renderer/) is compiled by `scripts/build.py --renderer-only` before init, so
+# CodeQL does not trace it, and CodeQL does not analyze Objective-C. Ruby is left out because the repository
+# has no Ruby file. JavaScript/TypeScript is left out because the repository has none
+# since the control panel became SwiftUI, and CodeQL fails a language it finds no code
+# for.
 #
 # Default setup must be off (Settings -> Code security -> CodeQL analysis), or
 # GitHub rejects this workflow's uploads (docs/release.md).

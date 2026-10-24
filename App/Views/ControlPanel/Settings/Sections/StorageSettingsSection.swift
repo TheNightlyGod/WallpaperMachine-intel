@@ -1,12 +1,23 @@
 import SwiftUI
 
-/// Settings › Storage: the files you chose for wallpapers, what can be cleared, backups, and the
-/// switches, the report and the performance data that help a bug get fixed.
+/// Settings › Storage: where the library is kept, the files you chose for wallpapers, what can be
+/// cleared, backups, and the switches, the report and the performance data that help a bug get fixed.
 struct StorageSettingsSection: View {
+  private static let location = SettingsItem.Group("location", title: "Wallpaper library location")
   private static let userFiles = SettingsItem.Group("user-files", title: "Wallpaper files you chose")
   private static let caches = SettingsItem.Group("caches")
   static let backup = SettingsItem.Group("backup", title: "Backup")
   private static let troubleshooting = SettingsItem.Group("troubleshooting", title: "Troubleshooting")
+
+  static let libraryLocation = SettingsItem(
+    id: "storage.library-location", section: .storage, group: location,
+    title: "Wallpaper library and downloads",
+    note:
+      "Installed wallpapers and downloads are kept in this folder, which can be on an external drive. Settings, Steam sign-ins, caches and the files you chose for wallpapers stay on this Mac.",
+    keywords: [
+      "Move…", "Move to This Mac…", "Show in Finder", "External drive", "Cancel move",
+      "Copying the wallpaper library…", "Ready to move",
+    ])
 
   static let userFilesFolder = SettingsItem(
     id: "storage.user-files", section: .storage, group: userFiles,
@@ -83,13 +94,14 @@ struct StorageSettingsSection: View {
     title: "Data to be sent", keywords: ["Show in Finder", "What is sent", "Nothing sent yet."])
 
   static let items = [
-    userFilesFolder, userFilesClear, shaderCache, logs, downloadHistory, context, backupExport,
+    libraryLocation, userFilesFolder, userFilesClear, shaderCache, logs, downloadHistory, context, backupExport,
     backupLibrary, backupRestore, verbose, webInspection, diagnostics, performanceData,
     performanceDataFile,
   ]
 
   var body: some View {
     SettingsPage(.storage) {
+      SettingsGroup(Self.location, in: .storage) { StorageLocationRows() }
       SettingsGroup(Self.userFiles, in: .storage) { StorageUserFilesRows() }
       SettingsGroup(Self.caches, in: .storage) {
         StorageCacheRows()
@@ -100,6 +112,92 @@ struct StorageSettingsSection: View {
     }
     // Row buttons and switches share one size across Settings.
     .controlSize(.small)
+  }
+}
+
+// MARK: - Library location
+
+/// Where the library and the downloads are, Move… and Move to This Mac…, the copy of a move being
+/// prepared, and the move that waits for the next launch.
+private struct StorageLocationRows: View {
+  @Environment(PanelController.self) private var controller
+  @Environment(\.locale) private var locale
+  @Environment(\.panelTheme) private var theme
+
+  var body: some View {
+    let location = controller.libraryLocation
+    // Also while either move has its folder picker or confirmation open.
+    let canMove =
+      !location.isCopying && location.pending == nil
+      && !controller.isBusy(PanelActionCoordinator.key("moveLibrary"))
+      && !controller.isBusy(PanelActionCoordinator.key("moveLibraryToThisMac"))
+    DisplaysRow(
+      item: StorageSettingsSection.libraryLocation, details: [location.current.path], labelsControl: false
+    ) {
+      HStack(spacing: 8) {
+        Button("Show in Finder") {
+          controller.launch(PanelActionCoordinator.key("showLibrary")) { try await controller.showLibrary() }
+        }
+        if !location.isOnThisMac {
+          Button("Move to This Mac…") {
+            controller.launch(PanelActionCoordinator.key("moveLibraryToThisMac")) {
+              try await controller.moveLibraryToThisMac()
+            }
+          }
+          .disabled(!canMove)
+        }
+        Button("Move…") {
+          controller.launch(PanelActionCoordinator.key("moveLibrary")) { try await controller.moveLibrary() }
+        }
+        .disabled(!canMove)
+      }
+    }
+
+    if let copied = location.copiedBytes {
+      let total = location.totalBytes
+      DisplaysRow(
+        item: StorageSettingsSection.libraryLocation, title: L("Copying the wallpaper library…"), note: "",
+        details: [
+          L("\(ByteSize.text(Double(copied), locale: locale)) of \(ByteSize.text(Double(total), locale: locale))")
+        ], labelsControl: false
+      ) {
+        Button("Cancel") {
+          controller.launch(PanelActionCoordinator.key("cancelLibraryCopy")) {
+            try await controller.cancelLibraryCopy()
+          }
+        }
+      }
+      ProgressView(value: Double(min(copied, total)), total: Double(max(total, 1)))
+        .progressViewStyle(.linear)
+        .accessibilityLabel(Text("Copy progress"))
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+    } else if let pending = location.pending {
+      DisplaysRow(
+        item: StorageSettingsSection.libraryLocation, title: L("Ready to move"),
+        note: pending.target.map {
+          L(
+            "The library moves to “\($0.path)” the next time you open WallpaperMachine. Quit and reopen the app when you are ready; it does not restart on its own."
+          )
+        }
+          ?? L(
+            "The library moves back to this Mac the next time you open WallpaperMachine. Quit and reopen the app when you are ready; it does not restart on its own."
+          ), labelsControl: false
+      ) {
+        Button("Cancel move") {
+          controller.launch(PanelActionCoordinator.key("cancelLibraryMove")) {
+            try await controller.cancelLibraryMove()
+          }
+        }
+        .foregroundStyle(theme.surface.danger.color)
+      }
+    }
+
+    let failure = location.isCopying ? nil : location.error
+    if let failure {
+      DisplaysMessageRow(text: failure, isError: true)
+    }
+    Color.clear.frame(height: 0).accessibilityHidden(true).announcesChanges(of: failure)
   }
 }
 

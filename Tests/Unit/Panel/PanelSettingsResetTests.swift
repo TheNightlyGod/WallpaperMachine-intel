@@ -32,16 +32,13 @@ final class PanelSettingsResetTests: PanelTestCase {
       try await controller.setLivePropertyEdits(true)
       try await controller.setConcurrentDownloads(6)
       try await controller.setWorkshopUpdateChecks(false)
-      try await controller.setVideoBackend(.nativePreferred)
       try await controller.setSceneOptimization(false)
       try await controller.setVerboseLogging(true)
       try await controller.setBatteryTargetFps(15)
       try PanelPreferences.saveFavorites(["kept"], in: panel.defaults)
-      bridge.videoBackendCalls = []
       bridge.sceneOptimizationCalls = []
       bridge.verboseLoggingCalls = []
       bridge.batteryProfileCalls = []
-      bridge.sceneRendererCalls = []
 
       panel.dialogs.confirmAnswer = true
       try await controller.resetAllSettings()
@@ -58,11 +55,9 @@ final class PanelSettingsResetTests: PanelTestCase {
         WorkshopDownloadManager.defaultConcurrentDownloads)
       XCTAssertTrue(controller.workshop.updates.checksAutomatically)
 
-      XCTAssertEqual(bridge.videoBackendCalls, ["compatibility"])
       XCTAssertEqual(bridge.sceneOptimizationCalls, [true])
       XCTAssertEqual(bridge.verboseLoggingCalls, [false])
       XCTAssertEqual(bridge.batteryProfileCalls, [.init(renderScale: 0.75, targetFps: 30)])
-      XCTAssertEqual(bridge.sceneRendererCalls, [], "A setting already at its default is not sent")
 
       XCTAssertEqual(PanelPreferences.favorites(in: panel.defaults), ["kept"], "Content is not a setting")
     }

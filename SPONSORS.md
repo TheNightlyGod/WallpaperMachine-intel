@@ -49,7 +49,7 @@ are answered ahead of general requests.
 
 The purchase buys no software. There is no license key, no Supporter build and
 nothing to unlock: the app works the same with or without it. Supporters get the
-same GPLv2 license as everyone else, and a refund takes none of it back. The
+same GPL-3.0-only license as everyone else, and a refund takes none of it back. The
 reasons are in [LICENSING.md](LICENSING.md#supporter-model-free-signed-download-paid-sponsorship-and-support).
 
 ## Before you buy.

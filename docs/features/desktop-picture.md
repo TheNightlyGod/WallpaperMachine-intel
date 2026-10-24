@@ -31,7 +31,9 @@ retakes the poster every five minutes while the wallpaper plays, for wallpapers 
 change over time; the wait may run up to 30 seconds longer so the system can share the
 wakeup with other timers. Without it the poster is taken only at the moments listed
 [below](#when-a-poster-is-taken), so it shows the wallpaper as it looked once it
-settled. The setting applies to the running sync at once and has no effect while the
+settled. With it, every retake of an animated wallpaper is a new file that macOS keeps
+a full-size copy of for good ([below](#a-new-file-for-every-new-frame)), so the setting
+costs disk space for as long as it is on. The setting applies to the running sync at once and has no effect while the
 lock screen is animated, because poster sync is then suspended
 ([below](#the-native-lock-screen-provider-and-space-selection)), or while posters are
 [switched off](#leaving-macoss-own-wallpaper-alone), where its row is disabled.
@@ -63,8 +65,8 @@ refresh, so a [settings backup](backup-restore.md) neither exports nor restores 
   while a restore runs waits for the restore to finish, then starts posters again.
 - **A poster left behind is found at launch.** With the switch off and no sync running,
   the launch (and the end of an animated lock screen) reads the journal
-  (`DesktopWallpaperLedger.hasRecordedOriginals`): if it still names an original, a
-  sync that never starts restores it, for a poster that a crash or an earlier run with
+  (`DesktopWallpaperLedger.hasRecordedOriginals`): if it still names an original or the
+  [store copy](#the-journal-of-originals) is still there, a sync that never starts restores it, for a poster that a crash or an earlier run with
   the switch on left on a desktop. A desktop showing anything but a poster keeps its
   choice, as on every restore.
 - **Animate lock screen decides.** While the lock screen is requested, or the native
@@ -88,7 +90,9 @@ answers from the frame it kept when its view left the window tree, since WebKit 
 not promise a snapshot of a detached view (an edit made while it is paused draws in
 the window first, and the frame is kept again); a page not yet detached is
 snapshotted live. The first ready frame goes to every native desktop of the display
-at once, without visiting them.
+at once, without visiting them, except on a display with a
+[different wallpaper for each desktop](spaces.md), where it goes to the current desktop
+and every other desktop gets the saved poster of its own wallpaper.
 
 A native-backend clip stored rotated or mirrored (a portrait phone recording) is shown
 upright by the player layer, but the frames the playing item hands back are not, so its
@@ -101,7 +105,7 @@ Neither path resumes a paused video.
   `DesktopWallpaperSync.settleCaptureDelays` (3 s and 15 s), because intros, fades and
   settings that fade in are missed by the first frame. A wallpaper that resumes after
   a pause, a cover or display sleep settles the same way (`presentationResumed`),
-  unless its poster is still fresh (below).
+  unless its poster has settled (below).
 - **A wallpaper is moved on a display.** The inspector's Position sliders and **Center**
   change what the final pixels show, so a committed move requests the same capture as a
   new wallpaper (`BridgeStore.onDisplayFramingChanged`); moves that arrive close together
@@ -124,22 +128,36 @@ Neither path resumes a paused video.
   edit ends, so its poster is older, never unsaved.
 - **A Space change or wake.** The existing poster is applied at once, so a new Space
   has one immediately. A fresh frame is requested only for a surface whose poster has
-  aged (see the next item). Desktops that kept refusing posters are tried again, and
-  the Space monitor re-reads the topology first.
-- **A poster that is still fresh is kept.** A Space change, a wake and a resume
-  (`presentationResumed`) retake a surface only when its poster is older than
-  `DesktopWallpaperSync.recaptureFloor` (120 s) or was taken before the wallpaper
-  settled, that is, before the last of the settle captures could have landed. Each
-  display is judged on its own. Mission Control shows sampled stills, and a file name
-  hashes the pixels, so an animated wallpaper turns every extra capture into one more
-  poster file for WallpaperAgent to decode, as well as a full-resolution readback, a
-  hash and an encode here. A wallpaper that starts or changes, the periodic setting
-  and a poster scoped to a Space ([spaces.md](spaces.md#poster-ownership-and-late-frames),
-  which must confirm its context) are not affected. The resume's settle captures
-  cover only the surfaces that were retaken, and nothing is scheduled when none were.
-  A frame that a paused or covered surface answers with is the one it kept, so it does
-  not make its poster fresh: a Space change or wake that asks such a surface while its
-  display is paused leaves the resume to retake it. The debug log notes each poster kept.
+  not settled (see the next item). Desktops that kept refusing posters are tried
+  again, and the Space monitor re-reads the topology first.
+- **A settled poster is kept until the wallpaper changes.** A Space change, a wake, a
+  resume (`presentationResumed`) and an engine snapshot that leaves every display as it
+  was retake only a surface whose poster has not settled: one taken before the last of
+  the settle captures could have landed, one a paused display answered with, or none
+  at all. A surface that a settle capture is still to ask is left to it. Each display
+  is judged on its own, and a settled poster stays however long ago it was taken,
+  because every new frame of an animated wallpaper is a new file macOS keeps
+  ([below](#a-new-file-for-every-new-frame)). A snapshot changes the displays when its
+  `DesktopPosterLayout` (each display's wallpaper, mode, mirror target and scaling, the
+  wallpapers' files and the screens' sizes) differs from the last snapshot that sync
+  saw (`DesktopWallpaperSync.snapshotApplied`), so a change made while the animated lock
+  screen held the desktop still counts; playback, audio, quality, frame rates, volumes
+  and the panel's selection do not. A wallpaper that starts or changes, a move, an apply,
+  the end of shown edits, the periodic setting and a poster scoped to a Space
+  ([spaces.md](spaces.md#poster-ownership-and-late-frames), which must confirm its
+  context) are not affected. The resume's settle captures cover only the surfaces that
+  were retaken, and nothing is scheduled when none were. A frame that a paused or
+  covered surface answers with is the one it kept, so it does not settle its poster: a
+  Space change or wake that asks such a surface while its display is paused leaves the
+  resume to retake it. The debug log notes the displays whose poster was kept.
+- **A frame nobody asked for.** A renderer sends its first frame unasked. On a surface
+  whose poster has settled, and which no settle capture is still to ask, it is
+  dropped: a renderer started again in the same window draws the same wallpaper, and
+  that first frame is often the start of an intro (a new wallpaper, a move or a new
+  screen size asks for posters itself). On a surface without a settled poster, such as
+  a window that just opened (a wallpaper unloaded while the displays slept gets a new
+  one), it becomes the poster without settling it, and the surface settles as a new
+  wallpaper does.
 - **Periodically**, every `periodicRefreshInterval` (300 s), while the setting is on.
 - Settling and periodic captures ask only displays whose wallpaper is presenting
   (`canCapture`: the presentation policy has not suspended playback globally or for
@@ -165,6 +183,20 @@ retried up to three times, 100 ms longer each time, for the system's asynchronou
 acknowledgement and Space-creation races; the initial update is never delayed for
 them.
 
+### A new file for every new frame
+
+Because the file name hashes the pixels, an animated wallpaper turns every capture
+that is not identical into a new poster file. On macOS 26 and later, WallpaperAgent
+keeps an uncompressed, full-size bitmap of every image file a desktop has shown in
+`~/Library/Containers/com.apple.wallpaper.agent/Data/Library/Caches/com.apple.wallpaper.caches/extension-com.apple.wallpaper.extension.image/`
+and does not delete it, even after the poster file itself is gone: 17.8 MB per poster
+on a 14-inch MacBook Pro (3024 × 1964 at 24 bits). When every engine snapshot retook
+every poster three times, and a Space change, a wake or a resume retook any poster
+older than two minutes, that cache grew to about 100 GB. That is why a settled poster
+is kept until the wallpaper changes and why the periodic setting is off by default. The
+app does not clear the cache: it belongs to WallpaperAgent, lives in another app's
+container, and changing it behind the system's back is unsupported.
+
 ## Reaching the per-Space picture
 
 `DesktopSpaceWallpaperAPI` `dlopen`s CoreGraphics and HIServices and resolves
@@ -174,7 +206,9 @@ symbol is optional: if one is missing the initializer fails and the caller falls
 to the public `NSWorkspace` API, which is scoped to the visible Space. That fallback
 is logged once, has no Space identity and so cannot accept a Space-scoped write.
 Switching Spaces, patching the wallpaper plist and restarting system processes are
-deliberately not used.
+deliberately not used to show posters. Only a full restoration edits the store and
+restarts WallpaperAgent, to put back choices this API cannot write (see [the journal of
+originals](#the-journal-of-originals)).
 
 A target is a display and the UUID of one of its regular desktops; fullscreen-app
 Spaces are not desktop thumbnails and are skipped.
@@ -216,6 +250,25 @@ to). `AppLog` records the missing file and what was put back instead. Only a def
 such file" counts. A file the app may not look at, such as one in a folder macOS's
 privacy protection covers, is written back as before. Files are looked at only while a
 desktop is being put back, never for each poster.
+
+The per-Space API speaks only image paths, so a choice that is not an image cannot be
+written back through it. An aerial, a dynamic or another extension wallpaper (macOS 27's
+default Golden Gate, for example) shown on all Spaces reads as an empty per-Space
+selection, and `NSWorkspace` answers with a still stand-in (`DefaultDesktop.heic`).
+Writing that still back alone would leave an image choice on every desktop, which macOS
+shows as a different wallpaper. So before the first poster the ledger also saves a copy
+of the system wallpaper store (`Index.plist`) in `<support>/DesktopPosters/store-original.json`,
+and journals each picture it writes back there with the time of the write: a store
+selection of that file counts as the app's only when its `LastSet` falls at one of those
+writes, so the same picture chosen in System Settings stays. A full restoration (quit, the switch
+turned off, the launch repair), once every desktop reads back without a poster, puts back
+`DesktopWallpaperStoreRestoration`'s result: every store desktop selection that names
+only posters or pictures the app wrote back gets its pre-poster value, a node the writes
+created goes, and WallpaperAgent is restarted to load it; a restart that fails is
+retried by the next pass or launch even though the store has nothing left to change. A selection chosen in System
+Settings meanwhile is kept, a snapshot entry that already named a poster is never put
+back, and the store is written only if it is still the version just read. The copy is
+deleted once restoration succeeds.
 
 A desktop showing anything but a poster was changed outside the app and keeps that
 choice on restoration. When a display stops showing a live wallpaper, its desktops are
@@ -270,7 +323,8 @@ then restores its own selections
 (without a lock-screen service, on macOS earlier than 26, restoration starts
 directly), and the poster service restores the originals: it puts each desktop's
 journaled original back (or, when that file is gone, [the next one that still
-exists](#the-journal-of-originals)), checks image references in the native store read-only, and
+exists](#the-journal-of-originals)), puts back [store selections the per-Space API cannot
+write](#the-journal-of-originals), checks image references in the native store, and
 retries asynchronous restoration for about five seconds (25 attempts, 200 ms apart)
 while WallpaperAgent reloads. Quit waits for every restored desktop to read back and for any poster write
 still in flight; one that lands late is restored again.
@@ -370,9 +424,12 @@ active or an animated lock screen is on its way to taking it. A screen saver cho
 its own leaves poster sync running. For restoration order at quit with the provider active, see
 [lock-screen.md](lock-screen.md#turning-it-off).
 
-A display using the experimental Follow desktop Space mode scopes its posters to the
-visited desktop and holds writes while it has no current target. The context
-bookkeeping that rejects late frames is in
+A display with a different wallpaper for each desktop scopes its fresh posters to the
+visited desktop and holds them while it has no current target; the other desktops, and
+the current one until a fresh poster is taken, get the last poster of their own wallpaper
+([pictures of the other desktops](spaces.md#pictures-of-the-other-desktops)). Its windows
+stay on the current desktop, so Mission Control shows each desktop's picture rather than
+the live window. The context bookkeeping that rejects late frames is in
 [spaces.md](spaces.md#poster-ownership-and-late-frames), and the mode's conflict with
 the animated lock screen in
 [spaces.md](spaces.md#focus-mirroring-and-native-lock-screen-ownership).

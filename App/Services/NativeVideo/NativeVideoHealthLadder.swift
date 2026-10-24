@@ -6,8 +6,8 @@ import Foundation
 /// pictures flowing needs none. A seek and a `play()` are invisible when they
 /// work. Rebuilding the player's item blanks the layer until the new item shows
 /// its first frame, and spends the surface's recovery allowance, so it is only
-/// tried when the kick did not help. When both are spent, the wallpaper goes to
-/// the scene engine, which can show it.
+/// tried when the kick did not help. When both are spent, the display is
+/// reported as failed.
 ///
 /// Pure: each verdict goes in, the next step comes out. Looking at the pipeline
 /// again, waiting between looks and carrying the step out belong to the caller.

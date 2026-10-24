@@ -31,12 +31,12 @@ def commit_repository(path, message):
 
 
 class RepositoryCommitTests(unittest.TestCase):
-    def test_reports_the_repository_not_the_vendored_renderer(self):
+    def test_reports_the_repository_not_a_nested_checkout(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             application = commit_repository(root, "application source")
-            renderer = commit_repository(root / "upstream/renderer", "pinned upstream revision")
-            self.assertNotEqual(application, renderer)
+            nested = commit_repository(root / "ThirdParty/vendored", "pinned vendored revision")
+            self.assertNotEqual(application, nested)
             self.assertEqual(build.repository_commit(root), application)
 
 

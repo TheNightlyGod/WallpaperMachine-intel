@@ -526,7 +526,12 @@ entry's value plus and minus the noise, cut off at 0 and 1), `inheritcontrolpoin
 `mapsequencebetweencontrolpoints` and `inheritinitialvaluefromevent` initializers are
 implemented. A scene object's `instanceoverride` colour re-tints the preset's own colours
 by the difference between the override and the preset's representative colour, keeping
-their spread, and is a plain tint only for a preset without colours; its
+their spread. In a scene saved before version 5 (`scene.json`'s `version`, missing counts
+as old) it then tints the particle by the override as well (so an orange override on a
+fire whose red end the re-tint turns magenta draws it red again, as Wallpaper Engine
+does); from version 5 the re-tint alone is the colour, so a dark override is not applied
+twice. A preset without colours takes the override as its colour, and an override equal
+to the preset's own colour changes nothing; its
 `controlpoint0`..`7` and `controlpointangle0`..`7` replace the preset's control points
 (a control point flagged 2 is held at its scene position as the layer moves), and
 `brightness` multiplies the tint in an HDR scene, and each of them follows a user
@@ -1472,6 +1477,18 @@ authored mips; a single-level image or an incomplete chain may remain above the
 limit, and loose images, videos, sprite atlases, multi-slot images and unknown
 encoded containers keep their original loading behavior. It is a texture-residency
 reduction, not a fixed ceiling on total process memory.
+
+When **Native Metal** draws one scene on several displays, each display reads and
+decodes the scene's pictures itself but uploads none that another display already
+holds: displays keeping the same mip levels of a picture (and the same sheet of a
+sprite atlas) on the same GPU bind one texture between them. A texture is handed to
+another display only when its pixels equal what that display just read, so a file
+that changed between two loads, or another wallpaper's picture of the same name,
+gets its own, and so does a display that keeps a different mip range (above). The
+cache holds the textures weakly: a picture is freed when the last display showing it
+unloads. Confirming a match reads the shared texture back once while the scene
+loads; nothing is added per frame. Render targets, pictures a script writes and
+video frames stay per display, and the Compatibility backend does not share.
 
 An authored `hdr` scene with its bloom on selects the HDR path on either scene
 backend, as in Wallpaper Engine: overbright color is preserved in half-float targets

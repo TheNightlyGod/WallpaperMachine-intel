@@ -2,7 +2,7 @@ import XCTest
 
 @testable import WallpaperMachine
 
-/// The upload is one POST with a product user agent, and anything but a 2xx is a failure.
+/// Each request is one POST with a product user agent, and anything but a 2xx is a failure.
 final class TelemetryClientTests: XCTestCase {
     private final class Stub: URLProtocol, @unchecked Sendable {
         static let lock = NSLock()
@@ -71,6 +71,15 @@ final class TelemetryClientTests: XCTestCase {
         let body = try XCTUnwrap(request.httpBody)
         XCTAssertEqual(try JSONSerialization.jsonObject(with: body) as? [String: String],
                        ["install": "8F1C2B9E-0000-4000-8000-000000000001"])
+    }
+
+    func testActivePingGoesToItsOwnPath() async throws {
+        try await client().sendActive(Data(#"{"schema":1}"#.utf8))
+        let request = try XCTUnwrap(Stub.lock.withLock { Stub.seen.first })
+        XCTAssertEqual(request.httpMethod, "POST")
+        XCTAssertEqual(request.url?.path, "/api/telemetry/active")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "User-Agent"), "WallpaperMachine/1.4.1")
+        XCTAssertEqual(request.httpBody, Data(#"{"schema":1}"#.utf8))
     }
 
     func testNon2xxIsAFailure() async {

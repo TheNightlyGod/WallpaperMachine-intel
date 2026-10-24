@@ -472,17 +472,7 @@ final class WebWallpaperSuspensionTests: XCTestCase {
 
     // The fixture has no listener; the host script replays what it received to
     // one that registers later, which exposes whether the call ran inside the window.
-    var received: String?
-    try await poll {
-      let value = try? await page.webView.callAsyncJavaScript(
-        """
-        let seen = null;
-        window.wallpaperPropertyListener = { applyUserProperties(p) { seen = p.theme && p.theme.value; } };
-        return seen;
-        """, arguments: [:], in: nil, contentWorld: .page)
-      received = value as? String
-      return received != nil
-    }
+    let received = try await themeSeenByALateListener(page)
     XCTAssertEqual(received, "dark")
     XCTAssertEqual(refreshed, 0, "the frame is only read once the page has had its time")
 
@@ -610,17 +600,7 @@ final class WebWallpaperSuspensionTests: XCTestCase {
     page.setPaused(false)
     // The fixture has no listener; the host script replays what it received to
     // one that registers later, which exposes whether the call ever ran.
-    var received: String?
-    try await poll {
-      let value = try? await page.webView.callAsyncJavaScript(
-        """
-        let seen = null;
-        window.wallpaperPropertyListener = { applyUserProperties(p) { seen = p.theme && p.theme.value; } };
-        return seen;
-        """, arguments: [:], in: nil, contentWorld: .page)
-      received = value as? String
-      return received != nil
-    }
+    let received = try await themeSeenByALateListener(page)
     XCTAssertEqual(received, "dark")
   }
 
@@ -773,6 +753,20 @@ final class WebWallpaperSuspensionTests: XCTestCase {
     let value = try await page.webView.callAsyncJavaScript(
       "return window.__ticks.frames", arguments: [:], in: nil, contentWorld: .page)
     return try XCTUnwrap(value as? Int)
+  }
+
+  /// Registers a listener once and waits for the `theme` value the host script hands it.
+  private func themeSeenByALateListener(_ page: WebWallpaperPage) async throws -> String? {
+    _ = try await page.webView.callAsyncJavaScript(
+      "window.wallpaperPropertyListener = { applyUserProperties(p) { window.__theme = p.theme && p.theme.value; } };",
+      arguments: [:], in: nil, contentWorld: .page)
+    var theme: String?
+    try await poll {
+      theme = try? await page.webView.callAsyncJavaScript(
+        "return window.__theme ?? null", arguments: [:], in: nil, contentWorld: .page) as? String
+      return theme != nil
+    }
+    return theme
   }
 
   private func waitUntilLoaded(_ page: WebWallpaperPage, timeout: TimeInterval = 10) async throws {

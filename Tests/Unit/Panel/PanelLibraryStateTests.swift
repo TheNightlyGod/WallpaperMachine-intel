@@ -306,34 +306,53 @@ final class PanelLibraryStateTests: PanelTestCase {
       panel.store.settingsSnapshot.sceneRenderers = [
         BridgeSceneBackendReport(
           displayId: 1, displayName: "Main", wallpaperId: "ghost", wallpaperTitle: "Ghost",
-          backend: "legacy_vulkan", fallbackReason: "lit particles", videoPath: "none",
+          backend: "native_metal", failureStage: nil, failureReason: nil, videoPath: "none",
           optimizationApplied: nil),
         BridgeSceneBackendReport(
           displayId: 2, displayName: "Side", wallpaperId: "ghost", wallpaperTitle: "Ghost",
-          backend: "legacy_vulkan", fallbackReason: "lit particles", videoPath: "none",
+          backend: "native_metal", failureStage: nil, failureReason: nil, videoPath: "none",
           optimizationApplied: nil),
       ]
-      func body(_ url: URL?) throws -> String {
+      func fields(_ url: URL?) throws -> [String: String] {
         let components = try XCTUnwrap(URLComponents(url: XCTUnwrap(url), resolvingAgainstBaseURL: false))
         XCTAssertTrue(components.path.hasSuffix("/issues/new"))
-        return try XCTUnwrap(components.queryItems?.first { $0.name == "body" }?.value)
+        return Dictionary(
+          uniqueKeysWithValues: try XCTUnwrap(components.queryItems).map { ($0.name, $0.value ?? "") })
+      }
+      func details(_ url: URL?) throws -> [String] {
+        try XCTUnwrap(fields(url)["app-details"]).components(separatedBy: "\n")
       }
       let version = try XCTUnwrap(
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String)
 
-      let plain = try body(panel.controller.issueReportURL(for: "ghost"))
-      XCTAssertTrue(plain.contains("**App version:** \(version)"), plain)
-      XCTAssertTrue(plain.contains("**Renderer:** legacy_vulkan (fallback: lit particles)\n"), "each backend once: \(plain)")
+      let plainFields = try fields(panel.controller.issueReportURL(for: "ghost"))
+      XCTAssertEqual(plainFields["version"], version)
+      XCTAssertEqual(plainFields["wallpaper"], "ghost")
+      let plain = try details(panel.controller.issueReportURL(for: "ghost"))
+      XCTAssertTrue(plain.contains("**Renderer:** native_metal"), "each backend once: \(plain)")
       XCTAssertTrue(plain.contains("**Type:** Scene"))
-      XCTAssertFalse(plain.contains("**Error:**"), plain)
+      XCTAssertFalse(plain.contains { $0.hasPrefix("**Error:**") }, "\(plain)")
 
-      let failed = try body(panel.controller.issueReportURL(for: "ghost", failure: "The scene file is damaged."))
-      XCTAssertTrue(failed.contains("**Error:** The scene file is damaged."), failed)
+      let failed = try details(panel.controller.issueReportURL(for: "ghost", failure: "The scene file is damaged."))
+      XCTAssertTrue(failed.contains("**Error:** The scene file is damaged."), "\(failed)")
 
-      let workshop = try body(panel.controller.issueReportURL(for: "123456"))
-      XCTAssertTrue(workshop.contains("**Workshop item:** https://steamcommunity.com/sharedfiles/filedetails/?id=123456"), workshop)
-      XCTAssertFalse(workshop.contains("**Renderer:**"), "nothing reported for it, nothing claimed")
+      let workshop = try fields(panel.controller.issueReportURL(for: "123456"))
+      XCTAssertEqual(workshop["wallpaper"], "https://steamcommunity.com/sharedfiles/filedetails/?id=123456")
+      XCTAssertFalse(
+        workshop["app-details"]?.contains("**Renderer:**") ?? true, "nothing reported for it, nothing claimed")
       XCTAssertNil(panel.controller.issueReportURL(for: "not-installed"))
+
+      // A scene held because Native Metal cannot draw it has no backend to name: the report says it was not drawn.
+      panel.store.settingsSnapshot.sceneRenderers = [
+        BridgeSceneBackendReport(
+          displayId: 1, displayName: "Main", wallpaperId: "ghost", wallpaperTitle: "Ghost",
+          backend: "unknown", failureStage: "unsupported",
+          failureReason: "the scene uses a puppet", videoPath: "none", optimizationApplied: nil)
+      ]
+      let held = try details(panel.controller.issueReportURL(for: "ghost"))
+      XCTAssertTrue(
+        held.contains("**Renderer:** not drawn (unsupported: the scene uses a puppet)"), "\(held)")
+      XCTAssertFalse(held.contains { $0.contains("unknown") }, "a backend nobody named is not a renderer: \(held)")
     }
   }
 }

@@ -9,8 +9,6 @@ struct WallpaperCompatibilityContext: Hashable, Sendable {
   let supported: Bool
   let targetFPS: UInt32
   let targetAvailable: Bool
-  let videoBackend: String
-  let sceneRenderer: String
   let libraryRevision: UInt64
   let assetsConfiguration: String
 }
@@ -50,7 +48,7 @@ actor WallpaperCompatibilityService {
 
   init(libraryURL: URL = ClientPaths.libraryURL,
        assetsURL: @escaping @Sendable () -> URL = { ClientPaths.assetsURL },
-       probe: @escaping Probe = { await NativeVideoAdmission.probe(url: $0) }) {
+       probe: @escaping Probe = { await WallpaperCompatibilityService.playbackProbe(url: $0) }) {
     self.libraryURL = libraryURL
     self.assetsURL = assetsURL
     self.probe = probe
@@ -74,7 +72,7 @@ actor WallpaperCompatibilityService {
            ? String(localized: "Web wallpapers are not supported on the lock screen.")
            : context.kind == .unknown
              ? String(localized: "This wallpaper type has no supported lock-screen route.")
-             : String(localized: "Video and scene wallpapers have a lock-screen route. Publishing, resource access and extension playback still require runtime verification; scenes use Compatibility there."))
+             : String(localized: "Video and scene wallpapers have a lock-screen route. Publishing, resource access and extension playback still require runtime verification."))
     guard Self.validID(context.wallpaperID) else {
       append("project", .unavailable, String(localized: "Installed project"),
              String(localized: "The installed wallpaper identifier is not a safe library path."))
@@ -141,19 +139,16 @@ actor WallpaperCompatibilityService {
           let outcome = await probe(file)
           let refusal: NativeVideoRefusal?
           switch outcome {
-          case .probed(let metadata): refusal = NativeVideoAdmission.decide(probe: metadata, targetFps: context.targetFPS)
+          case .probed(let metadata): refusal = NativeVideoAdmission.decide(probe: metadata)
           case .refused(let failure): refusal = failure
           }
           cacheable = refusal?.isSettled ?? true
-          let selected = context.videoBackend == "native_preferred"
           append("nativeVideo", refusal == nil ? .ok : refusal?.isSettled == true ? .warning : .unknown,
-                 String(localized: "Native video admission"), refusal.map(\.reason)
-                 ?? (selected
-                     ? String(localized: "AVFoundation metadata meets this target frame-rate constraint. Actual player preparation and on-screen presentation are not verified by this check.")
-                     : String(localized: "AVFoundation metadata meets this target frame-rate constraint. Compatibility remains selected; this check does not change your backend.")))
+                 String(localized: "Video playback"), refusal.map(\.reason)
+                 ?? String(localized: "This video can be played, at its own frame rate. Actual player preparation and on-screen presentation are not verified by this check."))
         } else {
-          append("nativeVideo", .unavailable, String(localized: "Native video admission"),
-                 String(localized: "Native admission needs a supported installed video, a readable entry and a valid target display."))
+          append("nativeVideo", .unavailable, String(localized: "Video playback"),
+                 String(localized: "Video playback needs a supported installed video, a readable entry and a valid target display."))
         }
       case .scene:
         let sharedReady = markers.allSatisfy { Self.readableRegular(shared.appendingPathComponent($0)) }
@@ -162,7 +157,7 @@ actor WallpaperCompatibilityService {
                ? String(localized: "The required baseline shared shaders and material are installed. Authored resources are not fully validated.")
                : String(localized: "Baseline Wallpaper Engine shaders or materials are missing. Install or locate the complete scene assets folder."))
         append("sceneCapability", .unknown, String(localized: "Scene shader and graph support"),
-               String(localized: "Preflight has no parsed render-graph capability result. Shader, puppet, particle and effect support need runtime evaluation; the live backend and fallback reason are shown separately."))
+               String(localized: "Preflight has no parsed render-graph capability result. Shader, puppet, particle and effect support need runtime evaluation; the live backend, and the reason a scene it cannot draw is held, are shown separately."))
       case .web:
         append("webRuntime", .unknown, String(localized: "Web runtime"),
                String(localized: "The entry file check does not execute scripts or verify media, local dependencies or WebGL. These need runtime evaluation."))
@@ -188,6 +183,19 @@ actor WallpaperCompatibilityService {
       append("resources", .unknown, String(localized: "Installed resources"),
              String(localized: "The resource check could not complete: \(error.localizedDescription)"))
       return checks
+    }
+  }
+
+  /// What the app's players say about the file: AVFoundation for most, the WebM reader for Matroska
+  /// and WebM. Expressed as the admission probe the check already reads.
+  static func playbackProbe(url: URL) async -> NativeVideoProbeOutcome {
+    switch await VideoFormatSupport.inspect(url: url) {
+    case .supported, .supportedWebM:
+      return .probed(NativeVideoTrackProbe(isPlayable: true, hasVideoTrack: true))
+    case let .unsupported(format, reason):
+      return .refused(.unsupportedFormat(VideoFormatSupport.message(for: format, reason: reason)))
+    case let .unreadable(detail):
+      return .refused(.preparationFailed(detail))
     }
   }
 

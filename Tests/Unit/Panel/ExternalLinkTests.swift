@@ -17,11 +17,29 @@ final class ExternalLinkTests: XCTestCase {
     let artwork = try XCTUnwrap(ExternalLink.pixivArtwork(id: "301"))
     XCTAssertEqual(artwork.absoluteString, "https://www.pixiv.net/artworks/301")
     XCTAssertTrue(ExternalLink.isAllowed(artwork))
-    let issue = try XCTUnwrap(ExternalLink.newIssue(title: "[Scene] A & B", body: "**Wallpaper:** x\n\nWhat went wrong?"))
+    let issue = try XCTUnwrap(
+      ExternalLink.newIssue(title: "[Scene] A & B", wallpaper: "1", version: "1.0", details: "**Type:** Scene"))
     XCTAssertTrue(ExternalLink.isAllowed(issue))
-    let query = try XCTUnwrap(URLComponents(url: issue, resolvingAgainstBaseURL: false)?.queryItems)
-    XCTAssertEqual(query.first { $0.name == "title" }?.value, "[Scene] A & B")
-    XCTAssertEqual(query.first { $0.name == "body" }?.value, "**Wallpaper:** x\n\nWhat went wrong?")
+  }
+
+  /// The report opens the bug form, whose required fields stay empty so the reporter has to say
+  /// what they did, what went wrong and what they expected.
+  func testAProblemReportFillsOnlyTheFormFieldsTheAppKnows() throws {
+    let issue = try XCTUnwrap(
+      ExternalLink.newIssue(
+        title: "[Scene] A & B", wallpaper: "https://steamcommunity.com/sharedfiles/filedetails/?id=1",
+        version: "1.5.9", details: "**Type:** Scene\n**Error:** x"))
+    let components = try XCTUnwrap(URLComponents(url: issue, resolvingAgainstBaseURL: false))
+    XCTAssertTrue(components.path.hasSuffix("/issues/new"))
+    let fields = Dictionary(
+      uniqueKeysWithValues: try XCTUnwrap(components.queryItems).map { ($0.name, $0.value ?? "") })
+    XCTAssertEqual(
+      fields,
+      [
+        "template": "bug_report.yml", "title": "[Scene] A & B",
+        "wallpaper": "https://steamcommunity.com/sharedfiles/filedetails/?id=1", "version": "1.5.9",
+        "app-details": "**Type:** Scene\n**Error:** x",
+      ])
   }
 
   func testOnlyHttpsToAnExactHostWithoutCredentialsOrAPortIsAllowed() throws {

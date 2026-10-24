@@ -1,0 +1,4 @@
+# Cargo output of the workspace, and the CMake trees and unpacked Workshop scenes
+# the engine's tests may be pointed at.
+/target/
+/unpack/

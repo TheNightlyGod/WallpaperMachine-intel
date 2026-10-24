@@ -62,23 +62,17 @@ enum BridgeSnapshotFixtures {
       assetSourcePath: nil)
   }
 
-  /// A settings snapshot carrying shipped defaults: compatibility backend, full
+  /// A settings snapshot carrying shipped defaults: full
   /// render scale, keep-running on battery, no frame-rate cap, both experiments
   /// off, scene optimisation on and 2D scenes drawn at the display's resolution. Tests that care about one of those pass it
   /// explicitly.
   static func settings(
     displays: [BridgeDisplaySettingsRow] = [],
     batteryMode: BridgeBatteryMode = .keepRunning,
-    videoBackend: String = "compatibility",
     videoBackends: [BridgeVideoBackendReport] = [],
-    contentPacingEnabled: Bool = false,
-    sharedVideoDecodeEnabled: Bool = false,
-    sharedVideoDecodeSessions: UInt32 = 0,
-    sharedVideoDecodeConsumers: UInt32 = 0,
     sceneOptimizationEnabled: Bool = true,
     sceneOnDemandEnabled: Bool = false,
     sceneVideoPlaneSamplingEnabled: Bool = false,
-    sceneRenderer: String = "compatibility",
     sceneResolution: String = "display",
     sceneUpdateModes: [BridgeSceneUpdateModeReport] = [],
     sceneRenderers: [BridgeSceneBackendReport] = [],
@@ -105,16 +99,10 @@ enum BridgeSnapshotFixtures {
       coreVersion: "",
       shaderPipelineVersion: "",
       storage: storage(),
-      videoBackend: videoBackend,
       videoBackends: videoBackends,
-      contentPacingEnabled: contentPacingEnabled,
-      sharedVideoDecodeEnabled: sharedVideoDecodeEnabled,
-      sharedVideoDecodeSessions: sharedVideoDecodeSessions,
-      sharedVideoDecodeConsumers: sharedVideoDecodeConsumers,
       sceneOptimizationEnabled: sceneOptimizationEnabled,
       sceneOnDemandEnabled: sceneOnDemandEnabled,
       sceneVideoPlaneSamplingEnabled: sceneVideoPlaneSamplingEnabled,
-      sceneRenderer: sceneRenderer,
       sceneResolution: sceneResolution,
       sceneUpdateModes: sceneUpdateModes,
       sceneRenderers: sceneRenderers,

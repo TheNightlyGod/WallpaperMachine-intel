@@ -589,7 +589,7 @@ final class DisplaysSettingsModelTests: SettingsBTestCase {
     try await model.forgetDesktop("space-b", display: "primary")
     XCTAssertEqual(model.automationFocus, .forget(display: "primary", desktop: "space-c"))
     try await model.forgetDesktop("space-c", display: "primary")
-    XCTAssertEqual(model.automationFocus, .modePicker(display: "primary"))
+    XCTAssertEqual(model.automationFocus, .desktopsToggle(display: "primary"))
     XCTAssertTrue(controller.automationState(for: "primary").missingDesktops.isEmpty)
   }
 

@@ -122,6 +122,12 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
     /// What the log calls this run, for lines written outside the run itself.
     @ObservationIgnored private var runLabel = ""
     private(set) var isAuthenticating = true
+    /// Whether Steam accepted the sign-in at any point in this run, including one an earlier
+    /// launch of SteamCMD made: what separates a dropped connection from a refused sign-in.
+    @ObservationIgnored private var signInAccepted = false
+    /// SteamCMD exits with this status when it wants to be started again after updating itself.
+    nonisolated private static let restartStatus: Int32 = 42
+    nonisolated private static let maximumRestarts = 4
     private static let failurePattern = try! NSRegularExpression(pattern: #"(?:failed|error!?)\s*\(([^)\r\n]+)\)"#)
 
     /// The parenthesised reason SteamCMD gives a failure, such as `Timeout` in `failed (Timeout)`.
@@ -182,6 +188,7 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
             self.status = String(localized: "Validating and adding to your library…")
             // A download of a wallpaper already in the library is its update, and replaces it.
             try await WallpaperImportService().importDownloadedItem(item.id, from: staging, into: library, replacing: true)
+            self.clearTransferFigures()
             self.downloadedID = item.id
             self.status = String(localized: "Downloaded to your library")
             do { try await onImported() }
@@ -194,6 +201,7 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
             self.phase = .finishing
             self.status = String(localized: "Validating and installing scene assets…")
             try ClientPaths.installSceneAssets(from: staging.appendingPathComponent("wallpaper-engine/assets"), to: destination)
+            self.clearTransferFigures()
             try onInstalled()
             self.status = String(localized: "Scene assets installed")
         }
@@ -219,290 +227,389 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
             errorMessage = String(localized: "Enter your Steam account login name (not your display name). An account that owns Wallpaper Engine is required.")
             return
         }
+        // Opting out of a remembered sign-in also forgets the one already on disk, so the run
+        // neither reuses nor leaves behind a login the user chose not to keep.
         if !rememberSession {
-            forgetSavedAccount()
-            guard errorMessage == nil else { return }
+            do {
+                try Self.removeSession(at: sessionDirectory)
+                savedAccount = nil
+            } catch {
+                errorMessage = String(localized: "Could not log out of Steam: \(error.localizedDescription)")
+                return
+            }
         }
-        failure = nil
+        resetRunState(itemID: itemID, signInOnly: signInOnly, expectedBytes: expectedBytes)
+        let label = itemID ?? (signInOnly ? "sign-in" : "scene assets")
+        runLabel = label
+        task = Task {
+            await self.performRun(
+                itemID: itemID, account: account, executable: executable, root: root,
+                rememberSession: rememberSession, label: label, followUp: followUp, onDownloaded: onDownloaded)
+        }
+    }
+
+    /// Puts every observable and private per-run value back to where a new run begins.
+    private func resetRunState(itemID: String?, signInOnly: Bool, expectedBytes: Int64?) {
+        isRunning = true
+        phase = .preparing
         wasCancelled = false
         completedSuccessfully = false
         pauseRequested = false
         discardPartialRequested = false
+        progress = nil
+        bytesReceived = nil
+        bytesExpected = nil
+        bytesPerSecond = nil
+        prompt = nil
+        steamGuardChallenge = nil
+        authenticationFailed = false
         errorMessage = nil
+        downloadedID = nil
+        isSigningInOnly = signInOnly
+        isInstallingAssets = itemID == nil && !signInOnly
         sessionWarning = nil
-        cachedCredentialsRejected = false
-        isAuthenticating = true
         wallpaperEngineOwnership = .unknown
+        readingLicense = false
+        licenseIsActive = false
+        cachedCredentialsRejected = false
         assetsDownloadCompleted = false
         workshopDownloadCompleted = false
         fetchingPresetBase = false
-        authenticationFailed = false
+        endedBySessionConflict = false
+        signInHandedOff = false
+        signInAccepted = false
+        loggedStatus = ""
+        recentOutput = ""
+        failure = nil
+        receivesNetwork = false
+        networkStarted = false
+        self.expectedBytes = expectedBytes
+        diskSampleTask?.cancel()
+        diskSampleTask = nil
+        lastDiskSample = .distantPast
+        estimator = TransferEstimator()
+        receivedFloor = 0
+        receivedBaseline = 0
+        endedBySilence = false
+        silentRetries = 0
+        transientFailure = false
+        retryAttempt = 0
+        resumedAt = nil
+        lastTransferProgress = nil
+        transferMarks = [:]
+        lastActivity = now()
+        isAuthenticating = true
+        status = signInOnly
+            ? String(localized: "Preparing a private SteamCMD sign-in…")
+            : String(localized: "Preparing a private SteamCMD download…")
+    }
+
+    /// The whole life of one run: staging, passes of SteamCMD, hand-over of what arrived, and the
+    /// clean-up that always follows, whatever ended it.
+    private func performRun(
+        itemID: String?, account: String, executable: URL, root: URL, rememberSession: Bool, label: String,
+        followUp: (@MainActor (URL) async throws -> String?)?,
+        onDownloaded: @escaping @MainActor (URL) async throws -> Void
+    ) async {
+        // SteamCMD's home (the restored sign-in), its private copy and its temporary files stay
+        // beside the saved sign-in, on this Mac. What it fetches goes to `root`, the disk that
+        // holds the library, so publishing it is a rename there. Usually both are one folder.
+        let name = Self.stagingPrefix + UUID().uuidString
+        let runRoot = sessionDirectory.deletingLastPathComponent()
+        let staging = runRoot.appendingPathComponent(name, isDirectory: true)
+        let content = Self.sameFolder(runRoot, root) ? staging : root.appendingPathComponent(name, isDirectory: true)
+        var claim: Int32 = -1
+        var contentClaim: Int32 = -1
+        var restoredRevision: UInt64?
+        var finishedItem = false
+        var failedRun = false
+        do {
+            let binary = try await runtimeProvider.prepare(executable: executable, staging: staging)
+            // Out of backups before anything is downloaded into it.
+            ClientPaths.excludeFromBackup(staging)
+            claim = Self.claimStaging(staging)
+            if content != staging {
+                try FileManager.default.createDirectory(at: content, withIntermediateDirectories: false,
+                                                        attributes: [.posixPermissions: 0o700])
+                ClientPaths.excludeFromBackup(content)
+                contentClaim = Self.claimStaging(content)
+            }
+            if let checkpoint = checkpointDirectory, !isSigningInOnly {
+                try await Task.detached(priority: .utility) {
+                    try WorkshopDownloadCheckpoint.restore(from: checkpoint, to: content)
+                }.value
+            }
+            if rememberSession {
+                let directory = sessionDirectory
+                restoredRevision = try await Task.detached(priority: .utility) {
+                    try Self.restoreSession(from: directory, account: account, to: staging)
+                }.value
+            }
+            try Task.checkCancellation()
+            try await ensureFreeSpace(under: root, staging: content, label: label)
+
+            var currentItem = itemID
+            var followedUp = false
+            var restarts = 0
+            while true {
+                try Task.checkCancellation()
+                // Checked again before every launch: a relaunch must not run what has changed.
+                try await runtimeProvider.validate(at: staging)
+                try launch(executable: binary, staging: staging, content: content, account: account, itemID: currentItem,
+                           claim: claim, contentClaim: contentClaim)
+                let exitStatus = try await supervise(staging: staging, content: content, account: account, rememberSession: rememberSession)
+                if let reason = failure {
+                    if let delay = nextRetryDelay() {
+                        prepareRetry(label: label, delay: delay)
+                        if delay > 0 { try await Task.sleep(for: .seconds(delay)) }
+                        try await ensureFreeSpace(under: root, staging: content, label: label)
+                        continue
+                    }
+                    throw passFailure(reason, itemID: currentItem)
+                }
+                if exitStatus == Self.restartStatus, restarts < Self.maximumRestarts {
+                    restarts += 1
+                    try await ensureFreeSpace(under: root, staging: content, label: label)
+                    continue
+                }
+                try judgeExit(exitStatus, itemID: currentItem)
+                if let followUp, !followedUp, !fetchingPresetBase, itemID != nil,
+                   let base = try await followUp(content) {
+                    // One more item in the same session, never a chain of them.
+                    followedUp = true
+                    fetchingPresetBase = true
+                    currentItem = base
+                    workshopDownloadCompleted = false
+                    self.expectedBytes = nil
+                    receivedFloor = 0
+                    receivedBaseline = 0
+                    retryAttempt = 0
+                    silentRetries = 0
+                    status = String(localized: "Downloading the wallpaper this preset is based on…")
+                    continue
+                }
+                break
+            }
+            try Task.checkCancellation()
+            try await onDownloaded(content)
+            finishedItem = true
+            completedSuccessfully = true
+        } catch is CancellationError {
+            if pauseRequested {
+                status = String(localized: "Download paused")
+            } else {
+                wasCancelled = true
+                status = String(localized: "Download cancelled")
+            }
+            failedRun = false
+        } catch {
+            failedRun = true
+            errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            status = isSigningInOnly
+                ? String(localized: "Sign-in could not finish")
+                : String(localized: "Download could not finish")
+        }
+
+        // From here on nothing may depend on the task still being live.
+        await stopProcess()
+        terminal = nil
+        diskSampleTask?.cancel()
+        diskSampleTask = nil
+        prompt = nil
         steamGuardChallenge = nil
-        if itemID != nil { downloadedID = nil }
+        if failedRun || wasCancelled || pauseRequested {
+            progress = nil
+            bytesReceived = nil
+            bytesExpected = nil
+        }
+        bytesPerSecond = nil
+        receivesNetwork = false
+        resumedAt = nil
+
+        if rememberSession {
+            await settleSession(staging: staging, account: account, restoredRevision: restoredRevision)
+        }
+        let keepForLater = !finishedItem && !isSigningInOnly && (failedRun || (pauseRequested && !wasCancelled))
+        await retireStaging(staging, content: content, keepingPartialData: keepForLater && !discardPartialRequested)
+        if claim >= 0 { close(claim) }
+        if contentClaim >= 0 { close(contentClaim) }
+
+        isRunning = false
+        task = nil
+        pauseRequested = false
+        onFinished?()
+    }
+
+    /// What SteamCMD's exit says about a pass that reported no failure of its own.
+    private func judgeExit(_ exitStatus: Int32, itemID: String?) throws {
+        let confirmed = isSigningInOnly ? !isAuthenticating
+            : isInstallingAssets ? assetsDownloadCompleted : workshopDownloadCompleted
+        if exitStatus != 0 {
+            authenticationFailed = isAuthenticating && !signInAccepted
+            throw passFailure(isSigningInOnly
+                ? String(localized: "SteamCMD exited before confirming the sign-in. Check the account name and password, approve Steam Guard, and retry.")
+                : String(localized: "SteamCMD exited before completing the download. Confirm this account owns Wallpaper Engine, approve Steam Guard, and retry."),
+                itemID: itemID)
+        }
+        guard confirmed else {
+            if isSigningInOnly {
+                authenticationFailed = true
+                throw WorkshopFailure(message: String(localized: "Steam closed the session without confirming the sign-in. Check the account name and password, then retry."))
+            }
+            throw passFailure(isInstallingAssets
+                ? String(localized: "Steam exited without confirming a complete Wallpaper Engine installation. Retry installing scene assets; existing assets have not been changed.")
+                : String(localized: "Steam exited without confirming a complete Workshop download. Retry; no partial wallpaper has been added to your library."),
+                itemID: itemID)
+        }
+    }
+
+    /// Watches one SteamCMD pass every 200 ms until it ends or has to be stopped, and returns its
+    /// exit status once the rest of its output has been read.
+    private func supervise(staging: URL, content: URL, account: String, rememberSession: Bool) async throws -> Int32 {
+        let passStarted = now()
+        do {
+            while true {
+                try Task.checkCancellation()
+                try readTerminalOutput()
+                if status != loggedStatus {
+                    loggedStatus = status
+                    AppLog.info("SteamCMD \(runLabel): \(status)")
+                }
+                if signInAccepted, !signInHandedOff {
+                    signInHandedOff = true
+                    if rememberSession { await saveAcceptedSession(from: staging, account: account) }
+                    onAuthenticated?()
+                }
+                if receivesNetwork, !networkStarted, let pid = process?.processIdentifier {
+                    networkStarted = true
+                    receivedBaseline = receivedFloor
+                    networkMonitor.start(processID: pid)
+                }
+                if receivesNetwork, networkStarted {
+                    noteTransfer(networkMonitor.bytesReceived(), on: .network)
+                    bytesPerSecond = networkMonitor.rate(at: ProcessInfo.processInfo.systemUptime)
+                    sampleWorkshopDisk(in: content)
+                }
+                if failure == nil { checkLimits(passStarted: passStarted) }
+                if failure != nil {
+                    await stopProcess()
+                    break
+                }
+                if process?.isRunning != true {
+                    // Output can still be in flight through the terminal just after the exit: one
+                    // more interval, then it is read below and the pass is judged.
+                    try await Task.sleep(for: .milliseconds(200))
+                    break
+                }
+                try await Task.sleep(for: .milliseconds(200))
+            }
+            await stopProcess()
+            try readTerminalOutput()
+            consumeUnterminatedOutput()
+            let exitStatus = process?.terminationStatus ?? -1
+            terminal = nil
+            return exitStatus
+        } catch {
+            await stopProcess()
+            throw error
+        }
+    }
+
+    /// Ends a pass that has stopped being alive: a transfer that stayed silent after a wake, a run
+    /// that has said and moved nothing for the inactivity limit, or one that outlived its pass limit
+    /// and also stopped receiving bytes.
+    private func checkLimits(passStarted: Date) {
+        let current = now()
+        if let woke = resumedAt {
+            if let moved = lastTransferProgress, moved >= woke {
+                resumedAt = nil
+            } else if current.timeIntervalSince(woke) >= resumeGrace {
+                resumedAt = nil
+                setFailure(String(localized: "The connection to Steam stopped responding after the Mac woke from sleep. Check your connection and try again; what was already downloaded is kept."),
+                           transient: true)
+                return
+            }
+        }
+        let silent = current.timeIntervalSince(lastActivity) > inactivityTimeout
+        let bytesStopped = current.timeIntervalSince(lastTransferProgress ?? passStarted) > inactivityTimeout
+        let overlong = current.timeIntervalSince(passStarted) > passTimeout && bytesStopped
+        guard silent || overlong else { return }
+        // Steam Guard help only fits where the user may still be answering a sign-in.
+        let awaitingUser = !signInAccepted || prompt != nil || steamGuardChallenge != nil
+        setFailure(awaitingUser
+            ? String(localized: "SteamCMD timed out. If Steam Guard was not completed, retry signing in and approve the new request or enter a fresh code. Otherwise check your connection and available disk space.")
+            : String(localized: "SteamCMD stopped receiving the download. Check your connection and available disk space, then try again."),
+                   transient: !awaitingUser, silence: true)
+    }
+
+    /// Records how the pass failed, once. Everything the user has to decide is non-transient.
+    private func setFailure(_ message: String, transient: Bool = false, silence: Bool = false, conflict: Bool = false) {
+        guard failure == nil else { return }
+        failure = message
+        transientFailure = transient && signInAccepted && !isSigningInOnly
+        endedBySilence = silence && transientFailure
+        authenticationFailed = conflict ? isAuthenticating : (isAuthenticating && !signInAccepted)
+        prompt = nil
+        steamGuardChallenge = nil
         progress = nil
         bytesReceived = nil
         bytesExpected = nil
         bytesPerSecond = nil
         receivesNetwork = false
-        networkStarted = false
-        self.expectedBytes = expectedBytes
-        lastDiskSample = .distantPast
-        receivedFloor = 0
-        receivedBaseline = 0
-        estimator.reset()
-        retryAttempt = 0
-        silentRetries = 0
-        endedBySilence = false
-        transientFailure = false
-        resumedAt = nil
-        endedBySessionConflict = false
-        signInHandedOff = false
-        prompt = nil
-        recentOutput = ""
-        isRunning = true
-        isSigningInOnly = signInOnly
-        isInstallingAssets = itemID == nil && !signInOnly
-        phase = .preparing
-        status = signInOnly ? String(localized: "Preparing a private SteamCMD sign-in…") : String(localized: "Preparing a private SteamCMD download…")
-        let label = itemID ?? (signInOnly ? "sign-in" : "shared assets")
-        runLabel = label
-        loggedStatus = ""
-        task = Task {
-            let staging = root.appendingPathComponent(Self.stagingPrefix + UUID().uuidString, isDirectory: true)
-            var claim: Int32 = -1
-            defer {
-                // Releasing the claim is what lets a later launch reclaim this directory.
-                if claim >= 0 { close(claim) }
-                try? terminal?.close()
-                terminal = nil
-                process = nil
-                prompt = nil
-                recentOutput = ""
-                receivesNetwork = false
-                bytesPerSecond = nil
-                bytesReceived = nil
-                bytesExpected = nil
-                progress = nil
-                if completedSuccessfully { wasCancelled = false }
-                isRunning = false
-                task = nil
-                onFinished?()
-            }
-            var restoredSessionRevision: UInt64?
-            do {
-                let prepared = try await runtimeProvider.prepare(executable: executable, staging: staging)
-                // Partial downloads and the restored sign-in live here: keep a running backup away.
-                ClientPaths.excludeFromBackup(staging)
-                claim = Self.claimStaging(staging)
-                if let checkpointDirectory, !signInOnly {
-                    try await Task.detached(priority: .utility) {
-                        try WorkshopDownloadCheckpoint.restore(from: checkpointDirectory, to: staging)
-                    }.value
+    }
+
+    /// Keeps, after a run, the sign-in Steam accepted and drops one it rejected.
+    private func settleSession(staging: URL, account: String, restoredRevision: UInt64?) async {
+        let directory = sessionDirectory
+        let authenticated = !isAuthenticating && !authenticationFailed
+        do {
+            if authenticated {
+                let stored = try await Task.detached(priority: .utility) {
+                    try Self.saveSession(from: staging, account: account, to: directory)
+                }.value
+                if !stored {
+                    sessionWarning = String(localized: "This Steam sign-in did not provide reusable authentication information, so you may be asked to sign in again later.")
                 }
-                if rememberSession {
-                    let directory = sessionDirectory
-                    restoredSessionRevision = try await Task.detached(priority: .utility) {
-                        try Self.restoreSession(from: directory, account: account, to: staging)
-                    }.value
-                }
-                AppLog.info("SteamCMD \(label): runtime prepared; saved sign-in restored: \(restoredSessionRevision != nil)")
-                try Task.checkCancellation()
-                try await ensureFreeSpace(under: root, staging: staging, label: label)
-                try Task.checkCancellation()
-                var passItemID = itemID
-                while true {
-                    let started = now()
-                    var restarts = 0
-                    repeat {
-                        try Task.checkCancellation()
-                        // The first launch of the run was checked above, and a retry is checked before
-                        // it comes back here; this is SteamCMD asking to be started again.
-                        if restarts > 0 { try await ensureFreeSpace(under: root, staging: staging, label: label) }
-                        try await runtimeProvider.validate(at: staging)
-                        try Task.checkCancellation()
-                        try launch(executable: prepared, staging: staging, account: account, itemID: passItemID, claim: claim)
-                        while let process, process.isRunning {
-                            try Task.checkCancellation()
-                            try readTerminalOutput()
-                            if status != loggedStatus {
-                                loggedStatus = status
-                                AppLog.info("SteamCMD \(label): \(status)")
-                            }
-                            if !isAuthenticating && !signInHandedOff && failure == nil {
-                                signInHandedOff = true
-                                var savedEarly = false
-                                if rememberSession { savedEarly = await saveAcceptedSession(from: staging, account: account) }
-                                AppLog.info("SteamCMD \(label): sign-in accepted; session saved for siblings: \(savedEarly)")
-                                onAuthenticated?()
-                            }
-                            if receivesNetwork {
-                                if !networkStarted {
-                                    networkMonitor.start(processID: process.processIdentifier)
-                                    networkStarted = true
-                                    receivedBaseline = receivedFloor
-                                }
-                                bytesPerSecond = networkMonitor.rate(at: ProcessInfo.processInfo.systemUptime)
-                                noteTransfer(networkMonitor.bytesReceived(), on: .network)
-                                sampleWorkshopDisk(in: staging)
-                            } else {
-                                bytesPerSecond = nil
-                            }
-                            let checked = now()
-                            if let woke = resumedAt {
-                                if let moved = lastTransferProgress, moved > woke {
-                                    // Bytes are arriving again: the connection survived the sleep.
-                                    resumedAt = nil
-                                } else if receivesNetwork, phase == .transferring, failure == nil,
-                                          checked.timeIntervalSince(woke) > resumeGrace {
-                                    // Nothing arrived since the Mac woke, so the connection died with
-                                    // the sleep. Relaunching resumes from Steam's partial manifests.
-                                    resumedAt = nil
-                                    transientFailure = true
-                                    failure = String(localized: "The connection to Steam stopped responding after the Mac woke from sleep. Check your connection and try again; what was already downloaded is kept.")
-                                    AppLog.warn("SteamCMD \(label): no bytes \(Int(resumeGrace.rounded())) s after the Mac woke; restarting the transfer")
-                                }
-                            }
-                            let stalled = checked.timeIntervalSince(lastActivity) > inactivityTimeout
-                            // A long pass is cut short only once its bytes have stopped arriving too.
-                            let overlong = checked.timeIntervalSince(started) > passTimeout
-                                && checked.timeIntervalSince(lastTransferProgress ?? started) > inactivityTimeout
-                            if failure != nil || stalled || overlong {
-                                if failure == nil {
-                                    // Steam Guard can be what a silent sign-in waits for, but only until Steam
-                                    // has taken this run's sign-in once. A relaunch signs in again and flags
-                                    // `isAuthenticating` afresh; a stall there is the connection, unless it is
-                                    // sitting at a prompt that is waiting for the user.
-                                    let waitingOnSteamGuard = isAuthenticating
-                                        && (!signInHandedOff || prompt != nil || steamGuardChallenge != nil)
-                                    authenticationFailed = waitingOnSteamGuard
-                                    transientFailure = !waitingOnSteamGuard
-                                    endedBySilence = true
-                                    failure = waitingOnSteamGuard
-                                        ? String(localized: "SteamCMD timed out. If Steam Guard was not completed, retry signing in and approve the new request or enter a fresh code. Otherwise check your connection and available disk space.")
-                                        : String(localized: "SteamCMD stopped receiving the download. Check your connection and available disk space, then try again.")
-                                }
-                                await stopProcess()
-                                break
-                            }
-                            try await Task.sleep(for: .milliseconds(200))
-                        }
-                        // Reap our child and stop any descendants before a restart or staging cleanup.
-                        await stopProcess()
-                        // Drain the last output before closing, even when SteamCMD has already exited.
-                        try readTerminalOutput()
-                        consumeOwnershipLine(recentOutput)
-                        consumeUnterminatedOutput()
-                        try? terminal?.close()
-                        terminal = nil
-                        restarts += 1
-                    } while process?.terminationStatus == 42 && restarts < 4 && failure == nil
-                    AppLog.info("SteamCMD \(label): exited with status \(process.map { String($0.terminationStatus) } ?? "unknown")\(failure.map { "; failure: \($0)" } ?? "")")
-                    try Task.checkCancellation()
-                    // A connection lost after sign-in resumes in the same staging: Steam keeps its
-                    // partial manifests and the saved sign-in is still there, so nothing is asked.
-                    if failure != nil, let delay = nextRetryDelay() {
-                        prepareRetry(label: label, delay: delay)
-                        try await Task.sleep(for: .seconds(delay))
-                        // The disk can fill while a pass runs, and what the pass staged is counted, so
-                        // only the space still missing is asked for. Failing here beats waiting out
-                        // another silent pass that a full disk caused.
-                        try await ensureFreeSpace(under: root, staging: staging, label: label)
-                        try Task.checkCancellation()
-                        continue
-                    }
-                    if let failure { throw passFailure(failure, itemID: passItemID) }
-                    guard process?.terminationStatus == 0 else {
-                        authenticationFailed = isAuthenticating
-                        if isSigningInOnly {
-                            throw WorkshopFailure(message: String(localized: "SteamCMD exited before confirming the sign-in. Check the account name and password, approve Steam Guard, and retry."))
-                        }
-                        throw passFailure(String(localized: "SteamCMD exited before completing the download. Confirm this account owns Wallpaper Engine, approve Steam Guard, and retry."), itemID: passItemID)
-                    }
-                    progress = nil
-                    receivesNetwork = false
-                    bytesPerSecond = nil
-                    if isSigningInOnly && isAuthenticating {
-                        authenticationFailed = true
-                        throw WorkshopFailure(message: String(localized: "Steam closed the session without confirming the sign-in. Check the account name and password, then retry."))
-                    }
-                    if isInstallingAssets && !assetsDownloadCompleted {
-                        throw WorkshopFailure(message: String(localized: "Steam exited without confirming a complete Wallpaper Engine installation. Retry installing scene assets; existing assets have not been changed."))
-                    }
-                    if !isInstallingAssets && !isSigningInOnly && !workshopDownloadCompleted {
-                        throw passFailure(String(localized: "Steam exited without confirming a complete Workshop download. Retry; no partial wallpaper has been added to your library."), itemID: passItemID)
-                    }
-                    // At most one follow-up: a preset's base is never itself fetched for another.
-                    guard !fetchingPresetBase, let followUp, let next = try await followUp(staging) else { break }
-                    AppLog.info("SteamCMD \(label): preset is based on Workshop item \(next); downloading it in the same session")
-                    passItemID = next
-                    fetchingPresetBase = true
-                    workshopDownloadCompleted = false
-                    self.expectedBytes = nil
-                    receivedFloor = 0
-                    receivedBaseline = 0
-                    estimator.reset()
-                    retryAttempt = 0
-                    silentRetries = 0
-                    phase = .requesting
-                    status = String(localized: "Downloading the wallpaper this preset is based on…")
-                }
-                try await onDownloaded(staging)
-                completedSuccessfully = true
-            } catch is CancellationError {
-                wasCancelled = !pauseRequested
-                await stopProcess()
-                try? readTerminalOutput()
-                authenticationFailed = false
-                steamGuardChallenge = nil
-                status = pauseRequested ? String(localized: "Download paused") : String(localized: "Download cancelled")
-            } catch {
-                await stopProcess()
-                try? readTerminalOutput()
-                errorMessage = error.localizedDescription
-                status = isSigningInOnly ? String(localized: "Sign-in could not finish") : String(localized: "Download could not finish")
-            }
-            if rememberSession {
-                do {
-                    if !isAuthenticating && !authenticationFailed {
-                        let directory = sessionDirectory
-                        let stored = try await Task.detached(priority: .utility) {
-                            try Self.saveSession(from: staging, account: account, to: directory)
-                        }.value
-                        if stored {
-                            savedAccount = account
-                        } else {
-                            sessionWarning = String(localized: "Steam did not provide reusable sign-in files. You may need to sign in again next time.")
-                        }
-                    } else if let revision = restoredSessionRevision, cachedCredentialsRejected {
-                        try Self.invalidateSession(at: sessionDirectory, account: account, revision: revision)
-                    }
-                } catch {
-                    sessionWarning = String(localized: "Could not update the saved Steam sign-in: \(error.localizedDescription). You may need to sign in again next time.")
-                }
-            }
-            savedAccount = Self.readSavedAccount(at: sessionDirectory)
-            // Retain only content and Steam's download manifests. Programs, authentication,
-            // terminal state and the private runtime always leave with staging.
-            let keepPartial = !completedSuccessfully && !signInOnly && (pauseRequested || errorMessage != nil)
-            let checkpoint = checkpointDirectory
-            do {
+            } else if cachedCredentialsRejected, let restoredRevision {
                 try await Task.detached(priority: .utility) {
-                    defer { try? FileManager.default.removeItem(at: staging) }
-                    if let checkpoint {
-                        if keepPartial { try WorkshopDownloadCheckpoint.save(from: staging, to: checkpoint) }
-                        else { try WorkshopDownloadCheckpoint.remove(at: checkpoint) }
-                    }
-                }.value
-            } catch {
-                errorMessage = String(localized: "Could not save partial download data: \(error.localizedDescription)")
-            }
-            // Cancel can arrive while the detached checkpoint move is finishing a pause.
-            if discardPartialRequested, let checkpoint {
-                await Task.detached(priority: .utility) {
-                    try? WorkshopDownloadCheckpoint.remove(at: checkpoint)
+                    try Self.invalidateSession(at: directory, account: account, revision: restoredRevision)
                 }.value
             }
+        } catch {
+            sessionWarning = String(localized: "Steam authentication information retained on this device could not be updated (\(error.localizedDescription)); you may need to sign in again later.")
         }
+        savedAccount = Self.readSavedAccount(at: directory)
+    }
+
+    /// Removes the staging folders, or first moves what a later resume needs into the checkpoint.
+    private func retireStaging(_ staging: URL, content: URL, keepingPartialData: Bool) async {
+        let checkpoint = checkpointDirectory
+        let keep = keepingPartialData ? checkpoint : nil
+        let saveFailure = await Task.detached(priority: .utility) { () -> Error? in
+            var failure: Error?
+            if let keep {
+                do { try WorkshopDownloadCheckpoint.save(from: content, to: keep) } catch { failure = error }
+            }
+            try? FileManager.default.removeItem(at: staging)
+            if content != staging { try? FileManager.default.removeItem(at: content) }
+            return failure
+        }.value
+        if let saveFailure {
+            errorMessage = errorMessage ?? String(localized: "Could not save partial download data: \(saveFailure.localizedDescription)")
+        }
+        // A cancel that arrived while the data was being moved still discards it.
+        if discardPartialRequested, let checkpoint {
+            try? WorkshopDownloadCheckpoint.remove(at: checkpoint)
+        }
+    }
+
+    /// The ring stays full while the finished download is validated; once that is done nothing of
+    /// the transfer is left to show.
+    private func clearTransferFigures() {
+        progress = nil
+        bytesReceived = nil
+        bytesExpected = nil
+        bytesPerSecond = nil
     }
 
     /// What a failed pass is reported as. The second pass of a preset fetches its base wallpaper: the
@@ -613,19 +720,21 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
 
     func submitSecret(_ value: String) {
         guard isRunning, prompt != nil, !value.isEmpty,
-              !value.contains(where: { $0.isNewline || $0 == "\0" }), let terminal else { return }
+              !value.contains(where: { $0.isNewline }), !value.utf8.contains(0),
+              let terminal else { return }
         do {
-            // Only the terminal receives the secret. No arguments, scripts, defaults, or log output.
+            // The only place a secret goes: the terminal's input, never an argument or a file.
             try terminal.write(contentsOf: Data((value + "\n").utf8))
-            prompt = nil
-            recentOutput = ""
-            phase = .signingIn
-            status = String(localized: "Waiting for Steam authentication…")
-            lastActivity = now()
         } catch {
+            setFailure(String(localized: "SteamCMD closed its login prompt. Retry signing in to start a new session."))
             authenticationFailed = true
-            failure = String(localized: "SteamCMD closed its login prompt. Retry signing in to start a new session.")
+            return
         }
+        prompt = nil
+        recentOutput = ""
+        phase = .signingIn
+        status = String(localized: "Waiting for Steam authentication…")
+        lastActivity = now()
     }
 
     func pause() {
@@ -652,7 +761,6 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
         bytesExpected = nil
         task?.cancel()
         status = String(localized: "Cancelling…")
-        // The task stops the child before staging cleanup; the importer checks cancellation before its atomic move.
     }
 
     func shutdown() async {
@@ -666,38 +774,27 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
         await current.value
     }
 
-    private func launch(executable: URL, staging: URL, account: String, itemID: String?, claim: Int32) throws {
-        var master: Int32 = 0
-        var slave: Int32 = 0
+    private func launch(executable: URL, staging: URL, content: URL, account: String, itemID: String?, claim: Int32,
+                        contentClaim: Int32) throws {
+        var master: Int32 = -1
+        var slave: Int32 = -1
         guard openpty(&master, &slave, nil, nil, nil) == 0 else {
             throw WorkshopFailure(message: String(localized: "Could not create a private terminal for SteamCMD. Restart WallpaperMachine and retry."))
         }
         var settings = termios()
         if tcgetattr(slave, &settings) == 0 {
-            settings.c_lflag &= ~tcflag_t(ECHO | ECHONL)
+            settings.c_lflag &= ~tcflag_t(ECHO)
             tcsetattr(slave, TCSANOW, &settings)
         }
-        let input = FileHandle(fileDescriptor: master, closeOnDealloc: true)
-        let child = FileHandle(fileDescriptor: slave, closeOnDealloc: true)
         let flags = fcntl(master, F_GETFL)
-        guard flags >= 0, fcntl(master, F_SETFL, flags | O_NONBLOCK) == 0 else {
+        guard flags >= 0, fcntl(master, F_SETFL, flags | O_NONBLOCK) != -1 else {
+            close(master)
+            close(slave)
             throw WorkshopFailure(message: String(localized: "Could not read SteamCMD’s private terminal without blocking. Restart WallpaperMachine and retry."))
         }
-        terminal = input
-        let installDirectory = isInstallingAssets ? staging.appendingPathComponent("wallpaper-engine") : staging
-        let platform = isInstallingAssets ? ["+@sSteamCmdForcePlatformType", "windows"] : []
-        // Query licenses in the authenticated session without downloading any game files.
-        let command = isSigningInOnly ? ["+licenses_for_app", "431960"] : itemID.map { ["+workshop_download_item", "431960", $0] } ?? ["+app_update", "431960", "validate"]
-        let arguments = ["-inhibitbootstrap", "+@ShutdownOnFailedCommand", "1"] + platform
-            + ["+force_install_dir", installDirectory.path, "+login", account] + command + ["+quit"]
-        let temporary = staging.appendingPathComponent("tmp", isDirectory: true)
-        try Self.privateDirectory(temporary)
-        let environment = ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": staging.path,
-                           "TMPDIR": temporary.path, "TERM": "dumb", "LANG": "en_US.UTF-8",
-                           "DYLD_LIBRARY_PATH": staging.path,
-                           "DYLD_FRAMEWORK_PATH": staging.appendingPathComponent("Frameworks").path]
+
+        // The state of one pass starts from nothing.
         recentOutput = ""
-        wallpaperEngineOwnership = .unknown
         readingLicense = false
         licenseIsActive = false
         prompt = nil
@@ -707,36 +804,64 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
         networkStarted = false
         lastActivity = now()
         lastTransferProgress = nil
-        // A new process has not slept; whatever the last one was waiting for no longer applies.
         resumedAt = nil
         transferMarks = [:]
-        do {
-            process = try SteamCMDTerminalProcess(executable: executable, arguments: arguments,
-                                                  workingDirectory: staging, environment: environment,
-                                                  master: master, slave: slave, claim: claim)
+
+        let tmp = staging.appendingPathComponent("tmp", isDirectory: true)
+        let installDirectory = isInstallingAssets ? content.appendingPathComponent("wallpaper-engine", isDirectory: true) : content
+        var arguments = ["-inhibitbootstrap", "+@ShutdownOnFailedCommand", "1"]
+        if isInstallingAssets { arguments += ["+@sSteamCmdForcePlatformType", "windows"] }
+        arguments += ["+force_install_dir", installDirectory.path, "+login", account]
+        if isSigningInOnly {
+            arguments += ["+licenses_for_app", "431960"]
+        } else if let itemID {
+            arguments += ["+workshop_download_item", "431960", itemID]
+        } else {
+            arguments += ["+app_update", "431960", "validate"]
         }
-        catch {
-            try? child.close()
+        arguments.append("+quit")
+        let environment = [
+            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+            "HOME": staging.path,
+            "TMPDIR": tmp.path,
+            "DYLD_LIBRARY_PATH": staging.path,
+            "DYLD_FRAMEWORK_PATH": staging.path,
+            "TERM": "dumb",
+            "LANG": "en_US.UTF-8",
+            "LC_ALL": "en_US.UTF-8",
+        ]
+        do {
+            try Self.privateDirectory(tmp)
+            process = try SteamCMDTerminalProcess(
+                executable: executable, arguments: arguments, workingDirectory: staging,
+                environment: environment, master: master, slave: slave, claim: claim, contentClaim: contentClaim)
+        } catch {
+            close(master)
+            close(slave)
             throw WorkshopFailure(message: String(localized: "Cannot launch SteamCMD: \(error.localizedDescription). Reinstall SteamCMD in Settings → Library & Steam to get Valve’s Apple silicon version."))
         }
-        try? child.close()
+        // The child holds its own copy; keeping ours would stop the terminal from ever closing.
+        close(slave)
+        terminal = FileHandle(fileDescriptor: master, closeOnDealloc: true)
         phase = .connecting
         status = String(localized: "Starting SteamCMD and contacting Steam…")
     }
 
     private func readTerminalOutput() throws {
         guard let terminal else { return }
-        // FileHandle.read(upToCount:) waits to fill its buffer on a PTY. A short
-        // password prompt would deadlock both sides, so read only available bytes.
-        while true {
-            let count = outputBuffer.withUnsafeMutableBytes {
-                Darwin.read(terminal.fileDescriptor, $0.baseAddress, $0.count)
-            }
+        // At most this many reads per call, so a flood of output cannot hold the main actor.
+        for _ in 0..<64 {
+            let count = Darwin.read(terminal.fileDescriptor, &outputBuffer, outputBuffer.count)
             if count > 0 {
-                consume(String(decoding: outputBuffer[..<count], as: UTF8.self))
-            } else if count == 0 || errno == EAGAIN || errno == EWOULDBLOCK || errno == EIO {
-                return
-            } else if errno != EINTR {
+                consume(String(decoding: outputBuffer[0..<count], as: UTF8.self))
+                continue
+            }
+            if count == 0 { return }
+            switch errno {
+            case EINTR: continue
+            // Nothing more yet, or the other end is gone: both just end this read.
+            case EAGAIN, EIO: return
+            default:
                 throw WorkshopFailure(message: String(localized: "Lost the connection to SteamCMD’s login terminal. Retry signing in."))
             }
         }
@@ -746,15 +871,14 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
         guard isRunning else { return }
         lastActivity = now()
         recentOutput += text.lowercased()
-        // Keep only the incomplete line, not old prompts that can mask later failures.
         while let newline = recentOutput.firstIndex(where: { $0.isNewline }) {
             let line = String(recentOutput[..<newline])
             recentOutput.removeSubrange(...newline)
             consumeOwnershipLine(line)
             consumeLine(line)
         }
-        recentOutput = String(recentOutput.suffix(4096))
-        // Interactive prompts have no newline and can span multiple reads.
+        // An old prompt must not mask a later failure, and a prompt has no newline to wait for.
+        if recentOutput.count > 4096 { recentOutput = String(recentOutput.suffix(4096)) }
         consumeLine(recentOutput, complete: false)
     }
 
@@ -762,6 +886,7 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
     /// arrive, so a failure reported that way is judged like any other.
     private func consumeUnterminatedOutput() {
         guard !recentOutput.isEmpty else { return }
+        consumeOwnershipLine(recentOutput)
         consumeLine(recentOutput)
     }
 
@@ -789,178 +914,221 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
     /// recognised before their newline arrives, but a failure line is judged only once it is
     /// whole: what follows `failed` decides whether the connection or the purchase is to blame.
     private func consumeLine(_ line: String, complete: Bool = true) {
-        let output = line.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !output.isEmpty, failure == nil else { return }
-        if output.contains("cached credential") && (output.contains("invalid") || output.contains("expired") || output.contains("revoked")) {
-            cachedCredentialsRejected = true
-            // SteamCMD can fall back to its password prompt in the same process.
-            if output.contains("warning") {
-                phase = .signingIn
-                status = String(localized: "Saved Steam sign-in expired; waiting for fresh authentication…")
-                if output.hasSuffix("password:") { consumeLine("password:") }
+        let text = line.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !text.isEmpty, failure == nil else { return }
+        let cachedLine = text.contains("cached credential")
+            && ["invalid", "expired", "revoked"].contains { text.contains($0) }
+        let reason = Self.failureReason(in: text)
+
+        // Failures come first. A reason is judged only once its closing bracket is there.
+        if cachedLine { cachedCredentialsRejected = true }
+        if text.contains("logged in elsewhere") || text.contains("logged in from another")
+            || text.contains("loggedinelsewhere") {
+            endedBySessionConflict = true
+            setFailure(String(localized: "Steam ended this session because the account signed in somewhere else. Retry once the other sign-in is done."), conflict: true)
+            return
+        }
+        if let reason {
+            let kind = SteamCMDReportedFailure(
+                reason: reason, cachedCredentialsRejected: cachedCredentialsRejected,
+                awaitingSteamGuard: steamGuardChallenge != nil || prompt == .guardCode)
+            AppLog.warn("SteamCMD \(runLabel): reported failure (\(kind.rawValue))")
+            let transfer = text.contains("download item") || text.contains("app '431960'") || text.contains("app 431960")
+                || text.contains("start downloading item") || text.contains("install app")
+            if !transfer {
+                setFailure(kind.message, transient: kind.isTransient)
+            } else {
+                setFailure(transferFailureMessage(kind: kind, reason: reason), transient: kind == .connection)
+            }
+            return
+        }
+        if complete {
+            if text.contains("no subscription") || text.contains("does not own")
+                || (text.contains("access denied") && !isAuthenticating) {
+                setFailure(Self.deniedMessage)
+                return
+            }
+            if text.contains("error! download item") || text.contains("failed to download")
+                || text.contains("error! failed to start downloading item") {
+                setFailure(Self.genericDownloadMessage)
+                return
+            }
+            if isInstallingAssets, text.contains("error! app") || text.contains("failed to install app") {
+                setFailure(Self.assetInstallMessage)
+                return
+            }
+            if text.contains("invalid password") || text.contains("invalid login") || text.contains("account logon denied") {
+                let kind = SteamCMDReportedFailure(
+                    reason: text, cachedCredentialsRejected: cachedCredentialsRejected,
+                    awaitingSteamGuard: steamGuardChallenge != nil || prompt == .guardCode)
+                setFailure(kind.message)
                 return
             }
         }
-        if output.contains("logged in elsewhere") || output.contains("logged in from another") || output.contains("loggedinelsewhere") {
-            endedBySessionConflict = true
-            authenticationFailed = isAuthenticating
-            failure = String(localized: "Steam ended this session because the account signed in somewhere else. Retry once the other sign-in is done.")
-        } else if output.contains("no subscription") || (output.contains("access denied") && !isAuthenticating) || output.contains("does not own") {
-            failure = String(localized: "Steam denied this download. Sign in with an account that owns Wallpaper Engine and has access to this Workshop item.")
-        } else if output.contains("error! download item") || output.contains("failed to download") || output.contains("error! failed to start downloading item") {
-            // The reason arrives in parentheses at the end of the line; judge it once all of it is here.
-            if !complete || (!isInstallingAssets && output.contains("(") && !output.contains(")")) { return }
-            if !isInstallingAssets, let reason = Self.failureReason(in: output),
-               SteamCMDReportedFailure(reason: reason).isTransient {
-                // A slow or dropped connection says nothing about ownership, whatever the item.
-                transientFailure = !isAuthenticating || signInHandedOff
-                AppLog.warn("SteamCMD reported download failure: \(SteamCMDReportedFailure.connection.rawValue); authenticating: \(isAuthenticating)")
-                failure = String(localized: "The connection to Steam dropped while downloading. Check your connection and try again; what was already downloaded is kept.")
-            } else {
-                failure = String(localized: "Steam could not download this wallpaper. Downloads require a Steam account that has purchased Wallpaper Engine. Buy it on Steam or sign in with an account that already owns it, then retry. If this account already owns it, the wallpaper may be private or removed; check its Workshop page.")
-            }
-        } else if isInstallingAssets && (output.contains("error! app") || output.contains("failed to install app")) {
-            failure = String(localized: "Steam could not install Wallpaper Engine’s shared assets. Confirm ownership and check available disk space, then retry.")
-        } else if let reason = Self.failureReason(in: output) {
-            let reported = SteamCMDReportedFailure(
-                reason: reason, cachedCredentialsRejected: cachedCredentialsRejected,
-                awaitingSteamGuard: steamGuardChallenge != nil)
-            authenticationFailed = isAuthenticating
-            // A sign-in that times out on a relaunch is the connection, once this run was accepted.
-            transientFailure = reported.isTransient && signInHandedOff
-            AppLog.warn("SteamCMD reported failure: \(reported.rawValue); authenticating: \(isAuthenticating)")
-            failure = reported.message
-        } else if output.contains("invalid password") || output.contains("invalid login") || output.contains("account logon denied") {
-            authenticationFailed = true
-            failure = String(localized: "Steam rejected the sign-in. Check your account login name and password, then retry.")
-        } else if output.hasSuffix("password:") {
+
+        // A saved sign-in Steam no longer takes is only a warning: the same process goes on to
+        // ask for the password itself.
+        if cachedLine {
+            phase = .signingIn
+            status = String(localized: "Saved Steam sign-in expired; waiting for fresh authentication…")
+            guard text.hasSuffix("password:") else { return }
+        }
+
+        // Prompts.
+        if text.hasSuffix("password:") {
             prompt = .password
             steamGuardChallenge = nil
             progress = nil
-            receivesNetwork = false
-            bytesPerSecond = nil
             phase = .signingIn
             status = String(localized: "Enter your Steam password below")
-        } else if output.hasSuffix("auth code:") || output.hasSuffix("steam guard code:") || output.hasSuffix("two-factor code:") || output.hasSuffix("enter the code:") || output.hasSuffix("enter code:") {
+            return
+        }
+        if text.hasSuffix("code:") {
             prompt = .guardCode
-            steamGuardChallenge = output.hasSuffix("steam guard code:") ? .emailCode : .authenticatorCode
+            steamGuardChallenge = text.hasSuffix("steam guard code:") ? .emailCode : .authenticatorCode
             progress = nil
-            receivesNetwork = false
-            bytesPerSecond = nil
             phase = .signingIn
             status = String(localized: "Enter the code from Steam Guard or your email")
-        } else if isInstallingAssets && (output.contains("update state") || output.contains("success! app")) {
+            return
+        }
+        if text.contains("confirm"), text.contains("mobile") || text.contains("steam guard") {
+            prompt = nil
+            steamGuardChallenge = .mobileApproval
+            phase = .signingIn
+            status = String(localized: "Approve the sign-in in the Steam mobile app")
+            return
+        }
+
+        // Progress and milestones.
+        if text.contains("success. downloaded item") {
+            workshopDownloadCompleted = true
+            markAuthenticated()
+            phase = .finishing
+            progress = 1
+            prompt = nil
+            bytesReceived = nil
+            bytesExpected = nil
+            bytesPerSecond = nil
+            receivesNetwork = false
+            status = String(localized: "Download finished; waiting for SteamCMD to close…")
+            return
+        }
+        if text.contains("success! app '431960' fully installed") {
+            assetsDownloadCompleted = true
+            markAuthenticated()
+            phase = .finishing
+            progress = 1
+            bytesReceived = nil
+            bytesExpected = nil
+            bytesPerSecond = nil
+            status = String(localized: "Download finished; validating scene assets…")
+            return
+        }
+        if text.contains("downloading item") {
+            markAuthenticated()
             prompt = nil
             steamGuardChallenge = nil
-            isAuthenticating = false
-            receivesNetwork = output.contains("update state") && output.contains("downloading")
-            if !receivesNetwork { bytesPerSecond = nil }
-            if output.contains("success! app '431960' fully installed") {
-                assetsDownloadCompleted = true
+            phase = .transferring
+            receivesNetwork = true
+            estimator = TransferEstimator()
+            status = String(localized: "Downloading Workshop files…")
+            if let expected = expectedBytes, expected > 0, receivedFloor > 0 {
+                progress = min(0.99, Double(receivedFloor) / Double(expected))
+            } else {
+                progress = nil
+            }
+            return
+        }
+        if text.contains("logged in ok") || text.contains("waiting for user info...ok") {
+            markAuthenticated()
+            prompt = nil
+            steamGuardChallenge = nil
+            phase = .requesting
+            status = isSigningInOnly
+                ? String(localized: "Signed in; closing SteamCMD…")
+                : isInstallingAssets
+                    ? String(localized: "Signed in; requesting Wallpaper Engine’s shared assets…")
+                    : String(localized: "Signed in; requesting your Workshop download…")
+            return
+        }
+        if isInstallingAssets, text.contains("update state") {
+            let counters = Self.appProgressPattern.firstMatch(in: text, range: NSRange(text.startIndex..., in: text))
+            func number<T: LosslessStringConvertible>(_ group: Int) -> T? {
+                counters.flatMap { Range($0.range(at: group), in: text) }.flatMap { T(String(text[$0])) }
+            }
+            if text.contains("downloading") {
+                phase = .transferring
+                receivesNetwork = true
+                status = String(localized: "Downloading Wallpaper Engine files…")
+                // Byte counts only mean something while Steam is downloading and names a total.
+                if let done: Int64 = number(2), let total: Int64 = number(3), total > 0 {
+                    bytesReceived = done
+                    bytesExpected = total
+                    progress = min(1, Double(done) / Double(total))
+                    noteTransfer(done, on: .steam)
+                } else {
+                    bytesReceived = nil
+                    bytesExpected = nil
+                    progress = nil
+                }
+            } else {
+                phase = .updating
                 receivesNetwork = false
                 bytesPerSecond = nil
                 bytesReceived = nil
                 bytesExpected = nil
-                progress = 1
-                phase = .finishing
-                status = String(localized: "Download finished; validating scene assets…")
-            } else {
-                phase = .transferring
-                status = receivesNetwork ? String(localized: "Downloading Wallpaper Engine files…") : String(localized: "Processing Wallpaper Engine files…")
+                status = String(localized: "Updating the private SteamCMD runtime…")
+                if let percent: Double = number(1) { progress = min(1, max(0, percent / 100)) }
             }
-        } else if output.contains("success. downloaded item") {
-            workshopDownloadCompleted = true
-            prompt = nil
-            steamGuardChallenge = nil
-            isAuthenticating = false
-            receivesNetwork = false
-            bytesPerSecond = nil
-            bytesReceived = nil
-            bytesExpected = nil
-            phase = .finishing
-            status = String(localized: "Download finished; waiting for SteamCMD to close…")
-            progress = 1
-        } else if output.contains("downloading item") {
-            prompt = nil
-            steamGuardChallenge = nil
-            isAuthenticating = false
-            receivesNetwork = true
-            // A relaunch counts from a new network anchor. What was already shown stays on screen
-            // until the new meter passes it, and no pace is claimed in the meantime.
-            estimator.reset()
-            if receivedFloor > 0, let expected = expectedBytes, expected > 0 {
-                bytesReceived = receivedFloor
-                bytesExpected = expected
-                progress = min(0.99, Double(receivedFloor) / Double(expected))
-            } else {
-                bytesReceived = nil
-                bytesExpected = nil
-                progress = nil
-            }
-            phase = .transferring
-            status = fetchingPresetBase ? String(localized: "Downloading the wallpaper this preset is based on…")
-                : String(localized: "Downloading Workshop files…")
-        } else if output.contains("logged in ok") || output.contains("waiting for user info...ok") {
-            prompt = nil
-            steamGuardChallenge = nil
-            isAuthenticating = false
-            progress = nil
-            receivesNetwork = false
-            bytesPerSecond = nil
-            phase = .requesting
-            status = isSigningInOnly ? String(localized: "Signed in; checking Wallpaper Engine ownership…") : isInstallingAssets ? String(localized: "Signed in; requesting Wallpaper Engine’s shared assets…") : String(localized: "Signed in; requesting your Workshop download…")
-        } else if output.contains("confirm") && (output.contains("mobile") || output.contains("steam guard")) {
-            prompt = nil
-            steamGuardChallenge = .mobileApproval
-            progress = nil
-            receivesNetwork = false
-            bytesPerSecond = nil
-            phase = .signingIn
-            status = String(localized: "Approve the sign-in in the Steam mobile app")
-        } else if output.contains("logging in using cached credentials") {
-            prompt = nil
-            progress = nil
-            receivesNetwork = false
-            bytesPerSecond = nil
+            return
+        }
+        if text.contains("logging in using cached credentials") {
             phase = .signingIn
             status = String(localized: "Using your saved Steam sign-in…")
-        } else if output.contains("logging in") || output.contains("waiting for client config") || output.contains("waiting for user info") {
-            prompt = nil
-            progress = nil
-            receivesNetwork = false
-            bytesPerSecond = nil
+            return
+        }
+        if text.contains("logging in") || text.contains("waiting for client config") || text.contains("waiting for user info") {
+            guard isAuthenticating else { return }
             phase = .signingIn
             status = String(localized: "Waiting for Steam authentication…")
-        } else if output.contains("update") || output.contains("verifying installation") {
+            return
+        }
+        if text.contains("update") || text.contains("verifying installation") {
+            guard isAuthenticating, phase != .transferring, phase != .finishing else { return }
             phase = .updating
             status = String(localized: "Updating the private SteamCMD runtime…")
         }
-        if failure != nil {
-            prompt = nil
-            progress = nil
-            receivesNetwork = false
-            bytesPerSecond = nil
-            bytesReceived = nil
-            bytesExpected = nil
-            return
-        }
-        if isInstallingAssets && output.hasPrefix("update state") {
-            progress = nil
-            bytesReceived = nil
-            bytesExpected = nil
-            if let match = Self.appProgressPattern.firstMatch(in: output, range: NSRange(output.startIndex..., in: output)),
-               let receivedRange = Range(match.range(at: 2), in: output),
-               let totalRange = Range(match.range(at: 3), in: output),
-               let received = Int64(output[receivedRange]), let total = Int64(output[totalRange]),
-               total > 0, received >= 0, received <= total {
-                progress = Double(received) / Double(total)
-                noteTransfer(received, on: .steam)
-                if receivesNetwork {
-                    bytesReceived = received
-                    bytesExpected = total
-                    estimator.add(bytes: received, at: now().timeIntervalSinceReferenceDate)
-                }
+    }
+
+    /// Steam has taken the sign-in: nothing from here on is a sign-in failure.
+    private func markAuthenticated() {
+        isAuthenticating = false
+        signInAccepted = true
+    }
+
+    private static var deniedMessage: String {
+        String(localized: "Steam denied this download. Sign in with an account that owns Wallpaper Engine and has access to this Workshop item.")
+    }
+    private static var genericDownloadMessage: String {
+        String(localized: "Steam could not download this wallpaper. Downloads require a Steam account that has purchased Wallpaper Engine. Buy it on Steam or sign in with an account that already owns it, then retry. If this account already owns it, the wallpaper may be private or removed; check its Workshop page.")
+    }
+    private static var assetInstallMessage: String {
+        String(localized: "Steam could not install Wallpaper Engine’s shared assets. Confirm ownership and check available disk space, then retry.")
+    }
+
+    /// What a failed transfer is called to the user, by Steam's own reason.
+    private func transferFailureMessage(kind: SteamCMDReportedFailure, reason: String) -> String {
+        switch kind {
+        case .connection:
+            return String(localized: "The connection to Steam dropped while downloading. Check your connection and try again; what was already downloaded is kept.")
+        case .rateLimited, .steamGuard, .credentials, .cachedCredentials:
+            return kind.message
+        case .unknown:
+            let letters = reason.filter { $0.isASCII && ($0.isLetter || $0.isNumber) }
+            if letters.contains("accessdenied") || letters.contains("nosubscription") || letters.contains("notowned") {
+                return Self.deniedMessage
             }
+            return isInstallingAssets ? Self.assetInstallMessage : Self.genericDownloadMessage
         }
     }
 
@@ -1031,16 +1199,22 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
     }
 
     nonisolated static func normalizedAccount(_ username: String) -> String? {
-        let account = username.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !account.isEmpty, account != "anonymous",
-              account.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "_") }) else { return nil }
-        return account
+        let name = username.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !name.isEmpty, name != "anonymous",
+              name.unicodeScalars.allSatisfy({ $0.isASCII && (CharacterSet.alphanumerics.contains($0) || $0 == "_") })
+        else { return nil }
+        return name
     }
 
     /// Staging is removed when a download ends, so a leftover means the owning process died with a
     /// download inside it. The claim is a held lock rather than a recorded process identifier, and
     /// SteamCMD inherits it, so it stays held for as long as anything can still write here —
     /// including a child that outlived the app that started it.
+    /// Whether two paths name one folder, as a run decides if its download is kept apart.
+    nonisolated static func sameFolder(_ first: URL, _ second: URL) -> Bool {
+        first.resolvingSymlinksInPath().standardizedFileURL.path == second.resolvingSymlinksInPath().standardizedFileURL.path
+    }
+
     nonisolated private static func claimStaging(_ staging: URL) -> Int32 {
         let descriptor = open(staging.appendingPathComponent(ownerName).path, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
         guard descriptor >= 0 else { return -1 }
@@ -1121,12 +1295,12 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
     }
 
     nonisolated private static func readSavedAccountUnlocked(at directory: URL) -> String? {
-        let files = FileManager.default
-        let identity = directory.appendingPathComponent("account")
-        guard (try? files.attributesOfItem(atPath: directory.path)[.type]) as? FileAttributeType == .typeDirectory,
-              (try? files.attributesOfItem(atPath: identity.path)[.type]) as? FileAttributeType == .typeRegular,
-              let account = try? String(contentsOf: identity, encoding: .utf8) else { return nil }
-        return normalizedAccount(account)
+        var info = stat()
+        guard lstat(directory.path, &info) == 0, info.st_mode & S_IFMT == S_IFDIR else { return nil }
+        let file = directory.appendingPathComponent("account")
+        guard lstat(file.path, &info) == 0, info.st_mode & S_IFMT == S_IFREG,
+              let data = try? Data(contentsOf: file), let text = String(data: data, encoding: .utf8) else { return nil }
+        return normalizedAccount(text)
     }
 
     nonisolated static func removeSession(at directory: URL) throws {
@@ -1156,52 +1330,63 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
 
     nonisolated private static func privateDirectory(_ directory: URL) throws {
         let files = FileManager.default
-        try files.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        guard try files.attributesOfItem(atPath: directory.path)[.type] as? FileAttributeType == .typeDirectory else {
+        var info = stat()
+        if lstat(directory.path, &info) != 0 {
+            try files.createDirectory(at: directory, withIntermediateDirectories: true,
+                                      attributes: [.posixPermissions: 0o700])
+        }
+        guard lstat(directory.path, &info) == 0, info.st_mode & S_IFMT == S_IFDIR else {
             throw WorkshopFailure(message: String(localized: "Steam sign-in storage must be a private directory, not a symbolic link."))
         }
         try files.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
     }
 
     nonisolated private static func copySessionFiles(from source: URL, to destination: URL) throws -> Bool {
-        let files = FileManager.default
         try privateDirectory(source)
         try privateDirectory(destination)
+        let files = FileManager.default
+        let symlinkFailure = WorkshopFailure(message: String(localized: "Steam sign-in files cannot be read through symbolic links."))
         var copied = false
-        // Preserve Steam's opaque token + machine-auth state, not logs, programs,
-        // downloaded content, or submitted passwords/codes. macOS uses both roots.
-        layouts: for base in ["", "Library/Application Support/Steam"] {
-            var sourceBase = source
-            var destinationBase = destination
-            for component in base.split(separator: "/") {
-                sourceBase.appendPathComponent(String(component))
-                destinationBase.appendPathComponent(String(component))
-                guard files.fileExists(atPath: sourceBase.path) else { continue layouts }
-                guard try files.attributesOfItem(atPath: sourceBase.path)[.type] as? FileAttributeType == .typeDirectory else {
-                    throw WorkshopFailure(message: String(localized: "Steam sign-in files cannot be read through symbolic links."))
-                }
-                try privateDirectory(destinationBase)
+        // Steam keeps its state either directly under a root or under the user's Steam folder.
+        for depth in [[String](), ["Library", "Application Support", "Steam"]] {
+            var from = source
+            var to = destination
+            var present = true
+            for component in depth {
+                from.appendPathComponent(component, isDirectory: true)
+                var info = stat()
+                guard lstat(from.path, &info) == 0 else { present = false; break }
+                guard info.st_mode & S_IFMT == S_IFDIR else { throw symlinkFailure }
+                to.appendPathComponent(component, isDirectory: true)
+                try privateDirectory(to)
             }
-            for subdirectory in ["", "config"] {
-                let folder = subdirectory.isEmpty ? sourceBase : sourceBase.appendingPathComponent(subdirectory)
-                guard files.fileExists(atPath: folder.path) else { continue }
-                guard try files.attributesOfItem(atPath: folder.path)[.type] as? FileAttributeType == .typeDirectory else {
-                    throw WorkshopFailure(message: String(localized: "Steam sign-in files cannot be read through symbolic links."))
+            guard present else { continue }
+            for (subfolder, accepts) in [
+                (nil as String?, { (name: String) in name == "registry.vdf" || name.hasPrefix("ssfn") }),
+                ("config", { (name: String) in
+                    ["config.vdf", "loginusers.vdf", "local.vdf"].contains(name)
+                        || (name.hasPrefix("local_") && name.hasSuffix(".vdf")) }),
+            ] as [(String?, (String) -> Bool)] {
+                var folder = from
+                var target = to
+                if let subfolder {
+                    folder.appendPathComponent(subfolder, isDirectory: true)
+                    var info = stat()
+                    guard lstat(folder.path, &info) == 0 else { continue }
+                    guard info.st_mode & S_IFMT == S_IFDIR else { throw symlinkFailure }
+                    target.appendPathComponent(subfolder, isDirectory: true)
+                    try privateDirectory(target)
                 }
-                for file in try files.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil) {
-                    let name = file.lastPathComponent
-                    let isSessionFile = subdirectory.isEmpty
-                        ? name == "registry.vdf" || name.hasPrefix("ssfn")
-                        : name == "config.vdf" || name == "loginusers.vdf" || name == "local.vdf" || (name.hasPrefix("local_") && name.hasSuffix(".vdf"))
-                    guard isSessionFile else { continue }
-                    guard try files.attributesOfItem(atPath: file.path)[.type] as? FileAttributeType == .typeRegular else {
+                for name in try files.contentsOfDirectory(atPath: folder.path).sorted() where accepts(name) {
+                    let file = folder.appendingPathComponent(name)
+                    var info = stat()
+                    guard lstat(file.path, &info) == 0, info.st_mode & S_IFMT == S_IFREG else {
                         throw WorkshopFailure(message: String(localized: "Steam sign-in storage contains an unsafe file."))
                     }
-                    let targetFolder = subdirectory.isEmpty ? destinationBase : destinationBase.appendingPathComponent(subdirectory)
-                    try privateDirectory(targetFolder)
-                    let target = targetFolder.appendingPathComponent(name)
-                    try files.copyItem(at: file, to: target)
-                    try files.setAttributes([.posixPermissions: 0o600], ofItemAtPath: target.path)
+                    let copy = target.appendingPathComponent(name)
+                    if files.fileExists(atPath: copy.path) { try files.removeItem(at: copy) }
+                    try files.copyItem(at: file, to: copy)
+                    try files.setAttributes([.posixPermissions: 0o600], ofItemAtPath: copy.path)
                     copied = true
                 }
             }
@@ -1213,17 +1398,19 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
         sessionLock.lock()
         defer { sessionLock.unlock() }
         let files = FileManager.default
-        let pending = directory.deletingLastPathComponent().appendingPathComponent(".steam-session-\(UUID().uuidString)", isDirectory: true)
+        let parent = directory.deletingLastPathComponent()
+        try files.createDirectory(at: parent, withIntermediateDirectories: true)
+        let pending = parent.appendingPathComponent(".\(directory.lastPathComponent)-\(UUID().uuidString)", isDirectory: true)
         defer { try? files.removeItem(at: pending) }
-        // Flag the copy before it holds a token, and the published folder again below: replacing
-        // a directory can hand back the new one's attributes instead of the old one's.
+        // Private and out of backups before it holds a single token.
         try privateDirectory(pending)
         ClientPaths.excludeFromBackup(pending)
         guard try copySessionFiles(from: staging, to: pending) else { return false }
-        let identity = pending.appendingPathComponent("account")
-        try Data(account.utf8).write(to: identity, options: .atomic)
-        try files.setAttributes([.posixPermissions: 0o600], ofItemAtPath: identity.path)
-        if files.fileExists(atPath: directory.path) {
+        let accountFile = pending.appendingPathComponent("account")
+        try Data(account.utf8).write(to: accountFile, options: .atomic)
+        try files.setAttributes([.posixPermissions: 0o600], ofItemAtPath: accountFile.path)
+        var info = stat()
+        if lstat(directory.path, &info) == 0 {
             try privateDirectory(directory)
             _ = try files.replaceItemAt(directory, withItemAt: pending)
         } else {
@@ -1290,7 +1477,7 @@ private final class SteamCMDTerminalProcess {
     }
 
     init(executable: URL, arguments: [String], workingDirectory: URL, environment: [String: String],
-         master: Int32, slave: Int32, claim: Int32) throws {
+         master: Int32, slave: Int32, claim: Int32, contentClaim: Int32 = -1) throws {
         var actions: posix_spawn_file_actions_t?
         var attributes: posix_spawnattr_t?
         func check(_ result: Int32) throws {
@@ -1313,11 +1500,16 @@ private final class SteamCMDTerminalProcess {
         // SteamCMD keeps the staging claim alive if it outlives this process, which is what stops a
         // later launch from reclaiming a download still being written. The duplicate has to be a
         // different descriptor than the one it lands on, because dup2 onto itself does nothing and
-        // would leave the claim closing on exec; it also has to survive the closes above.
-        var inherited: Int32 = -1
-        if claim >= 0 { inherited = fcntl(claim, F_DUPFD, 20) }
-        defer { if inherited >= 0 { close(inherited) } }
-        if inherited >= 0 { try check(posix_spawn_file_actions_adddup2(&actions, inherited, 3)) }
+        // would leave the claim closing on exec; it also has to survive the closes above. A download
+        // kept beside a library on another disk has a second claim, on its content folder.
+        var inherited: [Int32] = []
+        defer { inherited.forEach { close($0) } }
+        for (descriptor, slot) in [(claim, Int32(3)), (contentClaim, Int32(4))] where descriptor >= 0 {
+            let copy = fcntl(descriptor, F_DUPFD, 20)
+            guard copy >= 0 else { continue }
+            inherited.append(copy)
+            try check(posix_spawn_file_actions_adddup2(&actions, copy, slot))
+        }
         let argv = ([executable.path] + arguments).map { strdup($0) } + [nil]
         let envp = environment.sorted(by: { $0.key < $1.key }).map { strdup("\($0.key)=\($0.value)") } + [nil]
         defer {
@@ -1458,27 +1650,41 @@ private struct NetworkTerminalRunner: SteamCMDProcessRunning {
         var master: Int32 = -1
         var slave: Int32 = -1
         guard openpty(&master, &slave, nil, nil, nil) == 0 else { throw POSIXError(.EIO) }
-        defer { close(master); if slave >= 0 { close(slave) } }
+        defer { close(master) }
         var settings = termios()
-        guard tcgetattr(slave, &settings) == 0 else { throw POSIXError(.EIO) }
-        settings.c_lflag &= ~tcflag_t(ECHO | ECHONL)
-        guard tcsetattr(slave, TCSANOW, &settings) == 0 else { throw POSIXError(.EIO) }
+        if tcgetattr(slave, &settings) == 0 {
+            settings.c_lflag &= ~tcflag_t(ECHO)
+            tcsetattr(slave, TCSANOW, &settings)
+        }
         let flags = fcntl(master, F_GETFL)
-        guard flags >= 0, fcntl(master, F_SETFL, flags | O_NONBLOCK) == 0 else { throw POSIXError(.EIO) }
-        let process = try SteamCMDTerminalProcess(executable: executable, arguments: arguments,
-            workingDirectory: workingDirectory, environment: environment, master: master, slave: slave, claim: -1)
+        guard flags >= 0, fcntl(master, F_SETFL, flags | O_NONBLOCK) != -1 else {
+            close(slave)
+            throw POSIXError(.EIO)
+        }
+        let process: SteamCMDTerminalProcess
+        do {
+            process = try SteamCMDTerminalProcess(
+                executable: executable, arguments: arguments, workingDirectory: workingDirectory,
+                environment: environment, master: master, slave: slave, claim: -1)
+        } catch {
+            close(slave)
+            throw error
+        }
         close(slave)
-        slave = -1
+
         var buffer = [UInt8](repeating: 0, count: 8192)
         func drain() throws {
             for _ in 0..<32 {
                 let count = buffer.withUnsafeMutableBytes { Darwin.read(master, $0.baseAddress, $0.count) }
                 if count > 0 {
-                    onOutput(Data(buffer.prefix(count)))
-                } else if count == 0 || errno == EAGAIN || errno == EWOULDBLOCK || errno == EIO {
-                    return
-                } else if errno != EINTR {
-                    throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+                    onOutput(Data(buffer[0..<count]))
+                    continue
+                }
+                if count == 0 { return }
+                switch errno {
+                case EINTR: continue
+                case EAGAIN, EIO: return
+                default: throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
                 }
             }
         }

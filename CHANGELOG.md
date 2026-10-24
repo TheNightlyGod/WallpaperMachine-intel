@@ -10,6 +10,270 @@ for older releases without Korean notes. The GitHub Release body repeats only th
 English notes. See
 [docs/release.md](docs/release.md) for how a version is cut.
 
+## 1.6.2 — 2026-10-24
+
+### English
+
+#### Fixed
+
+- Long names on narrow Quick Settings tiles now shrink slightly to fit instead of being cut off with an ellipsis
+
+### 简体中文
+
+#### 修复
+
+- 快捷设置磁贴较窄时，较长的名称现在会略微缩小以完整显示，不再被省略号截断
+
+### 한국어
+
+#### 수정됨
+
+- 빠른 설정 타일이 좁을 때 긴 이름이 말줄임표로 잘리지 않고 살짝 작아져 전체가 표시됩니다
+
+**Full changelog**: https://github.com/WallpaperMachine/WallpaperMachine/compare/v1.6.1...v1.6.2
+
+## 1.6.1 — 2026-10-24
+
+### English
+
+Each desktop can now have its own wallpaper and the library can live on an external drive, and Mission Control pictures no longer fill the disk on macOS 26 and later
+
+#### Breaking changes
+
+- The app now sends one daily count that it ran, with its version but no install ID, even when Send performance data is off
+
+#### New
+
+- Each desktop (Space) can now play a wallpaper or playlist of its own and resumes where you left it, off by default and turned on in Quick Settings
+- The wallpaper library and downloads can now live on an external drive, moved from Storage in Settings, with new downloads going straight there
+
+#### Improved
+
+- Report on GitHub now opens a bug report form with the wallpaper, app version and any error filled in, and asks what happened and what you expected
+
+#### Fixed
+
+- Mission Control pictures no longer fill the disk on macOS 26 and later, since the app now retakes them only when a display's wallpaper changes
+- Aerial, dynamic and other moving macOS wallpapers come back as you left them when you quit, instead of a still picture on every desktop
+- Muted scene wallpapers stay silent while they load, instead of playing a moment of music when a playlist switches to them
+- Video wallpapers with a sound track loop smoothly instead of freezing for about a quarter of a second at each seam
+- Scene layers that drew nothing now appear, such as the eyes and hair in Pastel Bloom and the alternate backgrounds some wallpapers offer
+- Recoloured particles in scenes saved with newer Wallpaper Engine editors are no longer tinted twice, so the snow in The Winter Nothingness [4K] shows again
+- A scene's first frame now shows with its own scaling instead of appearing fitted for a moment and then jumping to Fill
+- After an update, What's New and the control panel open in front of other apps instead of hiding behind them
+
+### 简体中文
+
+现在每个桌面都能拥有自己的壁纸，壁纸库也可以存放在外置磁盘上，同时修复了 macOS 26 及更高版本上调度中心图片占满磁盘的问题
+
+#### 不兼容变更
+
+- 即使关闭了“发送性能数据”，应用现在也会每天发送一次运行计数，包含版本信息但不含安装标识
+
+#### 新增
+
+- 每个桌面（空间）现在可以播放各自的壁纸或播放列表，切回时从离开处继续，此功能默认关闭，可在快速设置中开启
+- 壁纸库和下载内容现在可以存放在外置磁盘上，在设置的存储中即可移动，之后的新下载会直接保存到该磁盘
+
+#### 改进
+
+- “在 GitHub 上报告”现在会打开问题报告表单，自动填入壁纸、应用版本和错误信息，并请你描述发生了什么以及预期结果
+
+#### 修复
+
+- 在 macOS 26 及更高版本上，调度中心的桌面图片不再反复生成副本占满磁盘，现在仅在显示器的壁纸变化时才会更新
+- 退出应用后，航拍、动态等会动的 macOS 壁纸会恢复原样，不再在每个桌面上留下一张静态图片
+- 已静音的场景壁纸在加载时保持静音，播放列表切换时不再先播放片刻音乐
+- 带音轨的视频壁纸现在可以平滑循环，不再在每次循环时停顿约四分之一秒
+- 之前不显示的场景图层现在可以正常绘制，例如 Pastel Bloom 中人物的眼睛和头发，以及部分壁纸提供的备选背景
+- 使用较新 Wallpaper Engine 编辑器保存的场景中，重新着色的粒子不再被重复着色，The Winter Nothingness [4K] 的落雪重新可见
+- 场景壁纸的第一帧现在直接按其缩放方式显示，不再先短暂适应屏幕再跳到填充
+- 更新后，“新功能”窗口和控制面板会显示在其他应用前面，不再被遮挡在后方
+
+### 한국어
+
+이제 데스크탑마다 자체 배경화면을 둘 수 있고 보관함을 외장 드라이브에 보관할 수 있으며, macOS 26 이상에서 Mission Control 사진이 디스크를 채우던 문제가 해결되었습니다
+
+#### 호환되지 않는 변경 사항
+
+- 이제 성능 데이터 보내기가 꺼져 있어도 앱이 실행되었다는 사실을 하루에 한 번 보내며, 앱 버전은 포함하지만 설치 ID는 포함하지 않습니다
+
+#### 새로운 기능
+
+- 이제 데스크탑(Space)마다 각자의 배경화면이나 재생목록을 재생하고 돌아오면 멈춘 곳부터 이어지며, 기본적으로 꺼짐 상태로 빠른 설정에서 켤 수 있습니다
+- 이제 설정의 저장 공간에서 보관함과 다운로드를 외장 드라이브로 옮길 수 있으며, 이후 새 다운로드도 그 드라이브에 바로 저장됩니다
+
+#### 개선 사항
+
+- GitHub에 보고하기가 이제 배경화면, 앱 버전, 오류가 미리 채워진 버그 보고 양식을 열고 무슨 일이 있었는지와 기대한 결과를 묻습니다
+
+#### 수정됨
+
+- macOS 26 이상에서 Mission Control용 데스크탑 사진의 사본이 디스크를 채우지 않으며, 이제 디스플레이의 배경화면이 바뀔 때만 다시 찍습니다
+- 앱을 종료하면 항공 영상, 다이내믹 등 움직이는 macOS 배경화면이 원래대로 돌아오며, 더 이상 모든 데스크탑에 정지 사진이 남지 않습니다
+- 음소거된 씬 배경화면이 불러오는 동안에도 조용히 유지되며, 재생목록이 전환될 때 음악이 잠깐 재생되지 않습니다
+- 사운드 트랙이 있는 동영상 배경화면이 반복될 때마다 약 0.25초씩 멈추지 않고 매끄럽게 반복됩니다
+- Pastel Bloom의 눈과 머리카락, 일부 배경화면이 제공하는 대체 배경처럼 보이지 않던 씬 레이어가 이제 제대로 나타납니다
+- 최신 Wallpaper Engine 편집기로 저장한 씬에서 색을 바꾼 파티클이 두 번 칠해지지 않아 The Winter Nothingness [4K]의 눈이 다시 보입니다
+- 씬의 첫 프레임이 잠깐 화면에 맞춤으로 보였다가 채우기로 바뀌지 않고 처음부터 자체 크기 조정으로 표시됩니다
+- 업데이트 후 새로운 기능 창과 제어판이 다른 앱 뒤에 숨지 않고 앞에 열립니다
+
+**Full changelog**: https://github.com/WallpaperMachine/WallpaperMachine/compare/v1.6.0...v1.6.1
+
+## 1.6.0 — 2026-10-23
+
+### English
+
+![WallpaperMachine 1.6.0](Resources/ReleaseBanners/1.6.0.jpg)
+
+WallpaperMachine 1.6 draws every scene with Native Metal, hands video wallpapers to the macOS video player, uses less memory, and is now free software under the GNU GPL version 3
+
+#### Highlights
+
+- Native Metal now draws every scene wallpaper, and the older Compatibility renderer is gone
+- Video wallpapers play through the macOS hardware video player by default, at their own frame rate, on the desktop and in the preview window
+- Scenes with 10-bit and HDR videos now stay on Native Metal and show those videos tone mapped to standard range
+- Scene wallpapers and the control panel use much less memory, especially when one wallpaper runs on several displays
+- WallpaperMachine is now licensed under GPL-3.0-only, with the renderer it inherited rewritten from the ground up
+
+#### Breaking changes
+
+- The Scene renderer and Video playback choices are gone from Settings › Performance › Advanced; settings saved by earlier versions still load
+- A scene Native Metal cannot draw is no longer handed to another renderer: it keeps its last picture, or shows its preview, and the reason appears under Drawn by
+- Videos macOS cannot play, such as AVI files or AV1 on a Mac without hardware AV1 decoding, are refused when you apply them, with a message that names the format and how to convert it
+- Fit with blurred backdrop shows black bars around plain video wallpapers; scene wallpapers keep their blurred backdrop
+
+#### New
+
+- Horizontal position and Vertical position now move video wallpapers that macOS plays, and Center puts them back
+- The preview window plays video wallpapers with the same players as the desktop, with sound when you unmute it
+- On the optional animated lock screen and in the screen saver, plain video wallpapers play through the macOS hardware video player, always without sound
+- When the lock screen cannot show a scene or video, it keeps its last frame and the lock screen status in the app says why
+
+#### Improved
+
+- Displays showing the same scene share its pictures, saving tens to hundreds of megabytes of GPU memory for each extra display
+- Videos inside scenes are read from disk instead of being copied into memory, so a 150 MB clip no longer briefly needs about 300 MB while the scene loads
+- Scenes with many layers need less video memory, and 4K videos keep fewer decoded frames waiting
+- The control panel lets go of thumbnails and animated previews you have scrolled past or cannot see, and a thumbnail you scroll back to appears at once
+- Scenes with a clock or readout whose width keeps changing stay smooth instead of reloading the whole scene each time
+- Messages about scene rendering, Energy use and the lock screen now appear in Korean
+
+#### Fixed
+
+- The optional animated lock screen recovers by itself when its renderer stops or a display sleeps while the Mac is locked, instead of falling back to a black or default picture
+- Particle effects whose colour a scene overrides take on the right tint, so fire that should burn red no longer turns pink and magenta
+- Web wallpapers built with React, such as the Bocchi the Rock! album player, no longer stay black and silent
+- A background picture you choose is no longer darkened by the scene's colour, and pass-through, fullscreen and resized layers stay where they belong
+- Composite layers, perspective picture layers, cover art over a composite and height fog from older Workshop packages draw as the scene describes
+- Scene scripts follow Wallpaper Engine more closely for conditions, effect visibility, start-up order, sound layers and rotation
+- A scene with a shader that cannot be compiled keeps its picture and names the shader, instead of drawing with a part missing
+- Scenes whose scripts create layers from certain models no longer crash a few seconds in
+- More Workshop wallpapers' shaders now compile for Native Metal
+- The lock screen keeps working when your wallpapers are reached through a folder alias
+
+### 简体中文
+
+![WallpaperMachine 1.6.0](Resources/ReleaseBanners/1.6.0.zh-Hans.jpg)
+
+WallpaperMachine 1.6 用 Native Metal 绘制所有场景，把视频壁纸交给 macOS 视频播放器，占用更少内存，并改为以 GNU GPL 第 3 版发布的自由软件
+
+#### 亮点
+
+- 现在所有场景壁纸都由 Native Metal 绘制，旧的兼容模式渲染器已移除
+- 视频壁纸默认通过 macOS 硬件视频播放器播放，按视频自身的帧率运行，桌面和预览窗口均如此
+- 含 10 位和 HDR 视频的场景现在会留在 Native Metal 上，并将这些视频色调映射到标准动态范围显示
+- 场景壁纸和控制面板占用的内存大幅减少，在多台显示器上运行同一壁纸时尤为明显
+- WallpaperMachine 现以 GPL-3.0-only 许可发布，继承而来的渲染器已从头重写
+
+#### 不兼容变更
+
+- 设置 › 性能 › 高级 中的“场景渲染器”和“视频播放”选项已移除；旧版本保存的设置仍可正常载入
+- Native Metal 无法绘制的场景不再交给其他渲染器：它会保留最后一帧画面或显示预览图，原因显示在“绘制方”下
+- macOS 无法播放的视频（例如 AVI 文件，或在不支持硬件 AV1 解码的 Mac 上的 AV1 视频）会在应用时被拒绝，提示信息会说明格式及转换方法
+- 适应（模糊背景）在普通视频壁纸周围显示黑边；场景壁纸仍保留模糊背景
+
+#### 新增
+
+- 水平位置和垂直位置现在也能移动由 macOS 播放的视频壁纸，居中可将其复位
+- 预览窗口使用与桌面相同的播放器播放视频壁纸，取消静音后可听到声音
+- 在可选的动态锁定屏幕和屏幕保护程序中，普通视频壁纸通过 macOS 硬件视频播放器播放，且始终静音
+- 锁定屏幕无法显示某个场景或视频时会保留最后一帧，应用中的锁定屏幕状态会说明原因
+
+#### 改进
+
+- 显示同一场景的多台显示器会共享其图片，每多一台显示器可节省数十到数百 MB 显存
+- 场景中的视频直接从磁盘读取，不再整个复制到内存，150 MB 的视频在场景载入时不再短暂占用约 300 MB
+- 图层众多的场景所需显存更少，4K 视频等待中的已解码帧也更少
+- 控制面板会释放已滚过或看不到的缩略图和动态预览，滚回时缩略图会立即出现
+- 带有宽度不断变化的时钟或读数的场景保持流畅，不再每次都重新载入整个场景
+- 有关场景渲染、能耗和锁定屏幕的提示现在提供韩语版本
+
+#### 修复
+
+- 可选的动态锁定屏幕在渲染器停止或 Mac 锁定期间显示器休眠时会自行恢复，不再退回黑屏或默认图片
+- 场景覆盖了颜色的粒子效果现在会呈现正确的色调，本应燃烧成红色的火焰不再变成粉色和品红色
+- 使用 React 构建的网页壁纸（例如《孤独摇滚！》专辑播放器）不再一直黑屏无声
+- 你选择的背景图片不再被场景颜色压暗，穿透、全屏和调整过大小的图层也会留在正确位置
+- 合成图层、透视图片图层、合成图层上的封面以及旧版创意工坊包中的高度雾现在都按场景描述绘制
+- 场景脚本在条件、效果可见性、启动顺序、声音图层和旋转方面更贴近 Wallpaper Engine
+- 含有无法编译的着色器的场景会保留画面并指出是哪个着色器，不再缺少部分内容继续绘制
+- 脚本用某些模型创建图层的场景不再在几秒后崩溃
+- 更多创意工坊壁纸的着色器现在可以为 Native Metal 编译
+- 通过文件夹替身访问壁纸时，锁定屏幕也能正常工作
+
+### 한국어
+
+![WallpaperMachine 1.6.0](Resources/ReleaseBanners/1.6.0.ko.jpg)
+
+WallpaperMachine 1.6은 모든 장면을 Native Metal로 그리고, 비디오 배경화면을 macOS 비디오 플레이어에 맡기며, 메모리를 덜 사용하고, 이제 GNU GPL 버전 3을 따르는 자유 소프트웨어입니다
+
+#### 주요 변경 사항
+
+- 이제 모든 장면 배경화면을 Native Metal이 그리며, 이전 호환 렌더러는 제거되었습니다
+- 비디오 배경화면은 기본적으로 macOS 하드웨어 비디오 플레이어로 재생되며, 데스크톱과 미리보기 창 모두에서 원래 프레임 속도로 재생됩니다
+- 10비트 및 HDR 비디오가 들어 있는 장면도 이제 Native Metal에서 그려지며, 해당 비디오는 표준 다이내믹 레인지로 톤 매핑되어 표시됩니다
+- 장면 배경화면과 제어판의 메모리 사용량이 크게 줄었으며, 특히 하나의 배경화면을 여러 디스플레이에서 실행할 때 효과가 큽니다
+- WallpaperMachine은 이제 GPL-3.0-only 라이선스로 제공되며, 물려받은 렌더러는 처음부터 새로 작성되었습니다
+
+#### 호환되지 않는 변경 사항
+
+- 설정 › 성능 › 고급의 장면 렌더러 및 비디오 재생 선택 항목이 제거되었습니다. 이전 버전에서 저장한 설정은 그대로 불러옵니다
+- Native Metal이 그릴 수 없는 장면은 더 이상 다른 렌더러로 넘어가지 않습니다. 마지막 화면을 유지하거나 미리보기를 보여 주며, 이유는 렌더링 방식 아래에 표시됩니다
+- AVI 파일이나 하드웨어 AV1 디코딩을 지원하지 않는 Mac의 AV1 비디오처럼 macOS가 재생할 수 없는 비디오는 적용할 때 거부되며, 형식과 변환 방법을 알려 주는 메시지가 표시됩니다
+- 맞춤, 흐린 배경은 일반 비디오 배경화면 주위에 검은 여백을 표시합니다. 장면 배경화면은 흐린 배경을 그대로 유지합니다
+
+#### 새로운 기능
+
+- 가로 위치와 세로 위치로 이제 macOS가 재생하는 비디오 배경화면도 옮길 수 있으며, 중앙을 누르면 원래 위치로 돌아갑니다
+- 미리보기 창이 데스크톱과 같은 플레이어로 비디오 배경화면을 재생하며, 음소거를 해제하면 소리도 들립니다
+- 선택 사항인 움직이는 잠금 화면과 화면 보호기에서 일반 비디오 배경화면이 macOS 하드웨어 비디오 플레이어로 재생되며, 소리는 항상 꺼져 있습니다
+- 잠금 화면에서 장면이나 비디오를 표시할 수 없으면 마지막 프레임을 유지하고, 앱의 잠금 화면 상태에 그 이유가 표시됩니다
+
+#### 개선 사항
+
+- 같은 장면을 표시하는 디스플레이들이 그림을 공유하여, 디스플레이가 하나 늘어날 때마다 GPU 메모리를 수십에서 수백 MB 절약합니다
+- 장면 속 비디오를 메모리에 통째로 복사하지 않고 디스크에서 바로 읽으므로, 150MB 클립이 장면을 불러오는 동안 잠깐 약 300MB를 차지하는 일이 없어졌습니다
+- 레이어가 많은 장면에 필요한 비디오 메모리가 줄었고, 4K 비디오가 대기시켜 두는 디코딩된 프레임도 줄었습니다
+- 제어판이 스크롤해 지나갔거나 보이지 않는 썸네일과 움직이는 미리보기를 해제하며, 다시 스크롤해 돌아온 썸네일은 즉시 나타납니다
+- 폭이 계속 바뀌는 시계나 수치 표시가 있는 장면이 매번 장면 전체를 다시 불러오지 않고 부드럽게 유지됩니다
+- 장면 렌더링, 에너지 사용량, 잠금 화면에 관한 메시지가 이제 한국어로 표시됩니다
+
+#### 수정됨
+
+- 선택 사항인 움직이는 잠금 화면이 렌더러가 멈추거나 Mac이 잠긴 동안 디스플레이가 잠자기에 들어가도 스스로 복구되며, 검은 화면이나 기본 그림으로 돌아가지 않습니다
+- 장면이 색상을 덮어쓴 파티클 효과가 올바른 색조를 띠므로, 붉게 타올라야 할 불꽃이 더 이상 분홍색과 자홍색으로 변하지 않습니다
+- 봇치 더 록! 앨범 플레이어처럼 React로 만든 웹 배경화면이 더 이상 검은 화면에 소리 없이 멈춰 있지 않습니다
+- 직접 고른 배경 그림이 장면 색상 때문에 어두워지지 않으며, 패스스루·전체 화면·크기를 조정한 레이어도 제자리에 머뭅니다
+- 합성 레이어, 원근 그림 레이어, 합성 레이어 위의 커버, 이전 창작마당 패키지의 높이 안개가 장면에 적힌 대로 그려집니다
+- 장면 스크립트가 조건, 효과 표시 여부, 시작 순서, 사운드 레이어, 회전에서 Wallpaper Engine과 더 가깝게 동작합니다
+- 컴파일할 수 없는 셰이더가 있는 장면은 일부가 빠진 채 그려지지 않고, 화면을 유지하며 해당 셰이더를 알려 줍니다
+- 스크립트가 특정 모델로 레이어를 만드는 장면이 몇 초 뒤 충돌하지 않습니다
+- 더 많은 창작마당 배경화면의 셰이더가 이제 Native Metal용으로 컴파일됩니다
+- 폴더 별칭을 통해 배경화면에 접근하는 경우에도 잠금 화면이 제대로 동작합니다
+
+**Full changelog**: https://github.com/WallpaperMachine/WallpaperMachine/compare/v1.5.9...v1.6.0
+
 ## 1.5.9 — 2026-10-21
 
 ### English

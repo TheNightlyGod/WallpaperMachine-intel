@@ -6,6 +6,9 @@ struct WallpaperBackupService: Sendable {
     static let pendingDirectoryName = ".PendingBackupRestore"
     static let transactionDirectoryName = ".BackupRestoreTransaction"
     let supportRoot: URL
+    /// The folder holding `Library`: the support root unless the library was moved
+    /// (`StorageLocation`). Every logical `Library/…` path lives here.
+    let storageRoot: URL
     let limits: WallpaperBackupLimits
     private let referenceRoot: String
     private var manager: FileManager { .default }
@@ -15,10 +18,34 @@ struct WallpaperBackupService: Sendable {
     private static let solarSettingsKey = "WallpaperMachine.solarSettings"
     private static let solarKeys: Set<String> = [solarLocationKey, solarSettingsKey]
 
-    init(supportRoot: URL = ClientPaths.supportURL, limits: WallpaperBackupLimits = .init()) {
+    /// `storageRoot` nil keeps the library in `supportRoot`; the app passes `ClientPaths.storageURL`.
+    init(supportRoot: URL = ClientPaths.supportURL, storageRoot: URL? = nil, limits: WallpaperBackupLimits = .init()) {
         self.supportRoot = supportRoot.standardizedFileURL.resolvingSymlinksInPath()
+        self.storageRoot = (storageRoot ?? supportRoot).standardizedFileURL.resolvingSymlinksInPath()
         referenceRoot = supportRoot.standardizedFileURL.path
         self.limits = limits
+    }
+
+    /// Where a logical path of the package lives on this Mac.
+    private func liveRoot(_ logical: String) -> URL {
+        logical == "Library" || logical.hasPrefix("Library/") ? storageRoot : supportRoot
+    }
+
+    private func live(_ logical: String) -> URL { liveRoot(logical).appendingPathComponent(logical) }
+
+    private static func isLibrary(_ logical: String) -> Bool { logical == "Library" || logical.hasPrefix("Library/") }
+
+    /// Where a restore keeps a unit's `old/` and `ready/`: on the volume of the unit's live copy, so
+    /// publishing it and putting it back are renames. A library on another disk has its own
+    /// transaction folder there, which the journal names (`libraryRoot`).
+    private func unitTransaction(_ logical: String, transaction: URL, libraryRoot: URL) -> URL {
+        Self.isLibrary(logical) && libraryRoot.path != supportRoot.path
+            ? libraryRoot.appendingPathComponent(Self.transactionDirectoryName, isDirectory: true) : transaction
+    }
+
+    /// The library's transaction folder, when it is not the support root's.
+    private func libraryTransaction(libraryRoot: URL, transaction: URL) -> URL? {
+        libraryRoot.path == supportRoot.path ? nil : unitTransaction("Library", transaction: transaction, libraryRoot: libraryRoot)
     }
 
     var pendingRestore: Bool {
@@ -35,7 +62,7 @@ struct WallpaperBackupService: Sendable {
         let destination = package.deletingLastPathComponent().standardizedFileURL.resolvingSymlinksInPath()
             .appendingPathComponent(package.lastPathComponent)
         guard destination.pathExtension.lowercased() == Self.packageExtension,
-              !contains(destination, in: supportRoot) else {
+              !contains(destination, in: supportRoot), !contains(destination, in: storageRoot) else {
             throw WallpaperBackupFailure(message: String(localized: "Save the backup outside WallpaperMachine’s support folder with the .wmbackup extension."))
         }
         try validatePreferences(preferences.values)
@@ -45,7 +72,7 @@ struct WallpaperBackupService: Sendable {
         try manager.createDirectory(at: payload, withIntermediateDirectories: true)
         var entries: [WallpaperBackupEntry] = []
         for name in managedRoots where name != "Library" || includeLibrary {
-            let source = supportRoot.appendingPathComponent(name)
+            let source = live(name)
             guard manager.fileExists(atPath: source.path) else { continue }
             let (kind, size) = try files.kind(at: source)
             guard (name == "config.toml" && kind == .file) || (name != "config.toml" && kind == .directory) else {
@@ -59,8 +86,10 @@ struct WallpaperBackupService: Sendable {
             }
         }
         try validateEntries(entries, includesLibrary: includeLibrary)
+        // A moved library's own paths (`<storage>/Library/…`) are named through its root.
+        let aliases = Array(Set([referenceRoot, storageRoot.path]).subtracting([supportRoot.path])).sorted()
         var manifest = WallpaperBackupManifest(createdAt: Date(), sourceSupportRoot: supportRoot.path,
-                                               sourceSupportAliases: referenceRoot == supportRoot.path ? nil : [referenceRoot],
+                                               sourceSupportAliases: aliases.isEmpty ? nil : aliases,
                                                includesLibrary: includeLibrary, preferences: preferences.values,
                                                entries: entries.sorted { $0.path < $1.path })
         // Hex digests have a fixed encoded size. Check the complete manifest before
@@ -76,7 +105,7 @@ struct WallpaperBackupService: Sendable {
             if entry.kind == .directory {
                 try manager.createDirectory(at: target, withIntermediateDirectories: true)
             } else {
-                manifest.entries[index].digest = try files.stream(root: supportRoot, entry: entry, to: target, rejectHardLinks: false)
+                manifest.entries[index].digest = try files.stream(root: liveRoot(entry.path), entry: entry, to: target, rejectHardLinks: false)
             }
         }
         try writeManifest(manifest, at: temporary)
@@ -88,7 +117,7 @@ struct WallpaperBackupService: Sendable {
         let (manifest, digest) = try validatedPackage(package)
         try validateReferences(manifest: manifest, package: package)
         var conflicts = try resourceUnits(manifest.entries).filter {
-            manager.fileExists(atPath: supportRoot.appendingPathComponent($0).path)
+            manager.fileExists(atPath: live($0).path)
         }
         conflicts += manifest.preferences.keys.filter {
             !Self.solarKeys.contains($0) && preferences.values[$0] != nil
@@ -146,10 +175,10 @@ struct WallpaperBackupService: Sendable {
     /// The app calls this before initializing any preferences, Library or renderer.
     /// It is synchronous because those consumers must not race startup publication.
     @MainActor
-    static func applyPendingRestore(supportRoot: URL = ClientPaths.supportURL,
+    static func applyPendingRestore(supportRoot: URL = ClientPaths.supportURL, storageRoot: URL? = nil,
                                     defaults: UserDefaults = ClientPreferences.defaults,
                                     domainName: String = ClientPreferences.domainName) throws -> WallpaperBackupRestoreReport? {
-        let service = WallpaperBackupService(supportRoot: supportRoot)
+        let service = WallpaperBackupService(supportRoot: supportRoot, storageRoot: storageRoot)
         do {
             return try service.applyPendingRestore(defaults: defaults, domainName: domainName)
         } catch {
@@ -170,6 +199,12 @@ struct WallpaperBackupService: Sendable {
             try recover(transaction: transaction, defaults: defaults)
             recovered = true
         }
+        let libraryTransaction = libraryTransaction(libraryRoot: storageRoot, transaction: transaction)
+        // Without the support root's transaction, one beside the library holds only prepared
+        // copies or what a committed restore replaced: it is cleared after the journal's own.
+        if let libraryTransaction, manager.fileExists(atPath: libraryTransaction.path) {
+            try manager.removeItem(at: libraryTransaction)
+        }
         let pending = supportRoot.appendingPathComponent(Self.pendingDirectoryName)
         guard pendingRestore, lastStartupError == nil else {
             return recovered ? .init(restoredPaths: [], warnings: [], recoveredInterruptedRestore: true) : nil
@@ -180,7 +215,7 @@ struct WallpaperBackupService: Sendable {
         let current = try WallpaperBackupPreferences(defaults: defaults, domainName: domainName)
         try validateReferences(manifest: manifest, package: pending)
         let selected = try resourceUnits(manifest.entries).filter {
-            pendingState.policy == .replace || !manager.fileExists(atPath: supportRoot.appendingPathComponent($0).path)
+            pendingState.policy == .replace || !manager.fileExists(atPath: live($0).path)
         }
         let context = referenceContext(manifest: manifest, package: pending, selected: Set(selected))
         // A restored project must not turn an existing text override into a newly
@@ -199,11 +234,15 @@ struct WallpaperBackupService: Sendable {
         let warnings = try diagnose(manifest: manifest, package: pending)
         let prepared = transaction.appendingPathComponent("ready")
         try manager.createDirectory(at: prepared, withIntermediateDirectories: true)
+        func ready(_ path: String) -> URL {
+            unitTransaction(path, transaction: transaction, libraryRoot: storageRoot).appendingPathComponent("ready/" + path)
+        }
         // A failure before the journal is published has not touched live data.
         do {
             for path in selected {
                 let source = pending.appendingPathComponent("data/" + path)
-                let target = prepared.appendingPathComponent(path)
+                let target = ready(path)
+                try manager.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
                 let (kind, size) = try files.kind(at: source, rejectHardLinks: true)
                 if kind == .directory {
                     try files.copyTree(from: source, to: target, rejectingHardLinks: true)
@@ -231,22 +270,25 @@ struct WallpaperBackupService: Sendable {
                 if let value = domain[key] { previousValues[key] = try WallpaperBackupPreferences.encode(value) }
             }
             var journal = WallpaperBackupJournal(units: selected.map {
-                .init(path: $0, existed: manager.fileExists(atPath: supportRoot.appendingPathComponent($0).path))
+                .init(path: $0, existed: manager.fileExists(atPath: live($0).path))
             }, originalPreferences: previousValues.filter { changedKeys.contains($0.key) },
-                absentPreferences: changedKeys.filter { previousValues[$0] == nil })
+                absentPreferences: changedKeys.filter { previousValues[$0] == nil },
+                libraryRoot: libraryTransaction == nil ? nil : storageRoot.path,
+                libraryMarker: libraryTransaction == nil ? nil : StorageLocation.marker(at: storageRoot))
             try writeJSON(journal, to: transaction.appendingPathComponent("journal.json"))
             do {
                 for unit in journal.units {
                     try beforePublish?(unit.path)
-                    let live = supportRoot.appendingPathComponent(unit.path)
-                    let old = transaction.appendingPathComponent("old/" + unit.path)
-                    try ensureSafeParents(of: unit.path, root: supportRoot)
+                    let live = live(unit.path)
+                    let old = unitTransaction(unit.path, transaction: transaction, libraryRoot: storageRoot)
+                        .appendingPathComponent("old/" + unit.path)
+                    try ensureSafeParents(of: unit.path, root: liveRoot(unit.path))
                     if unit.existed {
                         try manager.createDirectory(at: old.deletingLastPathComponent(), withIntermediateDirectories: true)
                         try manager.moveItem(at: live, to: old)
                     }
                     try manager.createDirectory(at: live.deletingLastPathComponent(), withIntermediateDirectories: true)
-                    try manager.moveItem(at: prepared.appendingPathComponent(unit.path), to: live)
+                    try manager.moveItem(at: ready(unit.path), to: live)
                 }
                 // Preferences are last, after every referenced file is safely in place.
                 try beforePublish?("Preferences")
@@ -262,10 +304,11 @@ struct WallpaperBackupService: Sendable {
                 throw error
             }
             // A committed journal is a durable completion marker; recovery only cleans it.
-            try finishCommitted(transaction: transaction)
+            try finishCommitted(transaction: transaction, libraryTransaction: libraryTransaction)
             return .init(restoredPaths: selected, warnings: warnings, recoveredInterruptedRestore: recovered)
         } catch {
             if !manager.fileExists(atPath: transaction.appendingPathComponent("journal.json").path) {
+                if let libraryTransaction { try? manager.removeItem(at: libraryTransaction) }
                 try? manager.removeItem(at: transaction)
             }
             throw error
@@ -494,11 +537,29 @@ struct WallpaperBackupService: Sendable {
         // not hydrate. Recovery must not reject those originals under a newer schema.
         guard Set(journal.originalPreferences.keys).isSubset(of: recoveryKeys) else { throw files.unsafe("journal.json") }
         for data in journal.originalPreferences.values { try validateValue(WallpaperBackupPreferences.decode(data), depth: 0) }
+        // The library where this restore found it, which may not be where it is now.
+        let libraryRoot: URL
+        let drive = WallpaperBackupFailure(message: String(localized: "Restore recovery needs the drive that holds the wallpaper library. Connect it and open WallpaperMachine again; nothing has been deleted."))
+        if let recorded = journal.libraryRoot {
+            libraryRoot = URL(fileURLWithPath: recorded, isDirectory: true).standardizedFileURL.resolvingSymlinksInPath()
+            // A folder that is merely there is not enough: a disconnected drive can leave its
+            // empty mount point behind.
+            guard recorded.hasPrefix("/"), manager.fileExists(atPath: libraryRoot.path),
+                  journal.libraryMarker == nil || StorageLocation.marker(at: libraryRoot) == journal.libraryMarker else { throw drive }
+        } else {
+            libraryRoot = supportRoot
+        }
+        let libraryTransaction = libraryTransaction(libraryRoot: libraryRoot, transaction: transaction)
+        // Every library unit was prepared there before the journal was written.
+        if let libraryTransaction, journal.units.contains(where: { Self.isLibrary($0.path) }),
+           !manager.fileExists(atPath: libraryTransaction.path) { throw drive }
+        func staged(_ unit: String) -> URL { unitTransaction(unit, transaction: transaction, libraryRoot: libraryRoot) }
+        func liveRoot(_ unit: String) -> URL { Self.isLibrary(unit) ? libraryRoot : supportRoot }
         var paths = Set<String>()
         for unit in journal.units {
             try files.validateRelative(unit.path)
-            try ensureSafeParents(of: "old/" + unit.path, root: transaction)
-            try ensureSafeParents(of: "ready/" + unit.path, root: transaction)
+            try ensureSafeParents(of: "old/" + unit.path, root: staged(unit.path))
+            try ensureSafeParents(of: "ready/" + unit.path, root: staged(unit.path))
             let parts = unit.path.split(separator: "/")
             guard paths.insert(unit.path).inserted,
                   unit.path == "config.toml" || (parts.count == 2 && ["wallpapers", "Library", "UserAssets"].contains(String(parts[0])) && unit.path != "UserAssets/PresetAssets")
@@ -507,14 +568,24 @@ struct WallpaperBackupService: Sendable {
             }
         }
         if journal.preferencesCommitted {
-            try finishCommitted(transaction: transaction)
+            try finishCommitted(transaction: transaction, libraryTransaction: libraryTransaction)
             return
         }
+        // A unit that was here is moved aside before its replacement is published, so one of the
+        // two copies is always there. Neither means the copies are not where the journal says:
+        // nothing is rolled back and the journal is kept.
+        for unit in journal.units where unit.existed {
+            let staging = staged(unit.path)
+            guard manager.fileExists(atPath: staging.appendingPathComponent("old/" + unit.path).path)
+                    || manager.fileExists(atPath: staging.appendingPathComponent("ready/" + unit.path).path) else {
+                throw WallpaperBackupFailure(message: String(localized: "Restore recovery could not find the copies it set aside. The restore folder has been kept and nothing has been deleted."))
+            }
+        }
         for unit in journal.units.reversed() {
-            try ensureSafeParents(of: unit.path, root: supportRoot)
-            let live = supportRoot.appendingPathComponent(unit.path)
-            let old = transaction.appendingPathComponent("old/" + unit.path)
-            let ready = transaction.appendingPathComponent("ready/" + unit.path)
+            try ensureSafeParents(of: unit.path, root: liveRoot(unit.path))
+            let live = liveRoot(unit.path).appendingPathComponent(unit.path)
+            let old = staged(unit.path).appendingPathComponent("old/" + unit.path)
+            let ready = staged(unit.path).appendingPathComponent("ready/" + unit.path)
             if manager.fileExists(atPath: old.path) {
                 _ = try files.kind(at: old)
                 if manager.fileExists(atPath: live.path) { try manager.removeItem(at: live) }
@@ -529,12 +600,15 @@ struct WallpaperBackupService: Sendable {
         guard defaults.synchronize() else {
             throw WallpaperBackupFailure(message: String(localized: "The previous preferences could not be saved. Restore recovery will retry at the next launch."))
         }
+        // The library's folder first: the journal beside the support root is what names it.
+        if let libraryTransaction, manager.fileExists(atPath: libraryTransaction.path) { try manager.removeItem(at: libraryTransaction) }
         try manager.removeItem(at: transaction)
     }
 
-    private func finishCommitted(transaction: URL) throws {
+    private func finishCommitted(transaction: URL, libraryTransaction: URL?) throws {
         // Delete pending first: a crash cannot leave a completed restore to repeat.
         try cancelPendingRestore()
+        if let libraryTransaction, manager.fileExists(atPath: libraryTransaction.path) { try manager.removeItem(at: libraryTransaction) }
         try manager.removeItem(at: transaction)
     }
 
@@ -691,7 +765,7 @@ struct WallpaperBackupService: Sendable {
         guard !id.contains("/") else { throw files.unsafe(id) }
         let path = "Library/\(id)/project.json"
         let useIncoming = context.entries[path] != nil && (context.selected == nil || context.selected!.contains("Library/" + id))
-        let root = useIncoming ? context.payload : supportRoot
+        let root = useIncoming ? context.payload : storageRoot
         guard manager.fileExists(atPath: root.appendingPathComponent(path).path) else { return [:] }
         let object = try readObject(root: root, path: path)
         return (object["general"] as? [String: Any])?["properties"] as? [String: [String: Any]] ?? [:]
@@ -700,7 +774,7 @@ struct WallpaperBackupService: Sendable {
     private func isWebProject(_ id: String, context: ReferenceContext) throws -> Bool {
         let path = "Library/\(id)/project.json"
         let useIncoming = context.entries[path] != nil && (context.selected == nil || context.selected!.contains("Library/" + id))
-        let root = useIncoming ? context.payload : supportRoot
+        let root = useIncoming ? context.payload : storageRoot
         guard manager.fileExists(atPath: root.appendingPathComponent(path).path) else { return false }
         return (try readObject(root: root, path: path)["type"] as? String)?.lowercased() == "web"
     }
@@ -734,8 +808,8 @@ struct WallpaperBackupService: Sendable {
         }
         let projectPath = "Library/\(wallpaper)/project.json"
         var descriptor: [String: Any]?
-        if manager.fileExists(atPath: supportRoot.appendingPathComponent(projectPath).path) {
-            let object = try readObject(root: supportRoot, path: projectPath)
+        if manager.fileExists(atPath: live(projectPath).path) {
+            let object = try readObject(root: storageRoot, path: projectPath)
             descriptor = ((object["general"] as? [String: Any])?["properties"] as? [String: [String: Any]])?[property]
         }
         let configPath = "wallpapers/\(wallpaper).json"
@@ -773,10 +847,10 @@ struct WallpaperBackupService: Sendable {
                 || (retainedPreset != nil && relative.hasPrefix(retainedPreset! + "/"))
             if owned, context.entries[relative] != nil {
                 if let selected = context.selected, !selected.contains(where: { relative == $0 || relative.hasPrefix($0 + "/") }) {
-                    let live = supportRoot.appendingPathComponent(relative)
+                    let live = live(relative)
                     guard live.resolvingSymlinksInPath().path == live.path else { throw files.unsafe(relative) }
                 }
-                let mapped = supportRoot.appendingPathComponent(relative)
+                let mapped = live(relative)
                 return text.hasPrefix("file:") ? mapped.absoluteString : mapped.path
             }
         }
@@ -946,7 +1020,7 @@ struct WallpaperBackupService: Sendable {
         let payload = package.appendingPathComponent("data")
         let paths = Set(manifest.entries.map(\.path))
         let ids = wallpaperIDs(manifest.entries)
-        for id in ids where !paths.contains("Library/" + id) && !manager.fileExists(atPath: supportRoot.appendingPathComponent("Library/" + id).path) {
+        for id in ids where !paths.contains("Library/" + id) && !manager.fileExists(atPath: live("Library/" + id).path) {
             warnings.insert(String(localized: "Wallpaper \(id) is not included or installed. Reinstall its project files after restoring."))
         }
         let context = referenceContext(manifest: manifest, package: package)

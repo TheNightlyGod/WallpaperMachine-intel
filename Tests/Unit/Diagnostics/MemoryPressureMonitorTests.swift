@@ -45,6 +45,21 @@ final class MemoryPressureMonitorTests: XCTestCase {
         XCTAssertEqual(harness.reports.first?.isWarning, true)
     }
 
+    func testListenerHearsWhenPressureBeginsAndEndsOnce() {
+        let harness = Harness()
+        var changes: [Bool] = []
+        harness.monitor.onPressureChanged = { changes.append($0) }
+        harness.deliver(.normal, at: 0)
+        harness.deliver(.warning, at: 1)
+        harness.deliver(.critical, at: 2)
+        harness.deliver(.warning, at: 30)
+        XCTAssertTrue(harness.monitor.underPressure)
+        harness.deliver(.normal, at: 40)
+        harness.deliver(.normal, at: 41)
+        XCTAssertEqual(changes, [true, false], "only the start and the end of a stretch")
+        XCTAssertFalse(harness.monitor.underPressure)
+    }
+
     func testNormalAfterPressureReportsDuration() {
         let harness = Harness()
         harness.deliver(.warning, at: 10)

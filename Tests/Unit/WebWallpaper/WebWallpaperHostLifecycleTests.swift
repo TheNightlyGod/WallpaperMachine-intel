@@ -14,6 +14,8 @@ final class WebWallpaperHostLifecycleTests: XCTestCase {
     let page: WebWallpaperPage
     var frame: NSRect
     var posterLayer: CALayer? = CALayer()
+    var windowNumber: Int { ObjectIdentifier(self).hashValue }
+    private(set) var retired = false
     /// Hosts the page the way `WebWallpaperWindow` does when asked to, so a
     /// suspension can detach the view; otherwise the page has no container.
     private var container: NSView?
@@ -35,7 +37,7 @@ final class WebWallpaperHostLifecycleTests: XCTestCase {
     var hasVeil: Bool { posterLayer?.sublayers?.contains { $0.name == SwitchHoldVeil.layerName } == true }
     func setScreenFrame(_ frame: NSRect) { self.frame = frame }
     func present() { veiledWhenPresented = hasVeil }
-    func retire() {}
+    func retire() { retired = true }
   }
 
   private final class Model {
@@ -156,6 +158,53 @@ final class WebWallpaperHostLifecycleTests: XCTestCase {
     staleFailure?("retired document")
     XCTAssertEqual(fixture.model.states.count, count)
     XCTAssertEqual(fixture.model.states.last?.wallpaperID, "replacement")
+  }
+
+  // MARK: Pages kept suspended for another desktop
+
+  func testAPageTheDisplayKeepsIsSuspendedWhenItsDesktopIsLeftAndRunsOnWhenItComesBack() async throws {
+    let fixture = try Fixture()
+    defer { fixture.close() }
+    fixture.host.setKeptWallpapers([7: ["wallpaper", "replacement"]])
+    await fixture.host.apply([fixture.descriptor])
+    try await wait { fixture.model.states.last?.phase == .ready }
+    let first = try XCTUnwrap(fixture.model.surfaces.last)
+
+    await fixture.host.apply([fixture.replacement()])
+    try await wait { fixture.model.states.last?.phase == .ready }
+    let second = try XCTUnwrap(fixture.model.surfaces.last)
+    XCTAssertFalse(first === second, "the next desktop's page has a window of its own")
+    XCTAssertFalse(first.retired, "the page left behind is kept")
+    XCTAssertTrue(first.page.hostSuspended, "and suspended")
+    XCTAssertEqual(fixture.host.keptWallpapers(on: 7), ["wallpaper"])
+    XCTAssertEqual(fixture.host.keptWindowNumbers, [first.windowNumber])
+
+    await fixture.host.apply([fixture.descriptor])
+    XCTAssertEqual(fixture.model.surfaces.count, 2, "nothing loads again")
+    XCTAssertFalse(first.page.hostSuspended, "the kept page runs on")
+    XCTAssertTrue(second.page.hostSuspended, "and the one left now is kept in its turn")
+    XCTAssertFalse(second.retired)
+    XCTAssertEqual(fixture.host.windowWallpapers, [first.windowNumber: "wallpaper", second.windowNumber: "replacement"])
+    XCTAssertEqual(fixture.model.states.last?.wallpaperID, "wallpaper")
+    XCTAssertEqual(fixture.model.states.last?.phase, .ready)
+  }
+
+  func testKeptPagesAreLetGoWhenThePlanDropsThemAndAPageThatHasNotLoadedIsNotKept() async throws {
+    let fixture = try Fixture()
+    defer { fixture.close() }
+    fixture.host.setKeptWallpapers([7: ["wallpaper", "replacement"]])
+    await fixture.host.apply([fixture.descriptor])
+    let loading = try XCTUnwrap(fixture.model.surfaces.last)
+    await fixture.host.apply([fixture.replacement()])
+    XCTAssertTrue(loading.retired, "a page that has not loaded would leave its desktop blank")
+    try await wait { fixture.model.states.last?.phase == .ready }
+    let second = try XCTUnwrap(fixture.model.surfaces.last)
+
+    await fixture.host.apply([])
+    XCTAssertFalse(second.retired, "a display that moved to a scene keeps the page too")
+    fixture.host.setKeptWallpapers([:])
+    XCTAssertTrue(second.retired, "memory pressure or the mode turned off lets go of it")
+    XCTAssertTrue(fixture.host.keptWindowNumbers.isEmpty)
   }
 
   func testFailuresBeforePageCreationDoNotOfferRetry() async throws {

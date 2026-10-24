@@ -1,7 +1,8 @@
-# The new-issue chooser. Blank issues stay on: the app's "Not working? Report on
-# GitHub" opens /issues/new with the title and body filled in (ExternalLink.newIssue
-# in App/Views/ControlPanel/Model/), and with blank issues off GitHub would send it
-# here instead, losing both.
+# The new-issue chooser. The app's "Not working? Report on GitHub" opens the bug
+# report form (ExternalLink.newIssue in App/Views/ControlPanel/Model/), but 1.6.0 and
+# earlier open /issues/new with the title and body filled in. Blank issues stay on
+# for them: with blank issues off GitHub would send those links here instead,
+# losing both. Turn them off once those versions are rare.
 blank_issues_enabled: true
 contact_links:
   - name: Question or help

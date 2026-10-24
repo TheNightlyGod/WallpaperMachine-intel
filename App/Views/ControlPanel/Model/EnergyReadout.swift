@@ -13,7 +13,7 @@ struct EnergyReadout: Equatable {
 
   /// A condition that stops a figure from being graded or compared, with what it says.
   enum Caveat: Equatable, Sendable {
-    /// A video played through macOS's native player: macOS charges its decoding and drawing to nobody
+    /// A plain video: macOS charges its decoding and drawing to nobody
     /// this app owns.
     case nativeVideo
     /// Other apps kept the GPU busy, which makes macOS charge this app's GPU work more.
@@ -21,7 +21,7 @@ struct EnergyReadout: Equatable {
 
     @MainActor var title: String {
       switch self {
-      case .nativeVideo: L("Native video not counted")
+      case .nativeVideo: L("Video not counted")
       case .gpuContended: L("GPU shared with other apps")
       }
     }
@@ -30,7 +30,7 @@ struct EnergyReadout: Equatable {
       switch self {
       case .nativeVideo:
         L(
-          "macOS decodes and draws videos played with Native video and charges none of that to this app, so these figures leave most of it out. The grade and any comparison are off while one plays."
+          "macOS decodes and draws videos and charges none of that to this app, so these figures leave most of it out. The grade and any comparison are off while one plays."
         )
       case .gpuContended:
         L(

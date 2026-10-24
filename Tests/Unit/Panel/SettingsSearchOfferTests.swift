@@ -88,7 +88,7 @@ final class SettingsSearchOfferTests: PanelTestCase {
   }
 
   /// Active Display Only needs a second display, and the live reports need something to report:
-  /// a scale in force that differs from the saved one, a decoder that is shared.
+  /// a scale in force that differs from the saved one.
   func testOneDisplayAndQuietReportsLeaveTheirRowsOutOfTheResults() async throws {
     try pinPanelLanguageToEnglish()
     try await withRecordingPanel { panel, _ in
@@ -97,20 +97,19 @@ final class SettingsSearchOfferTests: PanelTestCase {
       let settings = controller.settings
       let quiet = BridgeSnapshotFixtures.settings(displays: panel.store.settingsSnapshot.displays)
       panel.store.settingsSnapshot = quiet
-      for query in ["Active Display", "Effective now", "decode in use"] {
+      for query in ["Active Display", "Effective now"] {
         settings.query = query
         XCTAssertTrue(settings.search.hasNoResults, "\(query) is not drawn on this Mac now")
       }
 
       panel.store.settingsSnapshot = BridgeSnapshotFixtures.settings(
         displays: quiet.displays + [ShellFixtures.display("secondary", "Built-in Retina Display")],
-        sharedVideoDecodeSessions: 1, sharedVideoDecodeConsumers: 2, renderScale: 0.75,
-        preferredRenderScale: 1)
+        renderScale: 0.75, preferredRenderScale: 1)
       settings.query = "Active Display"
       XCTAssertEqual(settings.search.count(in: .quick), 1, "The tile of a Mac with two displays")
       settings.query = "Effective now"
       XCTAssertEqual(settings.search.count(in: .performance), 1)
-      settings.query = "decode in use"
+      settings.query = "Direct video plane sampling"
       XCTAssertEqual(settings.search.count(in: .performance), 1)
       XCTAssertTrue(settings.search.opens(PerformanceSettingsSection.advanced))
     }

@@ -12,14 +12,10 @@ final class SettingsRecordingBridge: LayoutSnapshotBridge {
     var targetFps: UInt32
   }
 
-  var videoBackendCalls: [String] = []
   var batteryProfileCalls: [Profile] = []
-  var contentPacingCalls: [Bool] = []
-  var sharedVideoDecodeCalls: [Bool] = []
   var sceneOptimizationCalls: [Bool] = []
   var sceneOnDemandCalls: [Bool] = []
   var sceneVideoPlaneSamplingCalls: [Bool] = []
-  var sceneRendererCalls: [String] = []
   var sceneResolutionCalls: [String] = []
   var verboseLoggingCalls: [Bool] = []
   /// Counted off the main actor: the store reads these synchronously.
@@ -36,26 +32,12 @@ final class SettingsRecordingBridge: LayoutSnapshotBridge {
     return bundle
   }
 
-  override func setVideoBackend(mode: String) async throws -> BridgeSnapshotBundle {
-    try await record({ $0.videoBackendCalls.append(mode) }) { $0.videoBackend = mode }
-  }
-
   override func setBatteryQualityProfile(renderScale: Float, targetFps: UInt32) async throws
     -> BridgeSnapshotBundle
   {
     try await record({ $0.batteryProfileCalls.append(Profile(renderScale: renderScale, targetFps: targetFps)) }) {
       $0.batteryRenderScale = renderScale
       $0.batteryTargetFps = targetFps
-    }
-  }
-
-  override func setContentPacingEnabled(enabled: Bool) async throws -> BridgeSnapshotBundle {
-    try await record({ $0.contentPacingCalls.append(enabled) }) { $0.contentPacingEnabled = enabled }
-  }
-
-  override func setSharedVideoDecodeEnabled(enabled: Bool) async throws -> BridgeSnapshotBundle {
-    try await record({ $0.sharedVideoDecodeCalls.append(enabled) }) {
-      $0.sharedVideoDecodeEnabled = enabled
     }
   }
 
@@ -75,10 +57,6 @@ final class SettingsRecordingBridge: LayoutSnapshotBridge {
     try await record({ $0.sceneVideoPlaneSamplingCalls.append(enabled) }) {
       $0.sceneVideoPlaneSamplingEnabled = enabled
     }
-  }
-
-  override func setSceneRenderer(mode: String) async throws -> BridgeSnapshotBundle {
-    try await record({ $0.sceneRendererCalls.append(mode) }) { $0.sceneRenderer = mode }
   }
 
   override func setSceneResolution(mode: String) async throws -> BridgeSnapshotBundle {

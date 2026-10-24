@@ -2,7 +2,9 @@ import AppKit
 import Darwin
 
 struct LockScreenWallpaperFailure: LocalizedError {
-  enum Reason { case general, differentExtensionCopy, extensionTurnedOff }
+  /// `transient` is a failure a later attempt can get past on its own: a write that raced
+  /// WallpaperAgent's own, or the agent between a restart and its relaunch.
+  enum Reason { case general, differentExtensionCopy, extensionTurnedOff, transient }
   let message: String
   var reason: Reason = .general
   var errorDescription: String? { message }
@@ -107,6 +109,7 @@ final class LockScreenWallpaperSelection {
     }
     if !restartPending, let request, request == settled { return }
     settled = nil
+    let priorEntries = entries
     let bytes = try Data(contentsOf: storeURL)
     guard
       var root = try PropertyListSerialization.propertyList(from: bytes, format: nil)
@@ -437,9 +440,14 @@ final class LockScreenWallpaperSelection {
     if changed {
       try persistEntries(recovery)
       guard try Data(contentsOf: storeURL) == bytes else {
+        // Nothing was written. The union stays on disk for recovery, but the next attempt must
+        // not count the fields this one was about to take as ours: it would read them as
+        // changed outside the app.
+        entries = priorEntries
         throw LockScreenWallpaperFailure(
           message:
-            String(localized: "The system wallpaper changed during native selection. Please retry; no concurrent changes were overwritten."))
+            String(localized: "The system wallpaper changed during native selection. Please retry; no concurrent changes were overwritten."),
+          reason: .transient)
       }
       try Self.encode(root).write(to: storeURL, options: .atomic)
       restartPending = true
@@ -630,16 +638,18 @@ final class LockScreenWallpaperSelection {
 
   /// Verify effective UID and the kernel-reported executable immediately before
   /// each signal. Never signal by name alone, restart Dock, or touch loginwindow.
-  private static func reloadWallpaperAgent() throws {
+  static func reloadWallpaperAgent() throws {
     let expected = "/System/Library/CoreServices/WallpaperAgent.app/Contents/MacOS/WallpaperAgent"
     let capacity = proc_listallpids(nil, 0)
     guard capacity > 0 else {
-      throw LockScreenWallpaperFailure(message: String(localized: "Unable to enumerate the wallpaper service."))
+      throw LockScreenWallpaperFailure(
+        message: String(localized: "Unable to enumerate the wallpaper service."), reason: .transient)
     }
     var pids = [pid_t](repeating: 0, count: Int(capacity) + 32)
     let count = pids.withUnsafeMutableBytes { proc_listallpids($0.baseAddress, Int32($0.count)) }
     guard count > 0, Int(count) <= pids.count else {
-      throw LockScreenWallpaperFailure(message: String(localized: "Unable to identify the wallpaper service safely."))
+      throw LockScreenWallpaperFailure(
+        message: String(localized: "Unable to identify the wallpaper service safely."), reason: .transient)
     }
     var found = false
     // PROC_PIDPATHINFO_MAXSIZE expands to 4*MAXPATHLEN and is not Swift-importable.
@@ -671,7 +681,7 @@ final class LockScreenWallpaperSelection {
     if let last = lastReloadSignal, Date().timeIntervalSince(last) < 10 { return }
     throw LockScreenWallpaperFailure(
       message:
-        String(localized: "No positively verified user-owned WallpaperAgent is running. Native selection could not be activated; its restoration journal was retained.")
-    )
+        String(localized: "No positively verified user-owned WallpaperAgent is running. Native selection could not be activated; its restoration journal was retained."),
+      reason: .transient)
   }
 }

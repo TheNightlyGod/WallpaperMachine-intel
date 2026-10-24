@@ -47,7 +47,7 @@ final class TelemetrySamplerTests: XCTestCase {
     private static func context(wallpaper: String = "2873461829") -> TelemetryFrameContext {
         TelemetryFrameContext(
             scenes: [7: .init(wallpaperID: wallpaper, kind: .scene, backend: "native_metal",
-                              fallback: false, mode: "continuous")],
+                              mode: "continuous")],
             displays: [7: .init(width: 3024, height: 1964, scale: 2, hz: 120, main: true)],
             frameRateCap: nil, renderScale: 1, reducedQuality: false, battery: false,
             lowPower: false, thermal: "nominal")

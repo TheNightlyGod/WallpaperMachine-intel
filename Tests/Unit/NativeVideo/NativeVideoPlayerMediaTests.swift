@@ -453,6 +453,33 @@ final class NativeVideoPlayerMediaTests: XCTestCase {
         print("[media] audio cannot start -> \(dropped ?? "none")")
     }
 
+    func testEveryLoopPassStopsAtTheEndOfThePicture() async throws {
+        // Issue 76: an unbounded looper waited for the audio at every seam and
+        // held the last frame meanwhile. Paused, with the audio sent to an
+        // output that does not exist, so nothing plays or opens a device.
+        var request = SyntheticVideoFixture.Request.constantRate(
+            name: "loop-ends-with-picture", numerator: 30, denominator: 1, frames: 30)
+        request.withAudio = true
+        request.audioSeconds = 1.5
+        let url = try await SyntheticVideoFixture.write(request, into: directory)
+
+        let player = NativeVideoPlayer(surface: surface, counters: counters, paused: true)
+        player.setAudioOutputDeviceForTest("org.wallpapermachine.tests.missing-output")
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: 64, height: 36))
+        view.wantsLayer = true
+        player.attach(to: view)
+        player.load(url: url)
+        self.player = player
+
+        let queued = await wait { player.queuedItemCount > 0 }
+        XCTAssertTrue(queued, "the looper never queued a copy of the clip")
+        let ends = player.queuedItemEndTimesForTest
+        XCTAssertFalse(ends.isEmpty)
+        for end in ends {
+            XCTAssertEqual(end, CMTime(value: 1, timescale: 1), "a pass must end with the picture")
+        }
+    }
+
     /// A 64x36 clip, or its quarter-turned twin, playing in a 40x40 point view
     /// whose picture size the item has reported.
     private func sizedPlayer(
@@ -522,6 +549,40 @@ final class NativeVideoPlayerMediaTests: XCTestCase {
         // Back to a plain mode: the layer returns to the display.
         player.setScaling(.fill, factor: 1)
         XCTAssertEqual(player.layerFrameForTest, bounds)
+    }
+
+    func testThePositionMovesThePictureWithinTheRoomAroundIt() async throws {
+        let player = try await sizedPlayer(name: "layout-position")
+        _ = await wait(upTo: .seconds(3)) { player.layerIsReadyForDisplayForTest }
+        player.relayout(bounds: CGRect(x: 0, y: 0, width: 100, height: 50), backingScale: 1)
+
+        // Original size: the 64x36 picture leaves 36 points across and 14 down.
+        player.setScaling(.none, factor: 1, pan: .centered)
+        assertRect(player.layerFrameForTest, CGRect(x: 18, y: 7, width: 64, height: 36),
+            accuracy: 0, "centred")
+        player.setScaling(.none, factor: 1, pan: .init(x: 0, y: 0))
+        assertRect(player.layerFrameForTest, CGRect(x: 0, y: 14, width: 64, height: 36),
+            accuracy: 0, "top left: y grows upward in the layer, so the top edge is the last 14")
+        player.setScaling(.none, factor: 1, pan: .init(x: 1, y: 1))
+        assertRect(player.layerFrameForTest, CGRect(x: 36, y: 0, width: 64, height: 36),
+            accuracy: 0, "bottom right")
+
+        // A plain mode with a position is placed by the layout, not by gravity, which centres:
+        // Fit of 64x36 into 100x50 is 88.9x50 (rounded), with 11 points of room across.
+        player.setScaling(.match, factor: 1, pan: .init(x: 0, y: 0.5))
+        XCTAssertEqual(player.layerFrameForTest.minX, 0, accuracy: 0.01, "fit, flush left")
+        XCTAssertEqual(player.layerGravityForTest, .resize,
+            "the layer is the picture, stretched to the layout's own rectangle")
+
+        // Back to the middle: AVFoundation places the picture again.
+        player.setScaling(.match, factor: 1, pan: .centered)
+        XCTAssertEqual(player.layerFrameForTest, CGRect(x: 0, y: 0, width: 100, height: 50))
+        XCTAssertEqual(player.layerGravityForTest, .resizeAspect)
+
+        // A position that is not a position is held to the edge, or the middle.
+        player.setScaling(.none, factor: 1, pan: .init(x: .nan, y: 7))
+        assertRect(player.layerFrameForTest, CGRect(x: 18, y: 0, width: 64, height: 36),
+            accuracy: 0, "not a number is the middle, past the edge is the edge")
     }
 
     func testAResizedOrDenserDisplayMovesThePictureAtOnce() async throws {
@@ -629,7 +690,7 @@ final class NativeVideoPlayerMediaTests: XCTestCase {
         // End to end through the production entry point: admission refuses and
         // the player is never constructed for it.
         let url = try SyntheticVideoFixture.writeCorrupt(name: "corrupt-media", into: directory)
-        let refusal = await NativeVideoAdmission.evaluate(url: url, targetFps: 60)
+        let refusal = await NativeVideoAdmission.evaluate(url: url)
         XCTAssertNotNil(refusal)
         print("[media] corrupt -> \(refusal?.reason ?? "ACCEPTED")")
     }

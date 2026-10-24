@@ -115,14 +115,14 @@ final class ControlPanelWindowSizingTests: XCTestCase {
     let minimized = RecordingWindow()
     minimized.minimized = true
     ControlPanelWindow.bringForward(minimized)
-    XCTAssertEqual(minimized.calls, ["deminiaturize", "makeKeyAndOrderFront"],
+    XCTAssertEqual(minimized.calls, ["deminiaturize", "makeKeyAndOrderFront", "orderFrontRegardless"],
       "A minimized panel must leave the Dock before it is fronted")
     XCTAssertFalse(minimized.isMiniaturized)
 
     let open = RecordingWindow()
     ControlPanelWindow.bringForward(open)
-    XCTAssertEqual(open.calls, ["makeKeyAndOrderFront"],
-      "A window that is not minimized is only fronted")
+    XCTAssertEqual(open.calls, ["makeKeyAndOrderFront", "orderFrontRegardless"],
+      "A window that is not minimized is only fronted, above the active app even when this one is not")
   }
 
   /// A titled window that is never ordered onto the screen.
@@ -153,6 +153,7 @@ private final class RecordingWindow: NSWindow {
     minimized = false
   }
   override func makeKeyAndOrderFront(_ sender: Any?) { calls.append("makeKeyAndOrderFront") }
+  override func orderFrontRegardless() { calls.append("orderFrontRegardless") }
 }
 
 private struct KeyLoopHost: NSViewRepresentable {

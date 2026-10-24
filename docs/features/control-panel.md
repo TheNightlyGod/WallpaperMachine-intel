@@ -111,7 +111,8 @@ does not count). Sweeping across the grid, dragging a selection and a preview
 that is a single picture start nothing, and moving between one tile's own buttons
 keeps it playing. Leaving the tile, hiding the window, filtering the tile away or
 changing page releases the animation. The inspector's artwork is the preview file
-itself, so the selected wallpaper still animates there.
+itself, so the selected wallpaper still animates there while the window is on
+screen; hiding the window releases it, and showing the window reads the file again.
 
 The window never shrinks below a 760×560 content area (capped by the visible
 screen on small displays). `ControlPanelWindow.minimumContentSize` owns that
@@ -170,8 +171,11 @@ the rest opens in a popover from the ⓘ beside the title.
 - **Quick Settings** collects Control Center-style tiles that switch the same
   preferences as their full rows and stay in sync with them: **Open at Login**,
   **Mute All**, **Lock Screen** and **Screen Saver** (both experimental),
-  **Desktop Picture**, **Active Display Only** (shown with two or more enabled
-  displays, or while on), **Hide After Applying** and **Live Edits**. A tile that
+  **Desktop Picture**, **Wallpaper per Desktop** (the display the Library applies
+  wallpapers to, named in its state line when there are several; **Unavailable** without
+  desktop information or for a mirrored or disabled display), **Active Display Only**
+  (shown with two or more enabled displays, or while on), **Hide After Applying** and
+  **Live Edits**. A tile that
   cannot be switched is disabled with its reason (Desktop Picture leaves the reason to
   its row). Below the tiles are modules with
   segmented controls: the **Quality** preset (Low, Medium, High; Custom shows when
@@ -209,7 +213,10 @@ the rest opens in a popover from the ⓘ beside the title.
   the same note.
 - **Appearance** holds the window's look: appearance, accent color, surface tone,
   app icon and **Reset appearance** ([appearance](appearance.md)).
-- **Desktop & Lock Screen** holds the Desktop group (the switch for using the
+- **Desktop & Lock Screen** holds the Desktop group (**Different wallpaper for each
+  desktop** for the display the Library applies wallpapers to, named when there are several,
+  with **Choose…** opening that display's card in Displays to pick each desktop's wallpaper;
+  see [a different wallpaper for each desktop](spaces.md); the switch for using the
   wallpaper as the macOS desktop picture and the optional five-minute Mission Control
   picture update; see [desktop picture](desktop-picture.md#leaving-macoss-own-wallpaper-alone);
   keeping windows in place when clicking the wallpaper; and the off-by-default switch
@@ -223,8 +230,8 @@ the rest opens in a popover from the ⓘ beside the title.
   lower quality instead of pausing, and the page names which one is lowering it. See
   [Performance settings](performance.md).
 - **Performance** opens with a live energy readout for the app, then quality
-  (presets, frame-rate limit, render scale, 2D scene resolution) directly beneath it. Video backend,
-  scene controls and the experimental switches stay under **Advanced**. See
+  (presets, frame-rate limit, render scale, 2D scene resolution) directly beneath it. The scene controls
+  and the experimental switches stay under **Advanced**. See
   [Performance settings](performance.md). The inspector of an installed wallpaper
   adds its measured energy grade, and on a Mac with a battery its share of a charge
   per hour, once it has one
@@ -238,7 +245,10 @@ the rest opens in a popover from the ⓘ beside the title.
   [updates](updates.md)). The application menu item **Check for Updates…** opens
   this section. **Spread the word** has **Share WallpaperMachine…** and **Star on
   GitHub** ([one-time prompts](first-run.md#star-prompt-the-performance-data-question-and-the-subscriptions-offer)).
-- **Storage** holds the wallpaper files chosen for properties, **Clear unused
+- **Storage** opens with **Wallpaper library location**: where the installed
+  wallpapers and downloads are kept, **Show in Finder**, **Move…** to another folder
+  or an external drive and **Move to This Mac…** ([library location](library-location.md)).
+  It holds the wallpaper files chosen for properties, **Clear unused
   caches…** with the shader cache, logs and completed downloads,
   [Backup](backup-restore.md), and ends with **Troubleshooting**: Detailed logging, *Allow inspecting web wallpapers*
   (Safari's Web Inspector on the running pages), the diagnostics report
@@ -278,7 +288,8 @@ windows. A minimized panel comes back from the Dock when it is opened from the s
 menu, the Dock icon or Command-comma, or when the app is activated; the green button still
 offers full screen. The app keeps its Dock icon while any of these windows is open, on screen
 or minimized, and leaves the Dock when the last one closes. The wallpaper itself keeps playing
-on every Space as before.
+on every Space as before, unless the display has a
+[different wallpaper for each desktop](spaces.md): then only the desktop you are on plays.
 
 ### Reopening the panel
 
@@ -407,9 +418,11 @@ stay visible in a footer while editing. Its texts can be selected and copied.
 
 Below the compatibility note, an installed wallpaper that can run (not
 Application) shows **Not working? Report on GitHub**. It opens the repository's
-new-issue form in the browser with the wallpaper's title, Workshop link or id,
+bug report form in the browser with the wallpaper's title, Workshop link or id,
 type, app version and, while it is on screen, the backend drawing it (with the
-renderer's fallback reason) pre-filled. When the panel saw this wallpaper fail
+renderer's fallback reason) pre-filled. The fields the form requires (what the
+user did, what went wrong, what they expected and the diagnostics report) are
+left for the user to fill in. When the panel saw this wallpaper fail
 (its download, or the last attempt to apply it), an error notice takes the link's
 place with **Report this problem on GitHub**, whose issue also carries the error;
 an apply failure stays until an apply succeeds. An installed scene waiting for the
@@ -572,12 +585,15 @@ validated before changes. These operations preserve existing playback rules and
 use the normal command queue. See [Multi-display wallpaper layouts](display-layouts.md)
 for recovery, history, saved settings and the per-Space boundary.
 
-**Automatic wallpaper selection → Follow desktop Space** adds an experimental
-wallpaper/playlist picker for each regular desktop on the display. The current
-desktop is marked, reordered desktops keep their UUID-based choice, and
-unavailable desktops can be forgotten. Fullscreen app Spaces keep the previous
-selection. See [Space-based wallpaper choices](spaces.md) for transition, pause and
-lock-screen ownership limits; this mode does not create or switch Spaces.
+**Different wallpaper for each desktop**, under **Wallpaper** on each display's card
+and in the Library's target-display menu, gives each regular desktop of the display
+its own wallpaper or saved playlist. While it is on, the card shows a tile per desktop
+with its cover, the current one outlined; a tile opens a chooser with a search field
+and the installed wallpapers as covers, and Apply sets the current desktop's wallpaper,
+which the toolbar button names. Reordered desktops keep their UUID-based choice,
+unavailable desktops can be forgotten, and **Automatic wallpaper selection** shows the
+same mode by name. See [a wallpaper for each desktop](spaces.md) for transitions, pause
+and lock-screen ownership limits; this mode does not create or switch Spaces.
 
 A display the app has never configured starts enabled with the primary display's
 wallpaper, so a newly connected monitor shows a wallpaper without a trip to
@@ -589,10 +605,12 @@ wallpaper again does not make it independent.
 The **Primary display** row belongs to whichever display macOS makes the main one,
 but a wallpaper belongs to its display. When another display becomes the main one
 (a wake, a lid, a new arrangement), the previous main display keeps the wallpaper
-it showed, and the new main display shows what was saved for it, nothing if its
-wallpaper was switched off. A main display the app has never configured shows the
-wallpaper the previous main display had. `config.toml` records the display the
-row last described as `primary_display`.
+it showed, also while it is disconnected, and the new main display shows what was
+saved for it: nothing if its wallpaper was switched off or the display is set to
+mirror. A main display the app has never configured shows the wallpaper the previous
+main display had. `config.toml` records the display the row last described as
+`primary_display`; an older file without it hands nothing over until that record
+exists. Neither wallpaper reloads: the scenes stay on their displays.
 
 The renderer titles displays by CoreGraphics vendor and model numbers
 (`Vendor 1552 - Model 41055 (1 - Primary)`). `DisplayTitleResolver`
@@ -707,7 +725,9 @@ page. Quitting cancels and awaits an active local import.
 
 An import takes Wallpaper Engine project folders, a Steam library, a Wallpaper
 Engine folder, a project's own files, videos (`mp4`, `m4v`, `mov`, `webm`, `mkv`,
-`avi`), HTML files and pictures (`jpg`, `jpeg`, `png`, `gif`, `webp`, `heic`,
+`avi`; importing never checks the format, so a file macOS cannot play is imported and
+refused when applied, [with its format named](performance.md#video-playback)), HTML
+files and pictures (`jpg`, `jpeg`, `png`, `gif`, `webp`, `heic`,
 `heif`, `tif`, `tiff`, `bmp`, `avif`, at most 512 MB). A picture becomes a still
 `web` wallpaper with the id `image-<file name>`, packaged the way pixiv pages are
 (`StillImageWallpaper`; see [pixiv](pixiv.md#saving-a-page)): the original kept as

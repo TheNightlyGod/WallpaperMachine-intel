@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// A display's Automatic wallpaper selection disclosure: off, a time schedule, the system
-/// appearance or the desktop Space chooses its wallpaper. A mirrored or disabled display shows it
+/// appearance or a wallpaper for each desktop chooses its wallpaper. A mirrored or disabled display shows it
 /// but cannot change it.
 struct DisplaysAutomationDisclosure: View {
   let display: DisplayRow
@@ -47,14 +47,14 @@ private struct DisplaysAutomationRows: View {
             case .off: L("Off")
             case .schedule: L("Time schedule")
             case .appearance: L("Follow system appearance")
-            case .spaces: L("Follow desktop Space")
+            case .spaces: L("Different wallpaper for each desktop")
             }
           }(), width: 210
         ) {
           Text("Off").tag(DisplayWallpaperAutomation.Mode.off)
           Text("Time schedule").tag(DisplayWallpaperAutomation.Mode.schedule)
           Text("Follow system appearance").tag(DisplayWallpaperAutomation.Mode.appearance)
-          Text("Follow desktop Space").tag(DisplayWallpaperAutomation.Mode.spaces)
+          Text("Different wallpaper for each desktop").tag(DisplayWallpaperAutomation.Mode.spaces)
             .disabled(!state.spacesAvailable)
         }
         .focused($focus, equals: .modePicker(display: display.id))
@@ -88,9 +88,8 @@ private struct DisplaysAutomationRows: View {
           .disabled(locked)
         }
       case .spaces:
-        DisplaysSpaceRows(
-          display: display, state: state, targets: targets, locked: locked, forced: forced,
-          focus: $focus)
+        // The desktops are chosen on the card itself, where the switch is.
+        DisplaysNote(text: L("Each desktop’s wallpaper is chosen above, under Different wallpaper for each desktop."))
       case .schedule:
         DisplaysScheduleRows(
           display: display, state: state, targets: targets, locked: locked, forced: forced,
@@ -100,14 +99,19 @@ private struct DisplaysAutomationRows: View {
       DisplaysAutomationFooter(display: display, state: state, locked: locked, forced: forced)
     }
     .onChange(of: model.automationFocus, initial: true) { _, target in
-      guard let target else { return }
-      focus = target
-      model.consumeAutomationFocus()
+      switch target {
+      case nil, .desktopsToggle, .forget:
+        // The desktop rows take their own focus.
+        break
+      case let target?:
+        focus = target
+        model.consumeAutomationFocus()
+      }
     }
   }
 
-  /// "Manual choices stay until the next rule changes them." and, when Follow desktop Space cannot
-  /// be chosen, why.
+  /// "Manual choices stay until the next rule changes them." and, when a wallpaper for each desktop
+  /// cannot be chosen, why.
   private func modeNote(_ state: AutomationState) -> String {
     let base = L("Manual choices stay until the next rule changes them.")
     guard state.mode != .spaces, let reason = state.spacesUnavailableReason else { return base }
@@ -205,67 +209,6 @@ struct DisplaysTargetPicker: View {
     guard !identifier.isEmpty else { return nil }
     if let saved, Self.identifier(saved) == identifier { return saved }
     return (targets.wallpapers + targets.playlists).first { $0.id == identifier }?.target
-  }
-}
-
-// MARK: - Follow desktop Space
-
-private struct DisplaysSpaceRows: View {
-  let display: DisplayRow
-  let state: AutomationState
-  let targets: AutomationTargets
-  let locked: Bool
-  let forced: Bool
-  var focus: FocusState<DisplaysSettingsModel.AutomationFocus?>.Binding
-
-  @Environment(PanelController.self) private var controller
-
-  var body: some View {
-    let model = controller.displaysSettings
-    DisplaysItemNote(item: DisplaysSettingsSection.automationSpaces, forced: forced)
-    ForEach(state.desktops) { desktop in
-      DisplaysRow(
-        item: DisplaysSettingsSection.automationSpaces,
-        title: desktop.id == state.currentDesktop
-          ? L("Desktop \(desktop.number) (current)") : L("Desktop \(desktop.number)"),
-        note: "", forced: forced, identity: "\(display.id).\(desktop.id)"
-      ) {
-        DisplaysTargetPicker(
-          selection: desktop.target, targets: targets, isRequired: false,
-          key: PanelActionCoordinator.key("automationSpace", id: display.id, detail: desktop.id),
-          commit: {
-            try await controller.setAutomationDesktop(desktop.id, to: $0, display: display.id)
-          }
-        )
-        .disabled(locked || !state.spacesAvailable)
-      }
-    }
-    ForEach(state.missingDesktops) { missing in
-      let name = targets.title(of: missing.target) ?? L("Unavailable")
-      DisplaysRow(
-        item: DisplaysSettingsSection.automationSpaces, title: L("Unavailable desktop"), note: "",
-        forced: forced, identity: "\(display.id).missing.\(missing.id)", labelsControl: false
-      ) {
-        Button("Forget choice for \(name)") {
-          controller.launch(
-            PanelActionCoordinator.key("automationSpace", id: display.id, detail: missing.id)
-          ) { try await model.forgetDesktop(missing.id, display: display.id) }
-        }
-        .focused(focus, equals: .forget(display: display.id, desktop: missing.id))
-        .disabled(locked)
-      }
-    }
-    if state.mode == .spaces, let reason = state.spacesUnavailableReason {
-      DisplaysNote(
-        text: reason == .lockScreenOwnsDesktop
-          ? L("Turn off animated lock-screen wallpaper to use desktop Space choices.")
-          : L("Desktop information is unavailable. Refresh Spaces or choose another automatic mode."),
-        tone: .warning)
-    }
-    DisplaysNote(
-      text: L(
-        "Desktop numbers follow their order on this display; choices follow the desktop when you reorder it. An empty choice keeps the current wallpaper."
-      ))
   }
 }
 

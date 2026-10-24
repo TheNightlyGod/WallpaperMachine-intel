@@ -1,0 +1,23 @@
+# This project's Rust workspace: the shader layer, the renderer core that drives the
+# C++ engine in Engine/, and the bridge the app calls through UniFFI. Licence is
+# GPL-3.0-only.
+
+[workspace]
+resolver = "2"
+members = ["Shader", "Core", "Bridge"]
+
+[workspace.package]
+edition = "2024"
+license = "GPL-3.0-only"
+publish = false
+
+[workspace.dependencies]
+anyhow = "1.0"
+log = { version = "0.4", features = ["std"] }
+# Vendored naga (MIT OR Apache-2.0, used under MIT; ThirdParty/naga/PATCHES.md lists
+# the differences from the published crate). Only the GLSL front end and the Metal
+# back end are enabled: no SPIR-V output and no codespan diagnostics.
+naga = { path = "../ThirdParty/naga", default-features = false, features = ["glsl-in", "msl-out"] }
+
+# The static library is called from C++ across a C ABI, so panics must unwind
+# to be caught at the boundary: never set panic = "abort" here.

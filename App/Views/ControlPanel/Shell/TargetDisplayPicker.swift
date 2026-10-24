@@ -37,7 +37,9 @@ extension TargetDisplayOption {
   }
 }
 
-/// The display that wallpapers are applied to, chosen from a menu in the toolbar.
+/// The display that wallpapers are applied to, chosen from a menu in the toolbar, and whether that
+/// display keeps a different wallpaper for each desktop. While it does, the button names the
+/// desktop too: what is applied goes to that desktop and stays there.
 ///
 /// Every display is listed, but only an enabled one that plays its own wallpaper can be chosen; a
 /// mirrored or disabled one says so and is greyed out. A wide window names the chosen display next
@@ -53,6 +55,7 @@ struct TargetDisplayPicker: View {
     let displays = controller.targetDisplays
     let target = controller.targetDisplayID
     let current = displays.first { $0.id == target }
+    let desktop = current.flatMap { desktopName(of: $0) }
     let selection = Binding(
       get: { target },
       set: { shell.setTarget($0) })
@@ -65,6 +68,9 @@ struct TargetDisplayPicker: View {
         Text("Target display")
       }
       .pickerStyle(.inline)
+      if let current, current.isSelectable {
+        desktopsToggle(current)
+      }
     } label: {
       // The toolbar draws a `Label` as its icon alone, so a wide window spells the icon and the
       // name out side by side; a narrow one keeps the icon, and the help names the display.
@@ -76,21 +82,55 @@ struct TargetDisplayPicker: View {
           Text(verbatim: current?.shortLabel(among: displays) ?? L("Target display"))
             .lineLimit(1)
             .truncationMode(.tail)
+          if let desktop {
+            Text(verbatim: "· \(desktop)")
+              .lineLimit(1)
+              .fixedSize()
+          }
         }
-        .frame(maxWidth: 180)
+        .frame(maxWidth: desktop == nil ? 180 : 240)
       }
     }
     .disabled(controller.isStoreBusy)
-    .help(helpText(current))
+    .help(helpText(current, desktop: desktop))
     .accessibilityLabel(Text(verbatim: L("Target display")))
-    .accessibilityValue(Text(verbatim: current?.menuLabel ?? ""))
+    .accessibilityValue(Text(verbatim: [current?.menuLabel, desktop].compactMap { $0 }.joined(separator: ", ")))
     .accessibilityIdentifier("target-display")
   }
 
   /// What the button is for, and the display's full title, which the button may shorten.
-  private func helpText(_ current: TargetDisplayOption?) -> String {
-    let purpose = L("Wallpapers you apply go to this display")
+  private func helpText(_ current: TargetDisplayOption?, desktop: String?) -> String {
+    let purpose = desktop.map { L("Wallpapers you apply go to \($0) of this display") }
+      ?? L("Wallpapers you apply go to this display")
     guard let current else { return purpose }
     return "\(current.menuLabel)\n\(purpose)"
+  }
+
+  /// The desktop the person is on, while the display keeps a wallpaper for each desktop.
+  private func desktopName(of display: TargetDisplayOption) -> String? {
+    let state = controller.automationState(for: display.id)
+    guard state.mode == .spaces, let current = state.currentDesktop,
+      let desktop = state.desktops.first(where: { $0.id == current })
+    else { return nil }
+    return L("Desktop \(desktop.number)")
+  }
+
+  /// Different wallpaper for each desktop, for the chosen display: the same switch as its card in
+  /// Settings › Displays.
+  private func desktopsToggle(_ display: TargetDisplayOption) -> some View {
+    let state = controller.automationState(for: display.id)
+    let isOn = state.mode == .spaces
+    return Toggle(
+      isOn: Binding(
+        get: { isOn },
+        set: { on in
+          controller.launch(PanelActionCoordinator.key("desktopWallpapers", id: display.id)) {
+            try await controller.setDesktopWallpapers(on, display: display.id)
+          }
+        })
+    ) {
+      Text("Different wallpaper for each desktop")
+    }
+    .disabled(!isOn && !state.spacesAvailable)
   }
 }

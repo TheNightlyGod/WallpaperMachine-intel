@@ -27,6 +27,8 @@ enum SyntheticVideoFixture {
         /// Adds an audio track of silence covering the whole clip, for the
         /// cases that are about a clip with sound.
         var withAudio = false
+        /// How long the audio track lasts, when it should not end with the picture.
+        var audioSeconds: Double?
         /// Clockwise quarter-turn multiples written as the track's display
         /// matrix, the way a phone records a portrait clip: the stored frames
         /// stay `width` x `height` and only the matrix says how to show them.
@@ -155,7 +157,8 @@ enum SyntheticVideoFixture {
         // All of the audio goes in first and is finished, so the writer never
         // holds the video back waiting for audio to interleave with it.
         if let audio {
-            let seconds = Double(request.frameDurations.reduce(0, +)) / Double(request.timescale)
+            let seconds = request.audioSeconds
+                ?? Double(request.frameDurations.reduce(0, +)) / Double(request.timescale)
             let sample = try silence(frames: Int(silenceSampleRate * seconds))
             try await waitUntilReady(isReady: { audio.isReadyForMoreMediaData },
                 status: { writer.status }, failure: { writer.error?.localizedDescription })
@@ -185,7 +188,12 @@ enum SyntheticVideoFixture {
         input.markAsFinished()
         // The last frame needs an end time, or the track's duration stops one
         // frame short and the final interval never reaches the metadata.
-        writer.endSession(atSourceTime: CMTime(value: elapsed, timescale: request.timescale))
+        var end = CMTime(value: elapsed, timescale: request.timescale)
+        // A longer audio track would be cut off where the picture ends.
+        if let seconds = request.audioSeconds, request.withAudio {
+            end = CMTimeMaximum(end, CMTime(seconds: seconds, preferredTimescale: 44_100))
+        }
+        writer.endSession(atSourceTime: end)
         await writer.finishWriting()
         guard writer.status == .completed else {
             throw FixtureError.writerFailed(

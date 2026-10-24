@@ -17,7 +17,7 @@ writes that configuration to `artifacts/power/manifest-<timestamp>.json`:
 workspace commit and whether the tree was dirty, requested build configuration,
 chip and memory, macOS build, every online display's pixel geometry and refresh
 rate, charging and low-power state, recorded thermal warnings, current host
-Homebrew versions, and the workspace's pinned `upstream/` revisions. These
+Homebrew versions, and the pinned revisions of the vendored code in `ThirdParty/`. These
 workspace and host fields do not identify the application already running.
 
 Schema version 2 separates `workspace`, `host_renderer_libraries` and
@@ -125,14 +125,26 @@ comparison across a clock change reports throughput separately from power.
   period. A tick more than one whole interval late restarts the cadence instead
   of bursting to catch up
   (`ThreadTimerTest.CadenceKeepsItsPeriodDespiteWakeSlack`).
-- `FrameTimer` drops any tick that finds the previous DRAW still running; on
-  Compatibility a DRAW includes the GPU frame (the fence wait follows the
-  present). A DRAW that ends within a quarter interval of the tick it made the
-  clock drop runs that frame at once and restarts the cadence from it
-  (`FrameTimerTest.ADrawSlightlyLongerThanTheIntervalDoesNotHalveTheRate`); one
-  that ends later loses the whole period, so a scene that cannot keep up settles
-  at a steady fraction of the rate instead of drawing back to back. Otherwise
-  `FrameEnd` re-arms the clock only for an outstanding update request.
+- `FrameTimer` suppresses a tick while the previous admitted draw has not reached
+  `FrameEnd`. A completion within one quarter interval of the **observed suppressed
+  tick**, including the boundary, requests immediate recovery and restarts cadence.
+  A later completion loses that period; otherwise only an outstanding request
+  re-arms delivery. Posting delay is not subtracted, and scheduled due time is not
+  substituted for the suppression observation. The admission-contract tests cover
+  the inclusive boundary, one nanosecond beyond it, and actual observation-time
+  anchoring; other real-thread integration checks remain.
+
+`timer_delivery_benchmark`, run by `scripts/check_renderer.py`, reports a separate
+single-consumer measurement: requested 60 Hz ceiling, 18 ms of steady-clock busy
+work, 200 ms warmup and a nominal one-second sample. Raw counter loads lie within
+the recorded outer clock window; count divided by that actual duration is a
+diagnostic, not a simultaneous clock/counter observation or throughput guarantee.
+No delivered-count/rate threshold gates this measurement. Invocation, timeout and
+invalid-report failures still fail the tooling rather than fabricate a zero.
+
+This acceptance change leaves production scheduling, recovery, backpressure,
+atomics and process policy unchanged. It does not diagnose or retroactively pass
+the historical 42–60 throughput-check failures, nor establish an energy improvement.
 
 This is measured delivery, not presentation: whether and when those frames were
 displayed is not observable. Measurements recorded before 2026-09-28, when the
@@ -304,8 +316,8 @@ surface falsifies the change regardless of what a CPU graph shows.
 ### What the platform cannot report
 
 `present_requests` counts requests to present. Whether the compositor ever put
-a frame on a display is a different measurement, and this backend — MoltenVK
-over a `CAMetalLayer` swapchain — has no presentation-feedback source for it.
+a frame on a display is a different measurement, and this renderer, drawing into a
+`CAMetalLayer`, has no presentation-feedback source for it.
 The report says `presented_frames=unavailable`; the request count is never
 relabelled as displayed frames, and no frame-rate claim may be derived from it.
 
@@ -317,21 +329,11 @@ decode-correctness defect.
 
 | Switch | Off (default) | On |
 |---|---|---|
-| Settings → Performance → Advanced → Experimental → Content pacing (`experimental.content_pacing`) | Tick at the configured ceiling | Pace video to its observed content rate |
 | `WALLPAPER_MACHINE_FEEDBACK_COPIES=1` | Native Metal trades textures for a copy a layer only makes to read the image it draws into | Every such copy is made as a copy; the picture is byte-identical either way |
 | `WALLPAPER_MACHINE_METAL_TARGET_SHARING=0` | Native Metal lets targets never alive together share images, and traded copies share a small set | Every target keeps an image of its own; the picture is byte-identical either way, the target memory is not |
-| Settings → Performance → Advanced → Video playback (`video_backend` in the app config) | Compatibility: every wallpaper on the scene engine | Native video preferred: eligible plain local videos on the platform player |
-| Settings → Performance → Advanced → Scene renderer (`scene_renderer` in the app config) | See [scene rendering](../features/scene-rendering.md#scene-renderer) | The other renderer for every scene it can draw; headless, `LocalProjectEnergyIsMeasuredHeadlessly` ([renderer.md](renderer.md#ccmake-test-binaries)) runs one scene on either |
 | Settings → Performance → Quality → 2D scene resolution (`scene_resolution` under `[quality]`) | Display resolution: a 2D scene is rasterized at the size it is presented at | Canvas size: rasterized at the authored canvas and stretched; less GPU time and memory |
 
-`WALLPAPER_MACHINE_CONTENT_PACING=1` switches content pacing on in headless
-probes. An explicit setting wins over it and the app pushes its saved value at
-launch, so measure the app through the Settings switch.
-
-Demand-driven pacing is off by default because its remaining exposure cannot be
-bounded here: the content period only reaches the frame clock after a completed
-frame, so a rate that turns out tighter than the interval being waited out loses
-every frame produced during the remainder of it. Changes that are not switchable
+Changes that are not switchable
 (correctness and resource-lifetime fixes) need a separate build directory or
 worktree. Whichever way two versions are compared, they need isolated
 `WALLPAPER_MACHINE_HOME` directories and must be measured serially, never

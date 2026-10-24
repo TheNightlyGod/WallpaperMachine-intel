@@ -81,6 +81,8 @@ private final class HoldRig {
     var live: [UInt32: [CALayer]] = [:]
     var holdable = Set<UInt32>()
     var reduceMotion = false
+    var concealed = Set<UInt32>()
+    private(set) var released: [UInt32] = []
     /// What the visible wallpaper answers with; nil leaves the request unanswered.
     var answer: (CALayer) -> DesktopPosterFrame? = { _ in HoldRig.frame() }
     private(set) var requests: [(layer: CALayer, context: String)] = []
@@ -97,6 +99,7 @@ private final class HoldRig {
             layers: { [unowned self] in self.live[$0] ?? [] },
             shouldHold: { [unowned self] in self.holdable.contains($0) },
             reduceMotion: { [unowned self] in self.reduceMotion },
+            concealed: { [unowned self] in self.concealed.contains($0) },
             sleep: timers.closure,
             now: { [unowned self] in self.clock })
         responder = center.addObserver(forName: DesktopPosterNotification.request, object: nil, queue: nil) {
@@ -108,6 +111,7 @@ private final class HoldRig {
                 self.answer(layer)?.publish(for: layer, to: self.center, context: context)
             }
         }
+        hold.onReleased = { [unowned self] in self.released.append($0) }
         hold.start()
     }
 
@@ -648,6 +652,33 @@ final class WallpaperSwitchHoldTests: XCTestCase {
         XCTAssertNil(rig.veil(on: scene), "no fade to wait for")
         XCTAssertNil(rig.state())
         XCTAssertFalse(rig.timers.pending.contains(HoldRig.fadeWait))
+    }
+
+    func testAHiddenDisplayLosesItsVeilAtOnceAndSaysSo() async throws {
+        let rig = HoldRig()
+        defer { rig.finish() }
+        await rig.hold.begin(displays: [7])
+        XCTAssertTrue(rig.hold.isHolding(7))
+        let scene = HoldRig.screenLayer()
+        rig.announce(scene, display: 7, reason: "replace")
+        rig.concealed = [7]
+
+        rig.hold.engineSettled(displays: [7])
+
+        XCTAssertNil(rig.veil(on: scene), "nobody sees the veil, so it does not fade over the new picture")
+        XCTAssertFalse(rig.hold.isHolding(7))
+        XCTAssertEqual(rig.released, [7])
+    }
+
+    func testAStillThatNeverCameIsReportedAsReleased() async throws {
+        let rig = HoldRig()
+        defer { rig.finish() }
+        rig.answer = { _ in HoldRig.frame(bytes: 15) }
+
+        await rig.hold.begin(displays: [7])
+
+        XCTAssertFalse(rig.hold.isHolding(7))
+        XCTAssertEqual(rig.released, [7], "whoever waits for the hold is not left waiting")
     }
 
     func testDisplaysAreHeldAndReleasedIndependently() async throws {

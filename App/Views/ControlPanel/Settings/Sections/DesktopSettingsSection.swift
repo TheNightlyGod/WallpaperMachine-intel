@@ -7,6 +7,11 @@ struct DesktopSettingsSection: View {
   private static let lockScreen = SettingsItem.Group("lock-screen", title: "Lock screen")
   private static let screenSaver = SettingsItem.Group("screen-saver", title: "Screen saver")
 
+  static let desktopWallpapers = SettingsItem(
+    id: "desktop.desktop-wallpapers", section: .desktop, group: desktop,
+    title: "Different wallpaper for each desktop",
+    note: "Each desktop keeps the wallpaper you apply while you are on it, and only the desktop you are on plays, so Mission Control shows the other desktops as still pictures. A desktop you have visited waits paused where you left it; one you have not visited yet shows a still picture until its first visit. Kept wallpapers use memory and are let go when the Mac runs short of it.",
+    keywords: ["Spaces", "Choose…"])
   static let writeDesktopPicture = SettingsItem(
     id: "desktop.write-desktop-picture", section: .desktop, group: desktop,
     title: "Use the wallpaper as the macOS desktop picture",
@@ -55,7 +60,7 @@ struct DesktopSettingsSection: View {
     title: "Compatibility & permissions")
 
   static let items = [
-    writeDesktopPicture, refreshMissionControl, keepWindowsOnClick, livePropertyEdits,
+    desktopWallpapers, writeDesktopPicture, refreshMissionControl, keepWindowsOnClick, livePropertyEdits,
     lockScreenSwitch, lockScreenStatus, lockScreenContext, screenSaverSwitch, screenSaverStatus,
     screenSaverContext,
   ]
@@ -67,6 +72,7 @@ struct DesktopSettingsSection: View {
     SettingsPage(.desktop) {
       SettingsUnavailableNotice()
       SettingsGroup(Self.desktop, in: .desktop) {
+        desktopWallpapersRow
         SettingsRow(Self.writeDesktopPicture, note: desktop.lockedNote) {
           SettingsSwitchControl(key: .writeDesktopPicture)
         }
@@ -117,6 +123,32 @@ struct DesktopSettingsSection: View {
   }
 
   private var search: SettingsSearch { controller.settings.search }
+
+  /// Different wallpaper for each desktop, for the display the Library applies wallpapers to, named
+  /// when there are several. Choose… opens that display's card in Displays, where each desktop's
+  /// wallpaper is picked.
+  private var desktopWallpapersRow: some View {
+    let settings = controller.settings
+    let displays = controller.targetDisplays
+    let target = controller.targetDisplay
+    let several = displays.filter(\.isSelectable).count > 1
+    return SettingsRow(Self.desktopWallpapers) {
+      HStack(spacing: 8) {
+        if several, let target {
+          Text(verbatim: target.shortLabel(among: displays))
+            .font(.system(size: 11.5))
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+        }
+        SettingsActionButton("Choose…", isDisabled: target?.isSelectable != true) {
+          settings.select(.displays)
+          if let target { controller.displaysSettings.revealDesktops(display: target.id) }
+        }
+        .help(L("Open \(settings.text(SettingsSection.displays.title))"))
+        SettingsSwitchControl(key: .desktopWallpapers)
+      }
+    }
+  }
 
   /// The status the service reports, with Retry beside it while it reports a failure. Retry waits
   /// for the service to finish, and for the Mac, so it is never pressed twice.

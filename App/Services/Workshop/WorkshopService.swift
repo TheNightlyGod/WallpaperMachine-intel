@@ -136,30 +136,36 @@ actor WorkshopService {
 
     static func browseURL(search: String, kind: WorkshopKind, sort: WorkshopSort, page: Int, tags: [String] = [],
                           excludedTags: [String] = [], section: String = "readytouseitems") -> URL {
-        var url = URLComponents(string: "https://steamcommunity.com/workshop/browse/")!
-        url.queryItems = [
-            URLQueryItem(name: "appid", value: "431960"),
-            URLQueryItem(name: "section", value: section),
-            URLQueryItem(name: "browsesort", value: sort.browseSort),
-            URLQueryItem(name: "searchtext", value: search),
-            URLQueryItem(name: "p", value: String(max(1, page))),
-            URLQueryItem(name: "numperpage", value: String(Self.pageSize)),
-            URLQueryItem(name: "days", value: String(sort.days)),
-            URLQueryItem(name: "l", value: "english")
+        var items: [(String, String)] = [
+            ("appid", String(WorkshopApp.id)),
+            ("section", section),
+            ("browsesort", sort.browseSort),
+            ("searchtext", search),
+            ("p", String(max(1, page))),
+            ("numperpage", String(pageSize)),
+            ("days", String(sort.days)),
+            ("l", "english"),
         ]
-        if kind != .all { url.queryItems?.append(URLQueryItem(name: "requiredtags[]", value: kind.rawValue)) }
-        // Steam requires every selected tag, including the wallpaper type.
-        var seen: Set<String> = kind == .all ? [] : [kind.rawValue]
-        for tag in tags where seen.insert(tag).inserted {
-            url.queryItems?.append(URLQueryItem(name: "requiredtags[]", value: tag))
-        }
-        // Steam drops an item carrying any excluded tag; a tag that is also required would
-        // empty the result, so it is not sent as excluded.
-        var excluded: Set<String> = []
-        for tag in excludedTags where !seen.contains(tag) && excluded.insert(tag).inserted {
-            url.queryItems?.append(URLQueryItem(name: "excludedtags[]", value: tag))
-        }
-        return url.url!
+        var required: [String] = []
+        if kind != .all { required.append(kind.rawValue) }
+        for tag in tags where !required.contains(tag) { required.append(tag) }
+        items += required.map { ("requiredtags[]", $0) }
+        var excluded: [String] = []
+        for tag in excludedTags where !required.contains(tag) && !excluded.contains(tag) { excluded.append(tag) }
+        items += excluded.map { ("excludedtags[]", $0) }
+
+        // Every value is escaped down to unreserved characters: `URLComponents` would leave `+`
+        // (a space to Steam), and a search such as "rain & snow" must stay one parameter.
+        let unreserved = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = "steamcommunity.com"
+        components.path = "/workshop/browse/"
+        components.percentEncodedQuery = items.map { name, value in
+            (name.addingPercentEncoding(withAllowedCharacters: unreserved) ?? name) + "="
+                + (value.addingPercentEncoding(withAllowedCharacters: unreserved) ?? "")
+        }.joined(separator: "&")
+        return components.url!
     }
 
     func browse(search: String, kind: WorkshopKind, sort: WorkshopSort, page: Int, tags: [String] = [],
@@ -727,8 +733,6 @@ actor WorkshopService {
         return nil
     }
 
-    // Steam's public server-rendered page contains a JSON string, not an executable API response.
-    // Decode the JSON layers without evaluating any page JavaScript.
     static func decodePage(_ html: String) throws -> WorkshopPage {
         try decodeBrowse(html).page
     }
@@ -736,62 +740,78 @@ actor WorkshopService {
     /// A browse page and, for each collection on it, the ids of the wallpapers it holds (not
     /// the collections it holds), in the collection's order.
     static func decodeBrowse(_ html: String) throws -> (page: WorkshopPage, children: [String: [String]]) {
-        // Without the context or its query the page is not laid out as it was; `browse` then
-        // falls back to the links the page still carries.
         guard let context = renderContext(in: html),
-              let queryString = context["queryData"] as? String,
-              let queryData = try? JSONSerialization.jsonObject(with: Data(queryString.utf8)) as? [String: Any],
-              let queries = queryData["queries"] as? [[String: Any]],
-              let query = queries.first(where: { ($0["queryKey"] as? [Any])?.first as? String == "workshop_browse" }),
-              let state = query["state"] as? [String: Any],
-              let result = state["data"] as? [String: Any] else {
-            throw WorkshopLayoutChanged()
+              let queryData = context["queryData"] as? String,
+              let decoded = try? JSONSerialization.jsonObject(with: Data(queryData.utf8)) as? [String: Any],
+              let queries = decoded["queries"] as? [[String: Any]] else { throw WorkshopLayoutChanged() }
+
+        func key(_ query: [String: Any]) -> [String] { (query["queryKey"] as? [Any])?.compactMap { $0 as? String } ?? [] }
+        func data(_ query: [String: Any]) -> [String: Any]? {
+            (query["state"] as? [String: Any])?["data"] as? [String: Any]
         }
-        // The query is there and Steam answered it with something other than success: not a
-        // change of layout, so no list is guessed at from the page's links. Busy (10) is
-        // Steam's search being overloaded for a moment.
-        switch result["eresult"] as? Int {
-        case 1: break
-        case 10: throw WorkshopBusy()
-        default: throw WorkshopFailure(message: WorkshopLayoutChanged.message)
-        }
+        guard let browse = queries.first(where: { key($0).first == "workshop_browse" }),
+              let result = data(browse) else { throw WorkshopLayoutChanged() }
+        let answer = (result["eresult"] as? NSNumber)?.intValue
+        // 10 is Steam's search being overloaded; any other refusal keeps the page-changed wording.
+        if answer == 10 { throw WorkshopBusy() }
+        guard answer == 1 else { throw WorkshopFailure(message: WorkshopLayoutChanged.message) }
         guard let rows = result["results"] as? [[String: Any]] else { throw WorkshopLayoutChanged() }
-        var creators: [String: String] = [:]
+
+        // Display names of the creators the page mentions, by Steam id.
+        var names: [String: String] = [:]
         for query in queries {
-            guard let key = query["queryKey"] as? [String], key.count == 2, key[0] == "PlayerLinkDetails",
-                  let state = query["state"] as? [String: Any], let data = state["data"] as? [String: Any],
-                  let publicData = data["public_data"] as? [String: Any], let name = publicData["persona_name"] as? String else { continue }
-            creators[key[1]] = name
+            let parts = key(query)
+            guard parts.count == 2, parts[0] == "PlayerLinkDetails",
+                  let name = ((data(query)?["public_data"]) as? [String: Any])?["persona_name"] as? String,
+                  !name.isEmpty else { continue }
+            names[parts[1]] = name
         }
+
+        func number(_ value: Any?) -> Int? {
+            if let number = value as? NSNumber { return number.intValue }
+            if let text = value as? String { return Int(text) }
+            return nil
+        }
+        func fileID(_ value: Any?) -> String? {
+            if let text = value as? String { return UInt64(text) == nil ? nil : text }
+            if let number = value as? NSNumber, number.int64Value > 0 { return number.stringValue }
+            return nil
+        }
+
         var seen = Set<String>()
+        var items: [WorkshopItem] = []
         var children: [String: [String]] = [:]
-        let items = rows.compactMap { row -> WorkshopItem? in
-            guard let id = row["publishedfileid"] as? String, UInt64(id) != nil,
-                  row["consumer_appid"] as? Int == 431960,
-                  let title = row["title"] as? String, seen.insert(id).inserted else { return nil }
+        for row in rows {
+            guard let id = fileID(row["publishedfileid"]), number(row["consumer_appid"]) == WorkshopApp.id,
+                  let title = row["title"] as? String, seen.insert(id).inserted else { continue }
             let preview = (row["preview_url"] as? String).flatMap(URL.init(string:))
+            let creatorID = row["creator"] as? String
             let updated = (row["time_updated"] as? NSNumber)?.doubleValue
-            // Steam's file type 2 is a collection; its children list what it holds.
-            let isCollection = (row["file_type"] as? Int) == 2
+            let isCollection = number(row["file_type"]) == 2
+            var item = WorkshopItem(
+                id: id, title: title,
+                creator: creatorID.flatMap { names[$0] } ?? String(localized: "Workshop creator"),
+                summary: summary(row["short_description"] as? String ?? ""),
+                previewURL: preview?.scheme == "https" ? preview : nil,
+                tags: (row["tags"] as? [Any] ?? []).compactMap { ($0 as? [String: Any])?["tag"] as? String ?? $0 as? String },
+                size: Int64(row["file_size"] as? String ?? "") ?? (row["file_size"] as? NSNumber)?.int64Value ?? 0,
+                subscriptions: number(row["subscriptions"]) ?? 0,
+                creatorID: creatorID,
+                timeUpdated: updated.map(Date.init(timeIntervalSince1970:)))
             if isCollection {
-                children[id] = (row["children"] as? [[String: Any]] ?? [])
-                    .filter { ($0["file_type"] as? Int ?? 0) != 2 }
-                    .sorted { ($0["sortorder"] as? Int ?? 0) < ($1["sortorder"] as? Int ?? 0) }
-                    .compactMap { $0["publishedfileid"] as? String }
+                item.collectionSize = number(row["num_children"]) ?? 0
+                let held = (row["children"] as? [[String: Any]] ?? []).filter { number($0["file_type"]) != 2 }
+                    .compactMap { child -> (id: String, order: Int)? in
+                        fileID(child["publishedfileid"]).map { ($0, number(child["sortorder"]) ?? 0) }
+                    }
+                children[id] = held.sorted { $0.order < $1.order }.map(\.id)
             }
-            return WorkshopItem(
-                id: id, title: title, creator: creators[row["creator"] as? String ?? ""] ?? String(localized: "Workshop creator"),
-                summary: row["short_description"] as? String ?? "", previewURL: preview?.scheme == "https" ? preview : nil,
-                tags: (row["tags"] as? [[String: Any]] ?? []).compactMap { $0["tag"] as? String },
-                size: Int64(row["file_size"] as? String ?? "") ?? 0,
-                subscriptions: row["subscriptions"] as? Int ?? 0,
-                creatorID: row["creator"] as? String,
-                timeUpdated: updated.map(Date.init(timeIntervalSince1970:)),
-                collectionSize: isCollection ? row["num_children"] as? Int ?? 0 : nil
-            )
+            items.append(item)
         }
-        let page = WorkshopPage(items: items, page: result["current_page"] as? Int ?? 1,
-                                totalPages: max(1, result["total_pages"] as? Int ?? 1), totalCount: result["total_count"] as? Int ?? 0)
+        let page = WorkshopPage(
+            items: items, page: number(result["current_page"]) ?? 1,
+            totalPages: max(1, number(result["total_pages"]) ?? 1),
+            totalCount: number(result["total_count"]) ?? 0)
         return (page, children)
     }
 }

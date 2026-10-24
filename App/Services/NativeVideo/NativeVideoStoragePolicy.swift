@@ -7,8 +7,8 @@ import Foundation
 /// A disk that has spun down, a share that stopped answering and an iCloud or
 /// File Provider placeholder that has to be fetched first all take far longer
 /// to read than a file on the internal drive, and none of them is a statement
-/// about the content. A single fixed limit would either hand a healthy clip on
-/// a sleeping disk to the scene engine or let a dead share hold the host for
+/// about the content. A single fixed limit would either fail a healthy clip on
+/// a sleeping disk or let a dead share hold the host for
 /// minutes, so the limit follows the storage class.
 ///
 /// Classification is a pure function of a handful of facts so the rule can be
@@ -25,7 +25,7 @@ enum NativeVideoStoragePolicy {
         /// The volume's flags could not be read.
         case unknown
 
-        /// Names the class in a log line and in the hand-off reason.
+        /// Names the class in a log line and in a failure reason.
         var label: String {
             switch self {
             case .internalVolume: return "internal volume"

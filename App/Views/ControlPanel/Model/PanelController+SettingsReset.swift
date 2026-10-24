@@ -9,18 +9,14 @@ import Foundation
 /// Desktop switch only mirrors, is the system's and stays too.
 extension PanelController {
   /// The engine's defaults for the settings it owns, as `AppConfig::default()` in
-  /// `upstream/renderer/crates/bridge/src/config/app.rs` writes them.
+  /// `Renderer/Bridge/src/config/app.rs` writes them.
   enum EngineSettingDefaults {
     static let batteryMode = BridgeBatteryMode.keepRunning
     static let renderScale: Float = 1
     static let frameRateCap: UInt32? = nil
     static let batteryRenderScale: Float = 0.75
     static let batteryTargetFps: UInt32 = 30
-    static let videoBackend = VideoBackendMode.compatibility
-    static let sceneRenderer = SceneRendererMode.nativeMetalPreferred
     static let sceneResolution = SceneResolutionMode.display
-    static let contentPacing = false
-    static let sharedVideoDecode = false
     static let sceneOptimization = true
     static let sceneOnDemand = false
     static let sceneVideoPlaneSampling = false
@@ -117,20 +113,8 @@ extension PanelController {
     if current().frameRateCap != D.frameRateCap {
       await attempt { try await store.setFrameRateCapAsync(D.frameRateCap) }
     }
-    if current().videoBackend != D.videoBackend.rawValue {
-      await attempt { try await store.setVideoBackendAsync(D.videoBackend.rawValue) }
-    }
-    if current().sceneRenderer != D.sceneRenderer.rawValue {
-      await attempt { try await store.setSceneRendererAsync(D.sceneRenderer.rawValue) }
-    }
     if current().sceneResolution != D.sceneResolution.rawValue {
       await attempt { try await store.setSceneResolutionAsync(D.sceneResolution.rawValue) }
-    }
-    if current().contentPacingEnabled != D.contentPacing {
-      await attempt { try await store.setContentPacingEnabledAsync(D.contentPacing) }
-    }
-    if current().sharedVideoDecodeEnabled != D.sharedVideoDecode {
-      await attempt { try await store.setSharedVideoDecodeEnabledAsync(D.sharedVideoDecode) }
     }
     if current().sceneOptimizationEnabled != D.sceneOptimization {
       await attempt { try await store.setSceneOptimizationEnabledAsync(D.sceneOptimization) }

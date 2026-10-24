@@ -20,6 +20,7 @@ final class WebWallpaperRecoveryTests: XCTestCase {
     let page: WebWallpaperPage
     var frame: NSRect
     var posterLayer: CALayer? = CALayer()
+    var windowNumber: Int { ObjectIdentifier(self).hashValue }
     init(frame: NSRect, page: WebWallpaperPage) {
       self.frame = frame
       self.page = page

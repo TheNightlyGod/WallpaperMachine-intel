@@ -75,8 +75,8 @@ extension InspectorOptions {
     /// The highest frame rate the display offers; 0 when it did not say.
     let maximumFrameRate: Int
     let position: Position
-    /// macOS's own video player draws this wallpaper on the display, and it keeps a video centred
-    /// whatever the position says.
+    /// macOS's own video player draws this wallpaper on the display, at the clip's own frame rate,
+    /// so the display's frame rate and any ceiling on it do not apply to it.
     let isDrawnByNativePlayer: Bool
     /// The frame-rate ceiling in force, and what sets it, when it is below the saved frame rate.
     let frameRateLimit: FrameRateCeiling?

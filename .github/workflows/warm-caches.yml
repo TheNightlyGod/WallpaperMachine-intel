@@ -1,7 +1,7 @@
 # Keep the release build's caches alive between releases.
 #
 # GitHub evicts a cache entry nobody has read for seven days, and a release after a
-# quiet week would then rebuild FFmpeg, the C++ scene engine and the renderer from
+# quiet week would then rebuild the C++ scene engine and the renderer from
 # nothing. This builds the renderer through the same setup Build uses, which reads
 # every entry and refreshes the C++ object cache. Scheduled runs use main, whose
 # caches every ref, including release tags, can read. It publishes nothing.

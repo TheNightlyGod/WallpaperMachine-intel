@@ -211,6 +211,7 @@ final class WorkshopPreviewCoordinatorTests: XCTestCase {
     try await waitFor { coordinator.animations["a"] != nil }
     coordinator.pageChanged([tile("b")], stillPixels: 128)
     XCTAssertNil(coordinator.scheduler.states["a"], "a left the page")
+    XCTAssertNil(coordinator.animation(for: "a"), "a tile that left the page keeps no animation bytes")
     coordinator.setOnScreen("b", true)
     try await waitFor { coordinator.animations["b"] != nil }
   }

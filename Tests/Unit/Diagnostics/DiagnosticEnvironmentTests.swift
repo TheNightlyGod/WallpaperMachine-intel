@@ -7,11 +7,11 @@ import XCTest
 /// after a failure and one the user paused look the same on screen.
 final class DiagnosticEnvironmentTests: XCTestCase {
   private func scene(
-    displayId: UInt32 = 1, backend: String = "legacy_vulkan", fallbackReason: String? = nil
+    displayId: UInt32 = 1, backend: String = "native_metal"
   ) -> BridgeSceneBackendReport {
     BridgeSceneBackendReport(
       displayId: displayId, displayName: "Studio Display", wallpaperId: "rain-1",
-      wallpaperTitle: "Rain", backend: backend, fallbackReason: fallbackReason, videoPath: "none",
+      wallpaperTitle: "Rain", backend: backend, failureStage: nil, failureReason: nil, videoPath: "none",
       optimizationApplied: true)
   }
 
@@ -30,15 +30,27 @@ final class DiagnosticEnvironmentTests: XCTestCase {
 
   func testRunningSceneLineKeepsWhereTheSceneRunsAndWhatDrewIt() {
     let line = DiagnosticEnvironment.runningSceneLine(
-      scene(displayId: 7, backend: "legacy_vulkan", fallbackReason: "the scene uses a puppet"),
-      mode: "continuous")
+      scene(displayId: 7, backend: "native_metal"), mode: "continuous")
 
     for part in [
-      "display 7", "Studio Display", "rain-1", "Rain", "legacy_vulkan",
-      "fell back: the scene uses a puppet", "video path none",
+      "display 7", "Studio Display", "rain-1", "Rain", "native_metal", "video path none",
     ] {
       XCTAssertTrue(line.contains(part), "\"\(part)\" is missing from: \(line)")
     }
+  }
+
+  /// A scene Native Metal could not draw, with nothing else to draw it, is in the report as
+  /// not drawn with the stage and the renderer's reason: a bug report has to say it was held.
+  func testRunningSceneLineSaysWhenASceneIsHeldAndWhy() {
+    let held = BridgeSceneBackendReport(
+      displayId: 3, displayName: "Studio Display", wallpaperId: "rain-1", wallpaperTitle: "Rain",
+      backend: "unknown", failureStage: "compile",
+      failureReason: "the shader did not link", videoPath: "none", optimizationApplied: nil)
+    let line = DiagnosticEnvironment.runningSceneLine(held, mode: "stopped_after_failure")
+
+    XCTAssertTrue(
+      line.contains("not drawn, compile: the shader did not link; holding the last picture"), line)
+    XCTAssertTrue(line.contains("mode stopped_after_failure"), line)
   }
 
   func testRunningSceneLineWithoutAReadingSaysNothingAboutTheMode() {
@@ -47,6 +59,5 @@ final class DiagnosticEnvironmentTests: XCTestCase {
     XCTAssertFalse(
       line.contains("mode"),
       "No live reading is not a mode, and the report must not invent one: \(line)")
-    XCTAssertFalse(line.contains("fell back"), "A scene that got its backend did not fall back")
   }
 }

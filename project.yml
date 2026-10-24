@@ -22,22 +22,22 @@ targets:
     type: framework
     platform: macOS
     sources:
-      - path: upstream/mediaremote-adapter/src
+      - path: ThirdParty/mediaremote-adapter/src
         excludes:
           - test
-      - path: upstream/mediaremote-adapter/include
+      - path: ThirdParty/mediaremote-adapter/include
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: app.wallpapermachine.MediaRemoteAdapter
         GENERATE_INFOPLIST_FILE: YES
         # XcodeGen gives a framework build 1, but bump_version.py rewrites every pbxproj
         # entry; declaring the app's number keeps a regenerated project identical to a bumped one.
-        CURRENT_PROJECT_VERSION: "44"
+        CURRENT_PROJECT_VERSION: "47"
         CLANG_ENABLE_OBJC_ARC: YES
         GCC_SYMBOLS_PRIVATE_EXTERN: NO
         HEADER_SEARCH_PATHS:
-          - "$(SRCROOT)/upstream/mediaremote-adapter/include"
-          - "$(SRCROOT)/upstream/mediaremote-adapter/src"
+          - "$(SRCROOT)/ThirdParty/mediaremote-adapter/include"
+          - "$(SRCROOT)/ThirdParty/mediaremote-adapter/src"
     dependencies:
       - sdk: Foundation.framework
       - sdk: AppKit.framework
@@ -64,9 +64,9 @@ targets:
       - path: Resources/ReleaseBanners
         type: folder
         buildPhase: resources
-      - path: upstream/mediaremote-adapter/bin/mediaremote-adapter.pl
+      - path: ThirdParty/mediaremote-adapter/bin/mediaremote-adapter.pl
         buildPhase: resources
-      - path: upstream/mediaremote-adapter/LICENSE
+      - path: ThirdParty/mediaremote-adapter/LICENSE
         buildPhase: resources
     dependencies:
       - target: MediaRemoteAdapter
@@ -80,60 +80,41 @@ targets:
         PRODUCT_NAME: WallpaperMachine
         INFOPLIST_FILE: App/Resources/Info.plist
         GENERATE_INFOPLIST_FILE: NO
-        MARKETING_VERSION: "1.5.9"
-        CURRENT_PROJECT_VERSION: "44"
+        MARKETING_VERSION: "1.6.2"
+        CURRENT_PROJECT_VERSION: "47"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         SWIFT_INCLUDE_PATHS: "$(SRCROOT)/App/Bridge/Generated"
         SWIFT_OBJC_BRIDGING_HEADER: App/Bridge/WallpaperPreviewBridge.h
         HEADER_SEARCH_PATHS:
           - "$(SRCROOT)/App/Bridge/Generated"
-          - "$(SRCROOT)/upstream/renderer/external/open-wallpaper-engine/src/Platform/Apple"
+          - "$(SRCROOT)/Renderer/Engine/src/Platform/Apple"
         LIBRARY_SEARCH_PATHS: &rendererLibraryPaths
-          - "$(SRCROOT)/upstream/renderer/target/release"
-          - /Users/lukioff/homebrew/opt/mwe-ffmpeg/lib
+          - "$(SRCROOT)/Renderer/target/release"
           - /Users/lukioff/homebrew/lib
           - /Users/lukioff/homebrew/opt/quickjs-ng/lib
-          - /Users/lukioff/homebrew/opt/glslang/lib
-          - /usr/local/opt/mwe-ffmpeg/lib
           - /usr/local/lib
           - /usr/local/opt/quickjs-ng/lib
-          - /usr/local/opt/glslang/lib
-          - /opt/homebrew/opt/mwe-ffmpeg/lib
           - /opt/homebrew/lib
           - /opt/homebrew/opt/quickjs-ng/lib
-          - /opt/homebrew/opt/glslang/lib
-        OTHER_SWIFT_FLAGS: "-Xcc -fmodule-map-file=$(SRCROOT)/App/Bridge/Generated/WallpaperBridgeFFI.modulemap"
+        OTHER_SWIFT_FLAGS: "-Xcc -fmodule-map-file=$(SRCROOT)/App/Bridge/Generated/WallpaperBridgeFFI.modulemap -Xcc -fmodule-map-file=$(SRCROOT)/Renderer/Media/Apple/WallpaperMedia.modulemap"
         LD_RUNPATH_SEARCH_PATHS:
           - "@executable_path/../Frameworks"
-          - /Users/lukioff/homebrew/opt/mwe-ffmpeg/lib
           - /Users/lukioff/homebrew/lib
           - /Users/lukioff/homebrew/opt/quickjs-ng/lib
-          - /usr/local/opt/mwe-ffmpeg/lib
           - /usr/local/lib
           - /usr/local/opt/quickjs-ng/lib
-          - /opt/homebrew/opt/mwe-ffmpeg/lib
           - /opt/homebrew/lib
           - /opt/homebrew/opt/quickjs-ng/lib
         OTHER_LDFLAGS: &rendererLinkerFlags
           - -lwallpaper_bridge
           - -lc++
-          - -lvulkan
           - -llz4
           - -lfreetype
-          - -lavformat
-          - -lavcodec
-          - -lavutil
-          - -lswresample
-          - -lavfilter
-          - -lavdevice
-          - -lswscale
           - -lqjs
-          - -lglslang
-          - -lSPIRV
-          - -lglslang-default-resource-limits
           - -liconv
           - -framework Accelerate
           - -framework AppKit
+          - -framework AudioToolbox
           - -framework CoreAudio
           - -framework CoreData
           - -framework CoreFoundation
@@ -168,25 +149,23 @@ targets:
         INFOPLIST_FILE: Extension/Info.plist
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_CFBundleDisplayName: WallpaperMachine Wallpapers
-        MARKETING_VERSION: "1.5.9"
-        CURRENT_PROJECT_VERSION: "44"
+        MARKETING_VERSION: "1.6.2"
+        CURRENT_PROJECT_VERSION: "47"
         ENABLE_APP_SANDBOX: YES
         CODE_SIGN_ENTITLEMENTS: Extension/WallpaperExtension.entitlements
         APPLICATION_EXTENSION_API_ONLY: YES
         SWIFT_OBJC_BRIDGING_HEADER: Extension/WallpaperExtensionBridge.h
-        HEADER_SEARCH_PATHS: "$(SRCROOT)/upstream/renderer/external/open-wallpaper-engine/src/Platform/Apple"
+        OTHER_SWIFT_FLAGS: "-Xcc -fmodule-map-file=$(SRCROOT)/Renderer/Media/Apple/WallpaperMedia.modulemap"
+        HEADER_SEARCH_PATHS: "$(SRCROOT)/Renderer/Engine/src/Platform/Apple"
         LIBRARY_SEARCH_PATHS: *rendererLibraryPaths
         OTHER_LDFLAGS: *rendererLinkerFlags
         LD_RUNPATH_SEARCH_PATHS:
           - "@executable_path/../Frameworks"
           - "@executable_path/../../../../Frameworks"
-          - /Users/lukioff/homebrew/opt/mwe-ffmpeg/lib
           - /Users/lukioff/homebrew/lib
           - /Users/lukioff/homebrew/opt/quickjs-ng/lib
-          - /usr/local/opt/mwe-ffmpeg/lib
           - /usr/local/lib
           - /usr/local/opt/quickjs-ng/lib
-          - /opt/homebrew/opt/mwe-ffmpeg/lib
           - /opt/homebrew/lib
           - /opt/homebrew/opt/quickjs-ng/lib
         SKIP_INSTALL: YES
@@ -208,8 +187,8 @@ targets:
         SWIFT_INCLUDE_PATHS: "$(SRCROOT)/App/Bridge/Generated"
         HEADER_SEARCH_PATHS:
           - "$(SRCROOT)/App/Bridge/Generated"
-          - "$(SRCROOT)/upstream/renderer/external/open-wallpaper-engine/src/Platform/Apple"
-        OTHER_SWIFT_FLAGS: "-Xcc -fmodule-map-file=$(SRCROOT)/App/Bridge/Generated/WallpaperBridgeFFI.modulemap"
+          - "$(SRCROOT)/Renderer/Engine/src/Platform/Apple"
+        OTHER_SWIFT_FLAGS: "-Xcc -fmodule-map-file=$(SRCROOT)/App/Bridge/Generated/WallpaperBridgeFFI.modulemap -Xcc -fmodule-map-file=$(SRCROOT)/Renderer/Media/Apple/WallpaperMedia.modulemap"
   WallpaperMachineUITests:
     type: bundle.ui-testing
     platform: macOS

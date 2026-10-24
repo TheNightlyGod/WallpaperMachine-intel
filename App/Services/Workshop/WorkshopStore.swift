@@ -177,13 +177,16 @@ final class WorkshopStore {
 
   convenience init(service: WorkshopService = WorkshopService()) {
     self.init(
-      service: service, downloader: WorkshopDownloadManager(),
+      service: service, downloader: WorkshopDownloadManager(), storageDirectory: ClientPaths.storageURL,
       webSessions: KeychainSteamWebSessionStore())
   }
 
+  /// `storageDirectory` holds the partial downloads, beside the library (`ClientPaths.storageURL`);
+  /// nil keeps them in `supportDirectory`, as a test's single temporary folder wants.
   init(
     service: WorkshopService = WorkshopService(), downloader: WorkshopDownloadManager,
-    supportDirectory: URL = ClientPaths.supportURL, defaults: UserDefaults = ClientPreferences.defaults,
+    supportDirectory: URL = ClientPaths.supportURL, storageDirectory: URL? = nil,
+    defaults: UserDefaults = ClientPreferences.defaults,
     runtimeProvider: any SteamCMDRuntimeProviding = SteamCMDRuntimeService(),
     updates: WorkshopUpdateStore? = nil,
     sceneAssetsLocation: @escaping @MainActor () -> URL = { ClientPaths.assetsURL },
@@ -209,7 +212,7 @@ final class WorkshopStore {
     self.steamCMDSetup = SteamCMDSetupStore(
       downloader: downloader, supportDirectory: supportDirectory,
       defaults: defaults, runtimeProvider: runtimeProvider)
-    downloader.configurePersistence(at: ClientPaths.workshopDownloadsURL(in: supportDirectory))
+    downloader.configurePersistence(at: ClientPaths.workshopDownloadsURL(in: storageDirectory ?? supportDirectory))
     if let data = try? Data(contentsOf: requestFile),
       let saved = try? JSONDecoder().decode([WorkshopDownloadRequest].self, from: data)
     {
@@ -515,7 +518,8 @@ final class WorkshopStore {
     if request.id == Self.signInRequestID {
       downloader.signIn(
         username: request.account, executable: runtime.executableURL,
-        root: ClientPaths.libraryURL.deletingLastPathComponent(),
+        // A sign-in fetches nothing, so it stays beside the saved sign-in, not the library.
+        root: ClientPaths.supportURL,
         rememberSession: request.rememberSession)
     } else if let item = request.item {
       // Shared assets are queued first and only once: other scenes ride the same job.
@@ -1036,40 +1040,37 @@ final class WorkshopStore {
 
   private func load(_ request: WorkshopRequest) {
     searchTask?.cancel()
+    // A cache built for another query holds nothing this one can use.
     if cacheQuery != request.query { resetCache(for: request.query) }
-    generation = UUID()
+    let token = UUID()
+    generation = token
     errorMessage = nil
-    // A page already in the cache (paging back) never shows as loading.
+    // Paging back to a page already read shows it at once, never as loading.
     if let cached = steamPages[request.page] {
       isLoading = false
       publish(cached, for: request)
       return
     }
-    let requestID = generation
     isLoading = true
-    searchTask = Task {
+    searchTask = Task { [weak self] in
+      guard let self else { return }
+      defer { if self.generation == token { self.isLoading = false } }
       do {
-        let result = try await fetchSteamPage(request.page, query: request.query).value
-        guard generation == requestID, !Task.isCancelled else { return }
-        publish(result, for: request)
+        let result = try await self.fetchSteamPage(request.page, query: request.query).value
+        guard self.generation == token, !Task.isCancelled else { return }
+        self.publish(result, for: request)
       } catch {
-        guard generation == requestID, !Task.isCancelled else { return }
+        guard self.generation == token, !Task.isCancelled, !(error is CancellationError) else { return }
         AppLog.warn("Workshop \(request.query.source.key) page \(request.page) failed: \(error.localizedDescription)")
-        // No session, or Steam ended it: forget it and drop whatever list was on show, so the
-        // panel offers to sign in instead of leaving another list's tiles behind a Retry.
         if error is SteamSignInRequired {
-          forgetSteamWebSession()
-          clearResults()
-        } else if committedQuery?.source != request.query.source {
-          // Another list failed to open: the tiles on show belong to the list it was to replace,
-          // so they go too, rather than standing in for it and paging that list on Next.
-          clearResults()
+          // The session ended: drop it and the stale tiles, so the panel offers signing in again.
+          self.forgetSteamWebSession()
+          self.clearResults()
+        } else if self.committedQuery?.source != request.query.source {
+          self.clearResults()
         }
-        errorMessage = error.localizedDescription
-        failedRequest = request
-      }
-      if generation == requestID {
-        isLoading = false
+        self.errorMessage = error.localizedDescription
+        self.failedRequest = request
       }
     }
   }

@@ -11,13 +11,15 @@ struct DesktopPicture: Equatable, Codable {
     var nativeOptions: Data? = nil
 
     static func poster(_ url: URL) -> Self {
+        // The poster already has the display's aspect ratio: fill the screen without scaling twice.
         Self(url: url, scaling: Int(NSImageScaling.scaleAxesIndependently.rawValue),
              allowClipping: false, fill: [0, 0, 0, 1])
     }
 
     var options: [NSWorkspace.DesktopImageOptionKey: Any] {
         var result: [NSWorkspace.DesktopImageOptionKey: Any] = [
-            .imageScaling: scaling, .allowClipping: allowClipping
+            .imageScaling: NSNumber(value: scaling),
+            .allowClipping: NSNumber(value: allowClipping),
         ]
         if fill.count == 4 {
             result[.fillColor] = NSColor(srgbRed: fill[0], green: fill[1], blue: fill[2], alpha: fill[3])
@@ -39,6 +41,18 @@ protocol DesktopPictureWorkspace {
     /// Selections waiting for WallpaperAgent to reload may not be visible
     /// through the legacy picture API yet.
     func referencedPictureURLs(targets: [DesktopPictureTarget]) throws -> Set<URL>
+    /// The macOS wallpaper store, or nil where there is none to put back.
+    func storeContents() throws -> Data?
+    /// Replaces the store if it still holds `expected`.
+    func replaceStore(_ data: Data, expected: Data) throws
+    /// Has WallpaperAgent load the store, which it reads only as it starts.
+    func reloadStore() throws
+}
+
+extension DesktopPictureWorkspace {
+    func storeContents() throws -> Data? { nil }
+    func replaceStore(_ data: Data, expected: Data) throws {}
+    func reloadStore() throws {}
 }
 
 @MainActor
@@ -96,6 +110,19 @@ final class DesktopWallpaperLedger {
     var awaitsConfirmation: Bool { !unconfirmed.isEmpty || !inFlight.isEmpty }
 
     private static let journalName = "originals.json"
+    private static let storeSnapshotName = "store-original.json"
+
+    /// The wallpaper store as it was before the first poster, and every picture
+    /// written back through the per-Space API since. That API cannot express an
+    /// aerial or extension choice; see `DesktopWallpaperStoreRestoration`.
+    private struct StoreSnapshot: Codable {
+        var store: Data
+        var written: [DesktopWallpaperStoreRestoration.Write] = []
+        /// The store was put back but WallpaperAgent has not loaded it yet.
+        var reloadPending: Bool? = nil
+    }
+    private var storeSnapshot: StoreSnapshot?
+    private let storeSnapshotURL: URL
 
     /// What macOS shows a new user, through a link to the current release's
     /// picture. It is put back on a desktop whose original no longer exists
@@ -120,22 +147,33 @@ final class DesktopWallpaperLedger {
          confirmationWindow: Duration = DesktopWallpaperLedger.confirmationWindow,
          systemDefaultPicture: URL = DesktopWallpaperLedger.systemDefaultPictureURL) throws {
         self.folder = folder
-        self.journal = folder.appendingPathComponent(Self.journalName)
         self.workspace = workspace
         self.confirmationWindow = confirmationWindow
         self.systemDefaultPicture = systemDefaultPicture
+        journal = folder.appendingPathComponent(Self.journalName)
+        storeSnapshotURL = folder.appendingPathComponent(Self.storeSnapshotName)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         if FileManager.default.fileExists(atPath: journal.path) {
+            // A journal that cannot be read must stop creation: writing posters without a way
+            // back to the originals would strand the user's wallpaper.
             entries = try JSONDecoder().decode([String: Entry].self, from: Data(contentsOf: journal))
         } else {
             entries = [:]
         }
+        if FileManager.default.fileExists(atPath: storeSnapshotURL.path) {
+            storeSnapshot = try JSONDecoder().decode(StoreSnapshot.self, from: Data(contentsOf: storeSnapshotURL))
+        }
     }
 
     /// Whether the journal in `folder` still names a poster whose original has not been put back,
-    /// so a crash, a relaunch or a switched-off preference may have left one on a desktop. False
-    /// for a missing, unreadable or empty journal. Reads the file only; nothing is created.
+    /// so a crash, a relaunch or a switched-off preference may have left one on a desktop, or the
+    /// store copy is still there: its selections, or WallpaperAgent's reload of them, may not be
+    /// back yet. False for a missing, unreadable or empty journal and no store copy. Reads the
+    /// files only; nothing is created.
     static func hasRecordedOriginals(in folder: URL) -> Bool {
+        if FileManager.default.fileExists(atPath: folder.appendingPathComponent(storeSnapshotName).path) {
+            return true
+        }
         guard let data = try? Data(contentsOf: folder.appendingPathComponent(journalName)),
               let entries = try? JSONDecoder().decode([String: Entry].self, from: data) else { return false }
         return !entries.isEmpty
@@ -143,7 +181,12 @@ final class DesktopWallpaperLedger {
 
     /// Submit a fresh frame to EVERY desktop on its display, without a Space
     /// change event. A loading renderer keeps the previous poster until ready.
-    func synchronize(posters: [String: Data], liveDisplays: Set<String>, targetSpaces: [String: Set<String>] = [:]) throws {
+    ///
+    /// `spacePosters` gives a display's desktops a picture of their own: a display that follows
+    /// desktop Spaces sends the last poster of each desktop's wallpaper. A desktop outside
+    /// `targetSpaces` takes only that; one inside it takes the fresh poster when there is one.
+    func synchronize(posters: [String: Data], liveDisplays: Set<String>, targetSpaces: [String: Set<String>] = [:],
+                     spacePosters: [String: [String: Data]] = [:]) throws {
         let targets = try workspace.targets()
         var firstError: Error?
         // Cache only within this pass: external edits/missing files must still
@@ -157,11 +200,17 @@ final class DesktopWallpaperLedger {
         for target in targets {
             // A key with an empty set holds every Space on that display. The public
             // fallback has no identity and cannot safely accept a Space-specific poster.
-            if let allowed = targetSpaces[target.display], target.space.map(allowed.contains) != true { continue }
+            let otherDesktop = targetSpaces[target.display].map { allowed in target.space.map(allowed.contains) != true } ?? false
+            // Only a display whose posters are scoped to its desktops takes saved ones.
+            let ownPoster = targetSpaces[target.display] == nil ? nil
+                : target.space.flatMap { spacePosters[target.display]?[$0] }
+            if otherDesktop, ownPoster == nil { continue }
+            let fresh = otherDesktop ? nil : posters[target.display]
             do {
-                if let image = posters[target.display], liveDisplays.contains(target.display) {
+                if let image = fresh ?? ownPoster, liveDisplays.contains(target.display) {
                     applied.insert(target)
-                    try apply(image: image, digest: digests[target.display]!, target: target,
+                    let digest = fresh != nil ? digests[target.display]! : Data(SHA256.hash(data: image))
+                    try apply(image: image, digest: digest, target: target,
                               comparisons: &comparisons, fallbacks: fallbacks)
                 } else if !liveDisplays.contains(target.display) {
                     try restore(target: target) {
@@ -206,11 +255,39 @@ final class DesktopWallpaperLedger {
         // in flight can also land after its desktop was restored; the next pass
         // restores it, and the window ends well within quit's wait.
         guard unconfirmedRestorations.isEmpty, inFlight.isEmpty else { throw Failure.restorationUnconfirmed }
+        let storeRestored = try restoreStore()
         let targets = try workspace.targets()
         guard try !workspace.referencedPictureURLs(targets: targets)
             .contains(where: { Self.isPoster($0, folder: folder) }) else {
             throw Failure.restorationPending
         }
+        // A store that could not be read keeps its copy for the next restoration.
+        if storeRestored, storeSnapshot != nil {
+            try FileManager.default.removeItem(at: storeSnapshotURL)
+            storeSnapshot = nil
+        }
+    }
+
+    /// Once every desktop reads back without a poster, puts back the store
+    /// selections the app replaced, including the aerial or extension choice
+    /// the per-Space API could only write back as a still picture.
+    /// A store written back but not yet loaded stays pending, so a retry or the
+    /// next launch reloads it once rather than finding nothing left to change.
+    /// False when there is a copy to put back but no store to read.
+    private func restoreStore() throws -> Bool {
+        guard var snapshot = storeSnapshot else { return true }
+        guard let current = try workspace.storeContents() else { return false }
+        if let restored = try DesktopWallpaperStoreRestoration.restored(
+            current: current, original: snapshot.store, written: snapshot.written, posters: folder) {
+            snapshot.reloadPending = true
+            try save(snapshot)
+            try workspace.replaceStore(restored, expected: current)
+        }
+        guard snapshot.reloadPending == true else { return true }
+        try workspace.reloadStore()
+        snapshot.reloadPending = nil
+        try save(snapshot)
+        return true
     }
 
     func apply(image: Data, target: DesktopPictureTarget) throws {
@@ -284,6 +361,12 @@ final class DesktopWallpaperLedger {
         if !FileManager.default.fileExists(atPath: url.path) {
             try image.write(to: url, options: .atomic)
         }
+        // The store as the user left it, before the first poster since the last full
+        // restoration. A poster file journaled in an earlier run is written again under
+        // its old name, so this cannot wait for a new journal entry.
+        if storeSnapshot == nil, let store = try workspace.storeContents() {
+            try save(StoreSnapshot(store: store))
+        }
         if entries[name] == nil {
             entries[name] = Entry(original: original, display: target.display)
             // Journal BEFORE the native call, including crash/relaunch recovery.
@@ -331,6 +414,7 @@ final class DesktopWallpaperLedger {
         let journaled = entry(for: current.url)?.original
         let named = journaled.flatMap { Self.isUserWallpaper($0, folder: folder) ? $0 : nil }
         if let named, Self.fileMayExist(named.url) {
+            try recordWritten(named.url)
             try workspace.setPicture(named, target: target)
             return
         }
@@ -347,6 +431,7 @@ final class DesktopWallpaperLedger {
             reportedStandIns[target] = original.url
             AppLog.warn("Desktop picture: the original of display \(target.display), desktop \(target.space ?? "current") no longer exists (\(named.url.path)); putting back \(standIn) \(original.url.path) instead")
         }
+        try recordWritten(original.url)
         try workspace.setPicture(original, target: target)
     }
 
@@ -497,4 +582,23 @@ final class DesktopWallpaperLedger {
     }
 
     private func save() throws { try JSONEncoder().encode(entries).write(to: journal, options: .atomic) }
+
+    private func save(_ snapshot: StoreSnapshot) throws {
+        try JSONEncoder().encode(snapshot).write(to: storeSnapshotURL, options: .atomic)
+        storeSnapshot = snapshot
+    }
+
+    /// A picture written back is told apart from the same picture chosen in
+    /// System Settings by this record of the write and its time, journaled
+    /// before the write. A write of the same file moments after the last one
+    /// is covered by that record.
+    private func recordWritten(_ url: URL) throws {
+        guard var snapshot = storeSnapshot else { return }
+        let now = Date()
+        if snapshot.written.contains(where: {
+            $0.url == url && now.timeIntervalSince($0.at) < DesktopWallpaperStoreRestoration.writeTolerance.before
+        }) { return }
+        snapshot.written.append(.init(url: url, at: now))
+        try save(snapshot)
+    }
 }

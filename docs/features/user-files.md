@@ -171,7 +171,7 @@ The store, bridge, watcher and purge are covered by `Tests/Unit/UserAssets/`
 `UserAssetPreparationPerformanceTests`), the page payload and staging by
 `WebWallpaperPropertyPayloadTests`, the inspector side by `PanelPropertyFilesTests`,
 `PanelPropertyRowsTests` and `InspectorFlowTests` in `Tests/Unit/Panel/`, the bridge contract by
-`upstream/renderer/crates/bridge/src/tests/file_properties.rs`, and the lock-screen
+`Renderer/Bridge/src/tests/file_properties.rs`, and the lock-screen
 republication by `LockScreenWallpaperServiceTests`; the inventory is under
 [UserAssets](../testing/coverage.md#userassets). No test drives the real open panel,
 so choosing a file through it and a page reading the staged file in a desktop window

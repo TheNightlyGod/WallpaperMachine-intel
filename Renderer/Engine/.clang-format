@@ -1,0 +1,66 @@
+﻿---
+# Layout: four-space indent, 100 columns, spaces only.
+IndentWidth: 4                   # one level
+TabWidth: 4
+UseTab: Never                    # spaces only
+ColumnLimit: 100                 # wraps at this width
+AccessModifierOffset: -4         # public:/private: flush with the class
+IndentCaseLabels: false          # case aligns with switch
+IndentPPDirectives: AfterHash    # #  include nested under #if
+IndentWrappedFunctionNames: false
+KeepEmptyLinesAtTheStartOfBlocks: false
+Language: Cpp
+Standard: Cpp11
+PointerAlignment: Left           # T* p, T& r
+SortIncludes: false              # include order is meaningful here
+
+# Braces: only enums and namespaces get a line of their own. BraceWrapping is
+# read only with Custom.
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterEnum: true
+  AfterNamespace: true
+  SplitEmptyFunction: false      # {} stays together
+  SplitEmptyRecord: false
+CompactNamespaces: false
+
+# Runs of related lines line up: constants, members, macro bodies.
+AlignConsecutiveAssignments: true    # the = of a constant block
+AlignConsecutiveDeclarations: true   # member names
+AlignConsecutiveMacros: true
+AlignEscapedNewlines: Left           # backslashes of a macro hug the text
+AlignOperands: true
+AlignTrailingComments: true
+AlignAfterOpenBracket: Align
+
+# Calls and declarations.
+AllowAllParametersOfDeclarationOnNextLine: true
+BinPackArguments: false              # one argument per line once wrapped
+BinPackParameters: true
+ConstructorInitializerAllOnOneLineOrOnePerLine: true
+Cpp11BracedListStyle: false          # { 1, 2 } with inner spaces
+AlwaysBreakAfterReturnType: None
+AlwaysBreakTemplateDeclarations: true  # template<...> on its own line
+
+# What may stay on one line.
+AllowShortBlocksOnASingleLine: false
+AllowShortCaseLabelsOnASingleLine: true
+AllowShortIfStatementsOnASingleLine: true    # if (x) return;
+AllowShortLoopsOnASingleLine: true
+AllowShortLambdasOnASingleLine: false        # lambdas never collapse
+
+# Spacing: `! value`, `template<typename T>`, `T x { 1 }`.
+SpaceAfterLogicalNot: true              # ! value
+SpaceAfterTemplateKeyword: false        # template<typename T>
+SpaceBeforeCpp11BracedList: true        # T x { 1 }
+SpaceBeforeCtorInitializerColon: false
+SpaceAfterCStyleCast: false             # (int)x
+SpaceBeforeAssignmentOperators: true
+SpaceBeforeInheritanceColon: true
+SpaceBeforeRangeBasedForLoopColon: true
+SpaceInEmptyParentheses: false          # f()
+SpacesInAngles: false                   # vector<int>
+SpacesInContainerLiterals: false
+SpacesInCStyleCastParentheses: false
+SpacesInParentheses: false
+SpacesInSquareBrackets: false           # a[0]

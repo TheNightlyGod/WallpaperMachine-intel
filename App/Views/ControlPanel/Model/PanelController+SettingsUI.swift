@@ -8,7 +8,10 @@ enum SettingsSwitchKey: String, CaseIterable, Sendable {
   case writeDesktopPicture, refreshDesktopPicture, keepWindowsOnWallpaperClick, livePropertyEdits
   case lockScreenEnabled, screenSaverEnabled
   case wallpapersMuted, playOnlyOnActiveDisplay
-  case sceneOptimization, sceneOnDemand, contentPacing, sharedVideoDecode, sceneVideoPlaneSampling
+  case sceneOptimization, sceneOnDemand, sceneVideoPlaneSampling
+  /// Different wallpaper for each desktop, on the display the Library applies wallpapers to: the
+  /// same switch as that display's card in Settings › Displays and the toolbar's display menu.
+  case desktopWallpapers
 }
 
 /// What the Settings views read and send beyond the typed values: the saved state of a switch, the
@@ -32,9 +35,8 @@ extension PanelController {
       { _ = revisions.playback; return playback.playsOnlyOnActiveDisplay }()
     case .sceneOptimization: store.settingsSnapshot.sceneOptimizationEnabled
     case .sceneOnDemand: store.settingsSnapshot.sceneOnDemandEnabled
-    case .contentPacing: store.settingsSnapshot.contentPacingEnabled
-    case .sharedVideoDecode: store.settingsSnapshot.sharedVideoDecodeEnabled
     case .sceneVideoPlaneSampling: store.settingsSnapshot.sceneVideoPlaneSamplingEnabled
+    case .desktopWallpapers: automationState(for: targetDisplayID).mode == .spaces
     }
   }
 
@@ -48,8 +50,18 @@ extension PanelController {
     case .refreshDesktopPicture: desktopSettings.canChangeRefresh
     case .lockScreenEnabled: lockScreenState.isSwitchEnabled
     case .screenSaverEnabled: screenSaverState.isSwitchEnabled
+    case .desktopWallpapers: canSwitchDesktopWallpapers
     default: true
     }
+  }
+
+  /// Whether the target display can have a different wallpaper for each desktop switched now: an
+  /// enabled display of its own, and, to turn it on, desktop information to go by. The rows of its
+  /// card in Settings › Displays follow the same rule.
+  var canSwitchDesktopWallpapers: Bool {
+    guard let target = targetDisplay, target.isEnabled, !target.isMirror else { return false }
+    let state = automationState(for: target.id)
+    return state.mode == .spaces || state.spacesAvailable
   }
 
   /// Sends the value to the typed setter of `key`. Queued like every setting.
@@ -67,8 +79,7 @@ extension PanelController {
     case .playOnlyOnActiveDisplay: try await setPlaysOnlyOnActiveDisplay(on)
     case .sceneOptimization: try await setSceneOptimization(on)
     case .sceneOnDemand: try await setSceneOnDemand(on)
-    case .contentPacing: try await setContentPacing(on)
-    case .sharedVideoDecode: try await setSharedVideoDecode(on)
+    case .desktopWallpapers: try await setDesktopWallpapers(on, display: targetDisplayID)
     case .sceneVideoPlaneSampling: try await setSceneVideoPlaneSampling(on)
     }
   }

@@ -279,6 +279,42 @@ final class WallpaperBackupTests: XCTestCase {
         XCTAssertNil(try WallpaperBackupService.applyPendingRestore(supportRoot: destination, defaults: targetDefaults, domainName: domainName(for: targetDefaults)))
     }
 
+    func testMovedLibraryIsBackedUpFromAndRestoredToWhereItIsKept() async throws {
+        let original = try fixture()
+        let targetDefaults = try defaults()
+        // Both Macs keep the library on another disk (Settings › Storage).
+        let sourceDrive = root.appendingPathComponent("source-drive")
+        let destinationDrive = root.appendingPathComponent("destination-drive")
+        try FileManager.default.createDirectory(at: sourceDrive, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: destinationDrive, withIntermediateDirectories: true)
+        try FileManager.default.moveItem(at: source.appendingPathComponent("Library"), to: sourceDrive.appendingPathComponent("Library"))
+        // A file property that names a file inside the wallpaper's own folder.
+        try put(#"{"title":"Original","type":"scene","file":"scene.json","general":{"properties":{"photo":{"type":"file","value":""},"backdrop":{"type":"file","value":""}}}}"#,
+                "Library/101/project.json", in: sourceDrive)
+        let backdrop = sourceDrive.appendingPathComponent("Library/101/scene.json").path
+        try put(#"{"workshop_id":"101","type":"scene","property_overrides":{"photo":"PHOTO","backdrop":"BACKDROP"}}"#
+            .replacingOccurrences(of: "PHOTO", with: source.appendingPathComponent("UserAssets/101/photo/asset/画 像.png").path)
+            .replacingOccurrences(of: "BACKDROP", with: backdrop), "wallpapers/101.json", in: source)
+
+        let exporter = WallpaperBackupService(supportRoot: source, storageRoot: sourceDrive)
+        try exporter.export(to: package, includeLibrary: true, preferences: .init(defaults: original, domainName: domainName(for: original)))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: package.appendingPathComponent("data/Library/101/scene.json").path))
+
+        let importer = WallpaperBackupService(supportRoot: destination, storageRoot: destinationDrive)
+        let preview = try importer.preview(package: package, preferences: .init(defaults: targetDefaults, domainName: domainName(for: targetDefaults)))
+        XCTAssertEqual(preview.wallpaperCount, 1)
+        try importer.stageRestore(package: package, preview: preview, policy: .replace)
+        let report = try XCTUnwrap(WallpaperBackupService.applyPendingRestore(
+            supportRoot: destination, storageRoot: destinationDrive, defaults: targetDefaults, domainName: domainName(for: targetDefaults)))
+        XCTAssertTrue(report.restoredPaths.contains("Library/101"))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: destinationDrive.appendingPathComponent("Library/101/scene.json").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: destination.appendingPathComponent("Library").path),
+                       "the library is restored where it is kept, not into app support")
+        let overrides = try XCTUnwrap(json("wallpapers/101.json", in: destination)["property_overrides"] as? [String: String])
+        XCTAssertEqual(overrides["photo"], destination.appendingPathComponent("UserAssets/101/photo/asset/画 像.png").path)
+        XCTAssertEqual(overrides["backdrop"], destinationDrive.appendingPathComponent("Library/101/scene.json").path)
+    }
+
     func testKeepExistingPreservesCollidingWallpaperAndImportsIndependentCollectionsAndPresetBytes() async throws {
         let original = try fixture()
         let targetDefaults = try defaults()
@@ -348,6 +384,68 @@ final class WallpaperBackupTests: XCTestCase {
         XCTAssertTrue(importer.pendingRestore)
         _ = try importer.applyPendingRestore(defaults: targetDefaults, domainName: domainName(for: targetDefaults))
         XCTAssertEqual(targetDefaults.string(forKey: "WallpaperMachine.otherAudioAction"), "mute")
+    }
+
+    func testRestoreIntoAMovedLibraryKeepsItsOldCopyBesideTheLibraryAndPutsItBack() async throws {
+        let original = try fixture()
+        let targetDefaults = try defaults()
+        let destinationDrive = root.appendingPathComponent("destination-drive")
+        try put(#"{"title":"Local","type":"scene","file":"scene.json"}"#, "Library/101/project.json", in: destinationDrive)
+        try WallpaperBackupService(supportRoot: source).export(to: package, includeLibrary: true, preferences: .init(defaults: original, domainName: domainName(for: original)))
+        let importer = WallpaperBackupService(supportRoot: destination, storageRoot: destinationDrive)
+        let preview = try importer.preview(package: package, preferences: .init(defaults: targetDefaults, domainName: domainName(for: targetDefaults)))
+        try importer.stageRestore(package: package, preview: preview, policy: .replace)
+        let libraryTransaction = destinationDrive.appendingPathComponent(WallpaperBackupService.transactionDirectoryName)
+        let supportTransaction = destination.appendingPathComponent(WallpaperBackupService.transactionDirectoryName)
+        var oldCopyBesideTheLibrary = false
+        var oldCopyInSupport = true
+        XCTAssertThrowsError(try importer.applyPendingRestore(defaults: targetDefaults, domainName: domainName(for: targetDefaults), beforePublish: { path in
+            guard path == "Preferences" else { return }
+            // Every move of a library unit was a rename on the library's own disk.
+            oldCopyBesideTheLibrary = FileManager.default.fileExists(atPath: libraryTransaction.appendingPathComponent("old/Library/101/project.json").path)
+            oldCopyInSupport = FileManager.default.fileExists(atPath: supportTransaction.appendingPathComponent("old/Library").path)
+            throw CocoaError(.fileWriteOutOfSpace)
+        }))
+        XCTAssertTrue(oldCopyBesideTheLibrary)
+        XCTAssertFalse(oldCopyInSupport)
+        XCTAssertEqual(try json("Library/101/project.json", in: destinationDrive)["title"] as? String, "Local", "recovery puts the old copy back")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: libraryTransaction.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: supportTransaction.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: destination.appendingPathComponent("Library").path))
+
+        _ = try importer.applyPendingRestore(defaults: targetDefaults, domainName: domainName(for: targetDefaults))
+        XCTAssertEqual(try json("Library/101/project.json", in: destinationDrive)["title"] as? String, "Original")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: libraryTransaction.path))
+    }
+
+    func testRecoveryWaitsForTheLibraryDriveInsteadOfAnEmptyMountPoint() async throws {
+        let original = try fixture()
+        let targetDefaults = try defaults()
+        let drive = root.appendingPathComponent("drive")
+        let unplugged = root.appendingPathComponent("unplugged")
+        try put(#"{"title":"Local","type":"scene","file":"scene.json"}"#, "Library/101/project.json", in: drive)
+        try StorageLocation.writeMarker("drive-id", at: drive)
+        try WallpaperBackupService(supportRoot: source).export(to: package, includeLibrary: true, preferences: .init(defaults: original, domainName: domainName(for: original)))
+        let importer = WallpaperBackupService(supportRoot: destination, storageRoot: drive)
+        let preview = try importer.preview(package: package, preferences: .init(defaults: targetDefaults, domainName: domainName(for: targetDefaults)))
+        try importer.stageRestore(package: package, preview: preview, policy: .replace)
+        // The drive goes away part-way and leaves its empty mount point behind.
+        XCTAssertThrowsError(try importer.applyPendingRestore(defaults: targetDefaults, domainName: domainName(for: targetDefaults), beforePublish: { path in
+            guard path == "Preferences" else { return }
+            try FileManager.default.moveItem(at: drive, to: unplugged)
+            try FileManager.default.createDirectory(at: drive, withIntermediateDirectories: true)
+            throw CocoaError(.fileWriteOutOfSpace)
+        }))
+        let transaction = destination.appendingPathComponent(WallpaperBackupService.transactionDirectoryName)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: transaction.appendingPathComponent("journal.json").path), "the journal waits for the drive")
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: drive.path).isEmpty, "nothing is written to the mount point")
+
+        // The drive is back: the next launch puts the wallpaper it replaced back first.
+        try FileManager.default.removeItem(at: drive)
+        try FileManager.default.moveItem(at: unplugged, to: drive)
+        _ = try importer.applyPendingRestore(defaults: targetDefaults, domainName: domainName(for: targetDefaults))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: transaction.path))
+        XCTAssertEqual(try json("Library/101/project.json", in: drive)["title"] as? String, "Original")
     }
 
     func testInterruptedUncommittedJournalRestoresOriginalBeforeStoresReadPreferences() async throws {

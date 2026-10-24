@@ -20,9 +20,7 @@ Homebrew packages the renderer links against, exactly as listed in
 `build_environment()` in `scripts/build.py`:
 
 ```sh
-brew install quickjs-ng glslang freetype lz4 vulkan-loader \
-  vulkan-headers molten-vk eigen nlohmann-json argparse shaderc spirv-tools glm
-python3 scripts/install_ffmpeg.py
+brew install quickjs-ng freetype lz4 nlohmann-json argparse
 ```
 
 Plus the build tooling those packages are compiled and consumed with:
@@ -35,29 +33,12 @@ Steam Workshop downloads additionally need SteamCMD, which the app installs and
 manages itself at run time; it is not a build dependency. See
 [features/workshop-downloads.md](features/workshop-downloads.md#steamcmd-setup).
 
-FFmpeg is not Homebrew's `ffmpeg` formula but the repository's own
-`Formula/mwe-ffmpeg.rb`: an LGPL-2.1-or-later library set (`--disable-gpl
---disable-version3 --disable-nonfree --disable-autodetect`; native decoders and
-encoders, libdav1d, and VideoToolbox/AudioToolbox; no network or device
-support), because Homebrew's build is GPLv3 and links OpenSSL, neither of which
-the GPL-2.0-only application may bundle ([../LICENSING.md](../LICENSING.md)).
-`scripts/install_ffmpeg.py` publishes the formula into a local git-less tap
-(`WallpaperMachine/local`), installs it, and reinstalls it when the formula
-file or the installed receipt differs from it; `--check` only reports.
-`scripts/package.py` refuses to bundle FFmpeg libraries that are not an LGPL
-build (see [Packaging and installing](#packaging-and-installing)).
-
-`mwe-ffmpeg` is keg-only and reached through `pkg-config`, but Homebrew links
-any FFmpeg formula that is not keg-only into the shared `/opt/homebrew/include`,
-and several other dependencies put that prefix on the include path. Different
-majors' `AVFrame` and `AVCodecContext` differ by removed members, so compiling
-against one and linking the other is accepted by the compiler and then reads
-frame metadata at the wrong offsets at runtime. The renderer's CMake therefore
-pins the resolved FFmpeg prefix ahead of every other include directory
-(`wescene_prefer_ffmpeg_headers`), and the decode and probe entry points refuse
-to run when the loaded libav* majors are not the compiled ones. If you see that
-refusal, an include path is reaching a second FFmpeg before the one
-`pkg-config` chose.
+FFmpeg is not used any more: video plays with the app's own container readers and
+VideoToolbox, sounds with AudioToolbox and a vendored public-domain Ogg Vorbis
+decoder, and nothing links or bundles a `libav*` library (the check is recorded in
+[../LICENSING.md](../LICENSING.md#ffmpeg)). The Homebrew `ffmpeg` formulas, `mwe-ffmpeg` and
+`dav1d` that an earlier checkout installed are not needed and can be uninstalled;
+nothing in the build looks at them.
 
 ## The build environment
 
@@ -67,16 +48,16 @@ command produces the same build from a terminal, an editor, or CI.
 
 | Variable | Value | Why |
 |---|---|---|
-| `PATH` | `$(brew --prefix)/bin` prepended | Finds Homebrew `cmake`, `ninja`, `glslangValidator` and friends ahead of anything else. |
-| `CMAKE_PREFIX_PATH` | `;`-joined `opt/<package>` roots plus the Homebrew prefix | CMake resolves each dependency from its own keg, including keg-only ones like `mwe-ffmpeg`, instead of guessing. |
-| `PKG_CONFIG_PATH` | `:`-joined `opt/<package>/lib/pkgconfig` | `pkg-config` consumers (FFmpeg, freetype, lz4) find the matching `.pc` files. |
+| `PATH` | `$(brew --prefix)/bin` prepended | Finds Homebrew `cmake`, `ninja` and friends ahead of anything else. |
+| `CMAKE_PREFIX_PATH` | `;`-joined `opt/<package>` roots plus the Homebrew prefix | CMake resolves each dependency from its own keg, including keg-only ones like `quickjs-ng`, instead of guessing. |
+| `PKG_CONFIG_PATH` | `:`-joined `opt/<package>/lib/pkgconfig` | `pkg-config` consumers (freetype, lz4) find the matching `.pc` files. |
 | `OWE_NIX_LIBRARY_PATH` | `:`-joined `opt/<package>/lib` plus `<prefix>/lib` | The vendored scene engine's build scripts use this to locate native libraries to link. |
 | `LIBCLANG_PATH` | `$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/lib` | Rust `bindgen`/`uniffi` need `libclang` from the selected Xcode toolchain. |
 | `SDKROOT` | `xcrun --sdk macosx --show-sdk-path` | Pins C/C++/Rust compilation to the selected macOS SDK. |
 | `CC` / `CXX` | `/usr/bin/clang`, `/usr/bin/clang++` | Apple Clang, not a Homebrew LLVM that happens to be first on `PATH`. |
 | `MACOSX_DEPLOYMENT_TARGET` | `15.0` | Set for `xcodegen` and `xcodebuild`. Deliberately **not** in cargo's environment: cargo builds proc-macro crates for the host and dlopens them in the running compiler, and a pinned host dylib is rejected at load with `mis-aligned LINKEDIT`, which the compiler reports as `can't find crate for <macro>`. |
 | `OWE_MACOSX_DEPLOYMENT_TARGET` | `15.0` | The same value under a name cargo ignores. The renderer crate's build script passes it as `CMAKE_OSX_DEPLOYMENT_TARGET`, so the C++ engine keeps the minimum the app links against. |
-| `GIT_SHORT_COMMIT` | `git rev-parse --short HEAD` in the repository root | Stamps the build with the revision it was built from; Settings shows it as `Git revision`. The renderer build runs with `upstream/renderer` as its working directory, so HEAD is resolved against the repository root explicitly. |
+| `GIT_SHORT_COMMIT` | `git rev-parse --short HEAD` in the repository root | Stamps the build with the revision it was built from; Settings shows it as `Git revision`. The renderer build runs with `Renderer/` as its working directory, so HEAD is resolved against the repository root explicitly. |
 
 ## Stages and outputs
 
@@ -101,12 +82,12 @@ Xcode 26's `actool` crashes on most `.icon` compiles: CI compiles the icon on
 macOS 26 ([release.md](release.md#build-buildyml)), and a local build on macOS 15
 can do the same (see Troubleshooting). A build on macOS 26 never needs them.
 
-1. **Renderer** — `cargo build --workspace --release` in `upstream/renderer`.
+1. **Renderer** — `cargo build --workspace --release` in `Renderer/`.
    The Rust crates and the C++ scene engine are always built in release mode,
    independently of `--configuration`. Output lands in
-   `upstream/renderer/target/release`, including the static library
+   `Renderer/target/release`, including the static library
    `libwallpaper_bridge.a` the app links as `-lwallpaper_bridge`.
-2. **Swift bindings** — `upstream/renderer/target/release/uniffi-bindgen generate
+2. **Swift bindings** — `Renderer/target/release/uniffi-bindgen generate
    --library …/libwallpaper_bridge.a --language swift --no-format --out-dir
    App/Bridge/Generated`. This writes `WallpaperBridge.swift` plus the FFI header
    and module map. `App/Bridge/Generated` is build output: never edit it, and
@@ -118,7 +99,7 @@ can do the same (see Troubleshooting). A build on macOS 26 never needs them.
    WallpaperMachine -configuration <cfg> -derivedDataPath build build`. The app
    target embeds the `WallpaperMachineExtension` ExtensionKit extension.
    It also builds and embeds the unlinked `MediaRemoteAdapter.framework` from
-   the pinned BSD-3-Clause sources under `upstream/mediaremote-adapter`, and
+   the pinned BSD-3-Clause sources under `ThirdParty/mediaremote-adapter`, and
    includes its Perl entry point and license as app resources. Building or
    testing does not launch that helper.
 
@@ -128,7 +109,8 @@ Products:
 |---|---|
 | `build/Build/Products/Debug/WallpaperMachine.app` | Debug app, used by `scripts/test.py` |
 | `build/Build/Products/Release/WallpaperMachine.app` | Release app; this is the bundle the user runs, who quits and reopens it to load a new build |
-| `upstream/renderer/target/release/` | Renderer static libraries (`libwallpaper_bridge.a`, `libshader.a`) and `uniffi-bindgen` |
+| `Renderer/target/release/` | Renderer static library (`libwallpaper_bridge.a`, which contains the shader layer) and `uniffi-bindgen` |
+| `Renderer/target/release/` | The shader layer on its own (`libwm_shader.a`), built only by `scripts/check_renderer.py` and `scripts/check_rust.py` for the C++ and Rust tests |
 | `App/Bridge/Generated/` | Generated uniffi Swift bindings |
 
 `build/` is Git-ignored and disposable, but it holds the locally delivered app:
@@ -145,7 +127,7 @@ to see the raw stream as well, or open the log named in the failure line.
 | Mode | Use when | Requires |
 |---|---|---|
 | Full (no flag) | Renderer, bridge crate, or first build of a clean checkout. | All prerequisites. |
-| `--swift-only` | Only Swift, resources, or `project.yml` changed. | `upstream/renderer/target/release/libwallpaper_bridge.a` and `App/Bridge/Generated` must already exist from an earlier full build. |
+| `--swift-only` | Only Swift, resources, or `project.yml` changed. | `Renderer/target/release/libwallpaper_bridge.a` and `App/Bridge/Generated` must already exist from an earlier full build. |
 | `--renderer-only` | Iterating on Rust/C++ or the uniffi interface without needing an app bundle. | Nothing further; it stops after regenerating bindings. |
 
 ## Packaging and installing
@@ -178,21 +160,22 @@ bundle is absent.
      `build/Build/Products/Release/WallpaperMachine.app`, the locally delivered
      app.** Preview with `--dry-run`, keep a copy of any app you still need,
      and only then clean and rebuild; nothing cleans automatically.
-   - Every FFmpeg library the app links (`libav*`, `libsw*`, `libpostproc`) is
-     inspected at the resolved Homebrew file it would copy: the license string
-     FFmpeg's configure embeds must be exactly `LGPL version 2.1 or later` and
-     the embedded configure line must not contain `--enable-gpl`,
-     `--enable-version3` or `--enable-nonfree`. Otherwise it exits 1 with
-     `MISSING Refusing to bundle FFmpeg libraries that are not an LGPL build
-     (install the project's with python3 scripts/install_ffmpeg.py; see
-     LICENSING.md):` and one line per offending library.
    - The notice payload must exist: repository `LICENSE`, `LICENSING.md`,
-     `upstream/renderer/LICENSE`, `upstream/provenance.json`, the
+     `ThirdParty/received-licenses/wallpaper-engine-for-macos.GPL-2.0.txt`, `ThirdParty/provenance.json`, the
      Xcode-bundled `Resources/LICENSE` (mediaremote-adapter, BSD-3-Clause) and
      the extension's `Phosphene-LICENSE.txt`, and a `LICENSE*`/`COPYING*`/
      `COPYRIGHT*`/`NOTICE*` file in every Homebrew keg the link closure
      reaches. Otherwise `MISSING Missing license payload:` lists what is
      absent.
+   - `THIRD-PARTY-NOTICES.txt` must be generated: `python3 scripts/notices.py`'s
+     generator runs against the bundle's license closure (Homebrew libraries,
+     compiled-in code, every linked Rust crate; needs Homebrew, Cargo and a
+     populated cargo registry) and a tool failure or an empty closure stops
+     packaging (`Third-party notices could not be generated`). A component whose
+     license text cannot be found does not stop it by default: the output names
+     it (`MISSING LICENSE TEXT NOT FOUND for N of M components: …`) and the file
+     marks it. `--require-notices` makes that an error too; it is the gate for a
+     build that is distributed.
    - The disk image's inputs must be usable: `Packaging/dmg/background.png`, its
      `@2x` twin at exactly twice its pixel size, and the bundle's
      `Resources/AppIcon.icns`. Otherwise `Missing disk image input:` or
@@ -206,26 +189,28 @@ bundle is absent.
      `LSMinimumSystemVersion` to that release, so macOS declines to open the app
      instead of it failing to load a library. `--require-deployment-target`,
      which the release workflow passes, exits 1 instead.
-1. **Dylib relocation.** Starting from `libMoltenVK.dylib` and the app and
-   extension binaries, it walks `otool -L` transitively. Every dependency under
+1. **Dylib relocation.** Starting from the app and extension binaries, it walks `otool -L` transitively. Every dependency under
    the Homebrew prefix is copied into `Contents/Frameworks`, given an
    `@rpath/<name>` install name, and rewritten in its dependents with
    `install_name_tool -change`. Absolute `LC_RPATH` entries pointing into the
    Homebrew prefix or the repository are deleted, and
    `@executable_path/../Frameworks` (or `@executable_path/../../../../Frameworks`
    for the embedded `.appex`) is added instead.
-2. **MoltenVK ICD.** A `MoltenVK_icd.json` is written into the app's `Resources`
-   and into each extension's `Resources`, each pointing at the bundled
-   `libMoltenVK.dylib` with the correct relative depth, so Vulkan resolves the
-   portability driver inside the bundle.
-3. **License payload.** The root `LICENSE` is copied in as
+   `python3 scripts/check_licenses.py` walks the same `otool -L` closure
+   (read-only, on an unpackaged or a packaged app) and adds the compiled-in
+   and Rust-crate inventories; see [testing](testing/README.md).
+2. **License payload.** The root `LICENSE` is copied in as
    `WallpaperMachine-LICENSE.txt`, `LICENSING.md` as `LICENSING.md`,
-   `upstream/renderer/LICENSE` as `Renderer-LICENSE.txt`,
-   `upstream/provenance.json` as `provenance.json`, each bundled keg's notices
-   under `Licenses/<formula>-<version>/`, and the notices of the third-party
+   `ThirdParty/received-licenses/wallpaper-engine-for-macos.GPL-2.0.txt` (the terms the imported renderer arrived under, not the license of the code now) as `Imported-Renderer-GPL-2.0-LICENSE.txt`,
+   `ThirdParty/provenance.json` as `provenance.json`, each bundled keg's notices
+   under `Licenses/<formula>-<version>/`, the notices of the third-party
    code statically linked into the renderer under
-   `Licenses/renderer-third-party/`. `Licenses/` is rebuilt on every run.
-4. **Signing.** Each bundled dylib, then each extension
+   `Licenses/renderer-third-party/`, and the generated
+   `THIRD-PARTY-NOTICES.txt` (the license text of every third-party component
+   in the closure, including each linked Rust crate; the disk image carries only
+   the bundle, so the file travels inside the app). `Licenses/` is rebuilt on
+   every run.
+3. **Signing.** Each bundled dylib, then each extension
    (`--preserve-metadata=entitlements`), then the app are signed with
    `--sign-identity` (default `-`, ad hoc), and the result is checked with
    `codesign --verify --deep --strict`. Release builds use the project
@@ -233,11 +218,11 @@ bundle is absent.
    see [../LICENSING.md](../LICENSING.md#signing-and-notarization).
    A valid signature does not say what it signs, so the bundle is then read back
    against its [contract](#bundle-contract).
-5. **Dependency audit.** Every binary is re-scanned. A remaining Homebrew-prefixed
+4. **Dependency audit.** Every binary is re-scanned. A remaining Homebrew-prefixed
    load command fails with `Unbundled dependency: …`; an `@rpath` dependency with
    no matching file in `Contents/Frameworks` fails with `Missing bundled
    dependency: …` (Swift runtime libraries are exempt).
-6. **Disk image.** The version is read from the bundle's
+5. **Disk image.** The version is read from the bundle's
    `CFBundleShortVersionString`, and [`scripts/lib/dmg.py`](../scripts/lib/dmg.py)
    writes `WallpaperMachine-<version>-arm64.dmg`: an HFS+ volume named
    `WallpaperMachine <version>` holding the bundle (copied with `ditto`, so its
@@ -250,7 +235,7 @@ bundle is absent.
    `.DS_Store` records and the background are documented in `dmg.py`; the
    background is `Packaging/dmg/background.png` and its `@2x` twin, and the
    volume icon is the app's `AppIcon.icns`.
-7. **Verification and checksum.** The image is mounted read-only and out of
+6. **Verification and checksum.** The image is mounted read-only and out of
    sight: the bundle in it must be `app.wallpapermachine` at the version the name
    claims, pass `codesign --verify --deep --strict` and meet the same
    [contract](#bundle-contract) as the build, and the `Applications`
@@ -259,7 +244,7 @@ bundle is absent.
    `shasum -a 256 -c` reads. The in-app updater depends on the image name; see
    [release.md](release.md). The script labels the image not cleared for
    distribution; [../LICENSING.md](../LICENSING.md) records why.
-8. **`--install`.** Copies the bundle to `~/Applications/WallpaperMachine.app`.
+7. **`--install`.** Copies the bundle to `~/Applications/WallpaperMachine.app`.
    It refuses to overwrite an existing installation: quit and remove the old copy
    first.
 
@@ -274,8 +259,8 @@ bundle; no test can run Finder.
 ### Bundle contract
 
 [`scripts/lib/bundle_contract.py`](../scripts/lib/bundle_contract.py) reads the
-signed facts back from the artifact itself, after signing (step 4) and again on
-the app inside the mounted image (step 7), because re-signing or copying can drop
+signed facts back from the artifact itself, after signing (step 3) and again on
+the app inside the mounted image (step 6), because re-signing or copying can drop
 an entitlement or an Info.plist key without breaking the signature. The lock
 screen would then just never start on the user's Mac. Any of these exits 1 with
 `MISSING … does not match its signing and Info.plist contract:` and one line per
@@ -336,28 +321,32 @@ pass `--sign-identity "WallpaperMachine Code Signing"`.
 
 ## Runtime data locations
 
-The app never writes into the repository. Managed wallpapers live at
-`~/Library/Application Support/WallpaperMachine/Library`; imports copy files
-there and leave the originals untouched. Sibling directories under
+The app never writes into the repository. Managed wallpapers live by default at
+`~/Library/Application Support/WallpaperMachine/Library`; imports copy files into
+the library wherever it is kept and leave the originals untouched. Sibling directories under
 `~/Library/Application Support/WallpaperMachine/` hold scene assets
 (`SceneAssets`), the private SteamCMD runtime (`SteamCMD`) and the optional saved
-Steam sign-in (`SteamSession`). Setting `WALLPAPER_MACHINE_HOME` relocates the
-whole tree, which is how tests stay isolated from your real library.
+Steam sign-in (`SteamSession`). Settings → Storage can move `Library` and the
+partial downloads to another folder, such as an external drive
+([library location](features/library-location.md)); everything else stays.
+Setting `WALLPAPER_MACHINE_HOME` relocates the whole tree, which is how tests stay
+isolated from your real library.
 
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
 |---|---|---|
 | `cargo`/CMake stops with a missing header, library or `.pc` file | One of the Homebrew packages above is not installed, so its `opt/<package>` root contributed nothing to `CMAKE_PREFIX_PATH`/`PKG_CONFIG_PATH` | Install the package list, then rebuild. |
-| `cargo`/CMake configure fails once, immediately after the environment changed, and an unmodified retry succeeds | The renderer's CMake configure step is not robust to a changed `CMAKE_PREFIX_PATH`/`PKG_CONFIG_PATH` on its first run in a directory | Retry the same command once before investigating. Do not hand-set `LIBRARY_PATH=/opt/homebrew/lib` to work around it: that puts the non-keg-only FFmpeg back on the link line and reproduces the ABI mismatch above. Running `cargo` with a bare shell environment fails outright for the same reason |
+| `cargo`/CMake configure fails once, immediately after the environment changed, and an unmodified retry succeeds | The renderer's CMake configure step is not robust to a changed `CMAKE_PREFIX_PATH`/`PKG_CONFIG_PATH` on its first run in a directory | Retry the same command once before investigating. Running `cargo` with a bare shell environment fails outright for the same reason |
 | `brew: command not found` or `xcode-select` failure during startup | `build_environment()` shells out to `brew --prefix`, `xcode-select -p` and `xcrun` before any stage runs | Install Homebrew; select a full Xcode with `sudo xcode-select -s /Applications/Xcode.app`. |
-| Linker reports `library 'wallpaper_bridge' not found`, or Swift cannot find the generated bridge module | `--swift-only` was used without an earlier full build, so `upstream/renderer/target/release` and `App/Bridge/Generated` are empty | Run `python3 scripts/build.py` once without `--swift-only`. |
+| Linker reports `library 'wallpaper_bridge' not found`, or Swift cannot find the generated bridge module | `--swift-only` was used without an earlier full build, so `Renderer/target/release` and `App/Bridge/Generated` are empty | Run `python3 scripts/build.py` once without `--swift-only`. |
 | `xcodegen: command not found` | XcodeGen missing; both `scripts/build.py` and `scripts/test.py` regenerate the project | `brew install xcodegen`. |
 | Renderer changes have no effect on the app | The run used `--swift-only` | Rebuild without the flag. |
 | `Unbundled dependency:` or `Missing bundled dependency:` during packaging | A new native dependency is reachable from a binary but was not copied into `Contents/Frameworks` — usually loaded through an `@rpath` name with no Homebrew `lib/<name>` counterpart | Add the library to the Homebrew package list so the relocation walk can find it, then repackage. Never ship the bundle with the audit bypassed. |
-| `Refusing to bundle FFmpeg libraries that are not an LGPL build` during packaging | The app was linked against Homebrew's GPLv3 `ffmpeg@8` (or another non-LGPL build) instead of `mwe-ffmpeg` | `python3 scripts/install_ffmpeg.py`, then a fresh `python3 scripts/build.py` so the link resolves to the project's build. Never bypass the check; see [../LICENSING.md](../LICENSING.md). |
 | `Packaging requires fresh, unrelocated build output` | The bundle in `build/` was packaged before; incremental builds keep `Contents/Frameworks` and the rewritten load commands, and packaging never undoes them | Clean and rebuild as the [preflight](#packaging-and-installing) describes: `--all` deletes the delivered Release app, so preview with `--dry-run` and keep a copy first. |
 | `Missing license payload:` during packaging | A repository notice file, an Xcode-bundled notice, or a keg `LICENSE*`/`COPYING*` file is absent | Restore the listed file; the payload list is in [Packaging and installing](#packaging-and-installing). |
+| `Third-party notices could not be generated` during the preflight | `cargo tree --offline` failed (a missing lockfile or an unpopulated cargo registry) or no `--app` closure could be read | Run a build once so the registry is populated, then rerun; `python3 scripts/notices.py` shows the same failure on its own. |
+| `LICENSE TEXT NOT FOUND for N of M components` during packaging | A crate's published source carries no license file (supply it under `Packaging/notices/<crate>/`, as was done for the `objc2` and `uniffi` crates), or a keg ships none | Not an error unless `--require-notices` is set. Add the upstream project's license files under `Packaging/notices/<crate>/` (`LICENSE*`), recording where they were copied from, and rerun; `python3 scripts/notices.py` lists the gaps. |
 | `An installation already exists: …` | `--install` will not replace `~/Applications/WallpaperMachine.app` | Quit and remove the installed copy, then rerun. |
 | `CodeSign` fails with `resource fork, Finder information, or similar detritus not allowed in object file` | The built `.app`/`.appex` **directory** in `build/` picked up `com.apple.FinderInfo` or File Provider xattrs (`com.apple.fileprovider.fpfs#P`). It comes from the file provider syncing the checkout's parent directory, not from anything committed: source files carry only `com.apple.provenance`, which codesign accepts | `xattr -cr build/Build/Products/<configuration>` and rerun the same command. It recurs on synced checkouts; clearing the products directory is the fix, not a rebuild |
 | `codesign --verify --deep --strict` fails | A dylib or the extension was modified after signing | Rerun packaging on a fresh build rather than re-signing pieces by hand. |

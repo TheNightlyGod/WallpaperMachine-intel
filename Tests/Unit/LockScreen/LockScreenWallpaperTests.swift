@@ -731,6 +731,37 @@ final class LockScreenWallpaperTests: XCTestCase {
     XCTAssertFalse(FileManager.default.fileExists(atPath: journal.path))
   }
 
+  /// WallpaperAgent writes its store in bursts; an attempt that lost that race wrote nothing, so
+  /// the next one takes the displays over rather than reporting a change made outside the app.
+  @MainActor
+  func testRetryAfterConcurrentStoreChangeTakesOverInsteadOfReportingAnExternalChange() throws {
+    var external = fixture()
+    try write(external)
+    external["Unrelated"] = "concurrent external update"
+    var raced = false
+    var reloads = 0
+    let selection = LockScreenWallpaperSelection(
+      storeURL: store, journalURL: journal, reload: { reloads += 1 },
+      persistJournal: { url, data in
+        try LockScreenWallpaperSelection.persistJournalFile(url, data)
+        if !raced {
+          raced = true
+          try self.write(external)
+        }
+      })
+    XCTAssertThrowsError(try selection.synchronize(desktopDisplays: ["one"], screenSaverDisplays: ["one"])) {
+      XCTAssertEqual(($0 as? LockScreenWallpaperFailure)?.reason, .transient)
+    }
+    try selection.synchronize(desktopDisplays: ["one"], screenSaverDisplays: ["one"])
+    XCTAssertEqual(reloads, 1)
+    let taken = try readStore()
+    let display = try XCTUnwrap((taken["Displays"] as? [String: Any])?["one"] as? [String: Any])
+    XCTAssertEqual(provider(display, key: "Desktop"), LockScreenConfiguration.extensionIdentifier)
+    XCTAssertEqual(taken["Unrelated"] as? String, "concurrent external update")
+    try selection.synchronize(desktopDisplays: [], screenSaverDisplays: [])
+    XCTAssertEqual(try readStore() as NSDictionary, external as NSDictionary)
+  }
+
   @MainActor
   func testReloadRetryUsesPersistedUnionWithoutRewritingIt() throws {
     let original = fixture()
@@ -1480,5 +1511,86 @@ final class LockScreenWallpaperTests: XCTestCase {
     ] {
       XCTAssertFalse(LockScreenFraming(panX: panX, panY: panY).isValid, "\(panX), \(panY)")
     }
+  }
+
+  // MARK: The scene renderer is no longer a choice
+
+  /// A configuration an older app wrote may carry a `sceneRenderer` key naming any of the three old
+  /// renderers, or a name nobody knows. The extension reads past it: there is one renderer, so the key
+  /// decides nothing and the file is not refused.
+  func testAnOldSceneRendererKeyIsReadPastWhateverItNames() throws {
+    for name in ["compatibility", "native_metal_preferred", "native_metal_only", "somethingNew"] {
+      let json = """
+        {"version":2,"revision":"r","lockScreenEnabled":true,"screenSaverEnabled":false,\
+        "scenes":[{"displayID":1,"title":"t","projectPath":"revisions/a/project.json",\
+        "assetsPath":"revisions/a","fps":30,"scalingMode":3,"scalingFactor":1,"paused":false,\
+        "sceneRenderer":"\(name)"}]}
+        """
+      let configuration = try JSONDecoder().decode(LockScreenConfiguration.self, from: Data(json.utf8))
+      XCTAssertEqual(configuration.version, LockScreenConfiguration.supportedVersion, name)
+      XCTAssertEqual(configuration.scenes.first, publishedScene(), name)
+    }
+  }
+
+  func testTheSceneWrittenNowCarriesNoRendererKey() throws {
+    let plain = try XCTUnwrap(
+      try JSONSerialization.jsonObject(with: JSONEncoder().encode(publishedScene())) as? [String: Any])
+    XCTAssertNil(plain["sceneRenderer"], "there is no renderer to name")
+  }
+
+  // MARK: The native video player the extension may use
+
+  func testTheNativeVideoFileTravelsInTheFileAndAnOlderFileKeepsTheOldShape() throws {
+    let encoder = JSONEncoder()
+    var scene = publishedScene()
+    scene.plainVideo = true
+    scene.nativeVideoFile = "clip.mp4"
+    let decoded = try JSONDecoder().decode(LockScreenScene.self, from: encoder.encode(scene))
+    XCTAssertEqual(decoded.nativeVideoFile, "clip.mp4")
+    XCTAssertEqual(decoded.plainVideo, true)
+    XCTAssertEqual(decoded, scene)
+    let plain = try XCTUnwrap(
+      try JSONSerialization.jsonObject(with: encoder.encode(publishedScene())) as? [String: Any])
+    XCTAssertNil(plain["nativeVideoFile"], "without the choice no key is written")
+    XCTAssertNil(plain["plainVideo"], "a scene writes no video key")
+    let json = Data(#"{"displayID":1,"title":"t","projectPath":"p","assetsPath":"a","fps":30,"scalingMode":3,"scalingFactor":1,"paused":false}"#.utf8)
+    let older = try JSONDecoder().decode(LockScreenScene.self, from: json)
+    XCTAssertNil(older.nativeVideoFile)
+    XCTAssertNil(older.plainVideo)
+  }
+
+  func testBeingAVideoOrNotAndTheFileItPlaysReplaceTheRenderer() {
+    let scene = publishedScene()
+    var native = scene
+    native.plainVideo = true
+    native.nativeVideoFile = "clip.mp4"
+    XCTAssertFalse(scene.sharesRenderer(with: native))
+    XCTAssertFalse(native.sharesRenderer(with: scene))
+    var missing = native
+    missing.nativeVideoFile = nil
+    XCTAssertFalse(native.sharesRenderer(with: missing), "a clip that appeared is played, not held")
+    var other = native
+    other.nativeVideoFile = "other.mp4"
+    XCTAssertFalse(native.sharesRenderer(with: other))
+  }
+
+  /// A clip plays at its own rate, so no frame rate decides whether the native player may play
+  /// it: a new rate keeps the running player, and the scene engine takes the new rate while it
+  /// runs.
+  func testANewFrameRateKeepsTheNativePlayerAndTheSceneEngine() {
+    var native = publishedScene()
+    native.nativeVideoFile = "clip.mp4"
+    var faster = native
+    faster.fps = 60
+    XCTAssertTrue(native.sharesRenderer(with: faster))
+    let engine = publishedScene()
+    var engineFaster = engine
+    engineFaster.fps = 60
+    XCTAssertTrue(engine.sharesRenderer(with: engineFaster))
+    // Pause and title still apply to a running player.
+    var paused = native
+    paused.paused = true
+    paused.title = "renamed"
+    XCTAssertTrue(native.sharesRenderer(with: paused))
   }
 }

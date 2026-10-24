@@ -204,15 +204,19 @@ struct DisplayCard: View {
         }
       }
       ScaleFactorRow(options: options, display: display)
-      FrameRateRow(options: options, display: display)
-      if let limit = display.frameRateLimit {
-        InspectorCardRow {
-          VStack(alignment: .leading, spacing: 4) {
-            InspectorNote(verbatim: limit.note)
-            Button(limit.section.openTitle) {
-              controller.launch("openSettings") { try await controller.openSettings(limit.section) }
+      // The native player plays a clip at the clip's own rate, so neither the display's frame rate
+      // nor a ceiling on it applies to what it draws.
+      if InspectorPolicy.offersFrameRate(for: display) {
+        FrameRateRow(options: options, display: display)
+        if let limit = display.frameRateLimit {
+          InspectorCardRow {
+            VStack(alignment: .leading, spacing: 4) {
+              InspectorNote(verbatim: limit.note)
+              Button(limit.section.openTitle) {
+                controller.launch("openSettings") { try await controller.openSettings(limit.section) }
+              }
+              .buttonStyle(.inspectorLink)
             }
-            .buttonStyle(.inspectorLink)
           }
         }
       }
@@ -467,20 +471,9 @@ private struct PositionRows: View {
         .buttonStyle(.inspectorLink)
         .disabled(display.position.isCentered)
         .help(L("Center the wallpaper on the display"))
-        switch InspectorPolicy.positionNote(for: display) {
-        case .nativePlayer:
-          InspectorNote(
-            "This video is drawn by the native video player, which keeps it centered. Choose Compatibility for Video playback in Performance settings to move it."
-          )
-          Button("Open Performance") {
-            controller.launch("openSettings") { try await controller.openSettings(.performance) }
-          }
-          .buttonStyle(.inspectorLink)
-        case .explains:
-          InspectorNote(
-            "Choose which part of the wallpaper stays in view when it is larger than the display, or where it sits when it is smaller. Nothing moves when it already fits the display exactly."
-          )
-        }
+        InspectorNote(
+          "Choose which part of the wallpaper stays in view when it is larger than the display, or where it sits when it is smaller. Nothing moves when it already fits the display exactly."
+        )
       }
     }
     // A drag cut off by the rows going away settles with its newest value.

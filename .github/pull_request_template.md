@@ -17,6 +17,7 @@
 - [ ] One coherent change, and the PR title is a Conventional Commit subject (`fix(scene): …`, `feat(downloads): …`)
 - [ ] No `release:` line in the title or any commit message (it cuts a version when merged)
 - [ ] Tests for behavior a plausible bug would break
-- [ ] Generated files regenerated, not hand-edited (`project.yml` → Xcode project; bridge bindings through `scripts/build.py`); `upstream/` changes update `upstream/provenance.json`
+- [ ] Generated files regenerated, not hand-edited (`project.yml` → Xcode project; bridge bindings through `scripts/build.py`); `ThirdParty/` changes update `ThirdParty/provenance.json`
 - [ ] The document that owns the behavior updated
 - [ ] No build output, secrets, private wallpapers or personal paths in the diff
+- [ ] My commits are signed off (`git commit -s`): I certify the Developer Certificate of Origin and license this change under GPL-3.0-only (CONTRIBUTING.md)

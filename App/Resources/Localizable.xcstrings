@@ -1,6 +1,147 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
+    "Restore recovery could not find the copies it set aside. The restore folder has been kept and nothing has been deleted." : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "복원을 바로잡는 중에 따로 보관해 둔 사본을 찾을 수 없습니다. 복원 폴더는 그대로 유지되었으며 아무것도 삭제되지 않았습니다."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "復元の修復で、取り置いたコピーが見つかりませんでした。復元用フォルダは保持されており、何も削除されていません。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "修复恢复时找不到预先留存的副本。恢复文件夹已保留，没有任何内容被删除。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "修復回復時找不到預先留存的副本。回復檔案夾已保留，沒有任何內容被刪除。"}}}
+    },
+    "A backup restore that did not finish is put right the next time you open WallpaperMachine. Move the library after that." : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "완료되지 않은 백업 복원은 다음에 WallpaperMachine을 열 때 바로잡힙니다. 그 후에 보관함을 이동하세요."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "完了しなかったバックアップの復元は、次回WallpaperMachineを開いたときに修復されます。ライブラリの移動はその後に行ってください。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "未完成的备份恢复会在下次打开 WallpaperMachine 时修复。请在那之后再移动壁纸库。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "未完成的備份回復會在下次開啟 WallpaperMachine 時修復。請在那之後再搬移桌布庫。"}}}
+    },
+    "Restore recovery needs the drive that holds the wallpaper library. Connect it and open WallpaperMachine again; nothing has been deleted." : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "복원을 바로잡으려면 배경화면 보관함이 있는 드라이브가 필요합니다. 드라이브를 연결하고 WallpaperMachine을 다시 여세요. 아무것도 삭제되지 않았습니다."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "復元の修復には壁紙ライブラリがあるドライブが必要です。ドライブを接続して、もう一度WallpaperMachineを開いてください。何も削除されていません。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "修复恢复需要存放壁纸库的磁盘。请连接它，然后重新打开 WallpaperMachine；没有任何内容被删除。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "修復回復需要存放桌布庫的磁碟。請連接它，然後重新開啟 WallpaperMachine；沒有任何內容被刪除。"}}}
+    },
+    "WallpaperMachine could not read where your wallpaper library is kept." : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "WallpaperMachine이 배경화면 보관함이 저장된 위치를 읽지 못했습니다."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "WallpaperMachineは壁紙ライブラリの保存場所を読み取れませんでした。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "WallpaperMachine 无法读取壁纸库的存放位置。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "WallpaperMachine 無法讀取桌布庫的存放位置。"}}}
+    },
+    "Your wallpaper library is in “%@”, which is not available. Connect the drive that holds it, then quit and reopen WallpaperMachine. If it is connected, allow WallpaperMachine to use removable volumes in System Settings › Privacy & Security › Files and Folders." : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "배경화면 보관함이 “%@”에 있지만 지금 사용할 수 없습니다. 보관함이 있는 드라이브를 연결한 다음 WallpaperMachine을 종료하고 다시 여세요. 연결되어 있다면 시스템 설정 › 개인정보 보호 및 보안 › 파일 및 폴더에서 WallpaperMachine이 이동식 볼륨을 사용할 수 있도록 허용하세요."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "壁紙ライブラリは「%@」にありますが、現在利用できません。ライブラリがあるドライブを接続してから、WallpaperMachineを終了して開き直してください。接続されている場合は、システム設定の「プライバシーとセキュリティ」›「ファイルとフォルダ」で、WallpaperMachineにリムーバブルボリュームの使用を許可してください。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "你的壁纸库位于“%@”，但它现在不可用。请连接存放壁纸库的磁盘，然后退出并重新打开 WallpaperMachine。如果已经连接，请在“系统设置”›“隐私与安全性”›“文件与文件夹”中允许 WallpaperMachine 使用可移除的宗卷。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "你的桌布庫位於「%@」，但它目前無法使用。請連接存放桌布庫的磁碟，然後結束並重新開啟 WallpaperMachine。如果已經連接，請在「系統設定」›「隱私權與安全性」›「檔案與檔案夾」中允許 WallpaperMachine 使用可移除的卷宗。"}}}
+    },
+    "The current wallpaper library is not available, so it cannot be moved." : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "현재 배경화면 보관함을 사용할 수 없어 이동할 수 없습니다."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "現在の壁紙ライブラリが利用できないため、移動できません。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "当前的壁纸库不可用，因此无法移动。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "目前的桌布庫無法使用，因此無法搬移。"}}}
+    },
+    "A move is already waiting for the next launch. Cancel it before choosing another folder." : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "다음 실행 때 진행될 이동이 이미 대기 중입니다. 다른 폴더를 선택하기 전에 취소하세요."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "次回の起動時に実行される移動がすでにあります。別のフォルダを選ぶ前にキャンセルしてください。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "已有一次移动在等待下次启动时完成。请先取消它，再选择其他文件夹。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "已有一次搬移在等待下次啟動時完成。請先取消它，再選擇其他檔案夾。"}}}
+    },
+    "Choose a folder that exists." : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "존재하는 폴더를 선택하세요."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "存在するフォルダを選択してください。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "请选择一个存在的文件夹。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "請選擇一個存在的檔案夾。"}}}
+    },
+    "Choose a folder outside WallpaperMachine’s own folders." : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "WallpaperMachine 자체 폴더 밖에 있는 폴더를 선택하세요."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "WallpaperMachine自身のフォルダの外にあるフォルダを選択してください。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "请选择 WallpaperMachine 自身文件夹以外的文件夹。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "請選擇 WallpaperMachine 自身檔案夾以外的檔案夾。"}}}
+    },
+    "“%@” already has a folder named WallpaperMachine. Choose another folder, or move that one away first." : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "“%@”에 이미 WallpaperMachine이라는 폴더가 있습니다. 다른 폴더를 선택하거나 먼저 그 폴더를 다른 곳으로 옮기세요."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "「%@」にはすでにWallpaperMachineという名前のフォルダがあります。別のフォルダを選ぶか、先にそのフォルダを移動してください。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "“%@”中已有名为 WallpaperMachine 的文件夹。请选择其他文件夹，或先把那个文件夹移走。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "「%@」中已有名為 WallpaperMachine 的檔案夾。請選擇其他檔案夾，或先把那個檔案夾移走。"}}}
+    },
+    "The wallpaper library is already on this Mac." : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "배경화면 보관함이 이미 이 Mac에 있습니다."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "壁紙ライブラリはすでにこのMacにあります。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "壁纸库已经在这台 Mac 上。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "桌布庫已經在這台 Mac 上。"}}}
+    },
+    "WallpaperMachine’s folder on this Mac already holds “%@”. Move it away, then try again." : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "이 Mac의 WallpaperMachine 폴더에 이미 “%@” 항목이 있습니다. 다른 곳으로 옮긴 후 다시 시도하세요."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "このMac上のWallpaperMachineのフォルダにはすでに「%@」があります。それを移動してから、もう一度お試しください。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "这台 Mac 上的 WallpaperMachine 文件夹中已有“%@”。请把它移走后重试。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "這台 Mac 上的 WallpaperMachine 檔案夾中已有「%@」。請把它移走後再試一次。"}}}
+    },
+    "Not enough free space: the library and downloads need about %@ and only %@ is available there." : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "여유 공간이 부족합니다. 보관함과 다운로드에는 약 %@이(가) 필요하지만 그곳의 여유 공간은 %@뿐입니다."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "空き容量が足りません：ライブラリとダウンロードには約%@必要ですが、そこには%@しか空きがありません。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "可用空间不足：壁纸库和下载大约需要 %@，而那里只剩 %@ 可用。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "可用空間不足：桌布庫和下載項目大約需要 %@，而那裡只剩 %@ 可用。"}}}
+    },
+    "Choose a folder on a disk connected to this Mac, not a network share." : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "네트워크 공유가 아닌, 이 Mac에 연결된 디스크의 폴더를 선택하세요."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "ネットワーク共有ではなく、このMacに接続されたディスク上のフォルダを選択してください。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "请选择连接到这台 Mac 的磁盘上的文件夹，而不是网络共享。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "請選擇連接到這台 Mac 的磁碟上的檔案夾，而不是網路共享。"}}}
+    },
+    "WallpaperMachine cannot write to this folder. Choose another one." : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "WallpaperMachine이 이 폴더에 쓸 수 없습니다. 다른 폴더를 선택하세요."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "WallpaperMachineはこのフォルダに書き込めません。別のフォルダを選択してください。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "WallpaperMachine 无法写入这个文件夹。请选择其他文件夹。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "WallpaperMachine 無法寫入這個檔案夾。請選擇其他檔案夾。"}}}
+    },
+    "This disk’s format cannot hold the wallpaper library. Use a disk formatted as APFS or Mac OS Extended." : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "이 디스크의 포맷으로는 배경화면 보관함을 저장할 수 없습니다. APFS 또는 Mac OS 확장으로 포맷된 디스크를 사용하세요."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "このディスクのフォーマットでは壁紙ライブラリを保存できません。APFSまたはMac OS拡張でフォーマットされたディスクを使用してください。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "这个磁盘的格式无法存放壁纸库。请使用格式为 APFS 或 Mac OS 扩展的磁盘。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "這個磁碟的格式無法存放桌布庫。請使用格式為 APFS 或 Mac OS 擴充格式的磁碟。"}}}
+    },
+    "The wallpaper library was not moved: it is no longer where the move started from." : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "배경화면 보관함이 이동되지 않았습니다. 이동을 시작한 위치에 더 이상 없습니다."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "壁紙ライブラリは移動されませんでした：移動を始めたときの場所にもうありません。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "壁纸库未被移动：它已不在开始移动时的位置。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "桌布庫未被搬移：它已不在開始搬移時的位置。"}}}
+    },
+    "The wallpaper library was not moved: “%@” was not available. Connect the drive and choose the folder again." : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "배경화면 보관함이 이동되지 않았습니다. “%@”을(를) 사용할 수 없었습니다. 드라이브를 연결하고 폴더를 다시 선택하세요."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "壁紙ライブラリは移動されませんでした：「%@」を利用できませんでした。ドライブを接続して、もう一度フォルダを選択してください。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "壁纸库未被移动：“%@”不可用。请连接磁盘，然后重新选择文件夹。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "桌布庫未被搬移：「%@」無法使用。請連接磁碟，然後重新選擇檔案夾。"}}}
+    },
+    "Could not move “%@” into place: %@." : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "“%@”을(를) 제자리로 옮길 수 없습니다: %@."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "「%@」を所定の場所に移動できませんでした：%@。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "无法将“%@”移动到位：%@。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "無法將「%@」搬移到位：%@。"}}}
+    },
+    "Could not read the disk that holds “%@”." : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "“%@”이(가) 있는 디스크를 읽을 수 없습니다."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "「%@」があるディスクを読み取れませんでした。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "无法读取存放“%@”的磁盘。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "無法讀取存放「%@」的磁碟。"}}}
+    },
+    "Could not copy “%@”: %@." : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "“%@”을(를) 복사할 수 없습니다: %@."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "「%@」をコピーできませんでした：%@。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "无法拷贝“%@”：%@。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "無法拷貝「%@」：%@。"}}}
+    },
+    "The wallpaper library is already being copied." : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "배경화면 보관함을 이미 복사하고 있습니다."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "壁紙ライブラリはすでにコピー中です。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "壁纸库已在拷贝中。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "桌布庫已在拷貝中。"}}}
+    },
+    "Wallpaper Library Unavailable" : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "배경화면 보관함을 사용할 수 없음"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "壁紙ライブラリを利用できません"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "壁纸库不可用"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "桌布庫無法使用"}}}
+    },
+    "Use This Mac Instead…" : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "대신 이 Mac 사용…"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "代わりにこのMacを使用…"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "改用这台 Mac…"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "改用這台 Mac…"}}}
+    },
+    "Keep the wallpaper library on this Mac?" : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "배경화면 보관함을 이 Mac에 두시겠습니까?"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "壁紙ライブラリをこのMacに置きますか？"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "要把壁纸库放在这台 Mac 上吗？"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "要把桌布庫放在這台 Mac 上嗎？"}}}
+    },
+    "From the next launch WallpaperMachine keeps its library in its own folder on this Mac, so the wallpapers on the drive are not shown. Nothing on the drive is deleted. WallpaperMachine quits now; open it again afterwards." : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "다음 실행부터 WallpaperMachine은 이 Mac에 있는 자체 폴더에 보관함을 두므로 드라이브의 배경화면은 표시되지 않습니다. 드라이브에서는 아무것도 삭제되지 않습니다. WallpaperMachine이 지금 종료되며, 그 후 다시 여세요."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "次回の起動から、WallpaperMachineはライブラリをこのMac上の自身のフォルダに保存するため、ドライブ上の壁紙は表示されません。ドライブ上のものは何も削除されません。WallpaperMachineは今すぐ終了します。その後、もう一度開いてください。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "从下次启动起，WallpaperMachine 会把壁纸库放在这台 Mac 上它自己的文件夹中，因此不会显示磁盘上的壁纸。磁盘上的任何内容都不会被删除。WallpaperMachine 现在会退出，之后请重新打开它。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "從下次啟動起，WallpaperMachine 會把桌布庫放在這台 Mac 上它自己的檔案夾中，因此不會顯示磁碟上的桌布。磁碟上的任何內容都不會被刪除。WallpaperMachine 現在會結束，之後請重新開啟它。"}}}
+    },
+    "Use This Mac and Quit" : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "이 Mac 사용 후 종료"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "このMacを使用して終了"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "使用这台 Mac 并退出"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "使用這台 Mac 並結束"}}}
+    },
+    "Move Wallpaper Library" : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "배경화면 보관함 이동"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "壁紙ライブラリを移動"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "移动壁纸库"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "搬移桌布庫"}}}
+    },
+    "Choose where to keep the wallpaper library and downloads, such as an external drive. WallpaperMachine creates a folder named WallpaperMachine there." : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "배경화면 보관함과 다운로드를 저장할 위치(예: 외장 드라이브)를 선택하세요. WallpaperMachine이 그곳에 WallpaperMachine이라는 폴더를 만듭니다."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "壁紙ライブラリとダウンロードの保存先（外部ドライブなど）を選択してください。WallpaperMachineはそこにWallpaperMachineという名前のフォルダを作成します。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "选择存放壁纸库和下载的位置，例如外置硬盘。WallpaperMachine 会在那里创建名为 WallpaperMachine 的文件夹。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "選擇存放桌布庫和下載項目的位置，例如外接硬碟。WallpaperMachine 會在那裡建立名為 WallpaperMachine 的檔案夾。"}}}
+    },
+    "Choose" : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "선택"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "選択"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "选取"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "選擇"}}}
+    },
+    "WallpaperMachine copies %@ to “%@” now, and you can keep using it meanwhile. The move finishes the next time you open WallpaperMachine, which then deletes the old copy." : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "WallpaperMachine이 지금 %@을(를) “%@”(으)로 복사하며, 그동안에도 계속 사용할 수 있습니다. 이동은 다음에 WallpaperMachine을 열 때 완료되고, 그때 이전 사본이 삭제됩니다."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "WallpaperMachineは今から%@を「%@」にコピーします。その間も引き続き使用できます。移動は次回WallpaperMachineを開いたときに完了し、その後、古いコピーが削除されます。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "WallpaperMachine 现在会把 %@ 拷贝到“%@”，在此期间你可以继续使用。移动会在下次打开 WallpaperMachine 时完成，随后删除旧的副本。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "WallpaperMachine 現在會把 %@ 拷貝到「%@」，在此期間你可以繼續使用。搬移會在下次開啟 WallpaperMachine 時完成，隨後刪除舊的副本。"}}}
+    },
+    "The library and downloads move to “%@” the next time you open WallpaperMachine." : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "보관함과 다운로드는 다음에 WallpaperMachine을 열 때 “%@”(으)로 이동합니다."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "ライブラリとダウンロードは、次回WallpaperMachineを開いたときに「%@」に移動します。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "壁纸库和下载会在下次打开 WallpaperMachine 时移动到“%@”。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "桌布庫和下載項目會在下次開啟 WallpaperMachine 時搬移到「%@」。"}}}
+    },
+    "Move the wallpaper library back to this Mac?" : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "배경화면 보관함을 이 Mac으로 다시 옮기시겠습니까?"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "壁紙ライブラリをこのMacに戻しますか？"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "要把壁纸库移回这台 Mac 吗？"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "要把桌布庫搬回這台 Mac 嗎？"}}}
+    },
+    "Move the wallpaper library?" : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "배경화면 보관함을 이동하시겠습니까?"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "壁紙ライブラリを移動しますか？"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "要移动壁纸库吗？"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "要搬移桌布庫嗎？"}}}
+    },
+    "Move" : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "이동"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "移動"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "移动"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "搬移"}}}
+    },
+    "Wallpaper library location" : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "배경화면 보관함 위치"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "壁紙ライブラリの場所"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "壁纸库位置"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "桌布庫位置"}}}
+    },
+    "Wallpaper library and downloads" : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "배경화면 보관함 및 다운로드"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "壁紙ライブラリとダウンロード"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "壁纸库和下载"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "桌布庫和下載項目"}}}
+    },
+    "Installed wallpapers and downloads are kept in this folder, which can be on an external drive. Settings, Steam sign-ins, caches and the files you chose for wallpapers stay on this Mac." : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "설치한 배경화면과 다운로드는 이 폴더에 보관되며, 외장 드라이브에 둘 수도 있습니다. 설정, Steam 로그인, 캐시, 배경화면용으로 선택한 파일은 이 Mac에 남습니다."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "インストールした壁紙とダウンロードはこのフォルダに保存されます。外部ドライブ上のフォルダにもできます。設定、Steamのサインイン、キャッシュ、壁紙用に選択したファイルはこのMacに残ります。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "已安装的壁纸和下载存放在这个文件夹中，它可以位于外置硬盘上。设置、Steam 登录、缓存和你为壁纸选择的文件仍保留在这台 Mac 上。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "已安裝的桌布和下載項目存放在這個檔案夾中，它可以位於外接硬碟上。設定、Steam 登入、快取和你為桌布選擇的檔案仍保留在這台 Mac 上。"}}}
+    },
+    "Move…" : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "이동…"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "移動…"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "移动…"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "搬移…"}}}
+    },
+    "Move to This Mac…" : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "이 Mac으로 이동…"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "このMacに移動…"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "移到这台 Mac…"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "搬到這台 Mac…"}}}
+    },
+    "External drive" : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "외장 드라이브"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "外部ドライブ"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "外置硬盘"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "外接硬碟"}}}
+    },
+    "Cancel move" : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "이동 취소"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "移動をキャンセル"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "取消移动"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "取消搬移"}}}
+    },
+    "Copying the wallpaper library…" : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "배경화면 보관함 복사 중…"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "壁紙ライブラリをコピー中…"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "正在拷贝壁纸库…"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "正在拷貝桌布庫…"}}}
+    },
+    "Ready to move" : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "이동 준비 완료"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "移動の準備完了"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "已准备好移动"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "已準備好搬移"}}}
+    },
+    "Copy progress" : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "복사 진행 상황"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "コピーの進行状況"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "拷贝进度"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "拷貝進度"}}}
+    },
+    "The library moves to “%@” the next time you open WallpaperMachine. Quit and reopen the app when you are ready; it does not restart on its own." : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "보관함은 다음에 WallpaperMachine을 열 때 “%@”(으)로 이동합니다. 준비가 되면 앱을 종료한 후 다시 여세요. 앱이 자동으로 재시작되지는 않습니다."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "ライブラリは次回WallpaperMachineを開いたときに「%@」に移動します。準備ができたらAppを終了して開き直してください。Appが自動で再起動することはありません。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "壁纸库会在下次打开 WallpaperMachine 时移动到“%@”。准备好后请退出并重新打开应用；应用不会自行重启。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "桌布庫會在下次開啟 WallpaperMachine 時搬移到「%@」。準備好後請結束並重新開啟 App；App 不會自行重新啟動。"}}}
+    },
+    "The library moves back to this Mac the next time you open WallpaperMachine. Quit and reopen the app when you are ready; it does not restart on its own." : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "보관함은 다음에 WallpaperMachine을 열 때 이 Mac으로 다시 이동합니다. 준비가 되면 앱을 종료한 후 다시 여세요. 앱이 자동으로 재시작되지는 않습니다."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "ライブラリは次回WallpaperMachineを開いたときにこのMacに戻ります。準備ができたらAppを終了して開き直してください。Appが自動で再起動することはありません。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "壁纸库会在下次打开 WallpaperMachine 时移回这台 Mac。准备好后请退出并重新打开应用；应用不会自行重启。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "桌布庫會在下次開啟 WallpaperMachine 時搬回這台 Mac。準備好後請結束並重新開啟 App；App 不會自行重新啟動。"}}}
+    },
     "Every setting returns to its default, including appearance, language, shortcuts, playback, performance and app rules. Your library, playlists, collections, displays and sign-ins are kept." : {
       "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "모양, 언어, 단축키, 재생, 성능 및 앱 규칙을 포함한 모든 설정이 기본값으로 돌아갑니다. 보관함, 재생목록, 컬렉션, 디스플레이 및 로그인은 유지됩니다."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "外観、言語、ショートカット、再生、パフォーマンス、アプリルールを含むすべての設定がデフォルトに戻ります。ライブラリ、プレイリスト、コレクション、ディスプレイ、サインインはそのまま残ります。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "所有设置都会恢复为默认值，包括外观、语言、快捷键、播放、性能和应用规则。资源库、播放列表、收藏夹、显示器和登录状态会保留。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "所有設定都會恢復為預設值，包括外觀、語言、快速鍵、播放、效能和 App 規則。資料庫、播放列表、收藏集、顯示器和登入狀態會保留。"}}}
     },
@@ -259,9 +400,6 @@
     "This wallpaper type has no supported lock-screen route." : {
       "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "이 배경화면 유형에는 지원되는 잠금 화면 표시 방식이 없습니다."}}, "en" : {"stringUnit" : {"state" : "translated", "value" : "This wallpaper type has no supported lock-screen route."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "この壁紙の種類には、対応するロック画面での表示方法がありません。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "此壁纸类型没有受支持的锁定屏幕方式。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "此桌布類型沒有支援的鎖定畫面方式。"}}}
     },
-    "Video and scene wallpapers have a lock-screen route. Publishing, resource access and extension playback still require runtime verification; scenes use Compatibility there." : {
-      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "동영상 및 장면 배경화면은 잠금 화면에 표시할 수 있습니다. 게시, 리소스 접근 및 확장 프로그램 재생은 실행 중 검증이 필요합니다. 잠금 화면에서 장면은 ‘호환성’을 사용합니다."}}, "en" : {"stringUnit" : {"state" : "translated", "value" : "Video and scene wallpapers have a lock-screen route. Publishing, resource access and extension playback still require runtime verification; scenes use Compatibility there."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "動画とシーン壁紙にはロック画面への表示経路があります。公開、リソースへのアクセス、拡張機能での再生は実行時の検証が必要です。シーンは互換モードを使用します。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "视频和场景壁纸支持锁定屏幕方式。发布、资源访问和扩展播放仍需运行时验证；场景在此使用兼容模式。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "影片和場景桌布支援鎖定畫面方式。發佈、資源存取和延伸功能播放仍需執行時驗證；場景在此使用相容模式。"}}}
-    },
     "Installed project" : {
       "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "설치된 프로젝트"}}, "en" : {"stringUnit" : {"state" : "translated", "value" : "Installed project"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "インストール済みプロジェクト"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "已安装项目"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "已安裝專案"}}}
     },
@@ -301,18 +439,6 @@
     "The declared entry file is missing or unreadable. Reinstall this wallpaper." : {
       "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "선언된 진입 파일이 없거나 읽을 수 없습니다. 이 배경화면을 재설치하세요."}}, "en" : {"stringUnit" : {"state" : "translated", "value" : "The declared entry file is missing or unreadable. Reinstall this wallpaper."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "宣言されたエントリファイルが見つからないか、読み取れません。この壁紙を再インストールしてください。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "声明的入口文件缺失或不可读。请重新安装此壁纸。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "宣告的入口檔案遺失或無法讀取。請重新安裝此桌布。"}}}
     },
-    "Native video admission" : {
-      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "네이티브 동영상 적합성 확인"}}, "en" : {"stringUnit" : {"state" : "translated", "value" : "Native video admission"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "ネイティブ動画の適合確認"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "原生视频准入"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "原生影片准入"}}}
-    },
-    "AVFoundation metadata meets this target frame-rate constraint. Actual player preparation and on-screen presentation are not verified by this check." : {
-      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "AVFoundation 메타데이터가 이 대상 프레임률 조건을 충족합니다. 이 검사는 실제 플레이어 준비 및 화면 표시를 검증하지 않습니다."}}, "en" : {"stringUnit" : {"state" : "translated", "value" : "AVFoundation metadata meets this target frame-rate constraint. Actual player preparation and on-screen presentation are not verified by this check."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "AVFoundation のメタデータは対象のフレームレート制約を満たしています。実際のプレイヤーの準備や画面表示は、この確認では検証しません。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "AVFoundation 元数据符合目标帧率约束。此检查不验证实际播放器准备和屏幕显示。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "AVFoundation 中繼資料符合目標影格率限制。此檢查不驗證實際播放器準備和螢幕顯示。"}}}
-    },
-    "AVFoundation metadata meets this target frame-rate constraint. Compatibility remains selected; this check does not change your backend." : {
-      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "AVFoundation 메타데이터가 이 대상 프레임률 조건을 충족합니다. 호환 모드 선택은 유지되며, 이 검사로 백엔드가 변경되지는 않습니다."}}, "en" : {"stringUnit" : {"state" : "translated", "value" : "AVFoundation metadata meets this target frame-rate constraint. Compatibility remains selected; this check does not change your backend."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "AVFoundation のメタデータは対象のフレームレート制約を満たしています。互換モードの選択は維持され、この確認でバックエンドは変更されません。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "AVFoundation 元数据符合目标帧率约束。仍选择兼容模式；此检查不会更改后端。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "AVFoundation 中繼資料符合目標影格率限制。仍選擇相容模式；此檢查不會變更後端。"}}}
-    },
-    "Native admission needs a supported installed video, a readable entry and a valid target display." : {
-      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "네이티브 재생 적합성을 확인하려면 설치된 지원 동영상, 읽을 수 있는 진입점 및 유효한 대상 디스플레이가 필요합니다."}}, "en" : {"stringUnit" : {"state" : "translated", "value" : "Native admission needs a supported installed video, a readable entry and a valid target display."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "ネイティブ適合確認には、対応するインストール済み動画、読み取れるエントリ、有効な対象ディスプレイが必要です。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "原生准入需要受支持的已安装视频、可读入口和有效目标显示器。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "原生准入需要支援的已安裝影片、可讀取入口和有效目標顯示器。"}}}
-    },
     "Shared scene resources" : {
       "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "공유 장면 리소스"}}, "en" : {"stringUnit" : {"state" : "translated", "value" : "Shared scene resources"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "共有シーンリソース"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "共享场景资源"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "共用場景資源"}}}
     },
@@ -325,11 +451,14 @@
     "Scene shader and graph support" : {
       "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "장면 셰이더 및 그래프 지원"}}, "en" : {"stringUnit" : {"state" : "translated", "value" : "Scene shader and graph support"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "シーンのシェーダーとグラフの対応"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "场景着色器和图支持"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "場景著色器和圖支援"}}}
     },
-    "Preflight has no parsed render-graph capability result. Shader, puppet, particle and effect support need runtime evaluation; the live backend and fallback reason are shown separately." : {
-      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "사전 점검에 분석된 렌더 그래프의 지원 여부 결과가 없습니다. 셰이더, 퍼펫, 파티클 및 효과 지원 여부는 실행 중 평가해야 합니다. 실제 백엔드와 대체 처리 사유는 별도로 표시됩니다."}}, "en" : {"stringUnit" : {"state" : "translated", "value" : "Preflight has no parsed render-graph capability result. Shader, puppet, particle and effect support need runtime evaluation; the live backend and fallback reason are shown separately."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "事前確認には解析済みレンダーグラフの対応結果がありません。シェーダー、パペット、パーティクル、エフェクトは実行時の評価が必要です。実際のバックエンドとフォールバック理由は別途表示されます。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "预检没有已解析的渲染图能力结果。着色器、骨骼模型、粒子和特效支持需运行时评估；实际后端和回退原因另行显示。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "預先檢查沒有已解析的算繪圖能力結果。著色器、骨骼模型、粒子和特效支援需執行時評估；實際後端和備援原因另行顯示。"}}}
-    },
     "Web runtime" : {
       "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "웹 런타임"}}, "en" : {"stringUnit" : {"state" : "translated", "value" : "Web runtime"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "Web 実行環境"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "网页运行时"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "網頁執行環境"}}}
+    },
+    "This video can be played, at its own frame rate. Actual player preparation and on-screen presentation are not verified by this check." : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "이 동영상은 자체 프레임률로 재생할 수 있습니다. 실제 플레이어 준비와 화면 표시는 이 검사에서 확인하지 않습니다."}}, "en" : {"stringUnit" : {"state" : "translated", "value" : "This video can be played, at its own frame rate. Actual player preparation and on-screen presentation are not verified by this check."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "このビデオは再生できます。ビデオは動画自体のフレームレートで再生されます。実際のプレイヤーの準備や画面表示は、この確認では検証しません。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "此视频可以播放，视频按自身帧率播放。此检查不验证实际播放器准备和屏幕显示。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "此影片可以播放，影片會以自身的影格率播放。此檢查不驗證實際播放器準備和螢幕顯示。"}}}
+    },
+    "Video playback needs a supported installed video, a readable entry and a valid target display." : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "동영상 재생에는 지원되는 설치된 동영상, 읽을 수 있는 진입 파일, 유효한 대상 디스플레이가 필요합니다."}}, "en" : {"stringUnit" : {"state" : "translated", "value" : "Video playback needs a supported installed video, a readable entry and a valid target display."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "ビデオ再生の確認には、対応するインストール済み動画、読み取れるエントリ、有効な対象ディスプレイが必要です。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "视频播放检查需要受支持的已安装视频、可读入口和有效目标显示器。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "影片播放檢查需要支援的已安裝影片、可讀取入口和有效目標顯示器。"}}}
     },
     "The entry file check does not execute scripts or verify media, local dependencies or WebGL. These need runtime evaluation." : {
       "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "진입 파일 검사는 스크립트를 실행하거나 미디어, 로컬 의존 리소스 또는 WebGL을 검증하지 않습니다. 이러한 항목은 실행 중 평가가 필요합니다."}}, "en" : {"stringUnit" : {"state" : "translated", "value" : "The entry file check does not execute scripts or verify media, local dependencies or WebGL. These need runtime evaluation."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "エントリファイルの確認では、スクリプトの実行やメディア、ローカル依存リソース、WebGL の検証は行いません。これらは実行時の評価が必要です。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "入口文件检查不会执行脚本或验证媒体、本地依赖或 WebGL。这些需要运行时评估。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "入口檔案檢查不會執行指令碼或驗證媒體、本機相依資源或 WebGL。這些需要執行時評估。"}}}
@@ -1052,11 +1181,11 @@
       "extractionState" : "manual",
       "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "로그아웃"}}, "en" : {"stringUnit" : {"state" : "translated", "value" : "Log Out"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "ログアウト"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "退出登录"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "登出"}}}
     },
-    "Could not update the saved Steam sign-in: %@. You may need to sign in again next time." : {
-      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "저장된 Steam 로그인 정보를 업데이트하지 못했습니다: %@. 다음에 다시 로그인해야 할 수 있습니다."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "保存されているSteamのサインイン情報を更新できませんでした：%@。次回、再度サインインが必要になる場合があります。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "无法更新已保存的 Steam 登录：%@。下次可能需要重新登录。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "無法更新已儲存的 Steam 登入資訊：%@。下次可能需要重新登入。"}}}
+    "Steam authentication information retained on this device could not be updated (%@); you may need to sign in again later." : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "이 기기에 보관된 Steam 인증 정보를 업데이트할 수 없었습니다(%@). 나중에 다시 로그인해야 할 수 있습니다."}}, "en": {"stringUnit": {"state": "translated", "value": "Steam authentication information retained on this device could not be updated (%@); you may need to sign in again later."}}, "ja": {"stringUnit": {"state": "translated", "value": "このデバイスに保持されているSteam認証情報を更新できなかったため（%@）、後で再度ログインが必要になる場合があります。"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "无法更新此设备保留的 Steam 身份验证信息（%@）；之后可能需要重新登录。"}}, "zh-Hant": {"stringUnit": {"state": "translated", "value": "無法更新此裝置保留的 Steam 驗證資訊（%@）；之後可能需要重新登入。"}}}
     },
-    "Steam did not provide reusable sign-in files. You may need to sign in again next time." : {
-      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "Steam에서 재사용 가능한 로그인 파일을 제공하지 않았습니다. 다음에 다시 로그인해야 할 수 있습니다."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "Steamから再利用可能なサインインファイルが提供されませんでした。次回、再度サインインが必要になる場合があります。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "Steam 未提供可复用的登录文件，下次可能需要重新登录。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "Steam 未提供可重複使用的登入檔案。下次可能需要重新登入。"}}}
+    "This Steam sign-in did not provide reusable authentication information, so you may be asked to sign in again later." : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "이번 Steam 로그인에서는 재사용할 수 있는 인증 정보가 제공되지 않았으므로 나중에 다시 로그인하라는 요청을 받을 수 있습니다."}}, "en": {"stringUnit": {"state": "translated", "value": "This Steam sign-in did not provide reusable authentication information, so you may be asked to sign in again later."}}, "ja": {"stringUnit": {"state": "translated", "value": "今回のSteamログインでは再利用できる認証情報が得られなかったため、後で再度ログインを求められる場合があります。"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "本次 Steam 登录未提供可重复使用的身份验证信息，因此之后可能会要求您重新登录。"}}, "zh-Hant": {"stringUnit": {"state": "translated", "value": "本次 Steam 登入未提供可重複使用的驗證資訊，因此之後可能會要求您重新登入。"}}}
     },
     "Saved Steam sign-in expired; waiting for fresh authentication…" : {
       "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "저장된 Steam 로그인 정보가 만료되었습니다. 새 인증 대기 중…"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "保存されているSteamのサインイン情報の有効期限が切れました。新たな認証を待機中…"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "已保存的 Steam 登录已失效，等待重新验证…"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "已儲存的 Steam 登入資訊已過期；正在等待重新驗證…"}}}
@@ -2731,6 +2860,9 @@
     "macOS did not load the lock-screen renderer. The original wallpaper has been restored. Check for another wallpaper app or a conflicting system-wide wallpaper selection." : {
       "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "macOS에서 잠금 화면 렌더러를 불러오지 않았습니다. 원래 배경화면이 복원되었습니다. 다른 배경화면 앱이나 충돌하는 시스템 전체 배경화면 선택이 있는지 확인하세요."}}, "en" : {"stringUnit" : {"state" : "translated", "value" : "macOS did not load the lock-screen renderer. The original wallpaper has been restored. Check for another wallpaper app or a conflicting system-wide wallpaper selection."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "macOSがロック画面のレンダラを読み込みませんでした。元の壁紙が復元されました。ほかの壁紙Appや、競合するシステム全体の壁紙設定がないか確認してください。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "macOS 没有加载锁定屏幕渲染器，已恢复原来的墙纸。请检查是否有其他墙纸应用，或冲突的全局墙纸设置。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "macOS 未載入鎖定畫面渲染器，已還原原本的桌布。請檢查是否有其他桌布 App，或有衝突的全系統桌布選擇。"}}}
     },
+    "The lock-screen renderer stopped repeatedly. The original wallpaper has been restored." : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "잠금 화면 렌더러가 반복해서 중지되었습니다. 원래 배경화면이 복원되었습니다."}}, "en" : {"stringUnit" : {"state" : "translated", "value" : "The lock-screen renderer stopped repeatedly. The original wallpaper has been restored."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "ロック画面のレンダラが繰り返し停止しました。元の壁紙が復元されました。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "锁定屏幕渲染器反复停止，已恢复原来的墙纸。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "鎖定畫面渲染器反覆停止，已還原原本的桌布。"}}}
+    },
     "Wallpaper assets changed while preparing native playback. Retry after the download or edit finishes." : {
       "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "네이티브 재생을 준비하는 동안 배경화면 리소스가 변경되었습니다. 다운로드나 편집이 완료된 후 다시 시도하세요."}}, "en" : {"stringUnit" : {"state" : "translated", "value" : "Wallpaper assets changed while preparing native playback. Retry after the download or edit finishes."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "システムによる再生の準備中に壁紙のアセットが変更されました。ダウンロードまたは編集が完了してから再試行してください。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "准备原生播放时壁纸文件发生了变化。请等下载或编辑完成后重试。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "準備原生播放時，桌布資源發生變更。請等下載或編輯完成後再重試。"}}}
     },
@@ -3286,12 +3418,6 @@
     "The video changed since it was checked. Look for black bars again." : {
       "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "검사 후 동영상이 변경되었습니다. 검은 여백을 다시 확인하세요."}}, "en" : {"stringUnit" : {"state" : "translated", "value" : "The video changed since it was checked. Look for black bars again."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "確認したあとでビデオが変更されました。もう一度黒帯を確認してください。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "视频在检查之后发生了变化。请重新检查黑边。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "影片在檢查之後發生了變化。請再次檢查黑邊。"}}}
     },
-    "Follow desktop Space" : {
-      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "데스크탑 Space에 맞추기"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "デスクトップスペースに連動"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "跟随桌面空间"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "跟隨桌面空間"}}}
-    },
-    "Experimental. Switching desktops reloads their chosen wallpaper or playlist and may briefly show the previous wallpaper. Full-screen app Spaces keep the last choice." : {
-      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "실험적 기능입니다. 데스크탑을 전환하면 해당 데스크탑에서 선택한 배경화면이나 재생목록을 다시 불러오며, 이전 배경화면이 잠깐 보일 수 있습니다. 전체 화면 앱의 Spaces에서는 마지막 선택을 유지합니다."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "試験的な機能です。デスクトップを切り替えると選択した壁紙やプレイリストを読み直し、一時的に前の壁紙が見える場合があります。フルスクリーンのスペースでは直前の選択を維持します。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "实验功能。切换桌面会重新载入该桌面的壁纸或播放列表，期间可能短暂显示上一张壁纸。全屏应用空间会保留上一次选择。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "實驗功能。切換桌面會重新載入該桌面的桌布或播放列表，期間可能短暫顯示上一張桌布。全螢幕 App 空間會保留上一次選擇。"}}}
-    },
     "Turn off animated lock-screen wallpaper to use desktop Space choices." : {
       "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "데스크탑 공간별 선택을 사용하려면 움직이는 잠금 화면 배경화면을 끄세요."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "デスクトップスペースごとの選択を使うには、動くロック画面の壁紙をオフにしてください。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "请先关闭动态锁屏壁纸，再使用按桌面空间切换。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "請先關閉動態鎖定畫面桌布，再使用依桌面空間切換。"}}}
     },
@@ -3310,8 +3436,50 @@
     "Forget choice for %@" : {
       "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "%@에 대한 선택 지우기"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "%@の割り当てを解除"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "移除 %@ 的关联"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "移除 %@ 的關聯"}}}
     },
-    "Desktop numbers follow their order on this display; choices follow the desktop when you reorder it. An empty choice keeps the current wallpaper." : {
-      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "데스크탑 번호는 이 디스플레이의 순서를 따릅니다. 순서를 바꿔도 선택한 배경화면은 해당 데스크탑에 유지됩니다. 선택을 비워 두면 현재 배경화면을 유지합니다."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "番号はこのディスプレイ上の順序です。並べ替えても壁紙の選択は同じデスクトップに保持されます。未選択の場合は現在の壁紙を維持します。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "编号按此显示器上的桌面顺序排列；调整顺序后，壁纸选择仍与原桌面关联。留空会保留当前壁纸。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "編號依此顯示器上的桌面順序排列；調整順序後，桌布選擇仍與原桌面關聯。留空會保留目前的桌布。"}}}
+    "Different wallpaper for each desktop" : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "데스크탑마다 다른 배경화면"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "デスクトップごとに別の壁紙"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "每个桌面使用不同壁纸"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "每個桌面使用不同桌布"}}}
+    },
+    "Each desktop keeps the wallpaper you apply while you are on it, and only the desktop you are on plays, so Mission Control shows the other desktops as still pictures. A desktop you have visited waits paused where you left it; one you have not visited yet shows a still picture until its first visit. Kept wallpapers use memory and are let go when the Mac runs short of it." : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "각 데스크탑은 그 데스크탑에 있을 때 적용한 배경화면을 유지하며, 현재 데스크탑만 재생되므로 Mission Control에서는 다른 데스크탑이 정지 이미지로 표시됩니다. 방문한 데스크탑은 떠날 때의 화면에서 일시 정지되고, 아직 방문하지 않은 데스크탑은 처음 방문할 때까지 정지 이미지를 표시합니다. 유지된 배경화면은 메모리를 사용하며, Mac의 메모리가 부족해지면 해제됩니다."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "各デスクトップは、そのデスクトップにいるときに適用した壁紙を保持し、再生されるのは今いるデスクトップだけなので、Mission Controlではほかのデスクトップが静止画で表示されます。訪れたデスクトップは離れたときの場面で一時停止し、まだ訪れていないデスクトップは最初に訪れるまで静止画を表示します。保持された壁紙はメモリを使い、Macのメモリが不足すると解放されます。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "每个桌面会保留你在该桌面上应用的壁纸，且只有当前桌面会播放，因此调度中心里的其他桌面显示为静态画面。访问过的桌面会暂停在你离开时的画面；尚未访问的桌面在首次访问前显示静态画面。保留的壁纸会占用内存，Mac 内存不足时会被释放。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "每個桌面會保留你在該桌面上套用的桌布，且只有目前的桌面會播放，因此指揮中心裡的其他桌面顯示為靜態畫面。造訪過的桌面會暫停在你離開時的畫面；尚未造訪的桌面在首次造訪前顯示靜態畫面。保留的桌布會佔用記憶體，Mac 記憶體不足時會被釋放。"}}}
+    },
+    "Keeps the current wallpaper" : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "현재 배경화면 유지"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "現在の壁紙のまま"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "保持当前壁纸"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "保持目前的桌布"}}}
+    },
+    "Keep the current wallpaper" : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "현재 배경화면 그대로 두기"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "現在の壁紙を使う"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "沿用当前壁纸"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "沿用目前的桌布"}}}
+    },
+    "Same as Desktop 1" : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "데스크탑 1과 같음"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "デスクトップ1と同じ"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "与桌面 1 相同"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "與桌面 1 相同"}}}
+    },
+    "This desktop shows Desktop 1’s wallpaper, like every desktop you add." : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "이 데스크탑은 새로 추가하는 모든 데스크탑처럼 데스크탑 1의 배경화면을 표시합니다."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "このデスクトップには、追加するすべてのデスクトップと同じく、デスクトップ1の壁紙が表示されます。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "此桌面和你添加的每个桌面一样，显示桌面 1 的壁纸。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "此桌面和你加入的每個桌面一樣，顯示桌面 1 的桌布。"}}}
+    },
+    "Spaces" : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "스페이스"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "スペース"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "空间"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "空間"}}}
+    },
+    "Turning it on replaces this display’s automatic wallpaper selection." : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "켜면 이 디스플레이의 배경화면 자동 선택을 대체합니다."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "オンにすると、このディスプレイの壁紙の自動選択の代わりに使われます。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "开启后会取代此显示器的“自动选择壁纸”。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "開啟後會取代此顯示器的「自動選擇桌布」。"}}}
+    },
+    "Each desktop’s wallpaper is chosen above, under Different wallpaper for each desktop." : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "각 데스크탑의 배경화면은 위의 ‘데스크탑마다 다른 배경화면’에서 선택합니다."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "各デスクトップの壁紙は、上の「デスクトップごとに別の壁紙」で選びます。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "每个桌面的壁纸请在上方的“每个桌面使用不同壁纸”中选择。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "每個桌面的桌布請在上方的「每個桌面使用不同桌布」中選擇。"}}}
+    },
+    "Desktops of %@" : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "%@의 데스크탑"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "%@のデスクトップ"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "%@ 的桌面"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "%@ 的桌面"}}}
+    },
+    "Choose the wallpaper for %@" : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "%@의 배경화면 선택"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "%@の壁紙を選択"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "为%@选择壁纸"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "為%@選擇桌布"}}}
+    },
+    "Wallpaper for %@" : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "%@의 배경화면"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "%@の壁紙"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "%@的壁纸"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "%@的桌布"}}}
+    },
+    "No wallpapers match." : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "일치하는 배경화면이 없습니다."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "一致する壁紙はありません。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "没有匹配的壁纸。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "沒有符合的桌布。"}}}
+    },
+    "This desktop shows whatever the display plays when you switch to it." : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "이 데스크탑으로 전환하면 디스플레이에서 재생 중인 배경화면을 그대로 표시합니다."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "このデスクトップに切り替えると、ディスプレイで再生中の壁紙がそのまま表示されます。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "切换到此桌面时，会显示该显示器正在播放的壁纸。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "切換到此桌面時，會顯示該顯示器正在播放的桌布。"}}}
+    },
+    "Wallpapers you apply go to %@ of this display" : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "배경화면을 적용하면 이 디스플레이의 %@에 표시됩니다"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "適用した壁紙はこのディスプレイの%@に表示されます"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "应用的壁纸会显示在这台显示器的%@上"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "套用的桌布會顯示在這台顯示器的%@上"}}}
     },
     "Refresh Spaces" : {
       "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "Spaces 새로고침"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "スペースを更新"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "刷新空间列表"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "重新整理空間列表"}}}
@@ -5315,9 +5483,6 @@
     "%lld fps" : {
       "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "%lld fps"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "%lld fps"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "%lld fps"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "%lld fps"}}}
     },
-    "At the top of the slider there is no limit, and each display runs at its own frame rate: up to 60 fps unless you chose more for it. A lower value caps every display; saved per-display frame rates are not rewritten." : {
-      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "슬라이더를 최대로 올리면 제한 없이 각 디스플레이의 프레임률로 작동합니다. 개별적으로 더 높은 값을 선택하지 않았다면 최대 60 fps입니다. 값을 낮추면 모든 디스플레이에 상한이 적용되며, 디스플레이별로 저장된 프레임률은 변경되지 않습니다."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "スライダの一番上では制限がなく、各ディスプレイがそれぞれのフレームレートで動作します（個別により高い値を選択していない限り最大60 fps）。低い値にするとすべてのディスプレイに上限が適用されます。ディスプレイごとに保存されたフレームレートは書き換えられません。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "滑块最顶端表示不限制，每台显示器按各自的帧率运行：除非你为它选了更高的帧率，否则最高 60 fps。更低的值会限制每台显示器，但不会改写各显示器已保存的帧率。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "滑桿拉到最頂端時沒有限制，每台顯示器會以各自的影格率執行：除非你為它選擇了更高的值，否則最高為 60 fps。較低的值會限制每台顯示器，但不會改寫各顯示器已儲存的影格率。"}}}
-    },
     "Limited to %lld fps by Performance settings" : {
       "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "성능 설정에 따라 %lld fps로 제한됨"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "パフォーマンス設定により%lld fpsに制限されています"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "受性能设置限制为 %lld fps"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "已由「效能」設定限制為 %lld fps"}}}
     },
@@ -5357,41 +5522,44 @@
     "App rules pause, mute or stop wallpapers while a chosen app is running or in front. Your own Play and Pause are not changed." : {
       "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "앱 규칙은 선택한 앱이 실행 중이거나 맨 앞에 있을 때 배경화면을 일시 정지하거나 음소거하거나 정지합니다. 직접 설정한 재생 및 일시 정지 상태는 변경되지 않습니다."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "Appルールは、選択したAppが実行中または最前面にあるときに壁紙を一時停止、消音、または停止します。手動での再生と一時停止は変更されません。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "应用规则会在所选应用正在运行或位于前台时暂停、静音或停止壁纸，不会改动你自己的播放和暂停。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "App 規則會在所選 App 執行中或位於前景時暫停、靜音或停止桌布，不會變更你自己的播放與暫停操作。"}}}
     },
-    "A quality preset sets the frame-rate limit and render scale together. The frame-rate limit caps every display without rewriting the frame rate saved for each wallpaper. Internal render scale sets how many pixels are rendered before the image is scaled to fit." : {
-      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "화질 프리셋은 프레임률 제한과 렌더링 배율을 함께 설정합니다. 프레임률 제한은 배경화면마다 저장된 프레임률을 변경하지 않고 모든 디스플레이에 상한을 적용합니다. 내부 렌더링 배율은 이미지를 화면에 맞게 조절하기 전에 렌더링할 픽셀 수를 설정합니다."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "画質プリセットは、フレームレートの上限とレンダリングスケールをまとめて設定します。フレームレートの上限はすべてのディスプレイに適用され、壁紙ごとに保存されたフレームレートは書き換えられません。内部レンダリングスケールは、画像を画面に合わせて拡大縮小する前に描画するピクセル数を設定します。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "画质预设会同时设置帧率上限和渲染比例。帧率上限限制每台显示器，但不会改写各壁纸已保存的帧率。内部渲染比例决定放大到屏幕之前要渲染多少像素。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "畫質預設集會同時設定影格率上限與渲染比例。影格率上限會限制每台顯示器，但不會改寫各桌布已儲存的影格率。內部渲染比例決定影像縮放至適當大小前要渲染多少像素。"}}}
-    },
-    "Video playback picks a backend for each wallpaper. Native is used only for videos it supports; the rest play in Compatibility." : {
-      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "동영상 재생은 배경화면마다 백엔드를 선택합니다. ‘네이티브’는 지원되는 동영상에만 사용하며, 나머지는 ‘호환성’으로 재생합니다."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "ビデオ再生では、壁紙ごとにバックエンドを選択します。「ネイティブ」は対応しているビデオにのみ使用され、それ以外は互換モードで再生されます。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "视频播放会为每张壁纸选择后端。原生模式只用于它支持的视频，其余使用兼容模式。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "影片播放會為每張桌布選擇後端。「原生」只用於它支援的影片，其餘影片會以「相容模式」播放。"}}}
-    },
     "Scene render optimisation reuses work inside a scene and produces the same picture. It only affects scene wallpapers." : {
       "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "장면 렌더링 최적화는 장면 내의 처리 결과를 재사용하여 동일한 이미지를 생성합니다. 장면 배경화면에만 영향을 줍니다."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "シーンレンダリングの最適化は、シーン内の処理を再利用して同じ画像を生成します。影響するのはシーン壁紙のみです。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "场景渲染优化会复用场景内部的工作并得到同样的画面，只影响场景壁纸。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "場景渲染最佳化會重複使用場景內的運算結果，產生相同的畫面，且只影響場景桌布。"}}}
-    },
-    "Video backend" : {
-      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "동영상 백엔드"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "ビデオバックエンド"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "视频后端"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "影片後端"}}}
     },
     "Video playback" : {
       "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "동영상 재생"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "ビデオ再生"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "视频播放"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "影片播放"}}}
     },
-    "Compatibility" : {
-      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "호환 모드"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "互換モード"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "兼容模式"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "相容模式"}}}
+    "it uses something Native Metal can't draw" : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "네이티브 Metal로 그릴 수 없는 요소가 포함되어 있습니다"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "ネイティブMetalで描画できない要素が含まれています"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "其中包含原生 Metal 无法绘制的内容"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "其中包含原生 Metal 無法繪製的內容"}}}
     },
-    "Native video preferred" : {
-      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "네이티브 동영상 우선"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "ネイティブビデオを優先"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "优先原生视频"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "優先使用原生影片"}}}
+    "Native Metal couldn't start" : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "네이티브 Metal을 시작할 수 없었습니다"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "ネイティブMetalを開始できませんでした"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "原生 Metal 无法启动"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "原生 Metal 無法啟動"}}}
     },
-    "Native Metal preferred" : {
-      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "네이티브 Metal 우선"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "ネイティブMetalを優先"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "优先原生 Metal"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "優先使用原生 Metal"}}}
+    "its shaders didn't compile for Metal" : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "셰이더가 Metal용으로 컴파일되지 않았습니다"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "シェーダがMetal用にコンパイルされませんでした"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "其着色器无法编译为 Metal"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "其著色器無法編譯為 Metal"}}}
+    },
+    "a frame failed in Native Metal" : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "네이티브 Metal에서 프레임 그리기에 실패했습니다"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "ネイティブMetalでフレームの描画に失敗しました"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "原生 Metal 绘制某一帧失败"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "原生 Metal 繪製某個影格失敗"}}}
+    },
+    "Native Metal couldn't take the new display" : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "네이티브 Metal이 새 디스플레이를 이어받지 못했습니다"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "ネイティブMetalが新しいディスプレイを引き継げませんでした"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "原生 Metal 无法接管新的显示器"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "原生 Metal 無法接手新的顯示器"}}}
+    },
+    "it stopped (%@)" : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "중단되었습니다(%@)"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "停止しました（%@）"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "已停止（%@）"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "已停止（%@）"}}}
+    },
+    "not drawn — %@" : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "그려지지 않음 — %@"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "描画されていません — %@"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "未绘制 — %@"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "未繪製 — %@"}}}
+    },
+    "(reason: %@)" : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "(이유: %@)"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "（理由：%@）"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "（原因：%@）"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "（原因：%@）"}}}
+    },
+    "Showing its last picture." : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "마지막 화면을 표시하고 있습니다."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "最後の画像を表示しています。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "正在显示最后的画面。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "正在顯示最後的畫面。"}}}
     },
     "Renderer compatibility" : {
       "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "렌더러 호환성"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "レンダラの互換性"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "渲染器兼容性"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "渲染器相容性"}}}
     },
-    "Unsupported scenes use Compatibility. Lock screen playback always uses Compatibility." : {
-      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "지원되지 않는 장면은 ‘호환성’을 사용합니다. 잠금 화면 재생은 항상 ‘호환성’을 사용합니다."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "対応していないシーンには互換モードが使用されます。ロック画面での再生には常に互換モードが使用されます。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "不支持的场景会使用兼容模式。锁屏播放始终使用兼容模式。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "不支援的場景會使用相容模式。鎖定畫面播放一律使用相容模式。"}}}
-    },
     "Native Metal" : {
       "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "네이티브 Metal"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "ネイティブMetal"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "原生 Metal"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "原生 Metal"}}}
-    },
-    "Native plays supported videos through macOS and uses Compatibility for the rest." : {
-      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "네이티브 모드는 지원되는 동영상을 macOS를 통해 재생하며, 나머지는 호환 모드를 사용합니다."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "「ネイティブ」は対応しているビデオをmacOS経由で再生し、それ以外には互換モードを使用します。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "原生模式通过 macOS 播放支持的视频，其余自动使用兼容模式。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "「原生」會透過 macOS 播放支援的影片，其餘影片則使用相容模式。"}}}
     },
     "In use now" : {
       "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "현재 사용 중"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "現在使用中"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "当前使用"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "目前使用中"}}}
@@ -5477,8 +5645,8 @@
     "macOS shares GPU energy between apps by GPU time." : {
       "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "macOS는 GPU 사용 시간에 따라 GPU 에너지 사용량을 앱별로 배분합니다."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "macOSはGPUの使用時間に応じて、各AppにGPUのエネルギーを割り当てます。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "macOS 按各应用占用 GPU 的时间分摊 GPU 能耗。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "macOS 依各 App 使用 GPU 的時間分攤 GPU 能源用量。"}}}
     },
-    "Includes the control panel, the lock screen and the CPU side of video decoding. Screen compositing, the hardware video decoder, videos played with Native video, memory and the display itself are not included." : {
-      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "제어 패널, 잠금 화면 및 동영상 디코딩의 CPU 처리가 포함됩니다. 화면 합성, 하드웨어 동영상 디코더, 네이티브 동영상 방식으로 재생하는 동영상, 메모리 및 디스플레이 자체는 포함되지 않습니다."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "コントロールパネル、ロック画面、ビデオデコードのCPU処理を含みます。画面の合成処理、ハードウェアビデオデコーダ、ネイティブビデオで再生中のビデオ、メモリ、ディスプレイ本体は含まれません。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "包含控制面板、锁屏以及视频解码的 CPU 部分，不包含屏幕合成、硬件视频解码器、以原生视频播放的视频、内存和显示屏本身的耗电。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "包含控制面板、鎖定畫面，以及影片解碼的 CPU 部分；不包含畫面合成、硬體影片解碼器、以原生影片播放的影片、記憶體及顯示器本身的耗電。"}}}
+    "Includes the control panel, the lock screen and the CPU side of video decoding. Screen compositing, the hardware video decoder, memory and the display itself are not included." : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "제어 패널, 잠금 화면, 동영상 디코딩의 CPU 처리를 포함합니다. 화면 합성, 하드웨어 동영상 디코더, 메모리, 디스플레이 자체는 포함되지 않습니다."}}, "en" : {"stringUnit" : {"state" : "translated", "value" : "Includes the control panel, the lock screen and the CPU side of video decoding. Screen compositing, the hardware video decoder, memory and the display itself are not included."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "コントロールパネル、ロック画面、ビデオデコードのCPU処理を含みます。画面の合成処理、ハードウェアビデオデコーダ、メモリ、ディスプレイ本体は含まれません。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "包含控制面板、锁屏以及视频解码的 CPU 部分，不包含屏幕合成、硬件视频解码器、内存和显示屏本身的耗电。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "包含控制面板、鎖定畫面，以及影片解碼的 CPU 部分；不包含畫面合成、硬體影片解碼器、記憶體及顯示器本身的耗電。"}}}
     },
     "Low: below 0.5 W. Medium: 0.5 W to below 2 W. High: 2 W or more." : {
       "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "낮음: 0.5 W 미만. 중간: 0.5 W 이상 2 W 미만. 높음: 2 W 이상."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "低：0.5 W未満。中：0.5 W以上、2 W未満。高：2 W以上。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "低：低于 0.5 W。中：0.5 W 至不足 2 W。高：2 W 及以上。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "低：低於 0.5 W。中：0.5 W 至低於 2 W。高：2 W 以上（含 2 W）。"}}}
@@ -5507,11 +5675,11 @@
     "GPU shared with other apps" : {
       "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "다른 앱과 GPU 공유 중"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "ほかのAppとGPUを共有中"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "GPU 正与其他应用共享"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "GPU 正與其他 App 共用"}}}
     },
-    "Native video not counted" : {
-      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "네이티브 동영상은 측정에서 제외됨"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "ネイティブビデオは計測対象外"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "原生视频未计入"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "原生影片未計入"}}}
+    "Video not counted" : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "동영상은 집계되지 않음"}}, "en" : {"stringUnit" : {"state" : "translated", "value" : "Video not counted"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "ビデオは計測対象外"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "视频未计入"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "影片未計入"}}}
     },
-    "macOS decodes and draws videos played with Native video and charges none of that to this app, so these figures leave most of it out. The grade and any comparison are off while one plays." : {
-      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "네이티브 동영상 방식으로 재생하는 동영상은 macOS가 디코딩하고 렌더링하며, 이 작업은 이 앱의 사용량에 포함되지 않으므로 표시된 수치에서 대부분 제외됩니다. 해당 동영상이 재생되는 동안에는 등급과 비교 기능이 꺼집니다."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "ネイティブビデオで再生するビデオはmacOSがデコードと描画を行い、その分はこのAppに計上されないため、これらの値にはその大部分が含まれません。再生中は評価と比較を行いません。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "以原生视频播放的视频由 macOS 解码和绘制，这部分耗电不会计入本应用，因此这些读数不包含其中的大部分。播放期间不给出等级和前后对比。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "以原生影片播放的影片由 macOS 解碼與繪製，這部分耗電不會計入此 App，因此這些數值不包含其中的大部分。播放期間不會顯示等級與前後比較。"}}}
+    "macOS decodes and draws videos and charges none of that to this app, so these figures leave most of it out. The grade and any comparison are off while one plays." : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "동영상의 디코딩과 그리기는 macOS가 처리하며 그 부담은 이 앱에 반영되지 않으므로, 이 수치에는 대부분이 빠져 있습니다. 동영상이 재생되는 동안에는 등급과 비교가 꺼집니다."}}, "en" : {"stringUnit" : {"state" : "translated", "value" : "macOS decodes and draws videos and charges none of that to this app, so these figures leave most of it out. The grade and any comparison are off while one plays."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "ビデオのデコードと描画はmacOSが行い、その分はこのAppに計上されないため、これらの値にはその大部分が含まれません。再生中は評価と比較を行いません。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "视频由 macOS 解码和绘制，这部分耗电不会计入本应用，因此这些读数不包含其中的大部分。播放期间不给出等级和前后对比。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "影片由 macOS 解碼與繪製，這部分耗電不會計入此 App，因此這些數值不包含其中的大部分。播放期間不會顯示等級與前後比較。"}}}
     },
     "Other apps are keeping the GPU busy, so the GPU figure reads higher than this app’s own share. The grade and any comparison wait until the GPU is free." : {
       "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "다른 앱이 GPU를 사용하고 있어 GPU 수치가 이 앱의 실제 사용량보다 높게 표시됩니다. GPU가 여유로워질 때까지 등급 평가와 비교를 보류합니다."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "ほかのAppがGPUを使用しているため、GPUの値がこのApp自身の使用分より高く表示されています。GPUが空くまで、評価と比較は保留されます。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "其他应用正在大量占用 GPU，因此 GPU 读数会高于本应用实际的份额。等 GPU 空闲后再给出等级和前后对比。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "其他 App 正在大量使用 GPU，因此 GPU 數值會高於此 App 本身的份額。等級與前後比較會等到 GPU 空閒時才顯示。"}}}
@@ -5560,9 +5728,6 @@
     },
     "Scene render optimisation" : {
       "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "장면 렌더링 최적화"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "シーンレンダリングの最適化"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "场景渲染优化"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "場景渲染最佳化"}}}
-    },
-    "Skips rendering work that wouldn’t change the picture, such as parts of a scene that stay the same. Resolution, frame rate and animation speed are unaffected. Works with both scene renderers. Turn it off to compare." : {
-      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "장면에서 변하지 않는 부분처럼 이미지에 영향을 주지 않는 렌더링 작업을 건너뜁니다. 해상도, 프레임률 및 애니메이션 속도에는 영향을 주지 않습니다. 두 장면 렌더러 모두에서 작동합니다. 비교하려면 이 기능을 끄세요."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "シーン内の変化しない部分など、画像に影響しないレンダリング処理を省略します。解像度、フレームレート、アニメーションの速度は変わりません。どちらのシーンレンダラでも機能します。オフにすると比較できます。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "跳过不影响画面的渲染工作，比如场景中没有变化的部分。分辨率、帧率和动画速度都不受影响。两种场景渲染器都支持，可以关掉对比效果。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "略過不會改變畫面的渲染工作，例如場景中保持不變的部分。解析度、影格率與動畫速度皆不受影響。兩種場景渲染器都支援此功能。可關閉此功能來比較差異。"}}}
     },
     "How much can be skipped depends on the scene. If everything in it moves, nothing is skipped." : {
       "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "생략할 수 있는 양은 장면에 따라 다릅니다. 장면의 모든 요소가 움직이면 아무것도 생략하지 않습니다."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "省略できる量はシーンによって異なります。シーン内のすべてが動いている場合は、何も省略されません。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "能跳过多少取决于场景本身。如果画面里的内容都在动，就没有可以跳过的部分。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "能略過多少取決於場景本身。如果場景中的所有內容都在移動，就沒有可略過的部分。"}}}
@@ -5678,20 +5843,11 @@
     "running — state could not be read" : {
       "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "실행 중 — 상태를 읽지 못함"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "実行中 — 状態を読み取れません"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "运行中 — 无法读取状态"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "執行中 — 無法讀取狀態"}}}
     },
-    "Scene renderer" : {
-      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "장면 렌더러"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "シーンレンダラ"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "场景渲染器"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "場景渲染器"}}}
-    },
-    "Native Metal draws a scene only if it supports everything in it: image layers, sprite-sheet animation, 2D puppets with their own skinning shader, 2D sprite, sprite-trail, rope and rope-trail particles, 3D models, perspective cameras, scene lights, standard effect chains and post-processing, effects that read the previous frame, layer links, and BGRA or 8-bit NV12 video textures. Scenes with anything else, such as lit particles or HDR video, use Compatibility. This applies to desktop wallpapers only; the lock screen always uses Compatibility." : {
-      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "네이티브 Metal은 장면의 모든 요소를 지원하는 경우에만 해당 장면을 렌더링합니다. 지원 요소는 이미지 레이어, 스프라이트 시트 애니메이션, 자체 스키닝 셰이더가 있는 2D 퍼펫, 2D 스프라이트·스프라이트 궤적·로프·로프 궤적 파티클, 3D 모델, 원근 카메라, 장면 조명, 표준 효과 체인 및 후처리, 이전 프레임을 읽는 효과, 레이어 연결, BGRA 또는 8비트 NV12 동영상 텍스처입니다. 조명이 적용된 파티클이나 HDR 동영상 등 그 외의 요소가 있는 장면은 호환 모드를 사용합니다. 이는 데스크탑 배경화면에만 적용되며, 잠금 화면은 항상 호환 모드를 사용합니다."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "ネイティブMetalは、シーン内のすべての要素に対応している場合にのみそのシーンを描画します。対応している要素：画像レイヤー、スプライトシートアニメーション、独自のスキニングシェーダを持つ2Dパペット、2Dのスプライト／スプライトトレイル／ロープ／ロープトレイルパーティクル、3Dモデル、透視投影カメラ、シーンのライト、標準的なエフェクトチェーンとポストプロセス、前のフレームを読み取るエフェクト、レイヤーリンク、BGRAまたは8ビットNV12のビデオテクスチャ。ライティングされたパーティクルやHDRビデオなど、それ以外の要素を含むシーンには互換モードが使用されます。これはデスクトップ壁紙にのみ適用されます。ロック画面では常に互換モードが使用されます。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "只有场景里的内容全部受支持时，原生 Metal 才会绘制它。支持的内容包括：图像图层、精灵表动画、使用自身蒙皮着色器的二维木偶、二维的精灵、精灵拖尾、绳索和绳索拖尾粒子、3D 模型、透视摄像机、场景光源、常规效果链和后期处理、读取上一帧的效果、图层链接，以及 BGRA 或 8 位 NV12 视频纹理。含有其他内容（如受光照的粒子、HDR 视频）的场景会使用兼容模式。此设置只影响桌面壁纸，锁定屏幕始终使用兼容模式。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "只有在原生 Metal 支援場景中的所有內容時，才會由它繪製該場景。支援的內容包括：影像圖層、精靈圖集動畫、使用自身蒙皮著色器的 2D 人偶、2D 精靈圖、精靈圖拖尾、繩索與繩索拖尾粒子、3D 模型、透視攝影機、場景光源、標準效果鏈與後製處理、讀取上一影格的效果、圖層連結，以及 BGRA 或 8 位元 NV12 影片紋理。含有其他內容（例如受光照的粒子或 HDR 影片）的場景會使用相容模式。此設定只適用於桌面桌布；鎖定畫面一律使用相容模式。"}}}
-    },
     "Drawn by" : {
       "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "렌더링 방식"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "描画バックエンド"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "绘制方"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "繪製者"}}}
     },
     "preparing — no backend chosen yet" : {
       "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "준비 중 — 아직 백엔드가 선택되지 않음"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "準備中 — バックエンドはまだ選択されていません"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "准备中 — 尚未选择后端"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "準備中 — 尚未選擇後端"}}}
-    },
-    "(fell back: %@)" : {
-      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "(대체됨: %@)"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "（フォールバック済み：%@）"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "（已回退：%@）"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "（已改用備援：%@）"}}}
     },
     "— video: %@" : {
       "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "— 동영상: %@"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "— ビデオ：%@"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "— 视频：%@"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "— 影片：%@"}}}
@@ -5711,23 +5867,8 @@
     "Advanced" : {
       "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "고급"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "詳細"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "高级"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "進階"}}}
     },
-    "Renderers & experimental options" : {
-      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "렌더러 및 실험적 옵션"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "レンダラーと実験的な設定"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "渲染器与实验性选项"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "繪製器與實驗性選項"}}}
-    },
     "Live diagnostics" : {
       "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "실시간 진단"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "現在の動作状況"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "实时诊断"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "即時診斷"}}}
-    },
-    "Content pacing" : {
-      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "콘텐츠 기반 프레임 조절"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "コンテンツペーシング"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "内容节拍"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "內容步調"}}}
-    },
-    "Experimental. Presents frames at the content’s own frame rate instead of the display’s refresh rate." : {
-      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "실험적 기능입니다. 디스플레이의 재생률 대신 콘텐츠 자체의 프레임률로 프레임을 표시합니다."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "実験的機能です。ディスプレイのリフレッシュレートではなく、コンテンツ自体のフレームレートでフレームを表示します。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "实验性功能。按内容自身的帧率呈现画面，而不是跟随显示器刷新率。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "實驗性功能。以內容本身的影格率呈現畫面，而非顯示器的更新頻率。"}}}
-    },
-    "Shared video decode" : {
-      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "비디오 디코딩 공유"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "ビデオデコードの共有"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "共享视频解码"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "共用影片解碼"}}}
-    },
-    "Experimental. Screens showing the same video share one decoder." : {
-      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "실험적 기능입니다. 같은 동영상을 표시하는 화면이 하나의 디코더를 공유합니다."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "実験的機能です。同じビデオを表示している画面で1つのデコーダを共有します。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "实验性功能。显示同一视频的多个画面共用一个解码器。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "實驗性功能。顯示相同影片的螢幕會共用一個解碼器。"}}}
     },
     "Direct video plane sampling" : {
       "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "동영상 플레인 직접 샘플링"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "ビデオプレーンの直接サンプリング"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "直接采样视频平面"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "直接取樣影片平面"}}}
@@ -5735,29 +5876,11 @@
     "Experimental. In scenes drawn by Native Metal, lets a layer’s shader read video frames directly instead of converting them to a color image every frame. Only works with 8-bit NV12 video and shaders that support it; everything else converts as before. Live diagnostics under Scene wallpapers shows which path each scene uses." : {
       "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "실험적 기능입니다. 네이티브 Metal로 렌더링하는 장면에서 매 프레임을 컬러 이미지로 변환하는 대신 레이어의 셰이더가 동영상 프레임을 직접 읽도록 합니다. 8비트 NV12 동영상과 이를 지원하는 셰이더에서만 작동하며, 나머지는 이전과 같이 변환합니다. ‘장면 배경화면’의 ‘실시간 진단’에서 각 장면이 사용하는 처리 경로를 확인할 수 있습니다."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "実験的機能です。ネイティブMetalで描画されるシーンで、フレームごとにカラー画像へ変換する代わりに、レイヤーのシェーダがビデオフレームを直接読み取れるようにします。8ビットNV12ビデオと、これに対応したシェーダでのみ機能します。それ以外は従来どおり変換されます。「シーン壁紙」の「現在の動作状況」に、各シーンで使用されている方式が表示されます。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "实验性功能。在由原生 Metal 绘制的场景中，让图层着色器直接读取视频帧，省去每帧一次的颜色转换。仅适用于 8 位 NV12 视频和支持的着色器，其他情况照常转换。“场景壁纸”下的“实时诊断”会显示每个场景实际采用的方式。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "實驗性功能。在由原生 Metal 繪製的場景中，讓圖層的著色器直接讀取影片影格，而不必每個影格都轉換成彩色影像。僅適用於 8 位元 NV12 影片及支援此功能的著色器；其他情況照舊轉換。「場景桌布」下的「即時診斷」會顯示每個場景使用的方式。"}}}
     },
-    "Shared decode in use" : {
-      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "공유 디코딩 사용 중"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "デコード共有の使用状況"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "共享解码使用情况"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "共用解碼使用情況"}}}
-    },
-    "%@ serving %@" : {
-      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "%@에서 %@에 공급 중"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "%1$@で%2$@に供給中"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "%1$@，供 %2$@使用"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "%1$@，供 %2$@使用"}}}
-    },
-    "%lld session" : {
-      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "세션 %lld개"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "%lld個のセッション"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "%lld 个会话"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "%lld 個工作階段"}}}
-    },
-    "%lld sessions" : {
-      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "세션 %lld개"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "%lld個のセッション"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "%lld 个会话"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "%lld 個工作階段"}}}
-    },
-    "%lld surface" : {
-      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "서피스 %lld개"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "%lld個のサーフェス"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "%lld 个表面"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "%lld 個表面"}}}
-    },
-    "%lld surfaces" : {
-      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "서피스 %lld개"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "%lld個のサーフェス"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "%lld 个表面"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "%lld 個表面"}}}
-    },
     "What these settings change" : {
       "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "이 설정으로 변경되는 사항"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "これらの設定で変わること"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "这些设置会改变什么"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "這些設定會改變什麼"}}}
     },
-    "Content pacing, shared video decode and direct video plane sampling are experimental. Shared decode merges only the decoding; each screen still draws its own frames. Direct plane sampling skips a color conversion when a layer’s shader can handle it; otherwise the picture is produced as before." : {
-      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "콘텐츠 기반 프레임 조절, 동영상 디코딩 공유 및 동영상 플레인 직접 샘플링은 실험적 기능입니다. 디코딩 공유는 디코딩 처리만 통합하며 각 화면은 여전히 자체 프레임을 그립니다. 플레인 직접 샘플링은 레이어의 셰이더가 지원하는 경우 색상 변환을 생략합니다. 그렇지 않으면 기존 방식으로 영상을 생성합니다."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "コンテンツペーシング、ビデオデコードの共有、ビデオプレーンの直接サンプリングは実験的機能です。デコードの共有で統合されるのはデコード処理のみで、各画面はそれぞれ独自にフレームを描画します。プレーンの直接サンプリングでは、レイヤーのシェーダが対応している場合にカラー変換を省略します。それ以外の場合は、従来どおりに画像が生成されます。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "内容节拍、共享视频解码和直接采样视频平面都是实验性功能。共享解码只合并解码，每个画面仍各自绘制。直接采样在图层着色器能处理时省去一次颜色转换，否则画面与之前完全一样。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "內容步調、共用影片解碼與直接取樣影片平面都是實驗性功能。共用解碼只會合併解碼工作，每個螢幕仍會各自繪製影格。當圖層的著色器能夠處理時，直接取樣平面會省略一次色彩轉換；否則畫面會照舊產生。"}}}
+    "Direct video plane sampling is experimental. It skips a color conversion when a layer’s shader can handle it; otherwise the picture is produced as before." : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "동영상 플레인 직접 샘플링은 실험적 기능입니다. 레이어의 셰이더가 처리할 수 있으면 색 변환을 생략하고, 그렇지 않으면 이전과 같은 방식으로 화면을 만듭니다."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "ビデオプレーンの直接サンプリングは実験的機能です。レイヤーのシェーダが対応している場合にカラー変換を省略します。それ以外の場合は、従来どおりに画像が生成されます。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "直接采样视频平面是实验性功能。在图层着色器能处理时省去一次颜色转换，否则画面与之前完全一样。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "直接取樣影片平面是實驗性功能。當圖層的著色器能夠處理時，會省略一次色彩轉換；否則畫面會照舊產生。"}}}
     },
     "System (Auto)" : {
       "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "시스템(자동)"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "システム（自動）"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "跟随系统（自动）"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "系統（自動）"}}}
@@ -6078,11 +6201,11 @@
       "extractionState" : "manual",
       "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "기타 변경 사항"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "その他の変更"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "其他变更"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "其他變更"}}}
     },
-    "Not affiliated with Wallpaper Engine or Valve. Built on the GPLv2-only open-source renderer. Workshop browsing is independently implemented. No warranty is provided." : {
-      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "Wallpaper Engine 또는 Valve와 제휴 관계가 없습니다. GPLv2-only 오픈 소스 렌더러를 기반으로 제작되었습니다. 창작마당 탐색 기능은 독자적으로 구현되었습니다. 어떠한 보증도 제공하지 않습니다."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "Wallpaper EngineおよびValveとは関係ありません。GPLv2のみでライセンスされたオープンソースのレンダラをもとに構築されています。ワークショップの閲覧機能は独自に実装されています。保証は一切ありません。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "与 Wallpaper Engine 和 Valve 无关。基于仅限 GPLv2 授权的开源渲染器构建，创意工坊浏览功能为独立实现。不提供任何担保。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "與 Wallpaper Engine 或 Valve 無關。以僅限 GPLv2 授權的開放原始碼渲染器為基礎建構。工作坊瀏覽功能為獨立實作。不提供任何擔保。"}}}
+    "Not affiliated with Wallpaper Engine or Valve. WallpaperMachine itself is open source under GPL-3.0-only. Workshop browsing is independently implemented. No warranty is provided." : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "Wallpaper Engine 또는 Valve와 제휴 관계가 없습니다. WallpaperMachine 자체는 GPL-3.0-only 라이선스의 오픈 소스입니다. 창작마당 탐색 기능은 독자적으로 구현되었습니다. 어떠한 보증도 제공하지 않습니다."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "Wallpaper EngineおよびValveとは関係ありません。WallpaperMachine自体はGPL-3.0-onlyのオープンソースです。ワークショップの閲覧機能は独自に実装されています。保証は一切ありません。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "与 Wallpaper Engine 和 Valve 无关。WallpaperMachine 本身是依据 GPL-3.0-only 授权的开源软件，创意工坊浏览功能为独立实现。不提供任何担保。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "與 Wallpaper Engine 或 Valve 無關。WallpaperMachine 本身是依 GPL-3.0-only 授權的開放原始碼軟體。工作坊瀏覽功能為獨立實作。不提供任何擔保。"}}}
     },
-    "GNU General Public License v2" : {
-      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "GNU 일반 공중 사용 허가서 버전 2"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "GNU一般公衆利用許諾契約書 バージョン2"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "GNU 通用公共许可证第 2 版"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "GNU 通用公共授權條款第 2 版"}}}
+    "GNU General Public License v3" : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "GNU 일반 공중 사용 허가서 버전 3"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "GNU一般公衆利用許諾契約書 バージョン3"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "GNU 通用公共许可证第 3 版"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "GNU 通用公共授權條款第 3 版"}}}
     },
     "Untitled" : {
       "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "무제"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "無題"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "无标题"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "未命名"}}}
@@ -7150,9 +7273,6 @@
     "Choose which part of the wallpaper stays in view when it is larger than the display, or where it sits when it is smaller. Nothing moves when it already fits the display exactly." : {
       "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "배경화면이 디스플레이보다 크면 표시할 부분을, 작으면 배치할 위치를 선택하세요. 이미 디스플레이에 정확히 맞는 경우에는 이동하지 않습니다."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "壁紙がディスプレイより大きいときは表示する部分を、小さいときは置く位置を選びます。ディスプレイにぴったり収まる壁紙は動きません。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "壁纸比显示器大时，选择保留哪一部分在画面内；比显示器小时，选择它摆放的位置。壁纸与显示器完全吻合时不会移动。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "桌布比顯示器大時，選擇要保留哪一部分在畫面內；比顯示器小時，選擇它擺放的位置。桌布與顯示器完全吻合時不會移動。"}}}
     },
-    "This video is drawn by the native video player, which keeps it centered. Choose Compatibility for Video playback in Performance settings to move it." : {
-      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "이 동영상은 네이티브 동영상 플레이어로 표시되므로 항상 중앙에 배치됩니다. 위치를 옮기려면 성능 설정의 ‘동영상 재생’에서 ‘호환성’을 선택하세요."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "このビデオはネイティブのビデオプレーヤーで描画されるため、常に中央に表示されます。動かすには、パフォーマンス設定の「ビデオ再生」で「互換モード」を選んでください。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "此视频由原生视频播放器绘制，始终居中显示。要移动它，请在“性能”设置中将“视频播放”选为“兼容模式”。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "此影片由原生影片播放器繪製，一律置中顯示。若要移動，請在「效能」設定中將「影片播放」選為「相容模式」。"}}}
-    },
     "Active Display Only" : {
       "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "활성 디스플레이만"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "使用中のディスプレイのみ"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "仅当前显示器"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "僅目前顯示器"}}}
     },
@@ -7173,6 +7293,9 @@
     },
     "Desktop Picture" : {
       "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "데스크탑 사진"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "デスクトップピクチャ"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "桌面图片"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "桌面圖片"}}}
+    },
+    "Wallpaper per Desktop" : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "데스크탑별 배경화면"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "デスクトップごとの壁紙"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "每个桌面独立壁纸"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "每個桌面獨立桌布"}}}
     },
     "Disk space, backups and troubleshooting." : {
       "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "디스크 공간, 백업 및 문제 해결."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "ディスク容量、バックアップ、トラブルシューティング。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "磁盘空间、备份与故障排除。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "磁碟空間、備份與疑難排解。"}}}
@@ -7336,6 +7459,9 @@
     "converted once per frame, direct sampling still being prepared" : {
       "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "프레임당 한 번 변환됨, 직접 샘플링은 준비 중"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "フレームごとに1回変換、直接サンプリングは準備中"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "每帧转换一次，直接采样仍在准备中"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "每個影格轉換一次，直接取樣仍在準備中"}}}
     },
+    "10-bit, converted once per frame (HDR tone mapped to SDR)" : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "10비트, 프레임당 한 번 변환(HDR은 SDR로 톤 매핑)"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "10ビット、フレームごとに1回変換（HDRはSDRにトーンマッピング）"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "10 位，每帧转换一次（HDR 色调映射为 SDR）"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "10 位元，每個影格轉換一次（HDR 色調映射為 SDR）"}}}
+    },
     "%@ (from configuration)" : {
       "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "%@ (구성 파일 값)"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "%@（設定ファイルの値）"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "%@（来自配置）"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "%@（來自設定檔）"}}}
     },
@@ -7359,6 +7485,36 @@
     },
     "SteamCMD is Valve’s free download tool. Install it into this app’s own folder or locate a copy you already have; the sign-in follows on its own." : {
       "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "SteamCMD는 Valve의 무료 다운로드 도구입니다. 이 앱 전용 폴더에 설치하거나 이미 설치된 위치를 지정하세요. 완료되면 자동으로 로그인이 진행됩니다."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "SteamCMDはValveの無料ダウンロードツールです。このアプリ専用のフォルダにインストールするか、既存のコピーを指定してください。完了すると自動的にサインインに進みます。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "SteamCMD 是 Valve 的免费下载工具。可以安装到应用自己的文件夹，也可以选择已有副本，完成后会自动继续登录。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "SteamCMD 是 Valve 的免費下載工具。你可以安裝到此 App 自己的資料夾，或指定現有副本；完成後會自動接著登入。"}}}
+    },
+    "A quality preset sets the frame-rate limit and render scale together. The frame-rate limit caps scenes and web wallpapers on every display without rewriting the frame rate saved for each wallpaper; a video plays at its own frame rate. Internal render scale sets how many pixels are rendered before the image is scaled to fit." : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "화질 프리셋은 프레임률 제한과 렌더링 배율을 함께 설정합니다. 프레임률 제한은 배경화면별로 저장된 프레임률을 변경하지 않고 모든 디스플레이의 장면과 웹 배경화면에 상한을 적용하며, 동영상은 자체 프레임률로 재생됩니다. 내부 렌더링 배율은 이미지를 화면 크기에 맞게 조정하기 전에 렌더링할 픽셀 수를 정합니다."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "画質プリセットは、フレームレートの上限とレンダリングスケールをまとめて設定します。フレームレートの上限はすべてのディスプレイのシーンとWeb壁紙に適用され、壁紙ごとに保存されたフレームレートは書き換えられません。ビデオは動画自体のフレームレートで再生されます。内部レンダリングスケールは、画像を画面に合わせて拡大縮小する前に描画するピクセル数を設定します。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "画质预设会同时设置帧率上限和渲染比例。帧率上限限制每台显示器上的场景和网页壁纸，但不会改写各壁纸已保存的帧率；视频按自身帧率播放。内部渲染比例决定放大到屏幕之前要渲染多少像素。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "畫質預設集會同時設定影格率上限與渲染比例。影格率上限會限制每台顯示器上的場景與網頁桌布，但不會改寫各桌布已儲存的影格率；影片會以自身的影格率播放。內部渲染比例決定影像縮放至適當大小前要渲染多少像素。"}}}
+    },
+    "At the top of the slider there is no limit, and each display runs at its own frame rate: up to 60 fps unless you chose more for it. A lower value caps scenes and web wallpapers on every display, while a video plays at its own frame rate; saved per-display frame rates are not rewritten." : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "슬라이더 맨 위에서는 제한이 없으며, 각 디스플레이가 자체 프레임률로 동작합니다. 해당 디스플레이에 더 높은 값을 선택하지 않은 경우 최대 60fps입니다. 값을 낮추면 모든 디스플레이의 장면과 웹 배경화면에 상한이 적용되며, 동영상은 자체 프레임률로 재생됩니다. 디스플레이별로 저장된 프레임률은 변경되지 않습니다."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "スライダの一番上では制限がなく、各ディスプレイがそれぞれのフレームレートで動作します（個別により高い値を選択していない限り最大60 fps）。低い値にすると、すべてのディスプレイのシーンとWeb壁紙に上限が適用されます。ビデオは動画自体のフレームレートで再生されます。ディスプレイごとに保存されたフレームレートは書き換えられません。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "滑块最顶端表示不限制，每台显示器按各自的帧率运行：除非你为它选了更高的帧率，否则最高 60 fps。更低的值会限制每台显示器上的场景和网页壁纸，而视频按自身帧率播放；不会改写各显示器已保存的帧率。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "滑桿拉到最頂端時沒有限制，每台顯示器會以各自的影格率執行：除非你為它選擇了更高的值，否則最高為 60 fps。較低的值會限制每台顯示器上的場景與網頁桌布，而影片會以自身的影格率播放；不會改寫各顯示器已儲存的影格率。"}}}
+    },
+    "AV1 video needs hardware decoding, which this Mac doesn’t have. Convert it to MP4 or MOV with H.264 or HEVC, then import it again." : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "AV1 동영상에는 하드웨어 디코딩이 필요하지만 이 Mac에는 없습니다. H.264 또는 HEVC를 사용하는 MP4 또는 MOV로 변환한 후 다시 가져오세요."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "AV1ビデオにはハードウェアデコードが必要ですが、このMacには搭載されていません。H.264またはHEVCのMP4またはMOVに変換してから、もう一度読み込んでください。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "AV1 视频需要硬件解码，而这台 Mac 不支持。请先将其转换为 H.264 或 HEVC 编码的 MP4 或 MOV，再重新导入。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "AV1 影片需要硬體解碼，但這台 Mac 不支援。請先轉換為 H.264 或 HEVC 編碼的 MP4 或 MOV，再重新匯入。"}}}
+    },
+    "This video’s format isn’t supported (%@), or the file is damaged. Convert it to MP4 or MOV with H.264 or HEVC, or import a complete copy, then apply it again." : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "이 동영상의 형식(%@)이 지원되지 않거나 파일이 손상되었습니다. H.264 또는 HEVC를 사용하는 MP4 또는 MOV로 변환하거나 완전한 사본을 가져온 후 다시 적용하세요."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "このビデオの形式（%@）には対応していないか、ファイルが破損しています。H.264またはHEVCのMP4またはMOVに変換するか、完全なコピーを読み込んでから、もう一度適用してください。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "不支持此视频的格式（%@），或文件已损坏。请将其转换为 H.264 或 HEVC 编码的 MP4 或 MOV，或导入完整的副本，然后重新应用。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "不支援此影片的格式（%@），或檔案已損毀。請轉換為 H.264 或 HEVC 編碼的 MP4 或 MOV，或匯入完整的副本，然後重新套用。"}}}
+    },
+    "Diagnostics & experimental options" : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "진단 및 실험적 옵션"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "診断と実験的な設定"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "诊断与实验性选项"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "診斷與實驗性選項"}}}
+    },
+    "A scene it can't draw is not drawn at all: it keeps its last picture, or its preview when it has drawn nothing yet, and the reason appears under “Drawn by”." : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "그릴 수 없는 장면은 전혀 그려지지 않습니다. 마지막 화면(아직 아무것도 그리지 않았다면 미리보기)이 유지되며, 그 이유는 ‘렌더링 방식’ 아래에 표시됩니다."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "ネイティブMetalで描画できないシーンはまったく描画されません。最後の画像（まだ何も描画していない場合はプレビュー）が保持され、理由は「描画バックエンド」の下に表示されます。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "原生 Metal 无法绘制的场景完全不会绘制：它会保留最后的画面（尚未绘制任何内容时则显示预览），原因会显示在“绘制方”下方。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "原生 Metal 無法繪製的場景完全不會繪製：它會保留最後的畫面（尚未繪製任何內容時則顯示預覽），原因會顯示在「繪製者」下方。"}}}
+    },
+    "Native Metal is the only scene renderer. It draws a scene only if it supports everything in it: image layers, sprite-sheet animation, 2D puppets with their own skinning shader, 2D sprite, sprite-trail, rope and rope-trail particles, 3D models, perspective cameras, scene lights, standard effect chains and post-processing, effects that read the previous frame, layer links, and BGRA, 8-bit NV12 or 10-bit video textures (HDR video is tone mapped to SDR). This applies to the lock screen and screen saver too." : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "네이티브 Metal은 유일한 장면 렌더러입니다. 장면에 포함된 모든 요소를 지원하는 경우에만 해당 장면을 그립니다. 지원 요소: 이미지 레이어, 스프라이트 시트 애니메이션, 자체 스키닝 셰이더를 사용하는 2D 퍼펫, 2D 스프라이트·스프라이트 트레일·로프·로프 트레일 파티클, 3D 모델, 원근 카메라, 장면 조명, 표준 효과 체인 및 후처리, 이전 프레임을 읽는 효과, 레이어 링크, BGRA·8비트 NV12·10비트 동영상 텍스처(HDR 동영상은 SDR로 톤 매핑됩니다). 이는 잠금 화면과 화면 보호기에도 적용됩니다."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "シーンのレンダラはネイティブMetalのみです。ネイティブMetalは、シーン内のすべての要素に対応している場合にのみそのシーンを描画します。対応している要素：画像レイヤー、スプライトシートアニメーション、独自のスキニングシェーダを持つ2Dパペット、2Dのスプライト／スプライトトレイル／ロープ／ロープトレイルパーティクル、3Dモデル、透視投影カメラ、シーンのライト、標準的なエフェクトチェーンとポストプロセス、前のフレームを読み取るエフェクト、レイヤーリンク、BGRA、8ビットNV12、または10ビットのビデオテクスチャ（HDRビデオはSDRにトーンマッピングされます）。これはロック画面とスクリーンセーバーにも適用されます。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "原生 Metal 是唯一的场景渲染器。只有场景里的内容全部受支持时，它才会绘制该场景。支持的内容包括：图像图层、精灵表动画、使用自身蒙皮着色器的二维木偶、二维的精灵、精灵拖尾、绳索和绳索拖尾粒子、3D 模型、透视摄像机、场景光源、常规效果链和后期处理、读取上一帧的效果、图层链接，以及 BGRA、8 位 NV12 或 10 位视频纹理（HDR 视频会被色调映射为 SDR）。此设置同样适用于锁定屏幕和屏幕保护程序。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "原生 Metal 是唯一的場景算繪器。只有在它支援場景中的所有內容時，才會繪製該場景。支援的內容包括：影像圖層、精靈圖集動畫、使用自身蒙皮著色器的 2D 人偶、2D 精靈圖、精靈圖拖尾、繩索與繩索拖尾粒子、3D 模型、透視攝影機、場景光源、標準效果鏈與後製處理、讀取上一影格的效果、圖層連結，以及 BGRA、8 位元 NV12 或 10 位元影片紋理（HDR 影片會被色調映射為 SDR）。此設定同樣適用於鎖定畫面和螢幕保護程式。"}}}
+    },
+    "Skips rendering work that wouldn’t change the picture, such as parts of a scene that stay the same. Resolution, frame rate and animation speed are unaffected. Turn it off to compare." : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "장면에서 변하지 않는 부분처럼 화면을 바꾸지 않는 렌더링 작업을 생략합니다. 해상도, 프레임률, 애니메이션 속도에는 영향이 없습니다. 비교하려면 끄세요."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "シーン内の変化しない部分など、画像に影響しないレンダリング処理を省略します。解像度、フレームレート、アニメーションの速度は変わりません。オフにすると比較できます。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "跳过不影响画面的渲染工作，比如场景中没有变化的部分。分辨率、帧率和动画速度都不受影响。可以关掉对比效果。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "略過不會改變畫面的渲染工作，例如場景中保持不變的部分。解析度、影格率與動畫速度皆不受影響。可關閉此功能來比較差異。"}}}
+    },
+    "Video and scene wallpapers have a lock-screen route. Publishing, resource access and extension playback still require runtime verification." : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "동영상 및 장면 배경화면에는 잠금 화면 경로가 있습니다. 게시, 리소스 접근, 확장 프로그램 재생은 아직 실행 시 검증이 필요합니다."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "動画とシーン壁紙にはロック画面への表示経路があります。公開、リソースへのアクセス、拡張機能での再生は実行時の検証が必要です。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "视频和场景壁纸支持锁定屏幕方式。发布、资源访问和扩展播放仍需运行时验证。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "影片和場景桌布支援鎖定畫面方式。發佈、資源存取和延伸功能播放仍需執行時驗證。"}}}
+    },
+    "Preflight has no parsed render-graph capability result. Shader, puppet, particle and effect support need runtime evaluation; the live backend, and the reason a scene it cannot draw is held, are shown separately." : {
+      "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "사전 점검에는 분석된 렌더 그래프 지원 결과가 없습니다. 셰이더, 퍼펫, 파티클, 효과 지원 여부는 실행 시 평가가 필요하며, 실제 백엔드와 그릴 수 없는 장면이 유지되는 이유는 따로 표시됩니다."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "事前確認には解析済みレンダーグラフの対応結果がありません。シェーダー、パペット、パーティクル、エフェクトは実行時の評価が必要です。実際のバックエンドと、描画できないシーンが保持されている理由は別途表示されます。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "预检没有已解析的渲染图能力结果。着色器、骨骼模型、粒子和特效支持需运行时评估；实际后端，以及无法绘制的场景被保留的原因，会另行显示。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "預先檢查沒有已解析的算繪圖能力結果。著色器、骨骼模型、粒子和特效支援需執行時評估；實際後端，以及無法繪製的場景被保留的原因，會另行顯示。"}}}
     },
     "Coordinates" : {
       "localizations" : {"ko" : {"stringUnit" : {"state" : "translated", "value" : "좌표"}}, "en" : {"stringUnit" : {"state" : "translated", "value" : "Coordinates"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "座標"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "经纬度"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "經緯度"}}}

@@ -3,7 +3,10 @@
 **Media integration** is on by default for scene and web wallpapers, sharing
 the system's current song title, artist, album, artwork and available timeline.
 Turn it off in a wallpaper's inspector to stop sharing; saved on/off choices are
-preserved. Configurations without a saved choice use the enabled default.
+preserved. Configurations without a saved choice, new ones and older files alike,
+use the enabled default (`MEDIA_INTEGRATION_DEFAULT` in the bridge's `config`
+module). The renderer's own scene default stays off, and previews and the lock
+screen never take part.
 The wallpaper must contain its own music display; this setting does not add an
 overlay to arbitrary wallpapers.
 
@@ -27,7 +30,7 @@ call for scenes that are paused or suspended, and its deliveries are chained so 
 slow cover is never overtaken by the one that replaced it.
 
 **Providers.** The primary provider is `AdapterSystemMediaProvider`. It runs the
-pinned BSD-3-Clause `upstream/mediaremote-adapter` stream through `/usr/bin/perl`;
+pinned BSD-3-Clause `ThirdParty/mediaremote-adapter` stream through `/usr/bin/perl`;
 Xcode builds and embeds `MediaRemoteAdapter.framework` without linking it into
 the application, and the Perl entry point loads it in its own process. This
 accommodates the private MediaRemote interface's restrictions on direct application
@@ -114,9 +117,9 @@ player.
 
 **Covers.** A new cover is pixels, not a new scene: `PublishSystemMediaArtwork`
 replaces the image behind `$mediaThumbnail` and moves the outgoing one to
-`$mediaPreviousThumbnail`, which is what a wallpaper cross-fades from. Each
-renderer notices the version move and swaps the texture on its next frame (Vulkan
-from the pass's per-frame update, Metal from `refreshRuntimeImages`) without
+`$mediaPreviousThumbnail`, which is what a wallpaper cross-fades from. The
+renderer notices the version move and swaps the texture on its next frame (Metal
+from `refreshRuntimeImages`) without
 rebuilding the render graph, so a track change does not idle the GPU or reopen
 videos. Both names are 1×1 transparent before any track, so a layer that binds
 either always has an image. A slot whose author also left a texture in it (a cover
@@ -124,7 +127,10 @@ layer's default art, or another layer's composite that draws it) shows that text
 instead of the transparent texel until a cover is published, and again after the
 explicit clear, as Wallpaper Engine does; a slot with nothing authored in it stays
 transparent
-([scene rendering](scene-rendering.md)). Publishing a cover byte-identical to the
+([scene rendering](scene-rendering.md)); when that texture is another layer's
+composite, the slot keeps sampling it until the first cover and again after the clear,
+the previous-cover slot until a track has a predecessor, and the cover it shows is
+clamped whatever the composite's own sampling is. Publishing a cover byte-identical to the
 one showing does nothing, not even a frame request, which makes replays to new
 scenes free and stops a wallpaper cross-fading a cover into itself. A recreated
 renderer receives the current snapshot again.
@@ -184,7 +190,9 @@ contract is in [Web wallpapers](web-wallpapers.md#host-protocol).
 The provider, fallback, artwork and sink tests run against fake streams and injected
 script results (see *SystemMedia* in [coverage](../testing/coverage.md)); Rust bridge
 tests cover consent, disabling and clearing, invalid states, nonfinite times and
-artwork bounds; `scenescript_media_event_smoke` and `media_thumbnail_texture_smoke`
+artwork bounds, and `tests::media_integration_default` the default (a new
+configuration, an older file without the field, saved choices kept, web pages, a
+scene that receives events with no setup step, previews and the lock screen left out); `scenescript_media_event_smoke` and `media_thumbnail_texture_smoke`
 exercise script delivery and runtime textures without a real player. Live Spotify,
 Apple Music, browser and local-player integration requires an explicit desktop run:
 passing the simulated tests is not proof that a particular player or OS version

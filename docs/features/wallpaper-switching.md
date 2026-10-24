@@ -20,7 +20,7 @@ three hooks on `BridgeStore` that tell the hold when a switch starts, settles or
   previous picture is replaced at once when the new wallpaper has drawn.
 - The held picture is a still taken up to a quarter of a second before the switch. An
   animated wallpaper may therefore jump a little at the moment the new one appears.
-- With the experimental native video backend the same picture covers the new clip's window
+- With the native video player (the default for videos) the same picture covers the new clip's window
   until the clip shows its first frame, then fades out. That fade is the dissolve from the
   old wallpaper to the clip, whether the old one was a clip or a scene.
 - With a web wallpaper the same picture covers the new page's window until the page has
@@ -34,9 +34,8 @@ Held: any activation that goes through `BridgeStore.activateWallpaperAsync` (a t
 menu choice, a hotkey, a link, a Shortcuts action, a playlist or rule, a rotation on unlock,
 **Back**, **Random Wallpaper**, a wallpaper applied to every display, a saved display layout,
 **Copy or swap**) on a display that is showing a wallpaper, when the new
-wallpaper is drawn by the scene engine (a scene, or a video on the Compatibility backend), by
-a native video window (a video with **Native video preferred**) or by a web page window (a
-web wallpaper). A display mirroring the switched display is held with it.
+wallpaper is drawn by the scene engine (a scene), by a native video window (a plain video)
+or by a web page window (a web wallpaper). A display mirroring the switched display is held with it.
 
 Not held, because the old picture is not available or the successor is not a scene:
 
@@ -44,6 +43,10 @@ Not held, because the old picture is not available or the successor is not a sce
   display that is suspended (display sleep, a covered desktop, a pause rule, a lock), and
   any display whose surface does not answer within 250 ms (a paused or stalled renderer
   may not).
+- A desktop whose wallpaper the display keeps paused for it
+  ([different wallpaper for each desktop](spaces.md#keeping-each-desktops-wallpaper)): that
+  wallpaper runs on in the window already on the desktop, so there is no gap to cover. A kept
+  window is never the picture held for another switch either.
 - **Reapply wallpaper**, Retry for a scene that stopped, and the reload after an update:
   all three take the wallpaper off the display first, so there is no picture left to hold.
 - A host window that does not come: a still that no host picks up is released 8 seconds after
@@ -147,13 +150,13 @@ tests and a host without one behave as before):
   is up. `isReadyForDisplay` says a frame can be shown, not that it has been drawn, so the
   fade is what hides a frame or two of lag; if a desktop run shows a flash as the veil goes,
   the knob is `contentReady(after:)`.
-- *Refusal.* A clip the backend cannot honour is handed to the scene engine before any
-  window exists. The still stays armed, the scene the engine opens takes it through the
-  renderer's layer announcement, and the host's `engineSettled` call, made once the bridge
-  has answered (the engine has then presented the scene or failed), releases it. If the
-  engine presents nothing, the 8 s grace ends it.
-- *Failure.* A clip that cannot be played after admission closes its window and hands the
-  wallpaper to the scene engine; the hold is cancelled, because the window it sat on is gone.
+- *Refusal.* A clip nothing can play is refused before any window exists, and nothing takes it
+  over: the display is reported as failed. The still stays armed for a window of another host that
+  might still come, and the host's `engineSettled` call, made as the failure is reported, starts
+  the 8 s grace that ends it.
+- *Failure.* A clip that cannot be played after admission closes its window and the display is
+  reported as failed; the hold is cancelled, because the window it sat on is gone and nothing
+  succeeds it.
 - *Closing.* A window closed to be replaced hands its veil to the successor through `adopt`.
   A window closed with no clip to follow, because the wallpaper was ejected, went to another
   backend or its display was disconnected, calls `windowClosed`: a veil that sat on that

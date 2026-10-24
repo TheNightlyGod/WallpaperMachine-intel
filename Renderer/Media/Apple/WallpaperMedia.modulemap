@@ -1,0 +1,8 @@
+// The Clang module Swift imports WebMReader through (`import WallpaperMedia`), in the
+// app, the lock-screen extension and the unit tests. The targets name this file with
+// `-Xcc -fmodule-map-file=` (project.yml), the way the generated bridge's module is
+// found; the implementation is in wmMediaApple, which libwallpaper_bridge.a carries.
+module WallpaperMedia {
+    header "WebMReader.h"
+    export *
+}

@@ -31,13 +31,13 @@ final class PanelLocaleTests: XCTestCase {
   func testEveryShippedLanguageResolvesMigratedPhrasesFromItsOwnBundle() {
     for language in AppLanguage.supported {
       let locale = panel(language.tag)
-      let phrase = locale.string("Follow desktop Space")
+      let phrase = locale.string("Different wallpaper for each desktop")
       let runtime = locale.catalogString("Steam password")
       if language.tag == "en" {
-        XCTAssertEqual(phrase, "Follow desktop Space")
+        XCTAssertEqual(phrase, "Different wallpaper for each desktop")
         XCTAssertEqual(runtime, "Steam password")
       } else {
-        XCTAssertNotEqual(phrase, "Follow desktop Space", language.tag)
+        XCTAssertNotEqual(phrase, "Different wallpaper for each desktop", language.tag)
         XCTAssertNotEqual(runtime, "Steam password", language.tag)
         XCTAssertFalse(phrase.isEmpty, language.tag)
       }
@@ -149,7 +149,7 @@ final class PanelLocaleTests: XCTestCase {
     XCTAssertEqual(locale.locale.language.script?.identifier, "Hant")
 
     try source.set("en")
-    XCTAssertEqual(locale.string("Follow desktop Space"), "Follow desktop Space")
+    XCTAssertEqual(locale.string("Different wallpaper for each desktop"), "Different wallpaper for each desktop")
     try source.set(AppLanguageStore.systemChoice)
     XCTAssertEqual(locale.tag, "ko")
 
@@ -164,19 +164,19 @@ final class PanelLocaleTests: XCTestCase {
     addTeardownBlock { @MainActor in PanelLocale.shared.bind(to: .testHost) }
     let source = try store("en")
     PanelLocale.shared.bind(to: source)
-    XCTAssertEqual(L("Follow desktop Space"), "Follow desktop Space")
+    XCTAssertEqual(L("Different wallpaper for each desktop"), "Different wallpaper for each desktop")
     let english = L("\(5) wallpapers")
 
     let fired = Counter()
     withObservationTracking {
-      _ = L("Follow desktop Space")
+      _ = L("Different wallpaper for each desktop")
     } onChange: {
       fired.increment()
     }
     XCTAssertEqual(fired.value, 0)
     try source.set("ja")
     XCTAssertEqual(fired.value, 1, "A body that called L() must be invalidated by a language change")
-    XCTAssertNotEqual(L("Follow desktop Space"), "Follow desktop Space")
+    XCTAssertNotEqual(L("Different wallpaper for each desktop"), "Different wallpaper for each desktop")
     XCTAssertNotEqual(L("\(5) wallpapers"), english)
 
     try source.set("en")

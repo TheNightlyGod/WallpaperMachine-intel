@@ -52,6 +52,7 @@ struct QuickTile: Identifiable, Equatable {
       QuickTile(
         key: .writeDesktopPicture, symbol: "desktopcomputer", isOn: isOn(.writeDesktopPicture),
         isEnabled: controller.isSwitchEnabled(.writeDesktopPicture), note: nil, isExperimental: false),
+      desktopWallpapersTile(for: controller, isOn: isOn(.desktopWallpapers)),
     ]
     if controller.playbackSettings.showsActiveDisplayOnly {
       tiles.append(
@@ -68,6 +69,23 @@ struct QuickTile: Identifiable, Equatable {
         isEnabled: true, note: nil, isExperimental: false),
     ]
     return tiles
+  }
+
+  /// Wallpaper per Desktop, for the display the Library applies wallpapers to. With several displays
+  /// its state line names that display; one that cannot have it says Unavailable.
+  @MainActor
+  private static func desktopWallpapersTile(for controller: PanelController, isOn: Bool) -> QuickTile {
+    let enabled = controller.isSwitchEnabled(.desktopWallpapers)
+    let displays = controller.targetDisplays
+    var note: String?
+    if !enabled {
+      note = L("Unavailable")
+    } else if displays.filter(\.isSelectable).count > 1, let target = controller.targetDisplay {
+      note = "\(isOn ? L("On") : L("Off")) · \(target.shortLabel(among: displays))"
+    }
+    return QuickTile(
+      key: .desktopWallpapers, symbol: "rectangle.3.group", isOn: isOn, isEnabled: enabled, note: note,
+      isExperimental: false)
   }
 
   /// The state itself: the note when there is one, else On or Off.
@@ -102,10 +120,14 @@ struct QuickTileView: View {
             Circle().fill(tile.isOn ? theme.accent.primary.color : theme.surface.badge.color)
           )
         VStack(alignment: .leading, spacing: 1) {
+          // A long name ("Wallpaper per Desktop" on the narrowest tile) shrinks a little before
+          // it truncates.
           Text(verbatim: title)
             .font(.system(size: 13, weight: .semibold))
             .foregroundStyle(theme.surface.text.color)
             .lineLimit(1)
+            .allowsTightening(true)
+            .minimumScaleFactor(0.8)
           // The whole line when it fits; the state alone when the tile is too narrow for the badge.
           ViewThatFits(in: .horizontal) {
             stateText(tile.stateLine)

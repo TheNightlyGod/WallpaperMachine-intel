@@ -32,6 +32,15 @@ struct DisplaysSettingsSection: View {
   static let wallpaper = SettingsItem(
     id: "displays.wallpaper", section: .displays, group: card, title: "Wallpaper",
     keywords: ["Choose…", "Eject", "None selected"])
+  static let desktops = SettingsItem(
+    id: "displays.desktops", section: .displays, group: card, title: "Different wallpaper for each desktop",
+    note:
+      "Each desktop keeps the wallpaper you apply while you are on it, and only the desktop you are on plays, so Mission Control shows the other desktops as still pictures. A desktop you have visited waits paused where you left it; one you have not visited yet shows a still picture until its first visit. Kept wallpapers use memory and are let go when the Mac runs short of it.",
+    keywords: [
+      "Desktop \(1)", "Keeps the current wallpaper", "Keep the current wallpaper", "Unavailable desktop",
+      "Spaces", "Refresh Spaces",
+      "Turning it on replaces this display’s automatic wallpaper selection.",
+    ])
 
   // The playlist
   static let playlist = SettingsItem(
@@ -128,7 +137,7 @@ struct DisplaysSettingsSection: View {
     id: "displays.automation-mode", section: .displays, inside: automation,
     title: "Automatic changes", note: "Manual choices stay until the next rule changes them.",
     keywords: [
-      "Off", "Time schedule", "Follow system appearance", "Follow desktop Space",
+      "Off", "Time schedule", "Follow system appearance", "Different wallpaper for each desktop",
       "Turn off animated lock-screen wallpaper to use desktop Space choices.",
       "Desktop information is unavailable. Refresh Spaces or choose another automatic mode.",
     ])
@@ -138,15 +147,6 @@ struct DisplaysSettingsSection: View {
   static let automationDark = SettingsItem(
     id: "displays.automation-dark", section: .displays, inside: automation,
     title: "In dark appearance", keywords: ["Leave as it is", "Use wallpaper", "Use saved playlist"])
-  static let automationSpaces = SettingsItem(
-    id: "displays.automation-spaces", section: .displays, inside: automation,
-    title: "Follow desktop Space",
-    note:
-      "Experimental. Switching desktops reloads their chosen wallpaper or playlist and may briefly show the previous wallpaper. Full-screen app Spaces keep the last choice.",
-    keywords: [
-      "Desktop \(1)", "Unavailable desktop",
-      "Desktop numbers follow their order on this display; choices follow the desktop when you reorder it. An empty choice keeps the current wallpaper.",
-    ])
   static let automationSchedule = SettingsItem(
     id: "displays.automation-schedule", section: .displays, inside: automation,
     title: "Add time rule",
@@ -229,12 +229,12 @@ struct DisplaysSettingsSection: View {
 
   /// The page's order.
   static let items: [SettingsItem] = [
-    refresh, enable, mode, mirrorSource, wallpaper,
+    refresh, enable, mode, mirrorSource, wallpaper, desktops,
     playlist, playlistMode, playlistHeld, playlistSource, playlistOrder, playlistInterval,
     playlistCustom, playlistNext, playlistList, playlistSkipped, playlistDay, playlistDayStart,
     playlistNight, playlistNightStart, playlistSwitch, playlistPlan,
     transfer, transferPeer,
-    automation, automationMode, automationLight, automationDark, automationSpaces,
+    automation, automationMode, automationLight, automationDark,
     automationSchedule, automationFooter,
     playback, scaling, scaleFactor, frameRate, mute, volume,
     layoutsSave, plansList, solarIntro, solarSource, solarSunrise, solarSunset,

@@ -44,9 +44,11 @@ superseded load cannot replace the newer preview. Load failures stay in the wind
 with their reason and a reload action; first-frame or page readiness has a
 30-second budget while visible.
 
-Scene and video previews use a private Compatibility renderer attached to the
-window, independently of the desktop's renderer preference, and scene hover,
-buttons and dragging are scoped to that view. Web previews reuse the wallpaper
+A scene preview uses a private Native Metal renderer attached to the window, and scene
+hover, buttons and dragging are scoped to that view. A video preview plays with the app's own
+players in the same view (AVFoundation for the containers macOS opens, the WebM player for WebM
+and Matroska), never the scene engine; it follows the wallpaper's scaling mode but not its scale
+factor or position, and a clip neither player can play is a failed preview with the reason. Web previews reuse the wallpaper
 host protocol in a separate, nonpersistent website data store and support ordinary
 in-window interaction; preview storage is discarded on close and is not the
 desktop page's localStorage or signed-in session. File and directory properties
@@ -431,22 +433,24 @@ picture is taken again ([desktop picture](desktop-picture.md#when-a-poster-is-ta
 and the lock screen and screen saver draw the wallpaper at the same position
 ([lock screen](lock-screen.md#where-the-picture-sits)).
 
-Both scene renderers honour the position, and so does Compatibility video playback,
-which draws a video as a one-texture scene. The native video player draws a video
-centred whatever the position says. A video it draws shows a note saying so, with a
-link to Performance settings, where choosing Compatibility for **Video playback** lets
-the position apply; the sliders stay available, and the saved position still reaches
-the lock screen. The panel learns which displays the native player draws from the
-running backend reports, so a wallpaper with no report yet shows the plain note.
+A scene honours the position, and so does video playback: the native video players place
+their layer by the same layout (`NativeVideoLayout`), so a clip that is larger than the
+display, or smaller, sits where the sliders put it whichever player draws it. A mirror is centred,
+as it is for a scene. The native player has no per-step preview: while a slider is
+dragged the picture on a clip it draws stays where it was, and it moves once the
+drag settles on a value, which is what is saved. The Mission Control picture is
+taken again after the move.
 
 ### Compatibility check
 
 An installed wallpaper's **Compatibility check** reads entry/shared resources and,
-for video, asynchronously checks native admission for the selected display and
-frame-rate constraints. Checks are explicit and version/configuration-bound.
+for video, asynchronously checks native admission for the selected display: whether
+macOS can open the file, since a clip plays at its own frame rate. Checks are explicit
+and version/configuration-bound.
 Unknown scene shader/graph or Web runtime behavior remains **unknown**; readable
 files and video metadata are not proof of a displayed frame. The same card shows
-the actual running backend and fallback reason when the runtime reports them.
+the actual running backend when the runtime reports it, and, for a scene Native Metal cannot draw,
+why it is held.
 When the installed project or its entry file is unavailable and the wallpaper is
 a Workshop item, the card also offers [Reinstall from Workshop…](workshop-downloads.md#reinstall-from-workshop).
 
@@ -501,8 +505,8 @@ and identity; if the file was replaced since the check, the result is dropped, t
 click reports that the video changed, and the card goes back to offering a new
 look.
 
-Both video backends apply the scale factor with the same Fill layout ([Video
-backend](performance.md#video-backend)), so the button does not depend on which one
+Both video players apply the scale factor with the same Fill layout ([Video
+playback](performance.md#video-playback)), so the button does not depend on which one
 plays the clip. Once the display holds the factor the card drops the button. It adds
 the line about Apply changes and Revert only for the factor this card set, and only
 while that factor is still waiting in the unsaved draft: the app remembers what it

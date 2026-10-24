@@ -77,6 +77,17 @@ final class WebWallpaperHost {
     var onSurfacesChanged: (@MainActor () -> Void)?
     var onStateChanged: (@MainActor (HostWallpaperState) -> Void)?
     private var states: [UInt32: HostWallpaperState] = [:]
+    /// The wallpapers each display may keep paused for a desktop the person left
+    /// (`WallpaperSpaceParking`), by display.
+    private var keepPlan: [UInt32: Set<String>] = [:]
+    /// A page a display keeps suspended in its own window for a desktop the person left, so it
+    /// runs on from there when that desktop comes back instead of loading again.
+    private struct KeptPage {
+        let window: any WebWallpaperSurface
+        let descriptor: BridgeWebWallpaper
+        let projectRevision: String
+    }
+    private var kept: [UInt32: [String: KeptPage]] = [:]
     private var surfaceChangePending = false
     /// One pump for every display: the audio analysis is process-global.
     private let audioPump: WebWallpaperAudioPump
@@ -369,9 +380,35 @@ final class WebWallpaperHost {
         }
     }
 
+    /// The windows of the pages kept suspended for other desktops.
+    var keptWindowNumbers: Set<Int> { Set(kept.values.flatMap(\.values).map(\.window.windowNumber)) }
+
+    /// The wallpapers the display keeps suspended for its other desktops.
+    func keptWallpapers(on displayID: UInt32) -> Set<String> { Set((kept[displayID] ?? [:]).keys) }
+
+    /// The wallpaper each of this host's windows shows, live and kept, by window number.
+    var windowWallpapers: [Int: String] {
+        var wallpapers: [Int: String] = [:]
+        for (displayID, window) in windows {
+            if let wallpaper = descriptors[displayID]?.wallpaperId { wallpapers[window.windowNumber] = wallpaper }
+        }
+        for pages in kept.values {
+            for (wallpaper, page) in pages { wallpapers[page.window.windowNumber] = wallpaper }
+        }
+        return wallpapers
+    }
+
+    /// Sets which wallpapers each display may keep suspended for a desktop the person left, and
+    /// closes the kept pages the plan no longer names.
+    func setKeptWallpapers(_ plan: [UInt32: Set<String>]) {
+        keepPlan = plan
+        releaseKeptPages()
+    }
+
     func apply(_ wallpapers: [BridgeWebWallpaper]) async {
         applyGeneration &+= 1
         let generation = applyGeneration
+        releaseKeptPages()
         let screens = Dictionary(screens().map { ($0.id, $0.frame) }, uniquingKeysWith: { first, _ in first })
         var next: [UInt32: BridgeWebWallpaper] = [:]
         for wallpaper in wallpapers where screens[wallpaper.displayId] != nil {
@@ -384,7 +421,7 @@ final class WebWallpaperHost {
         }
         var changed = false
         for (displayID, window) in windows where next[displayID] == nil {
-            closeVacated(window, displayID: displayID)
+            if !keep(window, displayID: displayID) { closeVacated(window, displayID: displayID) }
             changed = true
         }
         for (displayID, wallpaper) in next {
@@ -433,8 +470,24 @@ final class WebWallpaperHost {
                 window.page.applyDisplayRefreshRate(displayRefreshRate)
                 await push(wallpaper, into: window.page, previous: descriptors[displayID])
                 guard !stopped, generation == applyGeneration else { return }
+            } else if let page = kept[displayID]?[wallpaper.wallpaperId], page.window.page.canonicalEntryURL == canonicalEntry,
+                      page.projectRevision == projectRevision,
+                      page.window.page.rendersAtDisplayRefresh == rendersAtDisplayRefresh {
+                // The page the display kept for this wallpaper runs on: no load, no new window.
+                if let window = windows[displayID], !keep(window, displayID: displayID) { close(window) }
+                kept[displayID]?[wallpaper.wallpaperId] = nil
+                if kept[displayID]?.isEmpty == true { kept[displayID] = nil }
+                windows[displayID] = page.window
+                loadedProjectRevisions[displayID] = projectRevision
+                if page.window.frame != frame { page.window.setScreenFrame(frame) }
+                page.window.page.applyDisplayRefreshRate(displayRefreshRate)
+                await push(wallpaper, into: page.window.page, previous: page.descriptor)
+                guard !stopped, generation == applyGeneration else { return }
+                AppLog.info("web wallpaper \(wallpaper.wallpaperId) runs again on display \(displayID) without a load",
+                            load: page.window.page.logLoad)
+                changed = true
             } else {
-                if let window = windows[displayID] { close(window) }
+                if let window = windows[displayID], !keep(window, displayID: displayID) { close(window) }
                 surfaceGeneration += 1
                 let surface = RuntimeSurfaceKey(
                     kind: .desktopWeb, displayID: displayID, generation: surfaceGeneration)
@@ -523,6 +576,52 @@ final class WebWallpaperHost {
         refreshPointerMonitor()
         refreshAudioOutputs()
         if changed { onSurfacesChanged?() }
+    }
+
+    /// Suspends the page of a display that moves on to another wallpaper and keeps it, when the
+    /// display may keep that wallpaper for the desktop the person left and the page has loaded.
+    /// The page is suspended while it is still the display's, so it gives up the system audio and
+    /// media it listened to through the usual path. False when it is to be closed instead.
+    private func keep(_ window: any WebWallpaperSurface, displayID: UInt32) -> Bool {
+        guard let descriptor = descriptors[displayID], window.page.isLoaded,
+              let revision = loadedProjectRevisions[displayID],
+              keepPlan[displayID]?.contains(descriptor.wallpaperId) == true else { return false }
+        window.page.setPresentationSuspended(true, stillVisible: false)
+        recordState(descriptor, phase: .closed)
+        states.removeValue(forKey: displayID)
+        loadedProjectRevisions.removeValue(forKey: displayID)
+        windows[displayID] = nil
+        descriptors[displayID] = nil
+        if let earlier = kept[displayID]?[descriptor.wallpaperId] { retire(earlier.window) }
+        kept[displayID, default: [:]][descriptor.wallpaperId] = KeptPage(
+            window: window, descriptor: descriptor, projectRevision: revision)
+        AppLog.info("web wallpaper \(descriptor.wallpaperId) kept suspended on display \(displayID) "
+            + "for the desktop the person left", load: window.page.logLoad)
+        return true
+    }
+
+    /// Closes the kept pages whose display may no longer keep them or is gone, and keeps the
+    /// others fitted to their display.
+    private func releaseKeptPages() {
+        let frames = Dictionary(screens().map { ($0.id, $0.frame) }, uniquingKeysWith: { first, _ in first })
+        for (displayID, pages) in kept {
+            for (wallpaper, page) in pages {
+                if let frame = frames[displayID], keepPlan[displayID]?.contains(wallpaper) == true {
+                    if page.window.frame != frame { page.window.setScreenFrame(frame) }
+                    continue
+                }
+                retire(page.window)
+                kept[displayID]?[wallpaper] = nil
+                AppLog.info("web wallpaper \(wallpaper) no longer kept on display \(displayID)", load: page.window.page.logLoad)
+            }
+            if kept[displayID]?.isEmpty == true { kept[displayID] = nil }
+        }
+    }
+
+    /// Stops a page that is no longer any display's and takes its window away.
+    private func retire(_ window: any WebWallpaperSurface) {
+        window.page.stop()
+        window.retire()
     }
 
     /// Puts the picture a switch held for this display over the window about to open. A window
@@ -730,6 +829,9 @@ final class WebWallpaperHost {
         // the loop is what guarantees the invariant rather than trusting it.
         for window in windows.values { close(window) }
         windows.removeAll()
+        for page in kept.values.flatMap(\.values) { retire(page.window) }
+        kept.removeAll()
+        keepPlan.removeAll()
         audioPump.removeAllSubscribers()
         mediaRelay.removeListener(mediaListenerKey)
         mediaRelay.removeAllConsumers()

@@ -57,8 +57,8 @@ enum RuntimeCounter: String, CaseIterable, Sendable {
     /// visible as a difference rather than inferred.
     case nativeVideoItemCreated
     case nativeVideoItemReleased
-    /// The native backend refused a wallpaper and handed it to the scene
-    /// engine.
+    /// The native video host could not play a wallpaper and reported the display as
+    /// failed, with the reason; the display keeps the picture it had.
     case nativeVideoRefused
     /// Reading a clip's metadata did not finish within the limit for its
     /// storage, so the host stopped waiting and handed the wallpaper over. A

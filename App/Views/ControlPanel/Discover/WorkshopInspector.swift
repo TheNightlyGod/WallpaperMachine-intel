@@ -164,7 +164,8 @@ private struct InspectorPreview: View {
       }
       .shadow(color: .black.opacity(0.18), radius: 8, y: 3)
       .accessibilityHidden(true)
-      .task(id: item.id) { await loadAnimation() }
+      // Hidden, the request becomes nil and the animation's bytes go; the still stays under it.
+      .task(id: isVisible ? item.id : nil) { await loadAnimation() }
   }
 
   private var still: PanelImageSource? {
@@ -177,7 +178,7 @@ private struct InspectorPreview: View {
   /// Steam's animation for the selected item alone: one at a time, held to the pipeline's budget.
   private func loadAnimation() async {
     animation = nil
-    guard !isInstalled, let source = item.thumbnail else { return }
+    guard isVisible, !isInstalled, let source = item.thumbnail else { return }
     guard let data = try? await controller.images.animation(for: source) else { return }
     guard !Task.isCancelled else { return }
     animation = (item.id, data)
