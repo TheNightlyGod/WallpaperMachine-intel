@@ -307,7 +307,7 @@ desktop, [become a Supporter](SPONSORS.md).
 
 <!-- supporters:start: written by scripts/update_sponsors.py from the website's sponsor wall; edits here are overwritten -->
 <p align="center">
-  <a href="https://www.wallpapermachine.app/#sponsors"><img src="https://www.wallpapermachine.app/sponsors/wall?v=f31d29c41b85" width="100%" alt="WallpaperMachine Supporters: xwei12, umitsurumi, ReinforceZwei, hahagei2580, 你识认我. 5 Supporters on the wall. 1 more supports privately."></a>
+  <a href="https://www.wallpapermachine.app/#sponsors"><img src="https://www.wallpapermachine.app/sponsors/wall?v=e233059f0e8f" width="100%" alt="WallpaperMachine Supporters: xwei12, umitsurumi, ReinforceZwei, hahagei2580, 你识认我, Yanami. 6 Supporters on the wall. 1 more supports privately."></a>
 </p>
 <!-- supporters:end -->
 
