@@ -57,11 +57,11 @@ final class DownloaderSessionTests: DownloaderTestCase {
     try await authenticate(first)
     try await assertImported(first, in: root, itemID: "123456")
 
-    let other = startDownload(in: root, username: "another_account", itemID: "234567")
+    let other = startDownload(in: root, username: "_another_account", itemID: "234567")
     try await authenticate(other)
     try await assertImported(other, in: root, itemID: "234567")
-    XCTAssertEqual(other.savedAccount, "another_account")
-    let restored = startDownload(in: root, username: "another_account", itemID: "345678")
+    XCTAssertEqual(other.savedAccount, "_another_account")
+    let restored = startDownload(in: root, username: "_another_account", itemID: "345678")
     try await assertImported(restored, in: root, itemID: "345678")
 
     let previous = startDownload(in: root, itemID: "456789")
