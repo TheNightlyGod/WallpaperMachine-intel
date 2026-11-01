@@ -8,6 +8,9 @@ contact_links:
   - name: Question or help
     url: https://github.com/WallpaperMachine/WallpaperMachine/discussions/categories/q-a
     about: Ask how to install, set up or use WallpaperMachine.
+  - name: Discord
+    url: https://mmfoundation.dev/discord
+    about: Talk with the people who make and use WallpaperMachine on MMFoundation's Discord.
   - name: Install guide
     url: https://www.wallpapermachine.app/guides/install/
     about: From the download to the first-run guide, including Open Anyway on first launch.

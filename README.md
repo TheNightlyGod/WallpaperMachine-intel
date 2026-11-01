@@ -259,8 +259,8 @@ same with or without it. Both are explained in [SPONSORS.md](SPONSORS.md).
 <details>
 <summary><b>Where do I ask a question or suggest a feature?</b></summary>
 
-Questions go to [Discussions](https://github.com/WallpaperMachine/WallpaperMachine/discussions/categories/q-a),
-and ideas to a [feature request](https://github.com/WallpaperMachine/WallpaperMachine/issues/new?template=feature_request.yml).
+Questions go to [Discussions](https://github.com/WallpaperMachine/WallpaperMachine/discussions/categories/q-a)
+or MMFoundation's [Discord](https://mmfoundation.dev/discord), and ideas to a [feature request](https://github.com/WallpaperMachine/WallpaperMachine/issues/new?template=feature_request.yml).
 For a wallpaper that looks wrong, use **Not working? Report on GitHub** in its
 details. Security problems are reported privately: see [SECURITY.md](SECURITY.md).
 

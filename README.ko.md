@@ -247,7 +247,8 @@ Apple의 공증을 받지 않은 빌드라서 macOS는 시스템 설정 → 개�
 <details>
 <summary><b>질문이나 기능 제안은 어디에 하나요?</b></summary>
 
-질문은 [Discussions](https://github.com/WallpaperMachine/WallpaperMachine/discussions/categories/q-a)에,
+질문은 [Discussions](https://github.com/WallpaperMachine/WallpaperMachine/discussions/categories/q-a)나
+MMFoundation의 [Discord](https://mmfoundation.dev/discord)에,
 기능 제안은 [기능 요청](https://github.com/WallpaperMachine/WallpaperMachine/issues/new?template=feature_request.yml)에 남겨 주세요.
 배경화면이 이상하게 보인다면 세부 정보의 **작동하지 않나요? GitHub에 문제 보고**로 알릴 수 있습니다.
 보안 문제는 [SECURITY.md](SECURITY.md)(영문)의 안내에 따라 비공개로 제보해 주세요.

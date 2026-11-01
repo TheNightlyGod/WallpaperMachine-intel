@@ -255,8 +255,8 @@ mesmo com ou sem ele. Os dois estão explicados em [SPONSORS.md](SPONSORS.md) (e
 <details>
 <summary><b>Onde faço uma pergunta ou sugiro um recurso?</b></summary>
 
-Perguntas vão para as [Discussions](https://github.com/WallpaperMachine/WallpaperMachine/discussions/categories/q-a),
-e ideias para um [pedido de recurso](https://github.com/WallpaperMachine/WallpaperMachine/issues/new?template=feature_request.yml).
+Perguntas vão para as [Discussions](https://github.com/WallpaperMachine/WallpaperMachine/discussions/categories/q-a)
+ou para o [Discord](https://mmfoundation.dev/discord) da MMFoundation, e ideias para um [pedido de recurso](https://github.com/WallpaperMachine/WallpaperMachine/issues/new?template=feature_request.yml).
 Para um papel de parede que parece errado, use **Não funciona? Relatar no GitHub** nos
 detalhes dele. Problemas de segurança são relatados em particular: veja o [SECURITY.md](SECURITY.md).
 

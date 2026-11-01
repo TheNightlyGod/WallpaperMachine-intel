@@ -186,7 +186,7 @@ WallpaperMachine 支持场景、视频和网页渲染。兼容性因壁纸而异
 <details>
 <summary><b>在哪里提问或提出功能建议？</b></summary>
 
-问题请发到 [Discussions](https://github.com/WallpaperMachine/WallpaperMachine/discussions/categories/q-a)，想法请提交[功能建议](https://github.com/WallpaperMachine/WallpaperMachine/issues/new?template=feature_request.yml)，中文即可。壁纸显示不对，请使用它详情中的**无法正常使用？在 GitHub 上反馈**。安全问题请私下报告，见 [SECURITY.md](SECURITY.md)。
+问题请发到 [Discussions](https://github.com/WallpaperMachine/WallpaperMachine/discussions/categories/q-a) 或 MMFoundation 的 [Discord](https://mmfoundation.dev/discord)，想法请提交[功能建议](https://github.com/WallpaperMachine/WallpaperMachine/issues/new?template=feature_request.yml)，中文即可。壁纸显示不对，请使用它详情中的**无法正常使用？在 GitHub 上反馈**。安全问题请私下报告，见 [SECURITY.md](SECURITY.md)。
 
 </details>
 

@@ -8,7 +8,7 @@ topic; it does not repeat them.
 Everyone taking part follows the [code of conduct](CODE_OF_CONDUCT.md). Found a
 vulnerability? Report it privately, as [SECURITY.md](SECURITY.md) describes, not in
 an issue. Bugs and ideas go through the issue forms; questions go to the
-Discussions Q&A.
+Discussions Q&A or MMFoundation's [Discord](https://mmfoundation.dev/discord).
 
 ## Setup
 
