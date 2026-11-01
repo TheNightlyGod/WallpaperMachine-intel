@@ -1,6 +1,6 @@
 ---
 name: hotfix-release
-description: Ship an urgent fix to users as its own patch release, without the unreleased work on main. Use when the developer asks for an emergency, urgent, hotfix or "patch release right now" fix (a broken sign-in or download, a crash on launch). Cuts a hotfix/<x.y.z> branch from the newest release tag, puts only the fix on it with its test, runs the gate, and after the developer confirms pushes it with `release: patch`; CI then releases it and merges it back into main.
+description: 'Ship an urgent fix to users as its own patch release, without the unreleased work on main. Use when the developer asks for an emergency, urgent, hotfix or "patch release right now" fix (a broken sign-in or download, a crash on launch). Cuts a hotfix/<x.y.z> branch from the newest release tag, puts only the fix on it with its test, runs the gate, and after the developer confirms pushes it with `release: patch`; CI then releases it and merges it back into main.'
 ---
 
 # Emergency patch release
