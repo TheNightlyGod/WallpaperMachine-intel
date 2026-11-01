@@ -653,6 +653,11 @@ private:
                         desc.clear_depth_on_first_use = first;
                         desc.depth_override           = SceneDepthState {
                             .test = true, .write = true, .compare = DepthCompare::Greater };
+                        // The view's constant offset (`CasterOffset`) alone leaves surfaces
+                        // lit at a grazing angle shadowing themselves in stripes; push them
+                        // further toward the reversed far plane by their slope, clamped.
+                        desc.depth_bias_slope         = kShadowCasterSlopeBias;
+                        desc.depth_bias_clamp         = kShadowCasterBiasClamp;
                         desc.textures.assign(material->textures.size(), std::string {});
                         for (std::size_t i = 0; i < material->textures.size(); ++i) {
                             if (! material->textures[i].empty() && ! IsSpecLinkTex(material->textures[i]))

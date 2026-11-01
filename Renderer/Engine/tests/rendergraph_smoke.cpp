@@ -269,6 +269,8 @@ TEST(RenderGraph, anOrdinarySceneHasNoDepthOnlyTiledOrMirroredDraw) {
         EXPECT_FALSE(d.flip_winding);
         EXPECT_FALSE(d.clear_depth_on_first_use);
         EXPECT_FALSE(d.depth_override.has_value());
+        EXPECT_EQ(d.depth_bias_slope, 0.0f);
+        EXPECT_EQ(d.depth_bias_clamp, 0.0f);
         EXPECT_EQ(d.viewport_uv, (std::array<float, 4> { 0.0f, 0.0f, 1.0f, 1.0f }));
     }
 }

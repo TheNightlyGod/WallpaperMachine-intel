@@ -307,6 +307,8 @@ bool BuildScenePassDescriptions(Scene& scene, const rg::RenderGraph& graph,
                 desc.cull_mode        = SceneMetalCullMode(src.cull_override.value_or(material->cull_mode));
             }
             desc.depth_only   = src.depth_only;
+            desc.depth_bias_slope = src.depth_bias_slope;
+            desc.depth_bias_clamp = src.depth_bias_clamp;
             desc.viewport     = src.viewport_uv;
             desc.flip_winding = src.flip_winding;
             if (src.depth_only) {

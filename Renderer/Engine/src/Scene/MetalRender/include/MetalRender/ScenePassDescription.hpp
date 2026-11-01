@@ -118,6 +118,9 @@ struct ScenePassDescription
     MetalDepthCompare        depth_compare { MetalDepthCompare::LessEqual };
     /// The target is a depth image the draw writes depth into, with no colour attachment.
     bool                     depth_only { false };
+    /// See `DrawPass::Desc::depth_bias_slope`.
+    float                    depth_bias_slope { 0.0f };
+    float                    depth_bias_clamp { 0.0f };
     /// The depth a depth-only draw that clears its target clears it to.
     float                    clear_depth { 0.0f };
     /// The part of the target drawn into, (x, y, width, height) fractions of it, y down.

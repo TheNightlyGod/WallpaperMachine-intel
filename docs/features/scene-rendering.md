@@ -606,7 +606,9 @@ copy or conversion pass; a 2D colour image still cannot stand in for a compariso
 or 3D texture declaration.
 
 Point, spot and directional lights cast model shadows through a depth atlas, gated by
-the Shadows quality setting and the visible lights and model casters. Spot-cookie
+the Shadows quality setting and the visible lights and model casters. Casters write
+the atlas with the view's constant depth offset plus a clamped slope-scaled depth bias,
+so a surface lit at a grazing angle does not shadow itself in stripes. Spot-cookie
 sampling uses the existing lighting pass. Point and spot lights with `castvolumetrics`
 draw their volume after the scene and before its post-processing, using the light's
 colour, intensity, radius, density and volumetric exponent. Spot cookies and shadow

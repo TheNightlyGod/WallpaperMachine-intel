@@ -6490,6 +6490,8 @@ bool MetalRender::drawFrame(Scene& scene, bool* presented)
             id<MTLRenderPipelineState>  pipeline { nil };
             id<MTLDepthStencilState>    depth_stencil { nil };
             MetalCullMode               cull_mode { kSceneCullMode };
+            /// A new encoder starts with no depth bias.
+            std::array<float, 2>        depth_bias {};
         };
         OpenRenderPass open;
         const auto close_pass = [&open]() {
@@ -6769,6 +6771,11 @@ bool MetalRender::drawFrame(Scene& scene, bool* presented)
                 if (desc.cull_mode != open.cull_mode) {
                     [encoder setCullMode:static_cast<MTLCullMode>(desc.cull_mode)];
                     open.cull_mode = desc.cull_mode;
+                }
+                if (const std::array<float, 2> bias { desc.depth_bias_slope, desc.depth_bias_clamp };
+                    bias != open.depth_bias) {
+                    [encoder setDepthBias:0.0f slopeScale:bias[0] clamp:bias[1]];
+                    open.depth_bias = bias;
                 }
 
                 const std::size_t geometry_slot =

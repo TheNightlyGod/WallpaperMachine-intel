@@ -116,6 +116,11 @@ public:
         std::array<float, 4>     viewport_uv { 0.0f, 0.0f, 1.0f, 1.0f };
         /// The output is a depth target and the draw writes depth only (a shadow caster).
         bool                     depth_only { false };
+        /// The rasteriser's depth bias (a shadow caster's): the slope-scale factor that
+        /// multiplies the primitive's depth slope, and the clamp on the resulting bias, in
+        /// depth units. Zero leaves depth as the vertex shader wrote it.
+        float                    depth_bias_slope { 0.0f };
+        float                    depth_bias_clamp { 0.0f };
         /// Front faces wind clockwise instead of counter-clockwise (a mirrored view).
         bool                     flip_winding { false };
         /// A depth-only draw that opens the frame's use of its target clears it first (to 0,

@@ -634,6 +634,9 @@ TEST(SceneShadows, TopologyFollowsChangedCasterVisibilityAndLightPartitions)
             ++faces;
             ASSERT_TRUE(draw->desc().depth_override.has_value());
             EXPECT_EQ(draw->desc().depth_override->compare, DepthCompare::Greater);
+            // Biased by slope away from the light: toward 0, the reversed far plane.
+            EXPECT_LT(draw->desc().depth_bias_slope, 0.0f);
+            EXPECT_LT(draw->desc().depth_bias_clamp, 0.0f);
         }
         const auto submeshes = FindRootChild(*scene, "planet")->Mesh()->Submeshes().size();
         EXPECT_EQ(faces, expected_faces * submeshes);
