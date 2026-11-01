@@ -1,7 +1,7 @@
 import Foundation
 import Observation
 
-/// The panel's four one-time prompts and when each may appear.
+/// The panel's five one-time prompts and when each may appear.
 ///
 /// - `support` asks for support once a successfully downloaded wallpaper has been applied.
 /// - `star` asks for a GitHub star, once, from someone who did not choose it in the support
@@ -13,21 +13,27 @@ import Observation
 ///   guide and is signed in to Steam but has never signed in to Steam Community here: someone who
 ///   finished the guide before it offered the import, or skipped its Steam page. The guide's
 ///   offer, or signing in to Steam Community anywhere, spends it.
+/// - `discord` invites once to MMFoundation's Discord, after 21 days and on at least 7 different
+///   days of opening the panel: the star's clock, a week and two days of use later, so it never
+///   comes before the star and, for someone new, usually not right after it. Joining from
+///   Settings › About or the Help menu spends it.
 ///
 /// At most one is pending at a time, in that order of priority (telemetry, subscriptions,
-/// support, star), and
-/// none appears on the same day as another. "First use" for the star prompt is the first day
-/// the panel was opened with a build that counts it, so an existing user's clock starts at the
-/// update.
+/// support, star, discord), and
+/// none appears on the same day as another. "First use" for the star and Discord prompts is the
+/// first day the panel was opened with a build that counts it, so an existing user's clock starts
+/// at the update that brought the star prompt.
 @MainActor
 @Observable
 final class SupportPromptStore {
     enum Prompt: String {
-        case telemetry, subscriptions, support, star
+        case telemetry, subscriptions, support, star, discord
     }
 
     static let starDelay: TimeInterval = 14 * 24 * 60 * 60
     static let starUseDays = 5
+    static let discordDelay: TimeInterval = 21 * 24 * 60 * 60
+    static let discordUseDays = 7
 
     private struct State: Codable {
         var downloadedWallpaperIDs: Set<String> = []
@@ -37,6 +43,8 @@ final class SupportPromptStore {
         var starPresented = false
         var telemetryAsked = false
         var subscriptionsOffered = false
+        var discordChosen = false
+        var discordPresented = false
         var firstUseAt: Date?
         var useDays = 0
         var lastUseDay: Date?
@@ -54,6 +62,8 @@ final class SupportPromptStore {
             starPresented = try container.decodeIfPresent(Bool.self, forKey: .starPresented) ?? false
             telemetryAsked = try container.decodeIfPresent(Bool.self, forKey: .telemetryAsked) ?? false
             subscriptionsOffered = try container.decodeIfPresent(Bool.self, forKey: .subscriptionsOffered) ?? false
+            discordChosen = try container.decodeIfPresent(Bool.self, forKey: .discordChosen) ?? false
+            discordPresented = try container.decodeIfPresent(Bool.self, forKey: .discordPresented) ?? false
             firstUseAt = try container.decodeIfPresent(Date.self, forKey: .firstUseAt)
             useDays = try container.decodeIfPresent(Int.self, forKey: .useDays) ?? 0
             lastUseDay = try container.decodeIfPresent(Date.self, forKey: .lastUseDay)
@@ -97,6 +107,10 @@ final class SupportPromptStore {
         if !state.starChosen, !state.starPresented, let first = state.firstUseAt,
            now.timeIntervalSince(first) >= Self.starDelay, state.useDays >= Self.starUseDays {
             return .star
+        }
+        if !state.discordChosen, !state.discordPresented, let first = state.firstUseAt,
+           now.timeIntervalSince(first) >= Self.discordDelay, state.useDays >= Self.discordUseDays {
+            return .discord
         }
         return nil
     }
@@ -144,6 +158,14 @@ final class SupportPromptStore {
         persist(next)
     }
 
+    /// The user opened MMFoundation's Discord invite, here or anywhere else that offers it.
+    func recordDiscordChosen() {
+        guard !state.discordChosen else { return }
+        var next = state
+        next.discordChosen = true
+        persist(next)
+    }
+
     /// The welcome guide showed the performance data switch, so the prompt is not needed.
     func recordTelemetryAsked() {
         guard !state.telemetryAsked else { return }
@@ -177,6 +199,9 @@ final class SupportPromptStore {
         case .subscriptions:
             guard !state.subscriptionsOffered else { return }
             next.subscriptionsOffered = true
+        case .discord:
+            guard !state.discordPresented else { return }
+            next.discordPresented = true
         }
         next.lastPromptAt = now
         persist(next)

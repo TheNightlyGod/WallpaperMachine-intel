@@ -2,7 +2,7 @@ import AppKit
 import Foundation
 
 /// Every address the panel opens outside the app goes through here: Steam, GitHub, pixiv, Apple's
-/// support pages, the licence text and MMFoundation's website. A link built from remote data (a Workshop item, an author's
+/// support pages, the licence text, MMFoundation's website and its Discord. A link built from remote data (a Workshop item, an author's
 /// profile, a pixiv work) is only as trustworthy as the host it names, so `isAllowed` is the one
 /// gate for `Link`, `openURL` and every button that opens one. Support-prompt links go through
 /// their own injected opener and are not covered by it.
@@ -51,6 +51,9 @@ enum ExternalLink {
   static let gnuGPL3 = URL(string: "https://www.gnu.org/licenses/gpl-3.0.html")!
   /// The website of MMFoundation, the organization that makes WallpaperMachine.
   static let mmfoundation = URL(string: "https://mmfoundation.dev/")!
+  /// MMFoundation's Discord server. The website redirects this address to the current invite, so a
+  /// new invite needs no app release; never link the invite itself.
+  static let discord = URL(string: "https://mmfoundation.dev/discord")!
 
   // MARK: Built links
 
@@ -93,7 +96,7 @@ enum ExternalLink {
   static var fixedLinks: [URL] {
     [
       steamMobileApp, steamEmailedCodeHelp, steamJoin, wallpaperEngineStore, macOSAppSecurity,
-      gnuGPL3, mmfoundation, repository, repositoryIssues,
+      gnuGPL3, mmfoundation, discord, repository, repositoryIssues,
     ]
   }
 }

@@ -49,7 +49,7 @@ struct AboutSettingsSection: View {
     id: "about.credits", section: .about, group: credits, title: "GNU General Public License v3",
     note:
       "Not affiliated with Wallpaper Engine or Valve. WallpaperMachine itself is open source under GPL-3.0-only. Workshop browsing is independently implemented. No warranty is provided.",
-    keywords: ["MMFoundation"]
+    keywords: ["MMFoundation", "Join Discord"]
   )
 
   static let items = [
@@ -378,6 +378,13 @@ private struct AboutCreditsRow: View {
             Text(verbatim: "MMFoundation")
           }
           .help(ExternalLink.mmfoundation.absoluteString)
+          // Its Discord server, which also answers the one-time Discord invitation.
+          Button("Join Discord") {
+            controller.launch(PanelActionCoordinator.key("joinDiscord")) {
+              try await controller.joinDiscord()
+            }
+          }
+          .help(ExternalLink.discord.absoluteString)
         }
       }
       .frame(maxWidth: .infinity, alignment: .leading)

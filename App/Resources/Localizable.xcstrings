@@ -197,6 +197,10 @@
       "extractionState" : "manual",
       "localizations" : {"pt-BR" : {"stringUnit" : {"state" : "translated", "value" : "Relatar um Problema…"}}, "ko" : {"stringUnit" : {"state" : "translated", "value" : "문제 보고…"}}, "en" : {"stringUnit" : {"state" : "translated", "value" : "Report an Issue…"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "問題を報告…"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "报告问题…"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "回報問題…"}}}
     },
+    "Join Discord" : {
+      "extractionState" : "manual",
+      "localizations" : {"pt-BR" : {"stringUnit" : {"state" : "translated", "value" : "Entrar no Discord"}}, "ko" : {"stringUnit" : {"state" : "translated", "value" : "Discord 참여하기"}}, "en" : {"stringUnit" : {"state" : "translated", "value" : "Join Discord"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "Discordに参加"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "加入 Discord"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "加入 Discord"}}}
+    },
     "No wallpaper is playing" : {
       "extractionState" : "manual",
       "localizations" : {"pt-BR" : {"stringUnit" : {"state" : "translated", "value" : "Nenhum papel de parede em reprodução"}}, "ko" : {"stringUnit" : {"state" : "translated", "value" : "재생 중인 배경화면 없음"}}, "en" : {"stringUnit" : {"state" : "translated", "value" : "No wallpaper is playing"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "再生中の壁紙はありません"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "没有正在播放的壁纸"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "沒有正在播放的桌布"}}}
@@ -386,6 +390,15 @@
     },
     "Opens the project on GitHub." : {
       "localizations" : {"pt-BR" : {"stringUnit" : {"state" : "translated", "value" : "Abre o projeto no GitHub."}}, "ko" : {"stringUnit" : {"state" : "translated", "value" : "GitHub에서 프로젝트를 엽니다."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "GitHubのプロジェクトページを開きます。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "打开 GitHub 上的项目页面。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "開啟 GitHub 上的專案頁面。"}}}
+    },
+    "Join us on Discord?" : {
+      "localizations" : {"pt-BR" : {"stringUnit" : {"state" : "translated", "value" : "Vamos conversar no Discord?"}}, "ko" : {"stringUnit" : {"state" : "translated", "value" : "Discord에서 함께하실래요?"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "Discordに参加しませんか？"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "来 Discord 和我们聊聊？"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "來 Discord 和我們聊聊？"}}}
+    },
+    "MMFoundation, which makes WallpaperMachine, has a Discord server. Talk with the people who build it and with other users, ask questions and share ideas." : {
+      "localizations" : {"pt-BR" : {"stringUnit" : {"state" : "translated", "value" : "A MMFoundation, que faz o WallpaperMachine, tem um servidor no Discord. Converse com quem o desenvolve e com outros usuários, tire dúvidas e compartilhe ideias."}}, "ko" : {"stringUnit" : {"state" : "translated", "value" : "WallpaperMachine을 만드는 MMFoundation에는 Discord 서버가 있습니다. 개발자 및 다른 사용자와 이야기하고, 질문하고, 아이디어를 나눠 보세요."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "WallpaperMachineを開発しているMMFoundationには、Discordサーバーがあります。開発者やほかのユーザーと話したり、質問したり、アイデアを共有したりできます。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "WallpaperMachine 的开发组织 MMFoundation 有一个 Discord 服务器。来这里和开发者及其他用户聊天、提问、分享想法。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "WallpaperMachine 的開發組織 MMFoundation 有一個 Discord 伺服器。來這裡和開發者及其他使用者聊天、提問、分享想法。"}}}
+    },
+    "Opens the invite to MMFoundation’s server." : {
+      "localizations" : {"pt-BR" : {"stringUnit" : {"state" : "translated", "value" : "Abre o convite para o servidor da MMFoundation."}}, "ko" : {"stringUnit" : {"state" : "translated", "value" : "MMFoundation 서버 초대 링크를 엽니다."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "MMFoundationのサーバーへの招待ページを開きます。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "打开 MMFoundation 服务器的邀请链接。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "開啟 MMFoundation 伺服器的邀請連結。"}}}
     },
     "Send performance data?" : {
       "localizations" : {"pt-BR" : {"stringUnit" : {"state" : "translated", "value" : "Enviar dados de desempenho?"}}, "ko" : {"stringUnit" : {"state" : "translated", "value" : "성능 데이터를 전송할까요?"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "パフォーマンスデータを送信しますか？"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "发送性能数据？"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "傳送效能資料？"}}}

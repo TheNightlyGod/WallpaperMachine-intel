@@ -54,8 +54,9 @@ struct WelcomeOverlayHost: View {
 /// The one-time prompts, one at a time: after the first downloaded wallpaper, star the project or
 /// become a supporter; later, a GitHub star; for someone who finished the guide before it offered
 /// the switch, whether to send performance data; for someone signed in to Steam who never met the
-/// import, importing their subscriptions. Links open only when chosen; nothing is starred or paid
-/// by opening one. **Not now**, the close button and Escape all just leave.
+/// import, importing their subscriptions; later still, MMFoundation's Discord. Links open only when
+/// chosen; nothing is starred, paid or joined by opening one. **Not now**, the close button and
+/// Escape all just leave.
 struct SupportPromptSheet: View {
   let presenter: SupportPromptPresenter
 
@@ -126,6 +127,7 @@ struct SupportPromptSheet: View {
     case .star: Text("Like WallpaperMachine?")
     case .telemetry: Text("Send performance data?")
     case .subscriptions: Text("Import your Steam subscriptions?")
+    case .discord: Text("Join us on Discord?")
     }
   }
 
@@ -143,6 +145,10 @@ struct SupportPromptSheet: View {
     case .subscriptions:
       Text(
         "WallpaperMachine can download the Workshop wallpapers you already subscribe to on Steam. Sign in to Steam Community once, on Steam’s own page, and this Mac stays signed in until you sign out."
+      )
+    case .discord:
+      Text(
+        "MMFoundation, which makes WallpaperMachine, has a Discord server. Talk with the people who build it and with other users, ask questions and share ideas."
       )
     }
   }
@@ -182,6 +188,11 @@ struct SupportPromptSheet: View {
         title: Text("Import my subscriptions"),
         note: Text("Opens Steam’s sign-in, then adds them to Downloads."), trailingSymbol: "chevron.right"
       ) { choose(.importSubscriptions) }
+    case .discord:
+      WelcomeActionRow(
+        symbol: "bubble.left.and.bubble.right", color: .indigo, title: Text("Join Discord"),
+        note: Text("Opens the invite to MMFoundation’s server."), trailingSymbol: "arrow.up.right"
+      ) { choose(.joinDiscord) }
     }
   }
 

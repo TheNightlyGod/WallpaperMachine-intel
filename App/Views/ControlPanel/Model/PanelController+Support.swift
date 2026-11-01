@@ -12,13 +12,16 @@ enum SupportPromptChoice: Sendable {
   case enableTelemetry
   /// **Import my subscriptions** (the subscriptions offer).
   case importSubscriptions
+  /// **Join Discord**: MMFoundation's Discord invite (the Discord invitation).
+  case joinDiscord
 }
 
 /// The one-time prompts: when one is pending, which, and what its buttons do.
 ///
 /// Whether a prompt may appear, and which, is the store's (`SupportPromptStore`: the performance
 /// data question, the offer to import the Steam subscriptions, the support offer after a downloaded
-/// wallpaper is applied, the later star request, one a day). Whether it is on screen is the panel's: a hidden or minimised panel must not report
+/// wallpaper is applied, the later star request, the still later Discord invitation, one a day).
+/// Whether it is on screen is the panel's: a hidden or minimised panel must not report
 /// one, because showing it spends it.
 extension PanelController {
   /// The prompt the store names now, whether or not anyone can see the panel. Without a telemetry
@@ -53,10 +56,12 @@ extension PanelController {
 
   /// `supportPromptChoice`. Star opens the repository, Become a Supporter the pricing page (the Chinese
   /// one for a Chinese interface), through the `openSupportURL` seam and not the external-link allowlist;
-  /// either link counts as having chosen the star only when it is the repository. **Send performance
-  /// data** turns sending on and opens nothing. **Import my subscriptions** spends the prompt at
-  /// once and goes on without it: Steam's sign-in window, then the downloads, whose failure (or
-  /// finding nothing to download) reaches the banner. Not now spends the prompt and opens nothing.
+  /// either link counts as having chosen the star only when it is the repository. **Join Discord**
+  /// opens MMFoundation's invite through the same seam, after the external-link allowlist.
+  /// **Send performance data** turns sending on and opens nothing. **Import my subscriptions** spends
+  /// the prompt at once and goes on without it: Steam's sign-in window, then the downloads, whose
+  /// failure (or finding nothing to download) reaches the banner. Not now spends the prompt and
+  /// opens nothing.
   ///
   /// A link that cannot be opened throws and leaves the prompt available for another try or Escape, so
   /// call this directly from the prompt (not through `launch`) to keep the error in the dialog.
@@ -85,6 +90,10 @@ extension PanelController {
           self.errors.report(error)
         }
       }
+      return
+    case (.discord, .joinDiscord):
+      try await joinDiscord()
+      store.supportPrompt?.markPresented(.discord)
       return
     case (.support, .star), (.star, .star):
       url = AppUpdateConfiguration.repositoryURL

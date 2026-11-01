@@ -9,6 +9,18 @@ level.
 These are historical results about the trees they were taken on. They are not
 evidence about the current tree and must never be cited as such.
 
+## 2026-10-30 — Scene parity: shader contracts, HDR framing, particle frames and volumetrics
+
+- Integrated shader R8 author validation, puppet axis links, HDR pre-bloom framing, parent/world particle frames, volumetric lights, and the shared-depth state transition repair; planar reflection remains a separately verified private candidate pending resource-cost approval.
+- python3 scripts/check_rust.py — final exit 0: 2,418 passed; five explicitly excluded desktop-window tests. The first-frame scene fixture now uses the WE matrix convention.
+- python3 scripts/check_renderer.py, followed by failed-gate retries (final --skip-build with unchanged C++ inputs) — final exit 0: 3,244 passed, seven explicit asset/corpus/energy/clip skips; all 12 generated pooled/isolated pictures and 16 reloads passed with zero generated shader diagnostics.
+- python3 scripts/build.py --renderer-only — exit 0; renderer and generated Swift bindings updated. The mode now prints its completion verdict. No Release app build or desktop run.
+- python3 scripts/test.py — final exit 0: 464 Python tests; native 4,150 passed, zero failed, 50 skipped. The first full run failed one backup keep-existing case; it was not stably reproduced. Snapshot/archive/restore assertions were strengthened without a production fix, sleep, or test retry.
+- Three native runtime warnings were attributed to passing WebMFilteredVideoSinkTests.testDecoderFailureIsReportedInsteadOfSendingAnUnfilteredPacket, VideoFormatSupportTests.testTheOpenedFilesAreKeyedByTheFileAndForgetAChangedOne, and WebMPlayerTests.testAClipMarkedAsTurnedIsShownWithItsAxesExchanged; their responsible API was not identified.
+- WE comparisons: particle G/H/I effective CP/world samples agree within one encoded channel; volume inside point ROI is exact and spot maximum difference is one. Caster-on ROI MAE improved 27.2271→0.34573 (point) and 3.67252→0.17549 (spot); shadow-edge differences remain.
+- Private reflection candidate: 91 CPU and 27 GPU checks passed; combined reflection/volume/HDR candidate passed 71 CPU and 44 distinct GPU checks with Metal validation. Core reflection ROIs and explicit null/forward/winding controls match WE; this candidate is not enabled in MAIN.
+- Physical EDR appearance, live desktop/audio/network options, the final 17-scene sweep and remaining advanced plan contracts are not verified by this milestone. Ordinary direct clip-space culling differs from WE and is recorded in renderer limitations.
+
 ## 2026-10-30 — Keyed shader constant played by a script without update
 
 A cover cross-fade (blend amount keyed 1 to 0, start-paused, played by a mediaThumbnailChanged handler that only calls thisObject.getAnimation().play()) stayed on its first key, so the previous-cover slot covered the current cover. The handler-only script was never started; it now runs on the clock its constant's timeline plays on.

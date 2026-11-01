@@ -125,7 +125,7 @@ final class SupportPromptStoreTests: XCTestCase {
         XCTAssertTrue(store.isPending)
     }
 
-    // MARK: - Scheduling of the three prompts
+    // MARK: - Scheduling of the prompts
 
     private let day: TimeInterval = 86_400
     private var calendar: Calendar {
@@ -214,6 +214,73 @@ final class SupportPromptStoreTests: XCTestCase {
         useOnDays(store, 6)
         store.recordStarChosen()
         XCTAssertNil(store.pendingPrompt(welcomeSeen: true, telemetryOn: false, now: start + 30 * day))
+    }
+
+    /// The Discord invitation runs on the star's clock, later: three weeks and seven days of use.
+    /// Once shown it never returns, a relaunch included.
+    func testDiscordInvitationWaitsForThreeWeeksAndSevenDaysOfUse() {
+        let store = SupportPromptStore(defaults: defaults, calendar: calendar)
+        store.recordTelemetryAsked()
+        store.recordStarChosen()
+        useOnDays(store, 6)
+        XCTAssertNil(store.pendingPrompt(welcomeSeen: true, telemetryOn: false, now: start + 40 * day),
+                     "three weeks, but six days of use")
+        store.recordPanelUse(now: start + 6 * day)
+        XCTAssertNil(store.pendingPrompt(welcomeSeen: true, telemetryOn: false, now: start + 20 * day),
+                     "seven days of use, but not three weeks yet")
+        XCTAssertEqual(store.pendingPrompt(welcomeSeen: true, telemetryOn: false, now: start + 21 * day), .discord)
+
+        store.markPresented(.discord, now: start + 21 * day)
+        XCTAssertNil(SupportPromptStore(defaults: defaults, calendar: calendar)
+            .pendingPrompt(welcomeSeen: true, telemetryOn: false, now: start + 90 * day), "invited once, for good")
+    }
+
+    /// When everything is due at once the invitation is the last of the prompts, each on a day of
+    /// its own.
+    func testTheDiscordInvitationComesAfterEveryOtherPromptOnADayOfItsOwn() {
+        let store = SupportPromptStore(defaults: defaults, calendar: calendar)
+        store.recordDownload(wallpaperID: "downloaded")
+        store.recordSuccessfulActivation(wallpaperID: "downloaded")
+        useOnDays(store, 8)
+        var now = start + 30 * day
+        var shown = [SupportPromptStore.Prompt]()
+        while let prompt = store.pendingPrompt(welcomeSeen: true, telemetryOn: false, steamSignedIn: true, now: now) {
+            shown.append(prompt)
+            store.markPresented(prompt, now: now)
+            XCTAssertNil(store.pendingPrompt(welcomeSeen: true, telemetryOn: false, steamSignedIn: true, now: now + 60),
+                         "one prompt a day")
+            now += day
+        }
+        XCTAssertEqual(shown, [.telemetry, .subscriptions, .support, .star, .discord])
+    }
+
+    /// Someone who joined from Settings › About or the Help menu is not invited.
+    func testJoiningDiscordElsewhereSkipsTheInvitation() {
+        let store = SupportPromptStore(defaults: defaults, calendar: calendar)
+        store.recordTelemetryAsked()
+        store.recordStarChosen()
+        useOnDays(store, 8)
+        store.recordDiscordChosen()
+        XCTAssertNil(SupportPromptStore(defaults: defaults, calendar: calendar)
+            .pendingPrompt(welcomeSeen: true, telemetryOn: false, now: start + 30 * day))
+    }
+
+    /// State saved by a build without the invitation reads it as not yet shown, so an existing
+    /// user who has used the app for a while is invited once after the update.
+    func testStateSavedBeforeTheDiscordInvitationLoadsWithItUnspent() throws {
+        let earlier = SupportPromptStore(defaults: defaults, calendar: calendar)
+        earlier.recordTelemetryAsked()
+        useOnDays(earlier, 8)
+        earlier.markPresented(.star, now: start + 20 * day)
+        let key = "WallpaperMachine.supportPrompt.state"
+        var saved = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: try XCTUnwrap(defaults.data(forKey: key))) as? [String: Any])
+        saved["discordChosen"] = nil
+        saved["discordPresented"] = nil
+        defaults.set(try JSONSerialization.data(withJSONObject: saved), forKey: key)
+
+        let updated = SupportPromptStore(defaults: defaults, calendar: calendar)
+        XCTAssertEqual(updated.pendingPrompt(welcomeSeen: true, telemetryOn: false, now: start + 30 * day), .discord)
     }
 
     func testStateSavedByEarlierBuildsStillLoads() throws {

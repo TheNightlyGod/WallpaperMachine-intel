@@ -255,4 +255,43 @@ final class SupportPromptPresenterTests: PanelTestCase {
       XCTAssertEqual(opened, 0)
     }
   }
+
+  /// The Discord invitation is spent by being seen, like the others. **Join Discord** opens the
+  /// invite and closes the sheet; a link the Mac refuses keeps the sheet up with the reason, and
+  /// Escape still leaves without opening anything.
+  func testTheDiscordInvitationOpensTheInviteOrLeaves() async throws {
+    try pinPanelLanguageToEnglish()
+    for joins in [true, false] {
+      try await withPresenter { panel, presenter, prompt, defaults in
+        var allowsOpening = false
+        var opened = [URL]()
+        panel.controller.openSupportURL = { opened.append($0); return allowsOpening }
+        prompt.qualifyForDiscordInvitation()
+        panel.show()
+        XCTAssertEqual(presenter.prompt, .discord)
+        XCTAssertTrue(presenter.wantsPresentation)
+        presenter.sheetDidAppear()
+        XCTAssertNil(
+          SupportPromptStore(defaults: defaults).pendingPrompt(
+            welcomeSeen: true, telemetryOn: true, now: Date() + 2 * 86_400), "Seen: spent for good")
+
+        await presenter.choose(.joinDiscord)
+        XCTAssertEqual(presenter.error, "The link could not be opened. Please try again.")
+        XCTAssertTrue(presenter.wantsPresentation, "The invitation stays up")
+        XCTAssertEqual(presenter.prompt, .discord)
+
+        if joins {
+          allowsOpening = true
+          await presenter.choose(.joinDiscord)
+          XCTAssertNil(presenter.error)
+        } else {
+          await presenter.dismiss().value
+        }
+        XCTAssertEqual(opened.map(\.absoluteString).last, "https://mmfoundation.dev/discord")
+        XCTAssertEqual(opened.count, joins ? 2 : 1, "Leaving opens nothing")
+        XCTAssertTrue(presenter.isDismissed)
+        XCTAssertFalse(presenter.wantsPresentation)
+      }
+    }
+  }
 }

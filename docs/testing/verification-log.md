@@ -25,6 +25,15 @@ and moves whatever falls past ten verbatim into a monthly file under
 [archive/](archive/); promote anything durable before it goes. Editing an
 entry's recorded result is not allowed.
 
+## 2026-11-01 — Discord invitation, About entry and Help menu item
+
+A fifth one-time prompt, Join us on Discord?, invites once to MMFoundation's Discord through https://mmfoundation.dev/discord (ExternalLink.discord, allowlisted; never the invite itself), last in priority, after 21 days and 7 days of panel use on the star prompt's clock. Settings › About gains Join Discord beside MMFoundation and the Help menu gains Join Discord; either spends the invitation. Strings in all six languages.
+
+- `python3 scripts/test.py --only SupportPromptStoreTests --only PanelSupportPromptTests --only SupportPromptPresenterTests --only WelcomeRenderTests --only SettingsSectionsLocalizationTests --only ExternalLinkTests` — 62 passed (after `xattr -cr build/Build/Products/Debug`, docs/build.md)
+- `python3 scripts/test.py` — 4268 passed, 0 failed, 52 skipped
+- `python3 scripts/build.py --swift-only --configuration Release` — OK
+- Sheet (en, zh-Hans) and Settings › About (en, zh-Hans) rendered offscreen from a never-shown window to check the layout; the app was not launched and the Help menu item was not opened by hand
+
 ## 2026-11-01 — MMFoundation link in Settings › About
 
 Settings › About gains an MMFoundation button beside the GPL link, opening https://mmfoundation.dev/ through ExternalLink's allowlist (mmfoundation.dev added); READMEs in all four languages name MMFoundation with a link. Run while another task's uncommitted Spaces/desktop-picture edits were in the same checkout.
@@ -103,15 +112,3 @@ The poster sync now hears about native video windows that open or close after a 
 - `check_rust.py` passed; `check_renderer.py` 3,311 passed, 0 failed, 7 skipped; `build.py --renderer-only` OK; `test.py` 4,150 passed, 0 failed, 50 skipped (first run blocked by File Provider xattrs on `build/`, cleared per docs/build.md).
 - 17-scene sweep, paced: 34/34 frames, no visible rendering regression; 2998757800 and 3662790108 improved; metric increases are calendar/clock text (render date 10-30 vs captures 10-25) or stochastic particles.
 - Not done: Release build, desktop run, GPU-side rope subdivision, 64-segment trail length, 3D ModelData projection.
-
-## 2026-10-30 — Scene parity: shader contracts, HDR framing, particle frames and volumetrics
-
-- Integrated shader R8 author validation, puppet axis links, HDR pre-bloom framing, parent/world particle frames, volumetric lights, and the shared-depth state transition repair; planar reflection remains a separately verified private candidate pending resource-cost approval.
-- python3 scripts/check_rust.py — final exit 0: 2,418 passed; five explicitly excluded desktop-window tests. The first-frame scene fixture now uses the WE matrix convention.
-- python3 scripts/check_renderer.py, followed by failed-gate retries (final --skip-build with unchanged C++ inputs) — final exit 0: 3,244 passed, seven explicit asset/corpus/energy/clip skips; all 12 generated pooled/isolated pictures and 16 reloads passed with zero generated shader diagnostics.
-- python3 scripts/build.py --renderer-only — exit 0; renderer and generated Swift bindings updated. The mode now prints its completion verdict. No Release app build or desktop run.
-- python3 scripts/test.py — final exit 0: 464 Python tests; native 4,150 passed, zero failed, 50 skipped. The first full run failed one backup keep-existing case; it was not stably reproduced. Snapshot/archive/restore assertions were strengthened without a production fix, sleep, or test retry.
-- Three native runtime warnings were attributed to passing WebMFilteredVideoSinkTests.testDecoderFailureIsReportedInsteadOfSendingAnUnfilteredPacket, VideoFormatSupportTests.testTheOpenedFilesAreKeyedByTheFileAndForgetAChangedOne, and WebMPlayerTests.testAClipMarkedAsTurnedIsShownWithItsAxesExchanged; their responsible API was not identified.
-- WE comparisons: particle G/H/I effective CP/world samples agree within one encoded channel; volume inside point ROI is exact and spot maximum difference is one. Caster-on ROI MAE improved 27.2271→0.34573 (point) and 3.67252→0.17549 (spot); shadow-edge differences remain.
-- Private reflection candidate: 91 CPU and 27 GPU checks passed; combined reflection/volume/HDR candidate passed 71 CPU and 44 distinct GPU checks with Metal validation. Core reflection ROIs and explicit null/forward/winding controls match WE; this candidate is not enabled in MAIN.
-- Physical EDR appearance, live desktop/audio/network options, the final 17-scene sweep and remaining advanced plan contracts are not verified by this milestone. Ordinary direct clip-space culling differs from WE and is recorded in renderer limitations.

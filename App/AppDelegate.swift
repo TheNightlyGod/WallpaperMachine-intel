@@ -1957,6 +1957,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         helpMenu.addItem(menuItem("WallpaperMachine on GitHub", action: #selector(openRepository)))
         helpMenu.addItem(menuItem("Release Notes", action: #selector(openReleaseNotes)))
         helpMenu.addItem(menuItem("Report an Issue…", action: #selector(openIssues)))
+        helpMenu.addItem(.separator())
+        helpMenu.addItem(menuItem("Join Discord", action: #selector(openDiscord)))
         helpItem.submenu = helpMenu
         main.addItem(helpItem)
         NSApp.helpMenu = helpMenu
@@ -2161,6 +2163,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
 
     @objc private func openIssues() {
         ExternalLink.open(ExternalLink.repositoryIssues)
+    }
+
+    /// MMFoundation's Discord, which also answers the panel's one-time Discord invitation.
+    @objc private func openDiscord() {
+        if ExternalLink.open(ExternalLink.discord) { store?.supportPrompt?.recordDiscordChosen() }
     }
 
     /// Ticks the View menu's page on show, and enables Zoom In, Zoom Out and Actual Size while a

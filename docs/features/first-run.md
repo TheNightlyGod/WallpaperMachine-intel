@@ -4,8 +4,9 @@ One-time offers on a Mac that has not seen them: the welcome guide that covers t
 first window, a single request to star or support the project after the first
 downloaded wallpaper is applied, a later request for a GitHub star, one question
 about [performance data](telemetry.md) for someone who finished the guide before it
-had that switch, and one offer to import the Steam subscriptions for someone signed in
-to Steam who has not met that import. Each is shown once and remembered in the app's defaults. The panel
+had that switch, one offer to import the Steam subscriptions for someone signed in
+to Steam who has not met that import, and, after a few weeks of use, one invitation to
+MMFoundation's Discord. Each is shown once and remembered in the app's defaults. The panel
 they appear in is described in [control panel](control-panel.md).
 
 ## First run
@@ -150,11 +151,11 @@ finishes that action in their browser. See [Supporter details](../../SPONSORS.md
 
 ## Star prompt, the performance data question and the subscriptions offer
 
-`SupportPromptStore` schedules all four prompts and `PanelController.pendingPrompt`
+`SupportPromptStore` schedules all five prompts and `PanelController.pendingPrompt`
 names at most one; `SupportPromptPresenter` shows it in the same sheet with the same
 waiting rules as above (`SupportPromptSheet`). When several are due, the order is the
 performance data question, then the subscriptions offer, then the support prompt, then
-the star prompt, and no
+the star prompt, then the [Discord invitation](#discord-invitation), and no
 prompt appears on the same calendar day as another. Once one has been answered or
 dismissed, no other appears in that window.
 
@@ -183,3 +184,25 @@ Settings → About also has **Share WallpaperMachine…**, the system share menu
 website's home page (the Chinese page for either Chinese app language), and **Star on
 GitHub**. A Workshop wallpaper's details offer **Share…**; see
 [control panel](control-panel.md#sharing-a-wallpaper).
+
+## Discord invitation
+
+**Join us on Discord?** invites once to the Discord server of MMFoundation, the
+organization that makes the app, in every interface language. **Join Discord** opens
+https://mmfoundation.dev/discord, which the website redirects to the current invite, so
+a new invite never needs an app release; the app never links the invite itself. **Not
+now**, the close button and Escape spend it without opening anything, and a link that
+fails to open says so and leaves the sheet up.
+
+It never comes on a first launch: it uses the star prompt's clock and waits until 21
+days after the first day the panel was on screen with a build that counts it, and until
+the panel has been on screen on at least 7 different days. Both thresholds are above the
+star prompt's 14 days and 5 days of use, so it never comes before the star prompt and,
+for someone new, usually not right after it; when both are due at once the one-a-day rule
+puts the star first and the invitation on a later day. An existing user's clock started at the
+update that brought the star prompt, so someone who has used the app since then is
+invited soon after the update that brings the invitation.
+
+**Join Discord** in Settings → About, beside **MMFoundation**, and **Help → Join
+Discord** in the menu bar open the same address at any time. Opening it from either
+counts as having joined, and the invitation does not come up afterwards.

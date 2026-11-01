@@ -97,9 +97,9 @@ final class SupportPromptPresenter {
     controller.supportPromptShown(prompt)
   }
 
-  /// **Star on GitHub**, **Become a Supporter** and **Send performance data**. A link that cannot be
-  /// opened keeps the prompt open with the reason, so the other row, a retry and **Not now** all
-  /// remain.
+  /// **Star on GitHub**, **Become a Supporter**, **Join Discord** and **Send performance data**. A
+  /// link that cannot be opened keeps the prompt open with the reason, so the other row, a retry and
+  /// **Not now** all remain.
   func choose(_ choice: SupportPromptChoice) async {
     guard !isDismissed, !isChoosing, let prompt else { return }
     if choice == .dismiss {

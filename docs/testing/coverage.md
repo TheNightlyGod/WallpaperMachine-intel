@@ -1211,7 +1211,11 @@ never to `.shared`.
   `PanelPerformanceDataTests` (the Settings switch round-trips and **Show in Finder** writes the
   report it would send, the performance data question asked once of someone who finished the
   guide earlier and answered from the presenter, the guide answering it only once its
-  Preferences page was shown and committing its switch as a draft); see
+  Preferences page was shown and committing its switch as a draft). `PanelSupportPromptTests`
+  and `SupportPromptPresenterTests` also cover the Discord invitation: **Join Discord** opens
+  https://mmfoundation.dev/discord in English and Chinese and ends it, **Not now** spends it
+  without opening anything, a refused link keeps the sheet up, and **Join Discord** in About
+  answers it; `WelcomeRenderTests` lays its sheet out in every language. See
   [first run](../features/first-run.md).
 - Sharing: `PanelSharingTests` (a Workshop wallpaper shares its Workshop page with the website,
   any other id has no Share, the app is shared with the website in the panel's language, **Star on
@@ -1367,13 +1371,14 @@ install and a no-login smoke run (see [README.md](README.md#opt-in-layers)).
 
 `SupportPromptStoreTests` — a downloaded wallpaper qualifies only after a
 successful activation, a pending prompt survives relaunch and further downloads,
-and a presented prompt never returns. Across the four prompts: one a day in
+and a presented prompt never returns. Across the five prompts: one a day in
 priority order, the performance data question only for someone who finished the
 guide without it, the subscriptions offer only for someone signed in to Steam who
 finished the guide without meeting the import (spent by the guide's card or a Steam
 Community sign-in), the star prompt after 14 days and 5 days of use (one day counts
-once) and not after the star was chosen, and state saved by earlier builds still
-loads. `Support/` also holds the shared fixtures
+once) and not after the star was chosen, the Discord invitation after 21 days and 7 days
+of use, last of all and once for good, not after joining from About or the Help menu, and
+state saved by earlier builds still loads (before the invitation, with it unspent). `Support/` also holds the shared fixtures
 (`TemporaryDefaults`, `TestAppLanguage`, bridge snapshots).
 
 ## Telemetry

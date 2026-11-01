@@ -372,16 +372,47 @@ final class WelcomeRenderTests: PanelTestCase {
             controller.openSupportURL = { _ in false }
             await controller.supportPrompt.choose(.star)
           }
-          let hosting = NSHostingView(
-            rootView: SupportPromptSheet(presenter: controller.supportPrompt)
-              .panelTheme(theme: controller.theme, locale: PanelLocale.shared))
-          hosting.layoutSubtreeIfNeeded()
-          let size = hosting.fittingSize
-          XCTAssertEqual(size.width, 440, accuracy: 1, "\(language): the sheet keeps its width")
-          XCTAssertLessThan(size.height, 480, "\(language): the sheet stays small")
-          XCTAssertGreaterThan(size.height, 200, "\(language): and shows its content")
+          assertSheetFits(controller, language)
         }
       }
     }
+  }
+
+  /// The Discord invitation too, in every language, Chinese included, with and without the error
+  /// line of a link that could not be opened.
+  func testTheDiscordInvitationFitsItsWidthInEveryLanguage() async throws {
+    let defaults = try TemporaryDefaults.make(for: self).defaults
+    let prompt = SupportPromptStore(defaults: defaults)
+    prompt.qualifyForDiscordInvitation()
+    try await withPanel(supportPrompt: prompt) { panel in
+      let controller = panel.controller
+      panel.show()
+      XCTAssertEqual(controller.supportPrompt.prompt, .discord)
+      for failing in [false, true] {
+        if failing {
+          controller.openSupportURL = { _ in false }
+          await controller.supportPrompt.choose(.joinDiscord)
+          XCTAssertNotNil(controller.supportPrompt.error)
+        }
+        for language in AppLanguage.supported.map(\.tag) {
+          try controller.appLanguage.set(language)
+          PanelLocale.shared.bind(to: controller.appLanguage)
+          assertSheetFits(controller, language)
+        }
+      }
+    }
+  }
+
+  private func assertSheetFits(
+    _ controller: PanelController, _ language: String, file: StaticString = #filePath, line: UInt = #line
+  ) {
+    let hosting = NSHostingView(
+      rootView: SupportPromptSheet(presenter: controller.supportPrompt)
+        .panelTheme(theme: controller.theme, locale: PanelLocale.shared))
+    hosting.layoutSubtreeIfNeeded()
+    let size = hosting.fittingSize
+    XCTAssertEqual(size.width, 440, accuracy: 1, "\(language): the sheet keeps its width", file: file, line: line)
+    XCTAssertLessThan(size.height, 480, "\(language): the sheet stays small", file: file, line: line)
+    XCTAssertGreaterThan(size.height, 200, "\(language): and shows its content", file: file, line: line)
   }
 }
