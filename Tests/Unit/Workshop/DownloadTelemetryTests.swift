@@ -320,23 +320,22 @@ final class DownloadTelemetryTests: DownloaderTestCase {
     } catch { await downloader.shutdown(); throw error }
   }
 
-  func testAppUpdatePhaseProgressTracksExplicitByteCountersOnly() async throws {
+  func testDepotTransferShowsSpeedAndClearsFiguresWhenSteamConfirmsIt() async throws {
     let root = try makeRuntime("""
-      mkdir -p wallpaper-engine/assets/shaders
-      printf 'partial' > wallpaper-engine/assets/shaders/genericimage2.vert
-      printf 'Update state (0x61) downloading, progress: 25.00 (250 / 1000)\\n'
+      out=steamapps/content/app_431960/depot_431961
+      printf 'Downloading depot 431961 (1 KB) ...\\n'
+      mkdir -p "$out/assets"
+      head -c 1536 /dev/zero > "$out/assets/part"
       touch ../phase-one
       while [ ! -f ../next-phase ]; do sleep 0.02; done
-      printf 'Update state (0x36) verifying, progress: 50.00 (500 / 1000)\\n'
+      printf 'Depot download complete : "%s/%s" (1 files, manifest 1)\\n' "$PWD" "$out"
       touch ../phase-two
-      while [ ! -f ../final-phase ]; do sleep 0.02; done
-      printf 'Update state (0x61) downloading, progress: 0.00 (0 / 0)\\n'
-      touch ../phase-three
       IFS= read -r finish
       """)
     defer { try? FileManager.default.removeItem(at: root) }
     let monitor = FixtureNetworkMonitor()
     monitor.value = 400_000
+    monitor.received = 512
     let downloader = WorkshopDownloader(
       sessionDirectory: root.appendingPathComponent("SteamSession"),
       runtimeProvider: ShellRuntimeProvider(),
@@ -344,24 +343,19 @@ final class DownloadTelemetryTests: DownloaderTestCase {
     downloader.installAssets(
       username: "localtest", executable: root.appendingPathComponent("runtime/steamcmd"),
       destination: root.appendingPathComponent("SceneAssets")
-    ) { XCTFail("The incomplete install must not publish assets") }
+    ) { XCTFail("The incomplete depot must not publish assets") }
     do {
       try await waitUntil { FileManager.default.fileExists(atPath: root.appendingPathComponent("phase-one").path) }
-      try await waitUntil { downloader.progress == 0.25 }
+      try await waitUntil { downloader.progress == 0.5 }
       try await waitUntil { downloader.bytesPerSecond == 400_000 }
-      XCTAssertEqual(downloader.bytesReceived, 250)
-      XCTAssertEqual(downloader.bytesExpected, 1000)
+      XCTAssertEqual(downloader.bytesReceived, 512)
+      XCTAssertEqual(downloader.bytesExpected, 1024)
       try Data().write(to: root.appendingPathComponent("next-phase"))
       try await waitUntil { FileManager.default.fileExists(atPath: root.appendingPathComponent("phase-two").path) }
-      try await waitUntil { downloader.progress == 0.5 }
+      try await waitUntil { downloader.progress == 1 }
       XCTAssertNil(downloader.bytesReceived)
       XCTAssertNil(downloader.bytesExpected)
       try await waitUntil { downloader.bytesPerSecond == nil }
-      try Data().write(to: root.appendingPathComponent("final-phase"))
-      try await waitUntil { FileManager.default.fileExists(atPath: root.appendingPathComponent("phase-three").path) }
-      try await waitUntil { downloader.progress == nil }
-      XCTAssertNil(downloader.bytesReceived)
-      XCTAssertNil(downloader.bytesExpected)
       await downloader.shutdown()
     } catch { await downloader.shutdown(); throw error }
   }

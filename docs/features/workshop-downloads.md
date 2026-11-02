@@ -408,10 +408,13 @@ Installed page.
 
 ### Transfer progress
 
-SteamCMD prints byte counters for `app_update` (shared scene resources) but
-nothing while it fetches a Workshop item, so Workshop progress is measured outside
-its output and compared with the `file_size` Steam's Workshop listing gave for the
-item. While Steam reports the item as downloading, the app takes two measures
+SteamCMD prints no byte counters while it fetches a Workshop item or the shared
+scene resources' depot, so progress is measured outside its output: a Workshop
+item against the `file_size` Steam's Workshop listing gave for it, the depot
+against the size SteamCMD's `Downloading depot 431961 (… files, … MB)` line gives.
+That size is the compressed download, about a third of what lands on disk, so the
+depot is measured by the bytes the process has received over the network alone,
+and by the bytes in its folder only when `nettop` is unavailable. While Steam reports the item as downloading, the app takes two measures
 twice a second and shows the smaller: the bytes that have landed under the private
 staging's `steamapps/workshop` tree (allocated blocks, so a sparse file does not
 count), and the bytes the SteamCMD process has received over the network since the
@@ -724,7 +727,8 @@ work.
   prerequisite requests use `Downloads/workshop-requests.json` in app support. Quitting pauses active and
   queued downloads after stopping their child processes, and relaunch restores
   them as paused, without starting a login or transfer automatically. Checkpoints
-  contain only `steamapps` and `wallpaper-engine` download content; passwords,
+  (Workshop items only; the shared resources keep none) contain only `steamapps`
+  and `wallpaper-engine` download content; passwords,
   terminal state and private SteamCMD runtime files are never included.
   Checkpoint publication retains recoverable pending and previous directories
   until the new checkpoint is published; resume recovers an interrupted
@@ -769,8 +773,17 @@ installed scene opens this setup instead of asking the renderer for a failure
 itself once the resources arrive. **Locate an installation…** (**Use an existing
 installation** in the dialog) instead points at
 an existing purchased installation. Installation reuses the private SteamCMD login
-and cancellation flow and requests the Windows application with `app_update
-431960 validate`. Only the validated `assets` tree is retained, at
+and cancellation flow and fetches only Wallpaper Engine's Windows content depot
+with `download_depot 431960 431961` (about 360 MB to download). It never runs
+`app_update 431960`: updating the whole app also fetched whatever Steam ties to the
+account, which one report showed as a 49.6 GB download. Steam confirms the depot
+with `Depot download complete : "<folder>"`, a path SteamCMD for macOS prints with
+backslashes after the staging folder; the assets are taken from that folder
+when it lies inside the run's own staging, else from where SteamCMD puts depots
+(`steamapps/content/app_431960/depot_431961` under its staging or Steam home). A
+depot download starts over each time, so the shared resources keep no partial
+data: a paused or failed attempt keeps nothing, and a checkpoint an earlier
+version kept is deleted rather than restored. Only the validated `assets` tree is retained, at
 `~/Library/Application Support/WallpaperMachine/SceneAssets`; the Windows
 executables are removed together with the temporary installation. Steam must
 confirm that the installation completed before assets are published. An empty or
@@ -974,10 +987,9 @@ Steam's staging and 64 MiB of margin; whatever a paused or failed attempt kept a
 partial download data is counted from disk, so a retry only needs what is still
 missing. Free space is the figure macOS calls available for important usage,
 which includes space it can reclaim on demand. Shared scene resources have no
-listed size, so they need a fixed 3 GiB less whatever an earlier attempt already
-staged for them (counted from disk like an item's partial data, down to the 64 MiB
-margin): a lower bound meant to block only a clearly full disk, not yet tuned
-against a measured installation. When the disk is short
+listed size before SteamCMD starts, so they need a fixed 3 GiB (the content
+depot is about 800 MB on disk): a lower bound meant to block only a clearly full
+disk. Their depot download cannot resume, so nothing staged counts against it. When the disk is short
 the download fails with a message naming what it needs and what is available; its
 partial data is kept and **Try again** checks again. Nothing blocks a download
 whose size Steam does not list, a sign-in-only run, or a disk whose free space

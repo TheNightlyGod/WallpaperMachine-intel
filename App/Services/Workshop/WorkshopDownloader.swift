@@ -58,6 +58,10 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
     @ObservationIgnored private let networkMonitor: any ProcessNetworkMonitoring
     @ObservationIgnored private var cachedCredentialsRejected = false
     @ObservationIgnored private var assetsDownloadCompleted = false
+    /// The folder SteamCMD named when it finished the shared assets' depot, as it printed it.
+    @ObservationIgnored private var reportedDepotPath: String?
+    /// This run's private SteamCMD home, where a depot download may land.
+    @ObservationIgnored private var runStaging: URL?
     @ObservationIgnored private var workshopDownloadCompleted = false
     /// The run's second pass, which fetches the wallpaper a downloaded preset is based on.
     @ObservationIgnored private var fetchingPresetBase = false
@@ -160,7 +164,15 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
         return String(output[range])
     }
 
-    private static let appProgressPattern = try! NSRegularExpression(pattern: #"progress:\s*(\d+(?:\.\d+)?)\s*\((\d+)\s*/\s*(\d+)\)"#)
+    /// Wallpaper Engine's content depot: the Windows application with its `assets` folder (about
+    /// 800 MB on disk). The shared assets come from this depot alone. `app_update` on the whole
+    /// app also brought whatever Steam ties to the account (DLC, and in one report tens of
+    /// gigabytes it would not name), only to keep the `assets` folder.
+    nonisolated static let sceneAssetsDepotID = "431961"
+    /// "Downloading depot 431961 (788 MB) ..." or "(241 files, 788 MB)": the size Steam gives it.
+    nonisolated private static let depotSizePattern = try! NSRegularExpression(pattern: #"downloading depot \d+ \((?:[^)]*,\s*)?(\d+(?:\.\d+)?)\s*(kb|mb|gb)\)"#)
+    /// "Depot download complete : "<folder>" (…)": the folder, as SteamCMD prints it.
+    private static let depotFolderPattern = try! NSRegularExpression(pattern: #""([^"]+)""#)
     nonisolated private static let sessionLock = NSLock()
 
     init(sessionDirectory: URL = ClientPaths.steamSessionURL(),
@@ -222,10 +234,14 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
     }
 
     func installAssets(username: String, executable: URL, destination: URL, rememberSession: Bool = true, onInstalled: @escaping @MainActor () throws -> Void) {
-        download(itemID: nil, username: username, executable: executable, root: destination.deletingLastPathComponent(), rememberSession: rememberSession) { staging in
+        download(itemID: nil, username: username, executable: executable, root: destination.deletingLastPathComponent(), rememberSession: rememberSession) { content in
             self.phase = .finishing
             self.status = String(localized: "Validating and installing scene assets…")
-            try ClientPaths.installSceneAssets(from: staging.appendingPathComponent("wallpaper-engine/assets"), to: destination)
+            let staging = self.runStaging ?? content
+            let candidates = Self.depotFolders(reported: self.reportedDepotPath, staging: staging, content: content)
+            let depot = candidates.first { ClientPaths.hasSceneAssets(at: $0.appendingPathComponent("assets")) }
+                ?? candidates[0]
+            try ClientPaths.installSceneAssets(from: depot.appendingPathComponent("assets"), to: destination)
             self.clearTransferFigures()
             try onInstalled()
             self.status = String(localized: "Scene assets installed")
@@ -301,6 +317,8 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
         licenseIsActive = false
         cachedCredentialsRejected = false
         assetsDownloadCompleted = false
+        reportedDepotPath = nil
+        runStaging = nil
         workshopDownloadCompleted = false
         fetchingPresetBase = false
         presetBaseStatus = nil
@@ -357,6 +375,7 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
         var restoredRevision: UInt64?
         var finishedItem = false
         var failedRun = false
+        runStaging = staging
         do {
             let binary = try await runtimeProvider.prepare(executable: executable, staging: staging)
             // Out of backups before anything is downloaded into it.
@@ -368,7 +387,13 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
                 ClientPaths.excludeFromBackup(content)
                 contentClaim = Self.claimStaging(content)
             }
-            if let checkpoint = checkpointDirectory, !isSigningInOnly {
+            if let checkpoint = checkpointDirectory, isInstallingAssets {
+                // A depot download starts over, so nothing an earlier attempt kept is of use: that
+                // includes an interrupted `app_update` of the whole app, which could be gigabytes.
+                await Task.detached(priority: .utility) {
+                    try? WorkshopDownloadCheckpoint.remove(at: checkpoint)
+                }.value
+            } else if let checkpoint = checkpointDirectory, !isSigningInOnly {
                 try await Task.detached(priority: .utility) {
                     try WorkshopDownloadCheckpoint.restore(from: checkpoint, to: content)
                 }.value
@@ -476,7 +501,9 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
         if rememberSession {
             await settleSession(staging: staging, account: account, restoredRevision: restoredRevision)
         }
-        let keepForLater = !finishedItem && !isSigningInOnly && (failedRun || (pauseRequested && !wasCancelled))
+        // SteamCMD cannot resume a depot download, so the shared assets keep nothing for later.
+        let keepForLater = !finishedItem && !isSigningInOnly && !isInstallingAssets
+            && (failedRun || (pauseRequested && !wasCancelled))
         await retireStaging(staging, content: content, keepingPartialData: keepForLater && !discardPartialRequested)
         if claim >= 0 { close(claim) }
         if contentClaim >= 0 { close(contentClaim) }
@@ -540,7 +567,7 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
                 if receivesNetwork, networkStarted {
                     noteTransfer(networkMonitor.bytesReceived(), on: .network)
                     bytesPerSecond = networkMonitor.rate(at: ProcessInfo.processInfo.systemUptime)
-                    sampleWorkshopDisk(in: content)
+                    sampleTransferDisk(staging: staging, content: content)
                 }
                 if failure == nil { checkLimits(passStarted: passStarted) }
                 if failure != nil {
@@ -686,12 +713,12 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
         guard !isSigningInOnly,
               Self.requiredFreeBytes(expected: expected, alreadyStaged: 0, installingAssets: installingAssets) != nil
         else { return }
-        // Where this kind of run keeps what it has fetched: an item under the Workshop tree, the
-        // shared assets in the app's own install directory.
-        let content = staging.appendingPathComponent(installingAssets ? "wallpaper-engine" : "steamapps/workshop", isDirectory: true)
+        // What an item already has under the Workshop tree counts; the shared assets' depot
+        // download starts over every time, so nothing of theirs does.
+        let content = staging.appendingPathComponent("steamapps/workshop", isDirectory: true)
         let measure = freeSpace
         let (staged, available) = await Task.detached(priority: .utility) { () -> (Int64, Int64?) in
-            (Self.bytesOnDisk(under: content, item: installingAssets ? nil : item), measure(root))
+            (installingAssets ? 0 : Self.bytesOnDisk(under: content, item: item), measure(root))
         }.value
         guard let needed = Self.requiredFreeBytes(expected: expected, alreadyStaged: staged, installingAssets: installingAssets),
               let available, available < needed else { return }
@@ -722,17 +749,17 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
     nonisolated static let freeSpaceMargin: Int64 = 64 * 1024 * 1024
     /// What a Workshop item needs on top of its listed size while Steam stages and assembles it.
     nonisolated static let freeSpaceHeadroom = 1.15
-    /// Wallpaper Engine's shared assets have no size to read, so a fixed floor stands in. It is
-    /// a lower bound, meant to block only when the disk is clearly short; tune it after one
-    /// measured real installation. What an earlier attempt already staged counts against it.
+    /// The shared assets' depot has no size to read before SteamCMD names it, so a fixed floor
+    /// stands in: the depot (about 800 MB on disk) and the assets copied out of it, with room
+    /// to spare. It is meant to block only when the disk is clearly short.
     nonisolated static let sceneAssetsFreeBytes: Int64 = 3 * 1024 * 1024 * 1024
 
     /// The free space a download needs before it starts, or nil when nothing can be said and the
     /// download is never blocked: a sign-in-only run, or an item whose listing gives no size.
-    /// Bytes an earlier attempt already staged are on the disk and are not needed again, for the
-    /// shared assets as much as for an item.
+    /// Bytes an earlier attempt already staged for an item are on the disk and are not needed
+    /// again; the shared assets always need the whole floor, since their download starts over.
     nonisolated static func requiredFreeBytes(expected: Int64?, alreadyStaged: Int64, installingAssets: Bool) -> Int64? {
-        if installingAssets { return max(freeSpaceMargin, sceneAssetsFreeBytes - max(0, alreadyStaged)) }
+        if installingAssets { return sceneAssetsFreeBytes }
         guard let expected, expected > 0 else { return nil }
         // A listed size beyond a pebibyte is a bad listing, not a disk that needs it.
         let remaining = max(0, min(expected, 1 << 50) - max(0, alreadyStaged))
@@ -884,7 +911,7 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
         } else if let itemID {
             arguments += ["+workshop_download_item", "431960", itemID]
         } else {
-            arguments += ["+app_update", "431960", "validate"]
+            arguments += ["+download_depot", "431960", Self.sceneAssetsDepotID]
         }
         arguments.append("+quit")
         let environment = [
@@ -1036,6 +1063,7 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
                 awaitingSteamGuard: awaitingSteamGuard)
             AppLog.warn("SteamCMD \(runLabel): reported failure (\(kind.rawValue))")
             let transfer = text.contains("download item") || text.contains("app '431960'") || text.contains("app 431960")
+                || text.contains("depot")
                 || text.contains("start downloading item") || text.contains("install app")
             if !transfer {
                 setFailure(kind.message, transient: kind.isTransient)
@@ -1055,7 +1083,8 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
                 setFailure(Self.genericDownloadMessage)
                 return
             }
-            if isInstallingAssets, text.contains("error! app") || text.contains("failed to install app") {
+            if isInstallingAssets, text.contains("depot download failed") || text.contains("error! app")
+                || text.contains("failed to install app") {
                 setFailure(Self.assetInstallMessage)
                 return
             }
@@ -1118,15 +1147,35 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
             status = String(localized: "Download finished; waiting for SteamCMD to close…")
             return
         }
-        if text.contains("success! app '431960' fully installed") {
+        if isInstallingAssets, complete, text.hasPrefix("depot download complete") {
             assetsDownloadCompleted = true
+            reportedDepotPath = Self.depotFolderPattern
+                .firstMatch(in: line, range: NSRange(line.startIndex..., in: line))
+                .flatMap { Range($0.range(at: 1), in: line) }
+                .map { String(line[$0]) }
             markAuthenticated()
             phase = .finishing
             progress = 1
+            prompt = nil
             bytesReceived = nil
             bytesExpected = nil
             bytesPerSecond = nil
+            receivesNetwork = false
             status = String(localized: "Download finished; validating scene assets…")
+            return
+        }
+        if isInstallingAssets, text.hasPrefix("downloading depot") {
+            markAuthenticated()
+            prompt = nil
+            steamGuardChallenge = nil
+            phase = .transferring
+            receivesNetwork = true
+            estimator = TransferEstimator()
+            status = String(localized: "Downloading Wallpaper Engine files…")
+            // SteamCMD prints nothing more until the depot is complete: what has landed on the
+            // disk, against the size it gives here, is the progress.
+            if let size = Self.depotSize(in: text) { expectedBytes = size }
+            progress = nil
             return
         }
         if text.contains("downloading item") {
@@ -1154,37 +1203,6 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
                 : isInstallingAssets
                     ? String(localized: "Signed in; requesting Wallpaper Engine’s shared assets…")
                     : String(localized: "Signed in; requesting your Workshop download…")
-            return
-        }
-        if isInstallingAssets, text.contains("update state") {
-            let counters = Self.appProgressPattern.firstMatch(in: text, range: NSRange(text.startIndex..., in: text))
-            func number<T: LosslessStringConvertible>(_ group: Int) -> T? {
-                counters.flatMap { Range($0.range(at: group), in: text) }.flatMap { T(String(text[$0])) }
-            }
-            if text.contains("downloading") {
-                phase = .transferring
-                receivesNetwork = true
-                status = String(localized: "Downloading Wallpaper Engine files…")
-                // Byte counts only mean something while Steam is downloading and names a total.
-                if let done: Int64 = number(2), let total: Int64 = number(3), total > 0 {
-                    bytesReceived = done
-                    bytesExpected = total
-                    progress = min(1, Double(done) / Double(total))
-                    noteTransfer(done, on: .steam)
-                } else {
-                    bytesReceived = nil
-                    bytesExpected = nil
-                    progress = nil
-                }
-            } else {
-                phase = .updating
-                receivesNetwork = false
-                bytesPerSecond = nil
-                bytesReceived = nil
-                bytesExpected = nil
-                status = String(localized: "Updating the private SteamCMD runtime…")
-                if let percent: Double = number(1) { progress = min(1, max(0, percent / 100)) }
-            }
             return
         }
         if text.contains("logging in using cached credentials") {
@@ -1262,20 +1280,30 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
     /// most twice a second; a sample is applied only while the transfer it measured is still on.
     /// What is shown never falls below the most this run has shown, however either measure moves,
     /// and a relaunch carries on from there instead of waiting for the new meter to catch up.
-    private func sampleWorkshopDisk(in staging: URL) {
-        guard !isInstallingAssets, let expected = expectedBytes, expected > 0, diskSampleTask == nil,
+    /// The shared assets' depot is measured against the size SteamCMD gives it, which is what
+    /// crosses the network (compressed chunks), not what lands: about a third of the folder's
+    /// final weight. So the network figure is its measure, and its folder only stands in when
+    /// there is no network meter.
+    private func sampleTransferDisk(staging: URL, content: URL) {
+        guard let expected = expectedBytes, expected > 0, diskSampleTask == nil,
               Date().timeIntervalSince(lastDiskSample) >= 0.5 else { return }
         lastDiskSample = Date()
-        let root = staging.appendingPathComponent("steamapps/workshop", isDirectory: true)
+        let installingAssets = isInstallingAssets
+        let roots = installingAssets
+            ? Self.depotFolders(reported: nil, staging: staging, content: content)
+            : [content.appendingPathComponent("steamapps/workshop", isDirectory: true)]
         diskSampleTask = Task {
-            let item = transferItem
-            let onDisk = await Task.detached(priority: .utility) { Self.bytesOnDisk(under: root, item: item) }.value
+            let item = installingAssets ? nil : transferItem
+            let onDisk = await Task.detached(priority: .utility) {
+                roots.reduce(Int64(0)) { $0 + Self.bytesOnDisk(under: $1, item: item) }
+            }.value
             diskSampleTask = nil
             guard isRunning, receivesNetwork, failure == nil else { return }
             noteTransfer(onDisk, on: .disk)
             // Without a working network meter the tree alone is still better than nothing. The
             // meter counts from its own start, so a relaunch adds what was shown before it.
-            let arrived = networkMonitor.bytesReceived().map { min($0 + receivedBaseline, onDisk) } ?? onDisk
+            let network = networkMonitor.bytesReceived().map { $0 + receivedBaseline }
+            let arrived = installingAssets ? network ?? onDisk : network.map { min($0, onDisk) } ?? onDisk
             let received = max(receivedFloor, min(arrived, expected))
             receivedFloor = received
             estimator.add(bytes: received, at: now().timeIntervalSinceReferenceDate)
@@ -1401,6 +1429,37 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
     /// reporting their full logical size before the blocks exist.
     /// With `item`, only files inside a folder named for it count (Steam keeps an item under
     /// `content/431960/<id>` and `downloads/431960/<id>`).
+    /// The depot size in a lowercased "downloading depot" line, in bytes; nil when it names none.
+    nonisolated static func depotSize(in text: String) -> Int64? {
+        guard let match = depotSizePattern.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
+              let numberRange = Range(match.range(at: 1), in: text), let unitRange = Range(match.range(at: 2), in: text),
+              let number = Double(text[numberRange]), number > 0 else { return nil }
+        let scale: Double = switch text[unitRange] { case "kb": 1024; case "mb": 1024 * 1024; default: 1024 * 1024 * 1024 }
+        // A size beyond a pebibyte is a bad line, not a depot.
+        return Int64(min(number * scale, Double(1 << 50)))
+    }
+
+    /// Where the shared assets' depot may have landed, most likely first: the folder SteamCMD
+    /// reported, when it lies inside this run's own folders, then where SteamCMD puts depots
+    /// (under its own folder or its Steam home, whatever `force_install_dir` says).
+    nonisolated static func depotFolders(reported: String?, staging: URL, content: URL) -> [URL] {
+        let relative = "steamapps/content/app_431960/depot_\(sceneAssetsDepotID)"
+        var folders = [staging, staging.appendingPathComponent("Library/Application Support/Steam", isDirectory: true),
+                       content, content.appendingPathComponent("wallpaper-engine", isDirectory: true)]
+            .map { $0.appendingPathComponent(relative, isDirectory: true).standardizedFileURL }
+        if let reported, !reported.isEmpty {
+            let folder = URL(fileURLWithPath: reported.replacingOccurrences(of: "\\", with: "/"), isDirectory: true)
+                .standardizedFileURL.resolvingSymlinksInPath()
+            let inside = [staging, content].contains { root in
+                let base = root.standardizedFileURL.resolvingSymlinksInPath().pathComponents
+                return folder.pathComponents.count > base.count && folder.pathComponents.starts(with: base)
+            }
+            if inside { folders.insert(folder, at: 0) }
+        }
+        var seen = Set<String>()
+        return folders.filter { seen.insert($0.resolvingSymlinksInPath().path).inserted }
+    }
+
     nonisolated private static func bytesOnDisk(under root: URL, item: String? = nil) -> Int64 {
         var total: Int64 = 0
         var visited = 0

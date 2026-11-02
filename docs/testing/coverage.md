@@ -1555,8 +1555,11 @@ and `WorkshopDownloadPersistenceTests`:
   fit fails before SteamCMD launches with the needed and available sizes, Try again
   checks again, partial data already staged lowers the requirement, and an unknown
   size, an unreadable disk or a sign-in-only run never blocks. Scene assets use a
-  fixed floor, less what a resumed attempt already staged. The floor's real
-  footprint is unmeasured.
+  fixed floor whatever is staged, since their depot download starts over; a
+  checkpoint an earlier version kept is deleted, not restored. Depot progress is
+  the network bytes against the (compressed) size SteamCMD names, never the
+  folder's larger weight, and the reported folder, backslashes and all, is used
+  only inside the run's own staging.
 - Retry (`DownloaderRetryTests`, scripted runtime counting its launches): a
   timeout after the sign-in is retried in the same staging without a new prompt
   and then completes; the budget is three retries, but a silent stall is
