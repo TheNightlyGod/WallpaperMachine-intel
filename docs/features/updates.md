@@ -130,7 +130,10 @@ knows (**New**, **Fixed**, and so on) are translated.
 Only **Download Update** in About, **Install Update** in the update window or an
 automatic update starts a download; a check never fetches the image. The image is streamed under its asset name into `Updates/` in the app's
 Application Support folder (`ClientPaths.supportURL`), and About shows percent and
-bytes. `GitHubReleaseDownload` enforces:
+bytes. Only an image this launch downloaded is ever installed, so `Updates/` holds at
+most that one: a new download first deletes every image there, and each launch
+deletes the ones earlier launches left (installed, abandoned or unfinished) before its
+first check. `GitHubReleaseDownload` enforces:
 
 - HTTPS on `github.com`, `api.github.com` and the `objects`, `release-assets` and
   `github-releases` hosts under `githubusercontent.com` (default port only), plus

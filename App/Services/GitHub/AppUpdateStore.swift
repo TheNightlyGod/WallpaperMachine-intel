@@ -198,6 +198,16 @@ final class AppUpdateStore {
         }
     }
 
+    /// Deletes the disk images earlier launches downloaded into `Updates/`: one installed or
+    /// abandoned, or a download that never finished. Only an image this launch downloaded
+    /// can be installed, so the one that is ready stays, and nothing goes while a download
+    /// is writing. Runs off the main actor.
+    func discardStaleDownloads() async {
+        guard downloadTask == nil else { return }
+        let workspace = workspace, keeping = downloadedArchive
+        await Task.detached { workspace.discardArchives(keeping) }.value
+    }
+
     func revealDownloadedUpdate() {
         guard let downloadedApplication else { return }
         workspace.reveal(downloadedApplication)
@@ -289,6 +299,10 @@ final class AppUpdateStore {
             downloadTask = nil
         }
         let destination = workspace.archiveURL(release.version.display, asset.name)
+        // An image downloaded earlier, ready or not, is superseded by this one.
+        downloadedArchive = nil
+        let workspace = workspace
+        await Task.detached { workspace.discardArchives(nil) }.value
         do {
             try await client.download(asset, to: destination) { [weak self] transferred, total, rate in
                 guard let self else { return }
@@ -401,11 +415,29 @@ struct AppUpdateWorkspace: Sendable {
     let archiveURL: @Sendable (String, String) -> URL
     let reveal: @Sendable (URL) -> Void
     let open: @Sendable (URL) -> Void
+    /// Deletes every downloaded image except the one given.
+    var discardArchives: @Sendable (_ keeping: URL?) -> Void = { _ in }
+
+    static var updatesFolder: URL {
+        ClientPaths.supportURL.appendingPathComponent("Updates", isDirectory: true)
+    }
+
+    /// Removes everything in `folder` but `keeping`. Only the updater writes there, and it
+    /// never resumes or reuses an image from an earlier launch.
+    static func discardArchives(in folder: URL, keeping: URL?, fileManager: FileManager = .default) {
+        guard let items = try? fileManager.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil) else { return }
+        let kept = keeping?.standardizedFileURL.path
+        for item in items where item.standardizedFileURL.path != kept {
+            do { try fileManager.removeItem(at: item) } catch {
+                AppLog.warn("could not remove old update download \(item.lastPathComponent): \(error)")
+            }
+        }
+    }
 
     static var live: AppUpdateWorkspace {
         AppUpdateWorkspace(
             archiveURL: { version, name in
-                let folder = ClientPaths.supportURL.appendingPathComponent("Updates", isDirectory: true)
+                let folder = updatesFolder
                 // A mirror relays the manifest, so the name is untrusted: keep only its last component.
                 let last = (name as NSString).lastPathComponent
                 let sanitized = ["", ".", "..", "/"].contains(last) ? "WallpaperMachine-\(version).dmg" : last
@@ -417,7 +449,8 @@ struct AppUpdateWorkspace: Sendable {
             },
             open: { url in
                 MainActor.assumeIsolated { _ = DesktopActions.current.open(url) }
-            }
+            },
+            discardArchives: { keeping in discardArchives(in: updatesFolder, keeping: keeping) }
         )
     }
 }

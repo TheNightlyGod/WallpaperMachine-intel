@@ -465,6 +465,8 @@ running app.
   missing latest release is normal only after the repository is confirmed
   reachable; missing repositories, failed lookups and malformed metadata remain
   errors, and rechecking clears stale notes and availability.
+- Old images: a download and each launch empty `Updates/`, keeping only an image
+  this launch downloaded that is ready to install.
 - Installing, against real disk images made with `hdiutil`: the app is copied out
   without following the `Applications` link, a foreign bundle and an unsigned one
   are refused, the image is detached either way, and an app that cannot install in

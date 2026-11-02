@@ -2217,12 +2217,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         Task { _ = await appUpdater.checkForUpdates() }
     }
 
-    /// Checks at launch and every six hours after, because a menu-bar app can run for weeks
-    /// without relaunching. `Task.sleep` follows the continuous clock, so a Mac that slept
-    /// through the interval checks as soon as it wakes.
+    /// Clears the update images earlier launches left, then checks at launch and every six
+    /// hours after, because a menu-bar app can run for weeks without relaunching.
+    /// `Task.sleep` follows the continuous clock, so a Mac that slept through the interval
+    /// checks as soon as it wakes.
     private func startAutomaticUpdates() {
         guard automaticUpdates == nil else { return }
         automaticUpdates = Task { [weak self] in
+            await self?.appUpdater.discardStaleDownloads()
             while !Task.isCancelled {
                 await self?.runAutomaticUpdate()
                 try? await Task.sleep(for: .seconds(6 * 60 * 60))

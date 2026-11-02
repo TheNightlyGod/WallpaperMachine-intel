@@ -113,6 +113,26 @@ final class AppUpdateTests: XCTestCase {
         }
     }
 
+    func testDiscardingArchivesEmptiesTheUpdatesFolderButTheKeptImage() throws {
+        let fileManager = FileManager.default
+        let folder = fileManager.temporaryDirectory.appendingPathComponent("mwe-update-discard-\(UUID().uuidString)")
+        defer { try? fileManager.removeItem(at: folder) }
+        try fileManager.createDirectory(at: folder, withIntermediateDirectories: true)
+        let names = ["WallpaperMachine-1.6.0-arm64.dmg", "WallpaperMachine-1.7.0-arm64.dmg",
+                     "WallpaperMachine-1.8.0-arm64.dmg"]
+        for name in names { try Data("image".utf8).write(to: folder.appendingPathComponent(name)) }
+        let kept = folder.appendingPathComponent(names[2])
+
+        AppUpdateWorkspace.discardArchives(in: folder, keeping: kept)
+        XCTAssertEqual(try fileManager.contentsOfDirectory(atPath: folder.path), [names[2]])
+
+        AppUpdateWorkspace.discardArchives(in: folder, keeping: nil)
+        XCTAssertEqual(try fileManager.contentsOfDirectory(atPath: folder.path), [])
+
+        // No folder yet (nothing ever downloaded) is not an error.
+        AppUpdateWorkspace.discardArchives(in: folder.appendingPathComponent("missing"), keeping: nil)
+    }
+
     func testReleaseNotesReadTheSectionsAndStopAtTheInstallFooter() throws {
         let body = """
         ![WallpaperMachine 1.2.3](https://raw.githubusercontent.com/o/r/v1.2.3/Resources/ReleaseBanners/1.2.3.jpg)
@@ -817,6 +837,20 @@ final class AppUpdateTests: XCTestCase {
         XCTAssertEqual(inPlace.revealed, [inPlace.destination])
     }
 
+    func testOldImagesAreDiscardedBeforeADownloadAndAtLaunchButNotTheReadyOne() async {
+        let launch = Fixture()
+        await launch.store.discardStaleDownloads()
+        XCTAssertEqual(launch.discarded, [nil])
+
+        let fixture = Fixture()
+        fixture.client.release = fixture.release(version: "1.1.0")
+        await fixture.store.checkForUpdates()
+        await expect(fixture.store.downloadUpdate(), equals: .ready(currentVersion: "1.0.0", availableVersion: "1.1.0"))
+        XCTAssertEqual(fixture.discarded, [nil])
+        await fixture.store.discardStaleDownloads()
+        XCTAssertEqual(fixture.discarded, [nil, fixture.destination])
+    }
+
     func testUnverifiedDownloadIsNeverOfferedForManualInstallation() async {
         for canInstall in [false, true] {
             let fixture = Fixture()
@@ -1164,6 +1198,7 @@ private final class Fixture {
     var scheduled: [() -> Void] { recorder.scheduled }
     var revealed: [URL] { recorder.revealed }
     var opened: [URL] { recorder.opened }
+    var discarded: [URL?] { recorder.discarded }
     var terminateCalls: Int { recorder.terminateCalls }
     let destination: URL
     /// The store's preferences (automatic installs, the skipped version), never the app's own.
@@ -1175,7 +1210,8 @@ private final class Fixture {
         let workspace = AppUpdateWorkspace(
             archiveURL: { [destination] _, _ in destination },
             reveal: { url in recorder.revealed.append(url) },
-            open: { url in recorder.opened.append(url) }
+            open: { url in recorder.opened.append(url) },
+            discardArchives: { keeping in recorder.discarded.append(keeping) }
         )
         store = AppUpdateStore(
             currentVersion: "1.0.0",
@@ -1217,6 +1253,7 @@ private final class Recorder: @unchecked Sendable {
     var scheduled: [() -> Void] = []
     var revealed: [URL] = []
     var opened: [URL] = []
+    var discarded: [URL?] = []
     var terminateCalls = 0
     var onTerminate: (() -> Void)?
 }
