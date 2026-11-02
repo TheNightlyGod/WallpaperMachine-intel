@@ -476,6 +476,7 @@ void ClockedVideoSource::decodeLoop()
     for (;;) {
         uint64_t ticket  = 0;
         bool     seeking = false;
+        double   clock   = 0.0;
         {
             std::unique_lock lock(m_mutex);
             // Nothing to do (queue full, display filled, no seek asked for): no work and no timer.
@@ -490,12 +491,19 @@ void ClockedVideoSource::decodeLoop()
                 seeking          = true;
                 target           = m_seek.target;
             }
+            clock = currentDesiredAbsoluteLocked();
         }
         std::string error;
         if (seeking && !seekBackendToAbsolute(target, &error)) {
             if (!stopRequested()) fail(error.empty() ? std::string("video seek failed") : std::move(error));
             return;
         }
+        // A frame that ends before the clock, or before the seek being made, is passed over
+        // unseen (`refreshFrame` shows only the last frame due), so a picture of it that
+        // nothing refers to need not be decoded. A decoder that keeps up decodes ahead of
+        // the clock and loses nothing; one that does not stops spending itself on frames
+        // nobody will see, instead of falling behind until the source seeks ahead.
+        m_backend->skipDisposableBefore(std::max(clock, target));
         DecodedFrameSlot slot;
         switch (decodeNextFrame(target, &slot, &error)) {
         case DecodeOutcome::Cancelled: return;

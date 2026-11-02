@@ -220,6 +220,16 @@ engine's `VideoDecodePump` driving them. It is the one `VideoFrameBackend` under
 restarts at the first sync sample; frames before the start of the edit list and
 leading pictures of a random access point are decoded and never shown.
 
+A frame that ends before the clock (or before the target of the seek being made) is never shown,
+so the source tells the backend so before each decode (`VideoFrameBackend::skipDisposableBefore`)
+and the backend does not decode such a frame when it is a picture nothing refers to
+(`Media/DisposableSample.hpp`: an H.264 sample whose slices all have `nal_ref_idc` 0, an HEVC
+sub-layer non-reference picture of the highest temporal sub-layer; never VP9 or AV1). A decoder
+that keeps up decodes ahead of the clock and loses nothing. One slower than the clip, as a
+7232x3100 60 fps clip is on many Macs, keeps to the clock at a lower frame rate instead of falling
+behind until the source seeks ahead, which held the picture still for the seconds a seek takes
+every few seconds (issue #151). A seek also decodes fewer of the pictures before its target.
+
 An embedded payload is read in place from memory when it is at most 8 MiB. A larger one is
 copied into an anonymous file once the stream is known to play and the image's buffer is
 let go, so a long video does not stay resident for as long as it plays.
@@ -235,7 +245,7 @@ player keeps its last picture. FFmpeg decoded the videos these refuse until 2026
 
 | Binary | Covers |
 |---|---|
-| `media_core_tests` | error, checked arithmetic, fractions, byte cursor, memory and file byte sources |
+| `media_core_tests` | error, checked arithmetic, fractions, byte cursor, memory and file byte sources, which pictures nothing refers to (`DisposableSample.*`) |
 | `media_isobmff_tests` | the ISO-BMFF reader on files built in memory by `tests/mp4_builder.hpp`: tables and layouts, every codec entry, composition offsets, edit lists, all eight orientations, seeking, fragmented/unsupported/oversized/truncated/junk input and a deterministic random-mutation loop; plus corpus A/B checks: the bundled starter wallpaper against recorded expectations, and the local library against `ffprobe` |
 | `vt_frame_decoder_test` (engine tests, source in `Renderer/Media/Apple/tests`) | the Apple layer on real VideoToolbox decoding of the synthetic clips: display order on a clip with B-frames (and on H.264 in Matroska), a VP9 clip from WebM, seek epochs, draining, bounds, prompt cancellation, format description building (in-band parameter sets, colour range, 10-bit), Main 10 clips (PQ, HLG, BT.709) that decode to `x420` frames carrying their curve, primaries and matrix, and every refusal |
 | `webm_reader_test` (engine tests, source in `Renderer/Media/Apple/tests`) | `WebMReader` on the embedded VP9 WebM, H.264 Matroska and Opus WebM clips: the properties, the sample buffers (timing, key frames, the time offset, seeking) decoded by a VideoToolbox session, the audio buffers and their limit and offset, the refusals and the quarter-turn maths, and the poster |

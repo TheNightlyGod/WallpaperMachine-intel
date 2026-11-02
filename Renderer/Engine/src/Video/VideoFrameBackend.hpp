@@ -71,6 +71,15 @@ public:
     /// Pass the next frame belongs to.
     [[nodiscard]] virtual uint64_t loopIndex() const = 0;
 
+    /// Frames shown entirely before `absolute_seconds` (the source's clock: the
+    /// pass times the duration plus the presentation time) are late, and a late
+    /// picture that no other picture refers to need not be decoded at all. A
+    /// backend that can tell such a picture from its bytes leaves it out, so a
+    /// decoder slower than the clip spends itself on the pictures it has to
+    /// decode instead of falling further behind. Frames that are not late are
+    /// never left out. The default decodes everything.
+    virtual void skipDisposableBefore(double absolute_seconds) { (void)absolute_seconds; }
+
     /// Thread-safe cooperative cancellation. Latched.
     virtual void cancel() = 0;
     /// Releases the decoder and the media. Called once, after the decode thread

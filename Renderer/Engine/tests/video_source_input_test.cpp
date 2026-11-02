@@ -15,7 +15,10 @@
 // costs the decoder.
 
 #include "Image.hpp"
+#include "Media/DisposableSample.hpp"
 #include "Media/IsoBmff/IsoBmffReader.hpp"
+#include "Platform/Apple/VideoFrameInterop.hpp"
+#include "Video/ClockedVideoSource.hpp"
 #include "Video/NativeVideoBackend.hpp"
 #include "Video/VideoMedia.hpp"
 #include "video_project_image.hpp"
@@ -27,6 +30,7 @@
 
 #include <gtest/gtest.h>
 
+#include <CoreVideo/CoreVideo.h>
 #include <mach/mach.h>
 #include <unistd.h>
 
@@ -469,6 +473,145 @@ TEST_F(VideoSourceInput, AClipWithBFramesPlaysFromItsFirstFrameInDisplayOrder) {
         EXPECT_GE(pts + 1e-9, last_pts) << "frame " << frame << " came out of display order";
         last_pts = pts;
     }
+}
+
+// A decoder told that a pass is late leaves out the pictures of it that nothing refers to, and
+// only those: the clip's other pictures still come out, whole and in display order, and the
+// pass after the late one comes out complete. Frames that are not late are never left out.
+TEST_F(VideoSourceInput, ALateDecoderLeavesOutOnlyThePicturesNothingRefersTo) {
+    const auto media = project_dir / "late.mp4";
+    ASSERT_TRUE(testing_media::WriteReorderedVideo(media, "late-" + std::to_string(::getpid())));
+    std::string  error;
+    wm::Error    read_error;
+    auto         bytes  = wm::OpenFileByteSource(media.string(), &read_error);
+    ASSERT_NE(bytes, nullptr);
+    auto reader = wm::IsoBmffReader::Open(bytes, &read_error);
+    ASSERT_NE(reader, nullptr);
+    std::size_t               disposable = 0;
+    std::vector<std::uint8_t> sample;
+    for (std::size_t index = 0; index < reader->samples().size(); ++index) {
+        ASSERT_TRUE(reader->readSample(index, &sample, &read_error));
+        if (wm::IsDisposableSample(reader->info(), sample.data(), sample.size())) ++disposable;
+    }
+    const std::size_t total = reader->samples().size();
+    ASSERT_EQ(total, static_cast<std::size_t>(testing_media::kReorderedFrames));
+    ASSERT_GT(disposable, 0u) << "the encoder made every B-frame a reference picture";
+    ASSERT_LT(disposable, total);
+
+    NativeVideoBackend backend(media.string());
+    ASSERT_TRUE(backend.open(&error)) << error;
+    const double pass_seconds = backend.streamInfo().duration_seconds;
+    // Every frame of the first pass is late, none of the second.
+    backend.skipDisposableBefore(pass_seconds);
+
+    std::size_t frames[2] {};
+    double      last_pts = -1.0;
+    while (true) {
+        VideoFrameBackend::DecodedPosition position;
+        ASSERT_EQ(backend.decodeNext(0.0, &position, &error), VideoFrameBackend::Decode::Frame) << error;
+        backend.discardFrame();
+        if (position.loop_index > 1) break;
+        if (position.loop_index == 1 && frames[1] == 0) last_pts = -1.0;
+        EXPECT_GT(position.pts_seconds, last_pts) << "pass " << position.loop_index << " left display order";
+        last_pts = position.pts_seconds;
+        ++frames[position.loop_index];
+    }
+    EXPECT_EQ(frames[0], total - disposable) << "a late pass decoded other than its reference pictures";
+    EXPECT_EQ(frames[1], total) << "a pass that is not late lost frames";
+    backend.close();
+}
+
+/// A decoder slower than the clip it plays: 60 pictures a second, of which two in
+/// three are pictures nothing refers to, and 25 ms to decode any one of them (40
+/// a second). Like the native backend, it leaves out a late disposable picture
+/// when the source says what is late, and decodes every picture otherwise.
+class SlowDecoder final : public VideoFrameBackend {
+public:
+    static constexpr double   kPassSeconds  = 10.0;
+    static constexpr uint64_t kPassFrames   = 600;
+    static constexpr auto     kDecodeTime   = std::chrono::milliseconds(25);
+
+    bool       open(std::string*) override { return true; }
+    StreamInfo streamInfo() const override { return { kPassSeconds, 1.0 / 60.0, 1.0 / 60.0 }; }
+    Decode     decodeNext(double, DecodedPosition* position, std::string* error) override {
+        while (true) {
+            if (m_cancelled.load()) return Decode::Cancelled;
+            const uint64_t index    = m_next++;
+            const uint64_t pass     = index / kPassFrames;
+            const double   pts      = static_cast<double>(index % kPassFrames) / 60.0;
+            const double   ends     = static_cast<double>(pass) * kPassSeconds + pts + 1.0 / 60.0;
+            const bool     disposable = index % 3 != 0;
+            if (disposable && ends <= m_late_before.load()) continue;
+            std::this_thread::sleep_for(kDecodeTime);
+            CVPixelBufferRef pixels = nullptr;
+            if (CVPixelBufferCreate(kCFAllocatorDefault, 16, 16, kCVPixelFormatType_32BGRA,
+                                    nullptr, &pixels) != kCVReturnSuccess) {
+                *error = "no pixel buffer";
+                return Decode::Failed;
+            }
+            m_pixels                = pixels;
+            position->pts_seconds   = pts;
+            position->loop_index    = pass;
+            return Decode::Frame;
+        }
+    }
+    bool takeFrame(VideoTextureFrame* out, std::string* error) override {
+        void* pixels = m_pixels;
+        m_pixels     = nullptr;
+        return AdoptPixelBufferAsVideoFrame(pixels, out, error);
+    }
+    void discardFrame() override {
+        if (m_pixels != nullptr) CFRelease(m_pixels);
+        m_pixels = nullptr;
+    }
+    bool seek(double wrapped_seconds, uint64_t loop_index, std::string*) override {
+        discardFrame();
+        m_next = loop_index * kPassFrames + static_cast<uint64_t>(std::floor(wrapped_seconds * 60.0));
+        return true;
+    }
+    uint64_t loopIndex() const override { return m_next / kPassFrames; }
+    void     skipDisposableBefore(double absolute_seconds) override { m_late_before.store(absolute_seconds); }
+    void     cancel() override { m_cancelled.store(true); }
+    void     close() override { discardFrame(); }
+
+private:
+    uint64_t            m_next { 0 };
+    void*               m_pixels { nullptr };
+    std::atomic<double> m_late_before { -1.0 };
+    std::atomic<bool>   m_cancelled { false };
+};
+
+// A decoder that is slower than the clip but fast enough for the pictures other pictures refer
+// to keeps to the clock: it leaves out the late pictures nothing refers to and shows the others
+// on time. Decoding every picture, the frame on offer fell behind the clock by a third of a
+// second each second, until the source gave up on it and sought ahead, which holds the picture
+// still for as long as the seek takes; this repeated every few seconds (issue #151, a 7232x3100
+// 60 fps clip on a Mac whose decoder managed about half of that).
+TEST(VideoSourceClockSlowDecoder, ASlowDecoderKeepsToTheClockByLeavingOutLatePicturesNothingRefersTo) {
+    ClockedVideoSource source(std::make_unique<SlowDecoder>(), "slow decoder");
+    std::string        error;
+    ASSERT_TRUE(source.prime(&error)) << error;
+    const auto begin    = std::chrono::steady_clock::now();
+    double     worst    = 0.0;
+    double     at_worst = 0.0;
+    while (true) {
+        const double clock = std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count();
+        if (clock > 3.0) break;
+        ASSERT_TRUE(source.syncPlayback(VideoPlaybackState { false, 1.0f, clock }, &error)) << error;
+        ASSERT_TRUE(source.refreshFrame(&error)) << error;
+        // The first half second is the decoder getting going from a standing start.
+        if (clock >= 0.5) {
+            const double lag = clock - source.currentFrame().pts_seconds;
+            if (lag > worst) {
+                worst    = lag;
+                at_worst = clock;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    // Three frames of 60 a second, a decode and a busy machine's slack.
+    EXPECT_LT(worst, 0.15) << "the frame on offer fell " << worst << " s behind the clock at " << at_worst << " s";
+    EXPECT_EQ(source.sourceStats().seek_requests, 0u) << "the source sought ahead to catch up";
 }
 
 TEST_F(VideoSourceInput, DestroyingASourceMidDecodeCancelsPromptly) {

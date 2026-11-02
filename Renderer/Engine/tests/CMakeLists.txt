@@ -733,7 +733,7 @@ endif()
 
 add_executable(video_source_input_test video_source_input_test.cpp)
 target_link_libraries(video_source_input_test PRIVATE ${PROJECT_NAME}
-    wmMedia wescene_testing_media GTest::gtest_main)
+    wmMedia wescene_testing_media GTest::gtest_main "-framework CoreVideo")
 target_include_directories(video_source_input_test PRIVATE
     . ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/src/Scene/include)
 target_compile_features(video_source_input_test PRIVATE cxx_std_20)

@@ -342,6 +342,15 @@ device.
   refuses (a fragmented MP4, a container it does not read) fails with its reason, holds no decoder
   and stages no file; nothing else is tried (`AFragmentedMp4IsRefusedWithItsReason`,
   `AContainerTheReadersDoNotKnowIsRefusedByName`).
+- **A decoder slower than the clip keeps to the clock** — `VideoSourceInput.ALateDecoderLeavesOutOnlyThePicturesNothingRefersTo`
+  and `VideoSourceClockSlowDecoder.ASlowDecoderKeepsToTheClockByLeavingOutLatePicturesNothingRefersTo`
+  in `video_source_input_test`. The first tells the native backend that the whole first pass of the
+  B-frame clip is late and requires that pass to come out with exactly its reference pictures, in
+  display order, and the next pass whole. The second plays a fake decoder that takes 25 ms a picture
+  of a 60 fps clip (two in three pictures disposable) for three seconds against a wall clock and
+  requires the frame on offer within 0.15 s of the clock and no seek; decoding every picture, it
+  fell a third of a second behind each second until the source sought ahead, holding the picture
+  still while the seek decoded (issue #151: a 7232x3100 60 fps clip, a freeze every few seconds).
 - **Decoded frames carry real timestamps** — `video_source_input_test` against media the tests encode. A frame whose
   timestamp is always zero looks like playback for as long as frames keep
   arriving and then freezes, so a video regression here reads as "the picture
