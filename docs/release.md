@@ -861,8 +861,9 @@ What a release must satisfy:
   app refuses an image it cannot verify;
 - releases are signed with the project certificate
   ([build.md](build.md#release-signing)): the updater installs only a copy that meets
-  `AppUpdateConfiguration.signingRequirement`, and keeping the designated requirement
-  is what lets macOS keep the app's privacy permissions;
+  `AppUpdateConfiguration.signingRequirement` (the project certificate, or the
+  project's Developer ID accepted ahead of the switch to it), and keeping the
+  designated requirement is what lets macOS keep the app's privacy permissions;
 - the release body is the English notes above `<!-- release-notes-end -->`
   ([Release notes and the changelog](#release-notes-and-the-changelog)); the app
   shows what is above the marker as **What's new** in About and ignores the rest;

@@ -336,6 +336,16 @@ the telemetry hash does not change the signature or reset macOS permissions.
 To sign locally with it, import the PKCS#12 into a keychain in the search list and
 pass `--sign-identity "WallpaperMachine Code Signing"`.
 
+The updater's requirement already accepts the project's Developer ID as well: a copy
+with this identifier, signed by Apple's Developer ID chain for team `DT6YQU64FF`
+(`anchor apple generic`, the Developer ID intermediate and leaf markers, and
+`certificate leaf[subject.OU] = "DT6YQU64FF"`), installs like one signed with
+the project certificate. Releases are still signed with the project certificate; the
+Developer ID is accepted ahead of time so that they can update themselves to Developer
+ID signed, notarized releases once the pipeline signs with it. Every installed copy
+checks an update against the requirement it shipped with, so a signer stays in the
+requirement for as long as releases are signed with it.
+
 ## Runtime data locations
 
 The app never writes into the repository. Managed wallpapers live by default at

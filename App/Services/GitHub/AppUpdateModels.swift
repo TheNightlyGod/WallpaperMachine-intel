@@ -7,13 +7,17 @@ enum AppUpdateConfiguration {
     static let applicationName = productName + ".app"
     static let maximumDownloadBytes: Int64 = 1_073_741_824
 
-    /// The code-signing requirement every release meets: this app's identifier, signed with
-    /// the project certificate `WallpaperMachine Code Signing` (`docs/build.md#release-signing`).
-    /// It is the releases' designated requirement, so a copy that meets it also keeps the
-    /// app's privacy permissions. Replacing the certificate means shipping, first, a release
-    /// whose requirement accepts both certificates.
-    static let signingRequirement =
-        #"identifier "app.wallpapermachine" and certificate root = H"2bdf4e2431b7edeb731de288726c896480a0fa82""#
+    /// The code-signing requirement a copy must meet to count as a release, and so to be
+    /// installed by the updater: this app's identifier, signed either with the self-signed
+    /// project certificate `WallpaperMachine Code Signing` or with the project's Developer ID
+    /// (team DT6YQU64FF) that notarized releases carry (`docs/build.md#release-signing`).
+    /// Accepting both is what lets a copy signed with the project certificate update itself
+    /// to one signed with the Developer ID; dropping a signer from this requirement strands
+    /// every installed copy signed with it.
+    static let signingRequirement = #"identifier "app.wallpapermachine" and ("#
+        + #"certificate root = H"2bdf4e2431b7edeb731de288726c896480a0fa82" or (anchor apple generic"#
+        + #" and certificate 1[field.1.2.840.113635.100.6.2.6] and certificate leaf[field.1.2.840.113635.100.6.1.13]"#
+        + #" and certificate leaf[subject.OU] = "DT6YQU64FF"))"#
 
     /// The drag-to-install disk image `scripts/package.py` produces and the Build workflow
     /// publishes. Renaming the product moves both sides of this contract at once.

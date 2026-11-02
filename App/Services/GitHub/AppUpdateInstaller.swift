@@ -264,7 +264,7 @@ struct AppUpdateInstaller: AppUpdateInstalling, @unchecked Sendable {
     }
 
     /// Refuses a copy whose signature is missing, broken anywhere in the bundle, or not made
-    /// with the release certificate. The digest proves the image is the one the release lists;
+    /// by one of the release signers. The digest proves the image is the one the release lists;
     /// this proves who built it, so a release asset someone replaced cannot install itself.
     static func verifySignature(of app: URL, requirement: String) throws {
         var code: SecStaticCode?

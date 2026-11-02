@@ -1,4 +1,5 @@
 import CryptoKit
+import Security
 import XCTest
 @testable import WallpaperMachine
 
@@ -499,6 +500,15 @@ final class AppUpdateTests: XCTestCase {
         for current in ["1.2.3", "2.0.0", ""] {
             XCTAssertThrowsError(try AppUpdateInstaller.verifyNewer(app, than: current), current)
         }
+    }
+
+    /// A requirement Security cannot compile refuses every copy, so a typo in it would stop
+    /// all in-app updates while the refusal tests below still pass.
+    func testReleaseSigningRequirementCompiles() {
+        var requirement: SecRequirement?
+        XCTAssertEqual(SecRequirementCreateWithString(
+            AppUpdateConfiguration.signingRequirement as CFString, [], &requirement), errSecSuccess)
+        XCTAssertNotNil(requirement)
     }
 
     func testSignatureCheckRefusesAnUnsignedOrAlteredCopy() throws {
