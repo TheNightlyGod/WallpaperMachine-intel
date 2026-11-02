@@ -64,8 +64,18 @@ pipeline reads only for `i.pximg.net` addresses and decodes at the size a tile d
 A general HTTP 403 is reported as a denied request, not as a confirmed rate limit, and
 the error asks users to check access in a browser and their network/proxy connection (a
 working browser does not prove the app's requests are accepted); HTTP 429 has separate
-rate-limit advice. Failed HTTP responses log only the status code, never URLs, searches,
-cookies or response bodies, for the [diagnostics report](diagnostics.md#diagnostics-report).
+rate-limit advice. `www.pixiv.net` sits behind Cloudflare, which refuses some networks,
+proxy nodes and client signatures itself, before pixiv sees the request, even when a
+browser on the same network still opens pixiv. Such a refusal (a 403/503 from
+`Server: cloudflare` with `cf-mitigated: challenge`, or a block page naming a Cloudflare
+error reference such as 1010 or 1020: `error code: 1010`, `cf-error-1010`, `Error reference
+number: 1010`) is reported as a block by pixiv's protection service with its reference, and
+the error advises switching proxy node or network; it is never mapped to the R-18 sign-in
+handling below. The app keeps its honest user agent: URLSession shares Safari's TLS
+fingerprint but not its HTTP/2 one, so a Safari user agent would not make the app look like
+Safari and would only add a mismatch. Failed HTTP responses log the status code, the pixiv
+host and whether Cloudflare refused it (with its reference), never URLs, searches, cookies or
+response bodies, for the [diagnostics report](diagnostics.md#diagnostics-report).
 R-18 ranking denials have the account-specific handling described below.
 
 ## Saving a page

@@ -4,7 +4,8 @@ import Foundation
 /// answers 403 to any request that does not name pixiv as its referrer. Injected so tests never
 /// reach the network.
 protocol PixivTransport: Sendable {
-    /// The body of a 2xx answer; any other status throws `PixivFailure.Code.status`. `session`
+    /// The body of a 2xx answer; any other status throws `PixivFailure.Code.status`, or
+    /// `blockedByProtection` when pixiv's Cloudflare front refused the connection. `session`
     /// is the signed-in account's `PHPSESSID`, or nil to ask anonymously.
     func data(from url: URL, session: String?) async throws -> Data
 
@@ -87,7 +88,7 @@ struct URLSessionPixivTransport: PixivTransport {
         let (data, response) = try await Self.perform {
             try await transportSession.data(for: Self.request(url, accept: "application/json", session: session))
         }
-        try Self.check(response)
+        try Self.check(response, body: data)
         return data
     }
 
@@ -131,13 +132,51 @@ struct URLSessionPixivTransport: PixivTransport {
         }
     }
 
-    static func check(_ response: URLResponse) throws {
+    /// `body` is the answer's content when it was read whole; streamed images pass none, so only
+    /// the headers can show a protection block there.
+    static func check(_ response: URLResponse, body: Data? = nil) throws {
         guard let http = response as? HTTPURLResponse else { throw PixivFailure(code: .unreadable) }
         guard (200..<300).contains(http.statusCode) else {
-            // Do not log URLs, headers or bodies: they can reveal searches or the session cookie.
-            AppLog.warn("pixiv request failed: HTTP \(http.statusCode)")
-            throw PixivFailure(code: .status(http.statusCode))
+            let block = protectionBlock(http, body: body)
+            // Log the host and what refused, never URLs, headers or bodies: they can reveal
+            // searches or the session cookie.
+            let host = http.url?.host.flatMap { ["www.pixiv.net", "i.pximg.net"].contains($0) ? $0 : nil } ?? "another host"
+            let detail =
+                switch block {
+                case .blockedByProtection(let reference?)?: " (blocked by pixiv's Cloudflare protection, error \(reference))"
+                case .blockedByProtection(nil)?: " (pixiv's Cloudflare protection asked for a browser check)"
+                default: ""
+                }
+            AppLog.warn("pixiv request to \(host) failed: HTTP \(http.statusCode)\(detail)")
+            throw PixivFailure(code: block ?? .status(http.statusCode))
         }
+    }
+
+    /// Cloudflare, in front of pixiv's site, answers a connection it refuses itself, before pixiv
+    /// sees it: a browser check it marks with `cf-mitigated: challenge`, or a block page naming
+    /// its error reference (`error code: 1010` as plain text, or pixiv's styled page with
+    /// `cf-error-1010` and `Error reference number: 1010`). pixiv's own refusals, such as an R-18
+    /// ranking for a visitor it does not know to be an adult, carry neither.
+    static func protectionBlock(_ http: HTTPURLResponse, body: Data?) -> PixivFailure.Code? {
+        guard [403, 503].contains(http.statusCode),
+            http.value(forHTTPHeaderField: "Server")?.lowercased() == "cloudflare"
+        else { return nil }
+        if http.value(forHTTPHeaderField: "cf-mitigated")?.lowercased() == "challenge" {
+            return .blockedByProtection(reference: nil)
+        }
+        guard let body, !body.isEmpty else { return nil }
+        let text = String(decoding: body, as: UTF8.self)
+        for marker in ["cf-error-", "error code: ", "Error reference number: "] {
+            var rest = text[...]
+            while let found = rest.range(of: marker) {
+                rest = rest[found.upperBound...]
+                let digits = rest.prefix { $0.isASCII && $0.isNumber }
+                if digits.count == 4, digits.first == "1", let reference = Int(digits) {
+                    return .blockedByProtection(reference: reference)
+                }
+            }
+        }
+        return nil
     }
 }
 

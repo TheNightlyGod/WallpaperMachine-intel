@@ -208,6 +208,10 @@ struct PixivFailure: LocalizedError, Equatable, Sendable {
         /// The request never got an HTTP answer; carries the system's description.
         case network(String)
         case status(Int)
+        /// pixiv's Cloudflare front refused the connection before pixiv saw it (blocked network,
+        /// proxy node or client signature, or a browser check the app cannot pass); carries
+        /// Cloudflare's error reference (1010, 1020, …) when its block page names one.
+        case blockedByProtection(reference: Int?)
         /// The answer was not the JSON pixiv documents for this request.
         case unreadable
         /// pixiv answered but shows this work to signed-in members only.
@@ -236,6 +240,10 @@ struct PixivFailure: LocalizedError, Equatable, Sendable {
             String(localized: "pixiv is limiting requests from this network right now. Wait a minute, then try again.")
         case .status(403):
             String(localized: "pixiv denied access to this request (HTTP 403). Check access in your browser and your network or proxy connection before retrying.")
+        case .blockedByProtection(let reference?):
+            String(localized: "pixiv’s protection service blocked this connection (Cloudflare error \(reference)). It blocks some networks and proxy nodes even when a browser still opens pixiv. Switch to another proxy node or network, then try again.")
+        case .blockedByProtection(nil):
+            String(localized: "pixiv’s protection service blocked this connection with a browser check WallpaperMachine can’t complete. It blocks some networks and proxy nodes even when a browser still opens pixiv. Switch to another proxy node or network, then try again.")
         case .status(let status):
             String(localized: "pixiv returned status \(status). Try again later.")
         case .unreadable:
