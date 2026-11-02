@@ -59,8 +59,9 @@
 
 1. **Baixe** a [imagem de disco gratuita](https://www.wallpapermachine.app/download) da versão mais recente.
 2. **Instale**: abra-a e arraste o WallpaperMachine para Aplicativos.
-3. **Abra o app.** O download ainda não é notarizado, então o macOS bloqueia a primeira abertura:
-   clique em **Abrir Mesmo Assim** em Ajustes do Sistema → Privacidade e Segurança, uma única vez.
+3. **Abra o app.** As versões posteriores à 1.8.2 são notarizadas pela Apple e abrem direto.
+   A 1.8.2 e as anteriores não são, então o macOS bloqueia a primeira abertura: clique em
+   **Abrir Mesmo Assim** em Ajustes do Sistema → Privacidade e Segurança, uma única vez.
 
 A partir daí, um guia de boas-vindas assume, e o app passa a se atualizar sozinho.
 O [guia de instalação](https://www.wallpapermachine.app/guides/install/) (em inglês) mostra
@@ -217,9 +218,10 @@ os nomes das contas Steam são substituídos antes.
 
 Baixe a versão assinada de graça na
 [versão mais recente](https://github.com/WallpaperMachine/WallpaperMachine/releases/latest),
-ou [compile a partir do código-fonte](#código-aberto-livre-para-compilar). A versão não é
-notarizada, então o macOS bloqueia a primeira abertura até você clicar em Abrir Mesmo Assim em
-Ajustes do Sistema → Privacidade e Segurança. O
+ou [compile a partir do código-fonte](#código-aberto-livre-para-compilar). As versões
+posteriores à 1.8.2 são assinadas com um Developer ID e notarizadas pela Apple, então abrem
+direto; a 1.8.2 e as anteriores não são notarizadas, então o macOS bloqueia a primeira abertura
+até você clicar em Abrir Mesmo Assim em Ajustes do Sistema → Privacidade e Segurança. O
 [guia de instalação](https://www.wallpapermachine.app/guides/install/) (em inglês) acompanha
 tudo, do download até o guia de boas-vindas. A partir daí o app procura
 novas versões sozinho e, quando consegue substituir a própria cópia, oferece

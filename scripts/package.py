@@ -10,7 +10,16 @@ written. LICENSING.md describes the license and the notices the bundle carries.
 
 The signed bundle, and again the copy inside the mounted image, must still carry what the
 lock screen extension and the permission prompts need: the extension's sandbox and
-entitlements, the Info.plist keys, and a matching signing team (scripts/lib/bundle_contract.py).
+entitlements, the host's entitlements, the Info.plist keys, and a matching signing team
+(scripts/lib/bundle_contract.py).
+
+A Developer ID identity (`--sign-identity "Developer ID Application: …"`) signs every
+library, framework, extension and the app with the hardened runtime and a secure
+timestamp, and then the disk image. `--notarize PROFILE` (a `notarytool
+store-credentials` profile; `--notary-keychain` when it is not in the login keychain)
+has Apple notarize the app, staples the ticket to it before the image is made, then
+notarizes and staples the image too (scripts/lib/notary.py). The checksum is written
+last, because stapling changes the image's bytes.
 
 Every bundled dylib keeps the minimum macOS it was built for, which for a Homebrew
 bottle is the host's release. When one is newer than the app's deployment target the
@@ -31,12 +40,14 @@ in the file, and `--require-notices` makes it an error too (the gate for a distr
 import argparse
 import hashlib
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
+from typing import NamedTuple
 
 import check_licenses
-from lib import bundle_contract, dmg
+from lib import bundle_contract, dmg, notary
 from lib.homebrew import KEG_LICENSE_FILE, keg_of
 from lib.glyphs import markers
 from lib.paths import PROVENANCE, ROOT, THIRD_PARTY, app_bundle
@@ -76,15 +87,53 @@ def run(args):
     subprocess.run(list(map(str, args)), check=True)
 
 
-def sign(file, identity, *options):
-    """Ad hoc (`-`) by default. Release builds pass the project certificate, whose designated
-    requirement (identifier plus certificate) stays the same from one release to the next,
-    so macOS privacy permissions survive an update; an ad-hoc requirement is the build's
-    cdhash, which every release changes."""
-    command = ["codesign", "--force", "--sign", identity]
-    if identity != "-":
-        command.append("--timestamp=none")
-    run([*command, *options, file])
+class Signing(NamedTuple):
+    """How packaging signs: ad hoc (`-`), a certificate, or a Developer ID that can be notarized.
+
+    Release builds use the Developer ID: its designated requirement (identifier, Apple's
+    Developer ID chain and the team) stays the same from one release to the next, so macOS
+    privacy permissions survive an update, and it is the only signature Apple notarizes.
+    An ad-hoc requirement is the build's cdhash, which every release changes.
+    """
+    identity: str
+    developer_id: bool = False
+
+    def options(self):
+        if self.developer_id:
+            # Notarization requires both; library validation then needs every bundled
+            # library signed by the same team, which this identity does.
+            return ["--timestamp", "--options", "runtime"]
+        # Without a team, the hardened runtime's library validation would refuse the
+        # app's own libraries, so ad hoc and self-signed builds run without it.
+        return ["--options", "0"] if self.identity == "-" else ["--timestamp=none", "--options", "0"]
+
+
+IDENTITY_LINE = re.compile(r'^\s*\d+\) ([0-9A-F]{40}) "(.*)"')
+
+
+def signing_for(identity, listing=None):
+    """The `Signing` for `--sign-identity`, matched the way codesign matches it: a SHA-1 or part of the name.
+
+    `listing` is `security find-identity -v -p codesigning` output (valid identities only), read
+    from the keychains when omitted. An identity matching several of them stops packaging here,
+    before the bundle is touched, rather than in codesign after it is relocated: a renewed
+    certificate shares its name with the old one, so the SHA-1 picks between them. One that
+    matches none (an untrusted self-signed certificate is not listed) is left to codesign.
+    """
+    if identity == "-":
+        return Signing("-")
+    if listing is None:
+        listing = output(["security", "find-identity", "-v", "-p", "codesigning"])
+    names = {match.group(1): match.group(2) for match in map(IDENTITY_LINE.match, listing.splitlines()) if match}
+    matches = {digest: name for digest, name in names.items() if identity.upper() == digest or identity in name}
+    if len(matches) > 1:
+        listed = "; ".join(f"{digest} {name}" for digest, name in sorted(matches.items()))
+        raise PackagingError(f"--sign-identity {identity!r} matches {len(matches)} identities; pass one SHA-1 instead: {listed}")
+    return Signing(identity, any(name.startswith(bundle_contract.DEVELOPER_ID) for name in matches.values()))
+
+
+def sign(file, signing, *options):
+    run(["codesign", "--force", "--sign", signing.identity, *signing.options(), *options, file])
 
 
 def report(warnings, reported):
@@ -315,6 +364,12 @@ def relocate(file, prefix, rpath):
 
 
 def package(args):
+    signing = signing_for(args.sign_identity)
+    credentials = None
+    if args.notarize:
+        if not signing.developer_id:
+            raise PackagingError(f"Notarization needs a Developer ID Application identity, not {args.sign_identity!r} (docs/build.md#release-signing)")
+        credentials = notary.Credentials(args.notarize, args.notary_keychain)
     app = app_bundle(args.configuration)
     binary = app / "Contents/MacOS/WallpaperMachine"
     extensions = list((app / "Contents/Extensions").glob("*.appex"))
@@ -370,11 +425,16 @@ def package(args):
     write_licenses(resources, licenses, third_party)
     if floor != target:
         run(["/usr/libexec/PlistBuddy", "-c", f"Set :LSMinimumSystemVersion {floor}", info])
-    for file in frameworks.glob("*.dylib"):
-        sign(file, args.sign_identity)
+    # Inside out: a signature seals the nested code's signatures as they are.
+    for file in sorted(frameworks.glob("*.dylib")):
+        sign(file, signing)
+    for framework in sorted(frameworks.glob("*.framework")):
+        sign(framework, signing)
+    # Exactly the repository's entitlements: Xcode adds com.apple.security.get-task-allow
+    # to the extension even in a Release build, and Apple will not notarize it.
     for extension in extensions:
-        sign(extension, args.sign_identity, "--preserve-metadata=entitlements")
-    sign(app, args.sign_identity, "--options", "0")
+        sign(extension, signing, "--entitlements", bundle_contract.EXTENSION_ENTITLEMENTS)
+    sign(app, signing, "--entitlements", bundle_contract.HOST_ENTITLEMENTS)
     run(["codesign", "--verify", "--deep", "--strict", app])
     # A valid signature says nothing about what it signs: re-signing can drop an entitlement
     # or a key silently, and the lock screen then fails on the user's Mac, not here.
@@ -386,11 +446,20 @@ def package(args):
                 raise PackagingError(f"Unbundled dependency: {file}: {dependency}")
             if dependency.startswith("@rpath/") and not (frameworks / Path(dependency).name).exists() and "libswift" not in dependency:
                 raise PackagingError(f"Missing bundled dependency: {dependency}")
+    if credentials:
+        # Stapled before the image is made, so the copy a user drags out opens offline too.
+        notary.notarize(app, credentials)
+        print(f"{MARK.ok} Notarized and stapled: {app.name}")
     version = output(["/usr/libexec/PlistBuddy", "-c", "Print :CFBundleShortVersionString", info]).strip()
     image = dmg.build(app, app.parent / dmg.image_name(version), dmg.volume_name(version), icon=resources / "AppIcon.icns")
+    if signing.developer_id:
+        run(["codesign", "--force", "--sign", signing.identity, "--timestamp", image])
+    if credentials:
+        notary.notarize(image, credentials)
+        print(f"{MARK.ok} Notarized and stapled: {image.name}")
     # Prove the image, not the build tree: users and the in-app updater install
     # exactly this file, and a bundle that does not survive the round trip is not one.
-    report(dmg.verify(image, version), reported)
+    report(dmg.verify(image, version, contract=image_contract(credentials is not None)), reported)
     checksum = image.with_name(image.name + ".sha256")
     checksum.write_text(f"{sha256(image)}  {image.name}\n")
     if args.install:
@@ -403,6 +472,17 @@ def package(args):
     print(f"{MARK.ok} Verified bundle: {app}")
     print(f"{MARK.ok} Verified disk image: {image}")
     print(f"{MARK.ok} Checksum: {checksum}")
+
+
+def image_contract(notarized):
+    """What the app inside the mounted image must meet: the bundle contract, and its ticket when notarized."""
+    if not notarized:
+        return bundle_contract.verify_bundle
+
+    def contract(app):
+        notary.check_stapled(app)
+        return bundle_contract.verify_bundle(app)
+    return contract
 
 
 def sha256(file):
@@ -420,11 +500,13 @@ def main():
     parser.add_argument("--check", action="store_true", help="Run the license preflight against the built bundle and change nothing.")
     parser.add_argument("--require-deployment-target", action="store_true", help="Fail instead of raising the app's minimum macOS when a bundled library needs a newer one.")
     parser.add_argument("--require-notices", action="store_true", help="Fail instead of warning when a component's license text cannot be found for THIRD-PARTY-NOTICES.txt.")
-    parser.add_argument("--sign-identity", default="-", help="Code-signing identity for the dylibs, extensions and app; `-` (the default) signs ad hoc. Release builds pass the project certificate (docs/build.md).")
+    parser.add_argument("--sign-identity", default="-", help="Code-signing identity for the dylibs, frameworks, extensions and app; `-` (the default) signs ad hoc. Release builds pass the Developer ID (docs/build.md#release-signing).")
+    parser.add_argument("--notarize", metavar="PROFILE", help="Notarize and staple the app and the disk image with this `xcrun notarytool store-credentials` profile; needs a Developer ID --sign-identity.")
+    parser.add_argument("--notary-keychain", type=Path, help="Keychain holding the --notarize profile, when it is not the login keychain.")
     args = parser.parse_args()
     try:
         package(args)
-    except (PackagingError, dmg.DiskImageError, bundle_contract.BundleContractError) as error:
+    except (PackagingError, dmg.DiskImageError, bundle_contract.BundleContractError, notary.NotarizationError) as error:
         print(f"{MARK.missing} {error}", file=sys.stderr)
         return 1
     return 0

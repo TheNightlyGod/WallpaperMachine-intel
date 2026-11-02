@@ -8,14 +8,21 @@ prompt. `verify_bundle(app)` reads those facts back from the built artifact:
 * every embedded extension is sandboxed, signed with every key and value of
   `Extension/WallpaperExtension.entitlements` (the source of truth; no key list is
   repeated here), and declares the `com.apple.wallpaper` extension point;
-* the host is not sandboxed, carries the Apple Events and audio capture usage
-  strings, registers the `wallpapermachine` URL scheme, and requires at least the
-  project's deployment target (packaging may raise it, never lower it);
-* an app and an extension that are not ad hoc signed share a team identifier.
+* the host is not sandboxed, is signed with every key and value of
+  `Packaging/WallpaperMachine.entitlements` (what the hardened runtime lets it do),
+  carries the Apple Events and audio capture usage strings, registers the
+  `wallpapermachine` URL scheme, and requires at least the project's deployment target
+  (packaging may raise it, never lower it);
+* an app and an extension that are not ad hoc signed share a team identifier;
+* a Developer ID signed host, which is what gets notarized, has the hardened runtime on
+  itself and every extension, no `com.apple.security.get-task-allow` in either, and
+  every library and framework in `Contents/Frameworks` signed by its team: Apple refuses
+  to notarize anything else, and the runtime's library validation refuses to load a
+  library another team or an ad hoc signature signed.
 
 Findings that would break the app are errors; entitlements the signature adds beyond
-the repository file are warnings, because Xcode and signing profiles inject some
-(`com.apple.security.get-task-allow` in a debuggable build).
+the repository files are warnings, because Xcode and signing profiles inject some
+(`com.apple.security.get-task-allow` in a debuggable build, an error under Developer ID).
 
 The signature readers are parameters, so the checks run on a synthetic bundle without
 `codesign`: `scripts/package.py` calls this after signing the build, and
@@ -30,7 +37,7 @@ import subprocess
 from typing import NamedTuple
 from xml.parsers.expat import ExpatError
 
-from lib.paths import EXTENSION, PROJECT_YML
+from lib.paths import EXTENSION, PROJECT_YML, ROOT
 
 APP_IDENTIFIER = "app.wallpapermachine"
 EXTENSION_IDENTIFIER = "app.wallpapermachine.wallpaper-extension"
@@ -38,7 +45,12 @@ EXTENSION_POINT = "com.apple.wallpaper"
 URL_SCHEME = "wallpapermachine"
 USAGE_DESCRIPTIONS = ("NSAppleEventsUsageDescription", "NSAudioCaptureUsageDescription")
 SANDBOX = "com.apple.security.app-sandbox"
+GET_TASK_ALLOW = "com.apple.security.get-task-allow"
 EXTENSION_ENTITLEMENTS = EXTENSION / "WallpaperExtension.entitlements"
+# Applied by scripts/package.py, not Xcode: they only matter under the hardened runtime
+# packaging turns on, and debug builds and the test host run without it.
+HOST_ENTITLEMENTS = ROOT / "Packaging/WallpaperMachine.entitlements"
+DEVELOPER_ID = "Developer ID Application:"
 
 DEPLOYMENT_TARGET = re.compile(r"MACOSX_DEPLOYMENT_TARGET:\s*\"?([\d.]+)")
 NOT_SIGNED = "not signed at all"
@@ -53,6 +65,10 @@ class BundleContractError(Exception):
 class Signature(NamedTuple):
     adhoc: bool
     team: str | None
+    # The leaf certificate is a Developer ID Application certificate.
+    developer_id: bool = False
+    # The code directory carries the hardened runtime flag.
+    runtime: bool = False
 
 
 class Findings(NamedTuple):
@@ -83,14 +99,23 @@ def read_entitlements(path):
 
 def read_signature(path):
     """`Signature` of `path`, or None when it is unsigned."""
-    completed = _codesign("-dv", path)
+    completed = _codesign("-dvv", path)
     if NOT_SIGNED in completed.stderr:
         return None
     if completed.returncode != 0:
         raise BundleContractError(f"codesign could not read the signature of {path}: {completed.stderr.strip()}")
-    fields = dict(line.partition("=")[::2] for line in completed.stderr.splitlines())
+    lines = completed.stderr.splitlines()
+    # `Authority=` repeats from the leaf up to the root; the first one is the signer.
+    fields = {}
+    for line in lines:
+        key, _, value = line.partition("=")
+        fields.setdefault(key, value)
     team = fields.get("TeamIdentifier")
-    return Signature(adhoc=fields.get("Signature") == "adhoc", team=None if team in (None, "not set") else team)
+    # `CodeDirectory v=20500 size=… flags=0x10000(runtime) hashes=…`
+    flags = re.search(r"\bflags=\S+", fields.get("CodeDirectory v", ""))
+    return Signature(adhoc=fields.get("Signature") == "adhoc", team=None if team in (None, "not set") else team,
+                     developer_id=fields.get("Authority", "").startswith(DEVELOPER_ID),
+                     runtime=bool(flags and "runtime" in flags.group()))
 
 
 def deployment_target(project=PROJECT_YML):
@@ -111,12 +136,18 @@ def _differs(signed, expected):
     return signed != expected or type(signed) is not type(expected)
 
 
-def check_bundle(app, *, entitlements=read_entitlements, signature=read_signature, extension_entitlements=None, minimum_system=None):
+def _plist(path):
+    with Path(path).open("rb") as handle:
+        return plistlib.load(handle)
+
+
+def check_bundle(app, *, entitlements=read_entitlements, signature=read_signature, extension_entitlements=None,
+                 host_entitlements=None, minimum_system=None):
     """Every way `app` (a built or mounted `.app`) breaks its contract, as `Findings`.
 
     `entitlements(path)` and `signature(path)` read a signed bundle; `extension_entitlements`
-    is the repository file's contents and `minimum_system` the deployment target, both
-    read from the repository when omitted.
+    and `host_entitlements` are the repository files' contents and `minimum_system` the
+    deployment target, all read from the repository when omitted.
     """
     app = Path(app)
     errors, warnings = [], []
@@ -140,9 +171,30 @@ def check_bundle(app, *, entitlements=read_entitlements, signature=read_signatur
             errors.append(f"{label(path)} is not signed")
         return found
 
+    def held_to(name, actual, expected, ignore=()):
+        """Records how the signed `actual` entitlements stray from the repository's `expected` ones."""
+        for key, value in sorted(expected.items()):
+            if key in ignore:
+                continue
+            if key not in actual:
+                errors.append(f"{name}: the signature lacks {key}")
+            elif _differs(actual[key], value):
+                errors.append(f"{name}: {key} is signed as {actual[key]!r}, but the repository entitlements say {value!r}")
+        extra = sorted(set(actual) - set(expected))
+        if extra:
+            warnings.append(f"{name}: the signature adds {', '.join(extra)}, which the repository entitlements do not list")
+
+    def notarizable(path, found, actual):
+        """Records what keeps a component of a Developer ID signed app from notarizing."""
+        if not found.runtime:
+            errors.append(f"{label(path)} is signed with a Developer ID but without the hardened runtime, so Apple will not notarize it")
+        if actual.get(GET_TASK_ALLOW) is True:
+            errors.append(f"{label(path)}: {GET_TASK_ALLOW} is signed in, so Apple will not notarize it; package a Release build")
+
     if extension_entitlements is None:
-        with EXTENSION_ENTITLEMENTS.open("rb") as handle:
-            extension_entitlements = plistlib.load(handle)
+        extension_entitlements = _plist(EXTENSION_ENTITLEMENTS)
+    if host_entitlements is None:
+        host_entitlements = _plist(HOST_ENTITLEMENTS)
     if minimum_system is None:
         minimum_system = deployment_target()
 
@@ -165,8 +217,21 @@ def check_bundle(app, *, entitlements=read_entitlements, signature=read_signatur
             errors.append(f"{app.name}: LSMinimumSystemVersion is {host['LSMinimumSystemVersion']}, below the deployment target {minimum_system}")
 
     host_signature = signed(app)
-    if host_signature is not None and entitlements(app).get(SANDBOX) is True:
-        errors.append(f"{app.name} is sandboxed, but it reads Homebrew, Steam and the user's wallpaper folders; {SANDBOX} must not be signed into it")
+    distributed = host_signature is not None and host_signature.developer_id
+    if host_signature is not None:
+        actual = entitlements(app)
+        if actual.get(SANDBOX) is True:
+            errors.append(f"{app.name} is sandboxed, but it reads Homebrew, Steam and the user's wallpaper folders; {SANDBOX} must not be signed into it")
+        held_to(app.name, actual, host_entitlements, ignore=(SANDBOX,))
+        if distributed:
+            notarizable(app, host_signature, actual)
+            frameworks = app / "Contents/Frameworks"
+            for code in sorted([*frameworks.glob("*.dylib"), *frameworks.glob("*.framework")]):
+                found = signature(code)
+                if found is None or found.adhoc or found.team != host_signature.team:
+                    signer = "nothing" if found is None else "an ad hoc signature" if found.adhoc else f"team {found.team or 'none'}"
+                    errors.append(f"{label(code)} is signed by {signer}, not the Developer ID team {host_signature.team}: "
+                                  "Apple will not notarize it and library validation would refuse to load it")
 
     extensions = sorted((app / "Contents/Extensions").glob("*.appex"))
     if not extensions:
@@ -187,16 +252,9 @@ def check_bundle(app, *, entitlements=read_entitlements, signature=read_signatur
         actual = entitlements(extension)
         if actual.get(SANDBOX) is not True:
             errors.append(f"{name} is not sandboxed: {SANDBOX} must be signed in as true")
-        for key, value in sorted(extension_entitlements.items()):
-            if key == SANDBOX:
-                continue
-            if key not in actual:
-                errors.append(f"{name}: the signature lacks {key}")
-            elif _differs(actual[key], value):
-                errors.append(f"{name}: {key} is signed as {actual[key]!r}, but the repository entitlements say {value!r}")
-        extra = sorted(set(actual) - set(extension_entitlements))
-        if extra:
-            warnings.append(f"{name}: the signature adds {', '.join(extra)}, which the repository entitlements do not list")
+        held_to(name, actual, extension_entitlements, ignore=(SANDBOX,))
+        if distributed:
+            notarizable(extension, extension_signature, actual)
         if host_signature is not None and host_signature.adhoc != extension_signature.adhoc:
             errors.append(f"{name} and {app.name} are not signed the same way (one is ad hoc, the other is not)")
         elif host_signature is not None and not host_signature.adhoc and host_signature.team != extension_signature.team:

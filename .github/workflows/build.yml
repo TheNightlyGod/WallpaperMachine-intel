@@ -104,42 +104,66 @@ jobs:
           xcodebuild -version
           python3 scripts/build.py --configuration Release --app-icon "${RUNNER_TEMP}/app-icon"
 
-      - name: Import the signing certificate
-        # The project certificate, not ad hoc, keeps the app's designated requirement the
-        # same from one release to the next, so macOS keeps its privacy permissions after an
-        # in-app update (docs/build.md). A missing secret fails here instead of shipping an
-        # ad-hoc build that would drop those permissions again.
+      - name: Import the Developer ID certificate and the notary credentials
+        # Releases are signed with the project's Developer ID and notarized, so a downloaded
+        # copy opens without Open Anyway, and their designated requirement (identifier,
+        # Apple's Developer ID chain, team) is the same from one release to the next, so
+        # macOS keeps the app's privacy permissions after an in-app update
+        # (docs/build.md#release-signing). A missing secret fails here instead of shipping
+        # a build Gatekeeper holds or that drops those permissions.
         env:
-          SIGNING_CERTIFICATE_P12: ${{ secrets.SIGNING_CERTIFICATE_P12 }}
-          SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.SIGNING_CERTIFICATE_PASSWORD }}
+          DEVELOPER_ID_CERTIFICATE_P12: ${{ secrets.DEVELOPER_ID_CERTIFICATE_P12 }}
+          DEVELOPER_ID_CERTIFICATE_PASSWORD: ${{ secrets.DEVELOPER_ID_CERTIFICATE_PASSWORD }}
+          NOTARY_API_KEY: ${{ secrets.NOTARY_API_KEY }}
+          NOTARY_API_KEY_ID: ${{ secrets.NOTARY_API_KEY_ID }}
+          NOTARY_API_ISSUER: ${{ secrets.NOTARY_API_ISSUER }}
         run: |
           set -euo pipefail
-          if [ -z "${SIGNING_CERTIFICATE_P12}" ] || [ -z "${SIGNING_CERTIFICATE_PASSWORD}" ]; then
-            echo "::error::SIGNING_CERTIFICATE_P12 and SIGNING_CERTIFICATE_PASSWORD must be set (docs/build.md#release-signing)."
+          missing=""
+          for name in DEVELOPER_ID_CERTIFICATE_P12 DEVELOPER_ID_CERTIFICATE_PASSWORD NOTARY_API_KEY NOTARY_API_KEY_ID NOTARY_API_ISSUER; do
+            if [ -z "${!name}" ]; then missing="${missing} ${name}"; fi
+          done
+          if [ -n "${missing}" ]; then
+            echo "::error::Missing repository secrets:${missing} (docs/build.md#release-signing)."
             exit 1
           fi
           keychain="${RUNNER_TEMP}/signing.keychain-db"
           certificate="${RUNNER_TEMP}/signing.p12"
+          key="${RUNNER_TEMP}/notary-key.p8"
           password="$(openssl rand -hex 24)"
-          printf '%s' "${SIGNING_CERTIFICATE_P12}" | base64 -d > "${certificate}"
+          printf '%s' "${DEVELOPER_ID_CERTIFICATE_P12}" | base64 -d > "${certificate}"
           security create-keychain -p "${password}" "${keychain}"
           security set-keychain-settings -lut 21600 "${keychain}"
           security unlock-keychain -p "${password}" "${keychain}"
-          security import "${certificate}" -k "${keychain}" -P "${SIGNING_CERTIFICATE_PASSWORD}" -T /usr/bin/codesign
+          security import "${certificate}" -k "${keychain}" -P "${DEVELOPER_ID_CERTIFICATE_PASSWORD}" -T /usr/bin/codesign
           rm -f "${certificate}"
+          # Apple's Developer ID intermediates, so codesign can build the chain whichever
+          # one issued the certificate; the runner image does not promise either.
+          for intermediate in DeveloperIDCA DeveloperIDG2CA; do
+            curl -fsSL --retry 3 "https://www.apple.com/certificateauthority/${intermediate}.cer" -o "${RUNNER_TEMP}/${intermediate}.cer"
+            security import "${RUNNER_TEMP}/${intermediate}.cer" -k "${keychain}"
+          done
           # Lets codesign use the key without a keychain prompt.
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${password}" "${keychain}" > /dev/null
           # shellcheck disable=SC2046 # keychain paths carry no spaces on the runner
           security list-keychains -d user -s "${keychain}" $(security list-keychains -d user | tr -d '"')
+          # The App Store Connect API key becomes a notarytool profile in the same temporary
+          # keychain; storing it also checks it with Apple, so a wrong key fails here.
+          printf '%s\n' "${NOTARY_API_KEY}" > "${key}"
+          xcrun notarytool store-credentials "WallpaperMachine Notary" --key "${key}" \
+            --key-id "${NOTARY_API_KEY_ID}" --issuer "${NOTARY_API_ISSUER}" --keychain "${keychain}"
+          rm -f "${key}"
 
       - name: Package
-        # Relocates and signs the bundle with the project certificate, wraps it in the
-        # drag-to-install disk image, mounts that image to check the app's identifier,
-        # version, signature and the Applications link, and writes the .sha256 sidecar
-        # (docs/build.md).
+        # Relocates the bundle and signs it with the Developer ID and the hardened runtime,
+        # has Apple notarize the app and staples the ticket to it, wraps it in the
+        # drag-to-install disk image, signs, notarizes and staples the image, mounts it to
+        # check the app's identifier, version, signature, ticket and the Applications link,
+        # and only then writes the .sha256 sidecar (docs/build.md).
         run: |
           python3 scripts/package.py --configuration Release --require-deployment-target \
-            --sign-identity "WallpaperMachine Code Signing"
+            --sign-identity "Developer ID Application" \
+            --notarize "WallpaperMachine Notary" --notary-keychain "${RUNNER_TEMP}/signing.keychain-db"
 
       - name: Match the disk image to the tag
         env:

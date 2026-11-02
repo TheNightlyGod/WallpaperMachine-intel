@@ -200,8 +200,11 @@ bundle identifier `app.wallpapermachine` and a readable
 `Contents/MacOS/WallpaperMachine` before anything is replaced. Its signature must
 then be intact throughout the bundle (strict validation, every architecture and all
 nested code) and satisfy `AppUpdateConfiguration.signingRequirement`, which names the
-releases' signers: this identifier, signed with the project certificate or with the project's
-Developer ID ([release signing](../build.md#release-signing)). The digest proves the image is the one
+releases' signers: this identifier, signed with the project's Developer ID (every release
+after 1.8.2) or with the project certificate (1.0.2 through 1.8.2)
+([release signing](../build.md#release-signing)). Copies older than 1.8.0 accept only the
+project certificate, so they refuse a Developer ID release as unverifiable; they are
+updated by downloading the image. The digest proves the image is the one
 the release lists; the signature proves who built it, so a release asset someone replaced
 is refused as unverifiable, never installed, and so is a copy signed any other way, ad hoc
 included ([release](../release.md#what-the-in-app-updater-expects)). Its

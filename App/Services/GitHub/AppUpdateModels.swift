@@ -15,9 +15,14 @@ enum AppUpdateConfiguration {
     /// to one signed with the Developer ID; dropping a signer from this requirement strands
     /// every installed copy signed with it.
     static let signingRequirement = #"identifier "app.wallpapermachine" and ("#
-        + #"certificate root = H"2bdf4e2431b7edeb731de288726c896480a0fa82" or (anchor apple generic"#
-        + #" and certificate 1[field.1.2.840.113635.100.6.2.6] and certificate leaf[field.1.2.840.113635.100.6.1.13]"#
-        + #" and certificate leaf[subject.OU] = "DT6YQU64FF"))"#
+        + #"certificate root = H"2bdf4e2431b7edeb731de288726c896480a0fa82" or ("# + developerIDRequirement + "))"
+
+    /// Apple's Developer ID chain for the project's team (`anchor apple generic`, the Developer
+    /// ID intermediate and leaf markers, team DT6YQU64FF): what releases are signed and
+    /// notarized with. It names the team, not a certificate, so renewing the Developer ID
+    /// certificate changes neither this nor the releases' designated requirement.
+    static let developerIDRequirement = #"anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6]"#
+        + #" and certificate leaf[field.1.2.840.113635.100.6.1.13] and certificate leaf[subject.OU] = "DT6YQU64FF""#
 
     /// The drag-to-install disk image `scripts/package.py` produces and the Build workflow
     /// publishes. Renaming the product moves both sides of this contract at once.

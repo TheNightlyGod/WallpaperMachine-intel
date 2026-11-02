@@ -381,6 +381,12 @@ pull back, one without the other: 1.6.4 shipped the SteamCMD sign-in fix with th
 whole of #100. A hotfix release holds the fix and nothing else, so it can be checked
 in minutes, its notes say only what it fixes, and `main` goes on as before.
 
+A hotfix branched from 1.8.2 or older builds with that tag's `build.yml` and
+`scripts/package.py`: it is signed with the project certificate from the
+`SIGNING_CERTIFICATE_P12` and `SIGNING_CERTIFICATE_PASSWORD` secrets and is not
+notarized ([build.md](build.md#release-signing)). Keep those two secrets until a
+Developer ID release has shipped.
+
 1. Branch from the newest release tag, named after it:
 
    ```sh
@@ -515,7 +521,7 @@ repository `origin` points at.
 | Secret | Read by |
 |---|---|
 | `RELEASE_NOTES_API_KEY` | Version for every bump; Build only for a tag without a `CHANGELOG.md` section |
-| `SIGNING_CERTIFICATE_P12`, `SIGNING_CERTIFICATE_PASSWORD` | Build's `build` job, which fails when either is missing ([build.md](build.md#release-signing)) |
+| `DEVELOPER_ID_CERTIFICATE_P12`, `DEVELOPER_ID_CERTIFICATE_PASSWORD`, `NOTARY_API_KEY`, `NOTARY_API_KEY_ID`, `NOTARY_API_ISSUER` | Build's `build` job, which fails when any is missing ([build.md](build.md#release-signing)) |
 | `CLAUDE_CODE_OAUTH_TOKEN` | `claude.yml` and `claude-code-review.yml` |
 
 ### Version (`version.yml`)
@@ -599,18 +605,23 @@ artifact.
 4. runs `python3 scripts/build.py --configuration Release --app-icon DIR`, which
    leaves `AppIcon.icon` out of the Xcode build, puts the compiled icon and catalog
    into the bundle with their Info.plist keys and re-signs it;
-5. imports the project signing certificate from the two signing secrets into a
-   temporary keychain ([build.md](build.md#release-signing)), then runs
+5. imports the Developer ID certificate and the notary API key from the signing
+   secrets into a temporary keychain ([build.md](build.md#release-signing)), then runs
    `python3 scripts/package.py --configuration Release --require-deployment-target
-   --sign-identity "WallpaperMachine Code Signing"`, which fails if a bundled
-   library needs a newer macOS than the deployment target. It also generates
+   --sign-identity "Developer ID Application" --notarize "WallpaperMachine Notary"
+   --notary-keychain <that keychain>`, which fails if a bundled library needs a newer
+   macOS than the deployment target, and signs with the hardened runtime, notarizes
+   and staples the app and then the disk image; a submission Apple refuses fails the
+   job with Apple's log. Each submission waits up to 50 minutes, and one Apple has not
+   finished by then fails the job with its id (a new team's first submissions take
+   hours: [build.md](build.md#release-signing)). It also generates
    `THIRD-PARTY-NOTICES.txt` into the bundle; a component whose license text
    cannot be found is named in the log and marked in the file, and
    `--require-notices` (not yet passed here: see
    [../LICENSING.md](../LICENSING.md#notice-payload)) would fail on it.
    Packaging proves the
    disk image, not the build tree: it mounts the image read-only and requires
-   `app.wallpapermachine` at the bundle's version, a passing
+   `app.wallpapermachine` at the bundle's version, its stapled ticket, a passing
    `codesign --verify --deep --strict`, the signed entitlements and Info.plist
    keys the lock screen extension and the permission prompts need ([bundle
    contract](build.md#bundle-contract)), the `Applications` link and the window
@@ -860,11 +871,12 @@ What a release must satisfy:
 - the manifest's asset carries a `sha256:` digest of the image and a
   `browser_download_url` on github.com, both derived by `update_manifest.py`; the
   app refuses an image it cannot verify;
-- releases are signed with the project certificate
+- releases are signed with the project's Developer ID and notarized
   ([build.md](build.md#release-signing)): the updater installs only a copy that meets
-  `AppUpdateConfiguration.signingRequirement` (the project certificate, or the
-  project's Developer ID accepted ahead of the switch to it), and keeping the
-  designated requirement is what lets macOS keep the app's privacy permissions;
+  `AppUpdateConfiguration.signingRequirement` (the Developer ID, or the project
+  certificate that signed 1.0.2 through 1.8.2; copies older than 1.8.0 accept only the
+  latter), and keeping the designated requirement is what lets macOS keep the app's
+  privacy permissions;
 - the release body is the English notes above `<!-- release-notes-end -->`
   ([Release notes and the changelog](#release-notes-and-the-changelog)); the app
   shows what is above the marker as **What's new** in About and ignores the rest;
@@ -934,7 +946,8 @@ carries `CHANGELOG.md` as it is at the patch's tag, and that copy is not rewritt
    genuinely wrong, delete it deliberately rather than re-running.
 6. Open the published image on a Mac: the window shows the app beside
    Applications over the background, the drag installs it, and the first launch
-   goes through System Settings → Privacy & Security. Then run the manual smoke
+   opens without **Open Anyway** (`spctl --assess -vv` on the installed app says
+   `source=Notarized Developer ID`). Then run the manual smoke
    pass in [testing/manual-smoke.md](testing/manual-smoke.md) against that copy
    and record it with `python3 scripts/log_verification.py` (see
    [conventions](conventions.md#documentation)).
@@ -943,9 +956,8 @@ CI publishes the disk image although the questions in
 [../LICENSING.md](../LICENSING.md) remain unresolved; the licensing gate that
 once failed Build was removed for 1.0.0 by maintainer decision. That file also
 describes the distribution (a free signed download beside the paid Priority
-Support service, under the GPL with corresponding source alongside). Neither
-Developer ID signing nor notarization is part of this pipeline: `scripts/package.py`
-signs with a self-signed certificate that only keeps the designated requirement
-stable ([build.md](build.md#release-signing)), a provenance attestation records
-who built an artifact rather than who vouches for it, and neither is license
-clearance.
+Support service, under the GPL with corresponding source alongside). The image is
+signed with the project's Developer ID and notarized
+([build.md](build.md#release-signing)); notarization is Apple's malware check and a
+provenance attestation records who built an artifact rather than who vouches for it,
+and neither is license clearance.

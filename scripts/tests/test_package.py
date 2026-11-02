@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Unit tests for scripts/package.py: the minimum macOS a packaged bundle can claim and how warnings are shown."""
+"""Unit tests for scripts/package.py: the minimum macOS a packaged bundle can claim, how warnings are shown, and how it signs."""
 from __future__ import annotations
 
+import argparse
 import contextlib
 import io
 import sys
@@ -199,6 +200,75 @@ class WriteLicensesTests(unittest.TestCase):
             package.write_licenses(resources, {}, "new notices\n")
             self.assertEqual((resources / "THIRD-PARTY-NOTICES.txt").read_text(), "new notices\n")
             self.assertTrue((resources / "LICENSING.md").is_file())
+
+
+# What `security find-identity -v -p codesigning` prints: valid identities only, so an
+# untrusted self-signed certificate is not among them.
+IDENTITIES = """  1) B3AD765B2043BDF58E95C0C7376B4B6505BB8EDA "Apple Development: someone@example.com (C5762C9UB8)"
+  2) A26B5696707B23C51F8EB8501A941787F8F9A7CB "Developer ID Application: Example Maintainer (ABCDE12345)"
+     2 valid identities found
+"""
+# After a renewal: the old certificate and the new one share their name.
+RENEWED = """  1) A26B5696707B23C51F8EB8501A941787F8F9A7CB "Developer ID Application: Example Maintainer (ABCDE12345)"
+  2) 0F1E2D3C4B5A69788796A5B4C3D2E1F00F1E2D3C "Developer ID Application: Example Maintainer (ABCDE12345)"
+     2 valid identities found
+"""
+
+
+class SigningTests(unittest.TestCase):
+    def signing(self, identity, listing=IDENTITIES):
+        return package.signing_for(identity, listing)
+
+    def test_a_developer_id_is_signed_for_notarization(self):
+        for identity in ("Developer ID Application", "Developer ID Application: Example Maintainer (ABCDE12345)",
+                         "a26b5696707b23c51f8eb8501a941787f8f9a7cb"):
+            signing = self.signing(identity)
+            self.assertTrue(signing.developer_id, identity)
+            self.assertEqual(signing.options(), ["--timestamp", "--options", "runtime"])
+
+    def test_an_identity_that_is_not_listed_runs_without_the_hardened_runtime(self):
+        signing = self.signing("WallpaperMachine Code Signing")
+        self.assertFalse(signing.developer_id)
+        self.assertNotIn("runtime", signing.options())
+
+    def test_an_identity_matching_several_certificates_stops_packaging_and_lists_them(self):
+        with self.assertRaises(package.PackagingError) as raised:
+            self.signing("Developer ID Application", RENEWED)
+        self.assertIn("A26B5696707B23C51F8EB8501A941787F8F9A7CB", str(raised.exception))
+        self.assertIn("0F1E2D3C4B5A69788796A5B4C3D2E1F00F1E2D3C", str(raised.exception))
+        with self.assertRaises(package.PackagingError):
+            self.signing("(")
+
+    def test_a_sha1_picks_one_of_two_certificates_with_the_same_name(self):
+        self.assertTrue(self.signing("0F1E2D3C4B5A69788796A5B4C3D2E1F00F1E2D3C", RENEWED).developer_id)
+
+    def test_an_unknown_identity_is_not_a_developer_id(self):
+        self.assertFalse(self.signing("Developer ID Installer").developer_id)
+
+    def test_ad_hoc_needs_no_keychain(self):
+        signing = package.signing_for("-", listing="unreadable")
+        self.assertEqual((signing.identity, signing.developer_id), ("-", False))
+        self.assertNotIn("runtime", signing.options())
+
+    def test_notarizing_without_a_developer_id_stops_before_the_bundle_is_read(self):
+        args = argparse.Namespace(sign_identity="-", notarize="WallpaperMachine Notary", notary_keychain=None,
+                                  configuration="Release")
+        with mock.patch.object(package, "app_bundle") as app_bundle, \
+                self.assertRaisesRegex(package.PackagingError, "Developer ID"):
+            package.package(args)
+        app_bundle.assert_not_called()
+
+
+class ImageContractTests(unittest.TestCase):
+    def test_a_notarized_image_must_carry_the_ticket_on_its_app(self):
+        with mock.patch.object(package.notary, "check_stapled") as stapled, \
+                mock.patch.object(package.bundle_contract, "verify_bundle", return_value=["warning"]) as contract:
+            self.assertEqual(package.image_contract(True)(Path("/Volumes/x/WallpaperMachine.app")), ["warning"])
+        stapled.assert_called_once()
+        contract.assert_called_once()
+
+    def test_an_image_that_was_not_notarized_is_held_to_the_bundle_contract_only(self):
+        self.assertIs(package.image_contract(False), package.bundle_contract.verify_bundle)
 
 
 if __name__ == "__main__":

@@ -149,8 +149,8 @@ python3 scripts/package.py --configuration Release --check    # preflight only; 
 python3 scripts/package.py --configuration Release --install  # also copy the app to ~/Applications
 ```
 
-CI adds `--require-deployment-target` and `--sign-identity` (see the preflight and
-[Release signing](#release-signing)).
+CI adds `--require-deployment-target`, `--sign-identity` and `--notarize` (see the
+preflight and [Release signing](#release-signing)).
 
 `scripts/package.py` takes the already-built bundle at
 `build/Build/Products/<configuration>/WallpaperMachine.app`, makes it
@@ -234,18 +234,30 @@ bundle is absent.
    in the closure, including each linked Rust crate; the disk image carries only
    the bundle, so the file travels inside the app). `Licenses/` is rebuilt on
    every run.
-3. **Signing.** Each bundled dylib, then each extension
-   (`--preserve-metadata=entitlements`), then the app are signed with
-   `--sign-identity` (default `-`, ad hoc), and the result is checked with
-   `codesign --verify --deep --strict`. Release builds use the project
-   certificate; see [Release signing](#release-signing). Nothing is notarized;
-   see [../LICENSING.md](../LICENSING.md#signing-and-notarization).
+3. **Signing.** Inside out: each bundled dylib, each framework in
+   `Contents/Frameworks` (the MediaRemote adapter), each extension with
+   [`Extension/WallpaperExtension.entitlements`](../Extension/WallpaperExtension.entitlements),
+   then the app with
+   [`Packaging/WallpaperMachine.entitlements`](../Packaging/WallpaperMachine.entitlements)
+   are signed with `--sign-identity` (default `-`, ad hoc), and the result is checked
+   with `codesign --verify --deep --strict`. A Developer ID identity signs every piece
+   with the hardened runtime (`--options runtime`) and a secure timestamp, as
+   notarization requires; ad hoc and other certificates sign without the runtime,
+   whose library validation would refuse libraries that carry no team. Each bundle gets
+   exactly its repository entitlements, not what Xcode signed in: Xcode adds
+   `com.apple.security.get-task-allow` to the extension even in a Release build, and
+   Apple does not notarize that. Release builds use the Developer ID; see
+   [Release signing](#release-signing).
    A valid signature does not say what it signs, so the bundle is then read back
    against its [contract](#bundle-contract).
 4. **Dependency audit.** Every binary is re-scanned. A remaining Homebrew-prefixed
    load command fails with `Unbundled dependency: …`; an `@rpath` dependency with
    no matching file in `Contents/Frameworks` fails with `Missing bundled
    dependency: …` (Swift runtime libraries are exempt).
+   With `--notarize PROFILE`, the app is then zipped and sent to Apple with
+   `xcrun notarytool submit --wait`, and the ticket is stapled to the bundle, so the
+   copy a user drags out of the image opens without a network connection
+   ([Release signing](#release-signing)).
 5. **Disk image.** The version is read from the bundle's
    `CFBundleShortVersionString`, and [`scripts/lib/dmg.py`](../scripts/lib/dmg.py)
    writes `WallpaperMachine-<version>-arm64.dmg`: an HFS+ volume named
@@ -258,14 +270,17 @@ bundle is absent.
    permission. The window geometry, the Finder constraints behind the
    `.DS_Store` records and the background are documented in `dmg.py`; the
    background is `Packaging/dmg/background.png` and its `@2x` twin, and the
-   volume icon is the app's `AppIcon.icns`.
+   volume icon is the app's `AppIcon.icns`. A Developer ID identity then signs
+   the image itself, and `--notarize` has Apple notarize it and staples its
+   ticket too.
 6. **Verification and checksum.** The image is mounted read-only and out of
    sight: the bundle in it must be `app.wallpapermachine` at the version the name
-   claims, pass `codesign --verify --deep --strict` and meet the same
-   [contract](#bundle-contract) as the build, and the `Applications`
-   link and the window layout must be there. Only then is
-   `WallpaperMachine-<version>-arm64.dmg.sha256` written, in the format
-   `shasum -a 256 -c` reads. The in-app updater depends on the image name; see
+   claims, pass `codesign --verify --deep --strict`, meet the same
+   [contract](#bundle-contract) as the build and, when notarized, still carry its
+   stapled ticket; the `Applications` link and the window layout must be there.
+   Only then is `WallpaperMachine-<version>-arm64.dmg.sha256` written, in the format
+   `shasum -a 256 -c` reads: stapling changes the image's bytes, so a checksum
+   written earlier would not match the published file. The in-app updater depends on the image name; see
    [release.md](release.md). The notices the bundle carries are listed in
    [../LICENSING.md](../LICENSING.md#notice-payload).
 7. **`--install`.** Copies the bundle to `~/Applications/WallpaperMachine.app`.
@@ -303,14 +318,26 @@ finding:
   them macOS does not show the permission prompts); `CFBundleURLTypes` registering
   the `wallpapermachine` scheme; `LSMinimumSystemVersion` at least the
   `MACOSX_DEPLOYMENT_TARGET` in `project.yml` (packaging may raise it, never lower
-  it). The host must not be sandboxed.
+  it). The host must not be sandboxed, and every key and value of
+  [`Packaging/WallpaperMachine.entitlements`](../Packaging/WallpaperMachine.entitlements)
+  must be in its signature: under the hardened runtime, Apple Events to Music and
+  Spotify (`com.apple.security.automation.apple-events`) and the system audio tap
+  (`com.apple.security.device.audio-input`) fail without a prompt when they are
+  missing. Packaging signs them in, not Xcode, so debug builds and the test host
+  run as before.
 - **Signing:** the app and the extension must both be signed, and both ad hoc or
   neither. When neither is ad hoc their team identifiers must match (a self-signed
-  certificate such as the project's has none, and two absent teams match).
+  certificate has none, and two absent teams match).
+- **Developer ID:** when the host is signed with a Developer ID, the host and every
+  extension must carry the hardened runtime and no `com.apple.security.get-task-allow`,
+  and every dylib and framework in `Contents/Frameworks` must be signed by the same
+  team: Apple refuses to notarize anything else, and the runtime's library validation
+  would refuse to load a library signed ad hoc or by another team.
 
-Entitlements the signature adds beyond the repository file are only a
+Entitlements the signature adds beyond the repository files are only a
 `WARN`, because Xcode and signing profiles inject some; a debuggable build's
-`com.apple.security.get-task-allow` is the usual one. Tests:
+`com.apple.security.get-task-allow` is the usual one, and an error under a
+Developer ID. Tests:
 `scripts/tests/test_bundle_contract.py` (a synthetic bundle with injected
 signature readers, plus the readers against small binaries signed with
 `codesign`) and `scripts/tests/test_dmg.py` (the contract runs on the mounted
@@ -318,42 +345,82 @@ app).
 
 ### Release signing
 
-The published image is signed with the self-signed code-signing certificate
-`WallpaperMachine Code Signing` (SHA-1 `2BDF4E2431B7EDEB731DE288726C896480A0FA82`,
-valid to 2046). Its designated requirement is
-`identifier "app.wallpapermachine" and certificate root = H"2bdf…fa82"`, the same
-for every release, so macOS keeps the system-audio and Apple Events permissions
-across an in-app update. An ad-hoc requirement is the build's cdhash, which every
-release changes, so updating from an ad-hoc build (1.0.1 and older) asks for
-those permissions once more.
+The published image is signed with the project's Developer ID,
+`Developer ID Application: … (DT6YQU64FF)`, and notarized by Apple: the app is
+notarized and stapled before it goes into the disk image, and the image is then
+signed, notarized and stapled itself, so a downloaded copy opens on its first launch
+without **Open Anyway**, offline included. Every piece is signed with the hardened
+runtime and a secure timestamp ([Signing](#packaging-and-installing)), and the
+app's designated requirement is
+`identifier "app.wallpapermachine" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] and certificate leaf[field.1.2.840.113635.100.6.1.13] and certificate leaf[subject.OU] = DT6YQU64FF`.
+It names the team, not a certificate, so it is the same for every release and
+survives renewing the Developer ID certificate: macOS keeps the system-audio and
+Apple Events permissions across an in-app update.
 
-The certificate is not trusted by Gatekeeper and replaces no Developer ID: the
-first launch still goes through **Open Anyway**. `.github/workflows/build.yml`
-imports it from the `SIGNING_CERTIFICATE_P12` (base64 PKCS#12, legacy 3DES
-encryption so `security import` reads it) and `SIGNING_CERTIFICATE_PASSWORD`
-repository secrets into a temporary keychain and fails when either is missing,
-rather than shipping an ad-hoc build. The private key is kept only by the
-maintainer, outside the repository. Replacing the certificate changes the
-requirement, so the release after a replacement asks for permissions once more, and
-the in-app updater refuses a copy that does not meet `AppUpdateConfiguration.signingRequirement`
-([updates](features/updates.md#installing)): a release whose requirement accepts both
-certificates has to ship first. The same change updates `TelemetryEnvironment.releaseCertificateSHA256` with the SHA-256
-of the new certificate's DER bytes, or every copy of the next release reports itself
-as a build from source ([telemetry](features/telemetry.md#what-a-report-holds)). This
-telemetry fingerprint is independent of the designated requirement's SHA-1; changing
-the telemetry hash does not change the signature or reset macOS permissions.
-To sign locally with it, import the PKCS#12 into a keychain in the search list and
-pass `--sign-identity "WallpaperMachine Code Signing"`.
+The switch from the self-signed project certificate `WallpaperMachine Code Signing`
+(SHA-1 `2BDF4E2431B7EDEB731DE288726C896480A0FA82`, valid to 2046), which signed
+1.0.2 through 1.8.2, changed the designated requirement once. The first Developer ID
+release therefore asks for those permissions again, and macOS asks once before it
+hands the pixiv and Steam sign-ins saved in the keychain to the new signature (a
+sign-in that is refused is asked for again). Updating from an ad-hoc build (1.0.1
+and older) did the same. Only copies from 1.8.0 on install a Developer ID release
+from the in-app updater: `AppUpdateConfiguration.signingRequirement` accepts both
+the project certificate and the Developer ID from 1.8.0 on, while older copies refuse
+it as unverifiable and have to be updated by downloading the image
+([updates](features/updates.md#installing)). Every installed copy checks an update
+against the requirement it shipped with, so a signer stays in the requirement for
+as long as releases are signed with it, and replacing the team (not just renewing the
+certificate) needs a release whose requirement accepts both teams first.
+`TelemetryEnvironment` counts a copy that meets
+`AppUpdateConfiguration.developerIDRequirement`, or carries the project certificate as
+its leaf, as a release ([telemetry](features/telemetry.md#what-a-report-holds)).
 
-The updater's requirement already accepts the project's Developer ID as well: a copy
-with this identifier, signed by Apple's Developer ID chain for team `DT6YQU64FF`
-(`anchor apple generic`, the Developer ID intermediate and leaf markers, and
-`certificate leaf[subject.OU] = "DT6YQU64FF"`), installs like one signed with
-the project certificate. Releases are still signed with the project certificate; the
-Developer ID is accepted ahead of time so that they can update themselves to Developer
-ID signed, notarized releases once the pipeline signs with it. Every installed copy
-checks an update against the requirement it shipped with, so a signer stays in the
-requirement for as long as releases are signed with it.
+`.github/workflows/build.yml` imports the certificate and the notary credentials into
+a temporary keychain from five repository secrets and fails when any is missing,
+rather than shipping a build Gatekeeper holds:
+
+| Secret | Holds |
+|---|---|
+| `DEVELOPER_ID_CERTIFICATE_P12` | The Developer ID Application certificate with its private key, as a base64 PKCS#12 |
+| `DEVELOPER_ID_CERTIFICATE_PASSWORD` | That PKCS#12's password |
+| `NOTARY_API_KEY` | The text of an App Store Connect team API key (`AuthKey_<id>.p8`, Developer role) |
+| `NOTARY_API_KEY_ID` | That key's ID |
+| `NOTARY_API_ISSUER` | The issuer ID shown above the team keys in App Store Connect |
+
+The API key becomes the `WallpaperMachine Notary` profile of
+`xcrun notarytool store-credentials` in that keychain (storing it checks it with Apple),
+and packaging runs with `--sign-identity "Developer ID Application" --notarize
+"WallpaperMachine Notary" --notary-keychain <the temporary keychain>`. The private key
+is kept only by the maintainer, outside the repository. To export it, choose the
+**Developer ID Application** certificate in Keychain Access, **File → Export Items…**
+as a `.p12`, and store `base64 -i <file>.p12` as the first secret. The workflow also
+imports both of Apple's Developer ID intermediates, so the chain builds whichever one
+issued the certificate.
+
+Create the certificate with the **G2 Sub-CA** profile type in the Apple Developer
+portal. One made with **Previous Sub-CA** ends with that intermediate on 2027-02-01;
+a G2 one lasts longer (the portal shows the date; the one created on 2026-11-02 ends on
+2027-12-02). Code signed with a secure timestamp stays valid after its certificate
+expires, and the designated requirement names the team, so replacing an expiring
+certificate means exporting the new one into the first two secrets and nothing else.
+Never revoke a Developer ID certificate that signed a release: Gatekeeper then refuses
+every copy it signed.
+
+To sign and notarize locally, save a profile once with
+`xcrun notarytool store-credentials "WallpaperMachine Notary"` (the same API key, or an
+Apple ID with an app-specific password and `--team-id DT6YQU64FF`), then run
+`python3 scripts/package.py --configuration Release --sign-identity "Developer ID
+Application" --notarize "WallpaperMachine Notary"`. When the keychains hold more than
+one valid Developer ID certificate (an old one beside its renewal), packaging stops
+before it changes anything and lists their SHA-1s; pass one of them as
+`--sign-identity`. Without `--notarize`, the build is signed but Gatekeeper calls it
+`Unnotarized Developer ID`. A refused submission prints
+Apple's log: each issue names the file and the reason. A submission Apple has not
+finished within the 50 minutes packaging waits stops it with the submission's id;
+`xcrun notarytool history --keychain-profile "WallpaperMachine Notary"` lists them all.
+A new team's first submissions are held for hours (the team's first ones, on
+2026-11-02, were still `In Progress` after two hours), so a release waits until they
+are `Accepted`; later ones take minutes.
 
 ## Runtime data locations
 

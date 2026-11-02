@@ -717,8 +717,13 @@ closed lid has not been seen on a desktop
       then quits and reopens; **Skip This Version** keeps the next launch quiet.
 - [ ] Opening the disk image shows one window without toolbar or sidebar: the
       app and Applications at their places over the background, labels readable,
-      the volume icon. Dragging installs; the first launch is refused and opens
-      from System Settings → Privacy & Security → **Open Anyway**.
+      the volume icon. Dragging installs; a release (Developer ID signed and
+      notarized) opens on its first launch without **Open Anyway**, also with the
+      network off, and `spctl --assess -vv` on the installed app says
+      `source=Notarized Developer ID`. After updating from a project-certificate
+      copy (1.8.0 to 1.8.2), macOS asks for system audio and Apple Events again,
+      and the keychain asks once before handing over the saved pixiv and Steam
+      sign-ins.
 
 ## Cross-cutting
 

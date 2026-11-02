@@ -152,11 +152,11 @@ proc-macros run inside the compiler and are not linked.
 ## Signing and notarization
 
 `scripts/package.py` signs every bundled library, the extension and the app ad hoc by
-default; release builds use a self-signed project certificate
-([docs/build.md](docs/build.md#release-signing)) so that macOS privacy permissions
-survive in-app updates. No Developer ID certificate is used yet and the download is not
-notarized, which is why macOS asks before the first launch. Signing verifies the
-bundle's integrity; it is not a license grant.
+default; release builds are signed with the project's Developer ID and notarized by
+Apple ([docs/build.md](docs/build.md#release-signing)), so the download opens without
+**Open Anyway** and macOS privacy permissions survive in-app updates. Signing verifies
+the bundle's integrity and notarization is Apple's malware check; neither is a license
+grant. A build from source is signed ad hoc.
 
 ## Tooling
 

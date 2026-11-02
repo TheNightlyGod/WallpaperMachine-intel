@@ -9,6 +9,15 @@ level.
 These are historical results about the trees they were taken on. They are not
 evidence about the current tree and must never be cited as such.
 
+## 2026-11-02 — When another app is in front (discussion #91)
+
+- Feature: Settings → Playback & Power gains When another app is in front (Keep running / Mute / Pause), default Keep running.
+- AppRuleMonitor adds the chosen action while the frontmost app is not Finder or this app; no app in front counts as the desktop.
+- python3 scripts/test.py --only AppRuleMonitorTests, PlaybackPreferencesTests, PanelSettingsResetTests, ConditionOverrideTests and six more Panel/Backup classes: 120 passed.
+- python3 scripts/test.py: Python stage OK; native 4287 passed, 0 failed, 53 skipped.
+- Localization catalog and panel localization checks pass; five languages added for title, note and prose.
+- Not checked: the setting on a real desktop (no desktop run requested); the app was not rebuilt.
+
 ## 2026-11-01 — Discord invitation, About entry and Help menu item
 
 A fifth one-time prompt, Join us on Discord?, invites once to MMFoundation's Discord through https://mmfoundation.dev/discord (ExternalLink.discord, allowlisted; never the invite itself), last in priority, after 21 days and 7 days of panel use on the star prompt's clock. Settings › About gains Join Discord beside MMFoundation and the Help menu gains Join Discord; either spends the invitation. Strings in all six languages.

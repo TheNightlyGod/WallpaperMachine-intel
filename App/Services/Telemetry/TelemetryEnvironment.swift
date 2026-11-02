@@ -18,7 +18,7 @@ enum TelemetryEnvironment {
         return TelemetryReport.AppInfo(
             version: matching(version, #"^\d{1,4}(\.\d{1,4}){0,3}$"#) ?? "0",
             build: matching(build, #"^[0-9A-Za-z.]{1,16}$"#) ?? "0",
-            source: isSource(signingInformation: signingInformation()))
+            source: isSource(signingInformation: signingInformation(), signedWithDeveloperID: signedWithDeveloperID(ownCode())))
     }
 
     @MainActor
@@ -68,15 +68,19 @@ enum TelemetryEnvironment {
         value.range(of: pattern, options: .regularExpression) == nil ? nil : value
     }
 
-    /// SHA-256 of the DER-encoded project certificate `WallpaperMachine Code Signing`.
-    /// This telemetry fingerprint is separate from the code-signing requirement's SHA-1
-    /// (`docs/build.md#release-signing`); replacing the certificate changes both.
+    /// SHA-256 of the DER-encoded project certificate `WallpaperMachine Code Signing`, which
+    /// signed the releases before they were signed with the Developer ID. This telemetry
+    /// fingerprint is separate from the code-signing requirement's SHA-1
+    /// (`docs/build.md#release-signing`).
     static let releaseCertificateSHA256 = "5628ff548673a0cc17cbfc2de3298461be3340e00737a50f5356f5fcc84d364c"
 
-    /// A copy is the release only when it is signed with the project certificate. That
-    /// certificate is self-signed and carries no team, so a team says nothing here; a build
-    /// from source is signed ad hoc, without certificates, or with its builder's own one.
-    static func isSource(signingInformation: [String: Any]?) -> Bool {
+    /// A copy is the release when the project's Developer ID signed it (`signedWithDeveloperID`,
+    /// checked against `AppUpdateConfiguration.developerIDRequirement`), or the project
+    /// certificate as a leaf. That certificate is self-signed and carries no team, so its team
+    /// says nothing; a build from source is signed ad hoc, without certificates, or with its
+    /// builder's own certificate or Developer ID.
+    static func isSource(signingInformation: [String: Any]?, signedWithDeveloperID: Bool = false) -> Bool {
+        if signedWithDeveloperID { return false }
         guard let signingInformation else { return true }
         if let flags = signingInformation[kSecCodeInfoFlags as String] as? NSNumber,
             SecCodeSignatureFlags(rawValue: flags.uint32Value).contains(.adhoc)
@@ -89,9 +93,26 @@ enum TelemetryEnvironment {
         return digest.map { String(format: "%02x", $0) }.joined() != releaseCertificateSHA256
     }
 
-    private static func signingInformation() -> [String: Any]? {
+    /// Whether the running `code` is signed by Apple's Developer ID chain for the project's
+    /// team. The kernel already validated the running code, so this costs no rehashing of
+    /// the bundle, and a signature that merely names the team does not pass.
+    static func signedWithDeveloperID(_ code: SecCode?) -> Bool {
+        var requirement: SecRequirement?
+        guard let code,
+            SecRequirementCreateWithString(AppUpdateConfiguration.developerIDRequirement as CFString, [], &requirement)
+                == errSecSuccess, let requirement
+        else { return false }
+        return SecCodeCheckValidity(code, [], requirement) == errSecSuccess
+    }
+
+    static func ownCode() -> SecCode? {
         var code: SecCode?
-        guard SecCodeCopySelf([], &code) == errSecSuccess, let code else { return nil }
+        guard SecCodeCopySelf([], &code) == errSecSuccess else { return nil }
+        return code
+    }
+
+    private static func signingInformation() -> [String: Any]? {
+        guard let code = ownCode() else { return nil }
         var staticCode: SecStaticCode?
         guard SecCodeCopyStaticCode(code, [], &staticCode) == errSecSuccess, let staticCode else { return nil }
         var information: CFDictionary?
