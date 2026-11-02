@@ -777,8 +777,13 @@ An import takes Wallpaper Engine project folders, a Steam library, a Wallpaper
 Engine folder, a project's own files, videos (`mp4`, `m4v`, `mov`, `webm`, `mkv`,
 `avi`; importing never checks the format, so a file macOS cannot play is imported and
 refused when applied, [with its format named](performance.md#video-playback)), HTML
-files and pictures (`jpg`, `jpeg`, `png`, `gif`, `webp`, `heic`,
-`heif`, `tif`, `tiff`, `bmp`, `avif`, at most 512 MB). A picture becomes a still
+files and pictures. A video becomes a `video` wallpaper with the id `local-<file name>`
+and a 512 px `preview.jpg` (`VideoPoster`: the frame a tenth of the way in, at most
+3 s, past a fade-in), so its tile has a picture; a clip AVFoundation cannot decode is
+imported without one. At launch, a `local-` video project imported before posters
+existed, with no `preview` in its manifest, gets one and the library is rescanned.
+Pictures may be `jpg`, `jpeg`, `png`, `gif`, `webp`, `heic`,
+`heif`, `tif`, `tiff`, `bmp` or `avif`, at most 512 MB. A picture becomes a still
 `web` wallpaper with the id `image-<file name>`, packaged the way pixiv pages are
 (`StillImageWallpaper`; see [pixiv](pixiv.md#saving-a-page)): the original kept as
 `image.<ext>`, a 512 px `preview.jpg`, and a `display.jpg` shown instead when the

@@ -51,15 +51,21 @@ actor WallpaperImportService {
     nonisolated private static let stagingOwnerMarker = Data("WallpaperMachine local import v1\n".utf8)
 
     private let downscale: @Sendable (Data, Int) throws -> Data
+    private let poster: @Sendable (URL, Int) async throws -> Data
 
     /// `downscale` re-encodes an image as a JPEG no larger than the given pixel size; the app
-    /// uses the thumbnail cache's ImageIO encoder, which also proves the bytes decode.
+    /// uses the thumbnail cache's ImageIO encoder, which also proves the bytes decode. `poster`
+    /// makes the same of a frame of a video file (`VideoPoster`).
     init(
         downscale: @escaping @Sendable (Data, Int) throws -> Data = {
             try WorkshopThumbnailCache.encodeThumbnail($0, maxPixelSize: $1)
+        },
+        poster: @escaping @Sendable (URL, Int) async throws -> Data = {
+            try await VideoPoster.jpeg(of: $0, maxPixelSize: $1)
         }
     ) {
         self.downscale = downscale
+        self.poster = poster
     }
 
     func importItems(
@@ -201,12 +207,15 @@ actor WallpaperImportService {
             try copySafely(candidate, to: built.appendingPathComponent(name))
             var isVideo = false
             if case .video = kind { isVideo = true }
-            let manifest: [String: Any] = [
+            var manifest: [String: Any] = [
                 "title": candidate.deletingPathExtension().lastPathComponent,
                 "type": isVideo ? "video" : "web",
                 "file": name,
                 "general": ["properties": [String: Any]()],
             ]
+            if isVideo, try await writePoster(of: name, in: built) {
+                manifest["preview"] = StillImageWallpaper.previewFile
+            }
             let data = try JSONSerialization.data(withJSONObject: manifest,
                                                   options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
             try data.write(to: built.appendingPathComponent("project.json"), options: .atomic)
@@ -224,6 +233,54 @@ actor WallpaperImportService {
             try fm.moveItem(at: built, to: destination)
         }
         report.importedIDs.append(id)
+    }
+
+    /// Writes the library's still of the video `file` in `folder` as its preview. A clip the
+    /// system cannot decode (a codec only the renderer plays) still imports, without one.
+    private func writePoster(of file: String, in folder: URL) async throws -> Bool {
+        let still: Data
+        do {
+            still = try await poster(folder.appendingPathComponent(file), StillImageWallpaper.previewPixels)
+        } catch {
+            try Task.checkCancellation()
+            AppLog.warn("import: no preview for \(file): \(error.localizedDescription)")
+            return false
+        }
+        try Task.checkCancellation()
+        try still.write(to: folder.appendingPathComponent(StillImageWallpaper.previewFile), options: .atomic)
+        return true
+    }
+
+    /// Gives every video this service imported from disk before it made previews one, so its
+    /// tile shows a picture. Only the app's own `local-` projects are changed: a video project
+    /// with a manifest, nothing else in its manifest naming a preview. Returns the ids that got one.
+    func addMissingVideoPreviews(in library: URL) async -> [String] {
+        let fm = FileManager.default
+        guard let names = try? fm.contentsOfDirectory(atPath: library.path) else { return [] }
+        var added: [String] = []
+        for id in names.sorted() where id.hasPrefix("local-") {
+            guard !Task.isCancelled else { break }
+            let folder = library.appendingPathComponent(id, isDirectory: true)
+            guard holdsProjectManifest(folder), var manifest = readManifest(at: folder),
+                  manifest["type"] as? String == "video", manifest["preview"] == nil,
+                  let file = manifest["file"] as? String, !file.contains("/"), isSafeRelativePath(file),
+                  file != StillImageWallpaper.previewFile,
+                  let metadata = try? downloadMetadata(at: folder.appendingPathComponent(file)),
+                  metadata.st_mode & S_IFMT == S_IFREG
+            else { continue }
+            do {
+                guard try await writePoster(of: file, in: folder) else { continue }
+                manifest["preview"] = StillImageWallpaper.previewFile
+                let data = try JSONSerialization.data(withJSONObject: manifest,
+                                                      options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
+                try data.write(to: folder.appendingPathComponent("project.json"), options: .atomic)
+                added.append(id)
+            } catch {
+                AppLog.warn("library: could not add a preview to \(id): \(error.localizedDescription)")
+            }
+        }
+        if !added.isEmpty { AppLog.info("library: added a preview to \(added.count) imported video(s)") }
+        return added
     }
 
     /// Builds a self-contained wallpaper from a preset folder and the base it names, found beside

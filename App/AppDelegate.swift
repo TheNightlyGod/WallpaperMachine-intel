@@ -165,6 +165,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
                     AppLog.warn("import: \(id) was replaced but could not be reloaded: \(error.localizedDescription)")
                 }
             }
+            // Videos imported before imports made a preview show an empty tile until they have one.
+            let library = ClientPaths.libraryURL
+            Task(priority: .utility) { [weak created] in
+                guard !(await WallpaperImportService().addMissingVideoPreviews(in: library)).isEmpty else { return }
+                do { try await created?.refreshLibraryAsync() } catch {
+                    AppLog.warn("library: rescan after adding video previews failed: \(error.localizedDescription)")
+                }
+            }
             for line in DiagnosticEnvironment.current() { AppLog.info("environment: \(line)") }
             startupError = nil
             playbackSnapshotCurrent = false
