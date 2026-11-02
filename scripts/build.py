@@ -57,7 +57,7 @@ def repository_commit(root=ROOT):
 def build_environment():
     result = os.environ.copy()
     prefix = subprocess.check_output(["brew", "--prefix"], text=True).strip()
-    packages = ["quickjs-ng", "freetype", "lz4", "nlohmann-json", "argparse"]
+    packages = ["quickjs-ng", "libpng", "brotli", "lz4", "nlohmann-json", "argparse"]
     roots = [str(Path(prefix) / "opt" / name) for name in packages]
     result["PATH"] = f"{prefix}/bin:" + result.get("PATH", "")
     result["CMAKE_PREFIX_PATH"] = ";".join(roots + [prefix])

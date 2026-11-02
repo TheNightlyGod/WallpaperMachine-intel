@@ -12,6 +12,26 @@ app's update window shows the sections of every version newer than the installed
 one, in the app's language; the GitHub Release body repeats only the English notes.
 See [docs/release.md](docs/release.md) for how a version is cut.
 
+## [1.8.1](https://github.com/MMFoundation/WallpaperMachine/compare/v1.8.0...v1.8.1) (2026-11-02)
+
+### English
+
+#### Bug Fixes
+
+- WallpaperMachine opens again on macOS 15.0 to 15.3, where versions 1.7.1 and 1.8.0 quit before showing anything (closes [#149](https://github.com/MMFoundation/WallpaperMachine/issues/149)) ([e66f436](https://github.com/MMFoundation/WallpaperMachine/commit/e66f436eefa261759eea1c5558100853f7e908fc))
+
+### 简体中文
+
+#### 问题修复
+
+- WallpaperMachine 现可在 macOS 15.0 至 15.3 上正常打开，此前 1.7.1 和 1.8.0 版本会在显示任何内容前直接退出 (closes [#149](https://github.com/MMFoundation/WallpaperMachine/issues/149)) ([e66f436](https://github.com/MMFoundation/WallpaperMachine/commit/e66f436eefa261759eea1c5558100853f7e908fc))
+
+### 한국어
+
+#### 버그 수정
+
+- macOS 15.0~15.3에서 WallpaperMachine이 다시 열리며, 1.7.1 및 1.8.0 버전에서 아무것도 표시되기 전에 종료되던 문제가 해결되었습니다 (closes [#149](https://github.com/MMFoundation/WallpaperMachine/issues/149)) ([e66f436](https://github.com/MMFoundation/WallpaperMachine/commit/e66f436eefa261759eea1c5558100853f7e908fc))
+
 ## [1.8.0](https://github.com/MMFoundation/WallpaperMachine/compare/v1.7.1...v1.8.0) (2026-11-02)
 
 ### English

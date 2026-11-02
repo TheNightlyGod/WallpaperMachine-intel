@@ -49,6 +49,15 @@
     "modified": false,
     "note": "The release tarball's src/ copied unchanged (meson, Python generators, Ragel sources and test programs left out) with COPYING as LICENSE. Vendored 2026-10-25 as the text shaper behind text layers (Renderer/Engine/src/Text/TextShaper.cpp), because Wallpaper Engine 2.8.0.42 shapes with a statically linked HarfBuzz through hb_ft_font_create (artifacts/we-parity/decompiles/G-F1.md). Built as the static archive harfbuzz from the amalgamation src/harfbuzz.cc with HAVE_FREETYPE=1 and nothing else (no glib, ICU, graphite2 or cairo), so the dylib closure is unchanged."
   },
+  "freetype": {
+    "repository": "https://gitlab.freedesktop.org/freetype/freetype",
+    "version": "2.15.0",
+    "release": "2.15.0 (freetype-2.15.0.tar.xz, SHA-256 93cd47eb719c325107f2d3cf087d06299e944c3b48a40b55537302304dea1dd5, the archive Homebrew's freetype 2.15.0 formula builds)",
+    "license": "FTL OR GPL-2.0-or-later, used under GPL-2.0-or-later",
+    "directory": "ThirdParty/freetype",
+    "modified": false,
+    "note": "The release tarball's CMakeLists.txt, LICENSE.TXT, README, include/, src/ (less src/tools/), builds/cmake/ (less testbuild.sh), the four builds/unix/ files the CMake build reads (configure.raw, ftconfig.h.in, ftsystem.c, freetype2.in) and docs/FTL.TXT and docs/GPLv2.TXT, copied unchanged. Vendored 2026-11-02 in place of the Homebrew freetype dylib (issue #149): FreeType 2.15's build links Apple's /usr/lib/libhvf.dylib whenever the SDK has it, and macOS has that library only from 15.4, so 1.7.1 and 1.8.0 stopped in dyld on macOS 15.0 to 15.3. Built by Renderer/Engine/Dependencies through its own CMake project as the static archive freetype, with FT_DISABLE_HVF and FT_DISABLE_HARFBUZZ (Homebrew also builds it without HarfBuzz) and zlib, bzip2 (macOS), libpng and Brotli (Homebrew) required, as Homebrew's build links them."
+  },
   "msdfgen": {
     "repository": "https://github.com/Chlumsky/msdfgen",
     "version": "1.13",

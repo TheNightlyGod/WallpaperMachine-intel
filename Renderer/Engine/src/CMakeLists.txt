@@ -1,6 +1,5 @@
 find_package(OpenGL REQUIRED)
 find_package(Threads REQUIRED)
-find_package(Freetype REQUIRED)
 pkg_check_modules(LZ4 REQUIRED IMPORTED_TARGET liblz4)
 
 include(TestBigEndian)

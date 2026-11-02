@@ -75,10 +75,30 @@ target_include_directories(stb_vorbis SYSTEM PUBLIC ${WESCENE_THIRD_PARTY_DIR}/s
 target_compile_options(stb_vorbis PRIVATE -w)
 set_property(TARGET stb_vorbis PROPERTY POSITION_INDEPENDENT_CODE ON)
 
+# FreeType 2.15.0 (FTL or GPL-2.0-or-later, unchanged): the font engine behind text
+# layers, built from source as the static archive freetype with its own CMake project.
+# Its optional libraries are those Homebrew's build links (zlib and bzip2 from macOS,
+# libpng and Brotli from Homebrew), less two: HarfBuzz, which the autohinter would
+# otherwise load, and Apple's HVF fonts, whose /usr/lib/libhvf.dylib exists only from
+# macOS 15.4 but would be linked unconditionally, so the app could not start on 15.0
+# to 15.3. Freetype::Freetype names it for the libraries and tests that use it.
+set(BUILD_SHARED_LIBS OFF)
+set(SKIP_INSTALL_ALL ON)
+set(DISABLE_FORCE_DEBUG_POSTFIX ON)
+foreach(_option HARFBUZZ HVF)
+    set(FT_DISABLE_${_option} ON)
+endforeach()
+foreach(_option ZLIB BZIP2 PNG BROTLI)
+    set(FT_REQUIRE_${_option} ON)
+endforeach()
+add_subdirectory(${WESCENE_THIRD_PARTY_DIR}/freetype ${CMAKE_CURRENT_BINARY_DIR}/freetype EXCLUDE_FROM_ALL)
+target_compile_options(freetype PRIVATE -w)
+set_property(TARGET freetype PROPERTY POSITION_INDEPENDENT_CODE ON)
+add_library(Freetype::Freetype ALIAS freetype)
+
 # HarfBuzz 15.0.0 (Old MIT, unchanged): the text shaper behind text layers (Text/TextShaper),
 # built from its single-file amalgamation with the FreeType font functions only, as
 # Wallpaper Engine links it (hb_ft_font_create).
-find_package(Freetype REQUIRED)
 add_library(harfbuzz STATIC ${WESCENE_THIRD_PARTY_DIR}/harfbuzz/src/harfbuzz.cc)
 target_compile_definitions(harfbuzz PRIVATE HAVE_FREETYPE=1)
 target_include_directories(harfbuzz SYSTEM PUBLIC ${WESCENE_THIRD_PARTY_DIR}/harfbuzz/src)

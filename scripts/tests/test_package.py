@@ -34,6 +34,60 @@ class RaisedMinimumTests(unittest.TestCase):
         self.assertEqual(list(newer), ["libfreetype.6.dylib"])
 
 
+def otool_listing(file, *loads):
+    """`otool -L` output: the header line, then one load command per line."""
+    return "\n".join([f"{file}:", *(f"\t{load}" for load in loads)]) + "\n"
+
+
+class SystemLibraryTests(unittest.TestCase):
+    """Which system libraries the bundle may load unconditionally on its oldest macOS."""
+
+    prefix = Path("/opt/homebrew")
+    app = Path("/build/WallpaperMachine.app/Contents/MacOS/WallpaperMachine")
+    library = prefix / "opt/sample/lib/libsample.6.dylib"
+
+    def unavailable(self, listings):
+        with mock.patch.object(package, "output", lambda args: listings[Path(args[-1])]):
+            return package.unavailable_system_libraries([self.app], [self.library], self.prefix)
+
+    def test_a_bundled_library_that_loads_a_newer_system_library_stops_packaging(self):
+        listings = {
+            self.app: otool_listing(self.app, f"{self.library} (compatibility version 27.0.0, current version 27.7.0)"),
+            self.library: otool_listing(
+                self.library,
+                f"{self.library} (compatibility version 27.0.0, current version 27.7.0)",
+                "/usr/lib/libz.1.dylib (compatibility version 1.0.0, current version 1.2.12)",
+                "/usr/lib/libhvf.dylib (compatibility version 0.0.0, current version 0.0.0)",
+                "/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1351.0.0)"),
+        }
+        self.assertEqual(self.unavailable(listings), ["libsample.6.dylib: /usr/lib/libhvf.dylib"])
+
+    def test_a_weak_load_may_name_a_library_the_oldest_macos_lacks(self):
+        listings = {
+            self.app: otool_listing(self.app),
+            self.library: otool_listing(
+                self.library, "/usr/lib/libhvf.dylib (compatibility version 0.0.0, current version 0.0.0, weak)"),
+        }
+        self.assertEqual(self.unavailable(listings), [])
+
+    def test_only_the_apps_own_executables_may_load_frameworks_and_the_swift_runtime(self):
+        frameworks = ["/System/Library/Frameworks/Metal.framework/Versions/A/Metal (compatibility version 1.0.0, current version 370.64.2)",
+                      "/usr/lib/swift/libswiftCore.dylib (compatibility version 1.0.0, current version 6.2.0)",
+                      "@rpath/libsample.6.dylib (compatibility version 27.0.0, current version 27.7.0)"]
+        listings = {self.app: otool_listing(self.app, *frameworks), self.library: otool_listing(self.library, *frameworks)}
+        self.assertEqual(self.unavailable(listings), [
+            "libsample.6.dylib: /System/Library/Frameworks/Metal.framework/Versions/A/Metal",
+            "libsample.6.dylib: /usr/lib/swift/libswiftCore.dylib",
+        ])
+
+    def test_the_app_may_not_load_an_unlisted_library_from_usr_lib_either(self):
+        listings = {
+            self.app: otool_listing(self.app, "/usr/lib/libhvf.dylib (compatibility version 0.0.0, current version 0.0.0)"),
+            self.library: otool_listing(self.library),
+        }
+        self.assertEqual(self.unavailable(listings), ["WallpaperMachine: /usr/lib/libhvf.dylib"])
+
+
 class ResolveLibrariesTests(unittest.TestCase):
     """The Homebrew closure the app bundles, read from fake load commands."""
 

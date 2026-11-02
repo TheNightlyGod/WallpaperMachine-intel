@@ -314,10 +314,12 @@ class AppWalkTests(unittest.TestCase):
         self.assertEqual([(c.name, c.license, c.source) for c in components], [("lz4", "BSD-2-Clause", "map")])
 
     def test_an_override_beats_the_homebrew_string(self):
-        self.keg("freetype", "2.14.3", "libfreetype.6.dylib")
-        tools = FakeTools(otool={"Main": [self.opt("freetype", "libfreetype.6.dylib")], "Ext": [], "libfreetype.6.dylib": []})
-        components = check_licenses.dylib_components(self.walk(tools), self.prefix, self.app,
-                                                     FakeTools(brew_licenses={"freetype": "FTL"}))
+        self.keg("sample-font", "2.14.3", "libsamplefont.6.dylib")
+        tools = FakeTools(otool={"Main": [self.opt("sample-font", "libsamplefont.6.dylib")], "Ext": [], "libsamplefont.6.dylib": []})
+        override = {"sample-font": ("FTL OR GPL-2.0-or-later", "Homebrew reports only one of the two licenses")}
+        with mock.patch.dict(check_licenses.OVERRIDES, override):
+            components = check_licenses.dylib_components(self.walk(tools), self.prefix, self.app,
+                                                         FakeTools(brew_licenses={"sample-font": "FTL"}))
         self.assertEqual((components[0].license, components[0].source), ("FTL OR GPL-2.0-or-later", "override"))
         self.assertEqual(check_licenses.assess(components[0])[0], "ok")
 

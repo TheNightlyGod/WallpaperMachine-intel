@@ -20,7 +20,7 @@ Homebrew packages the renderer links against, exactly as listed in
 `build_environment()` in `scripts/build.py`:
 
 ```sh
-brew install quickjs-ng freetype lz4 nlohmann-json argparse
+brew install quickjs-ng libpng brotli lz4 nlohmann-json argparse
 ```
 
 Plus the build tooling those packages are compiled and consumed with:
@@ -59,7 +59,7 @@ command produces the same build from a terminal, an editor, or CI.
 |---|---|---|
 | `PATH` | `$(brew --prefix)/bin` prepended | Finds Homebrew `cmake`, `ninja` and friends ahead of anything else. |
 | `CMAKE_PREFIX_PATH` | `;`-joined `opt/<package>` roots plus the Homebrew prefix | CMake resolves each dependency from its own keg, including keg-only ones like `quickjs-ng`, instead of guessing. |
-| `PKG_CONFIG_PATH` | `:`-joined `opt/<package>/lib/pkgconfig` | `pkg-config` consumers (freetype, lz4) find the matching `.pc` files. |
+| `PKG_CONFIG_PATH` | `:`-joined `opt/<package>/lib/pkgconfig` | `pkg-config` consumers (lz4, and Brotli for the vendored FreeType) find the matching `.pc` files. |
 | `OWE_NIX_LIBRARY_PATH` | `:`-joined `opt/<package>/lib` plus `<prefix>/lib` | The vendored scene engine's build scripts use this to locate native libraries to link. |
 | `LIBCLANG_PATH` | `$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/lib` | Rust `bindgen`/`uniffi` need `libclang` from the selected Xcode toolchain. |
 | `SDKROOT` | `xcrun --sdk macosx --show-sdk-path` | Pins C/C++/Rust compilation to the selected macOS SDK. |
@@ -200,11 +200,20 @@ bundle is absent.
      `LSMinimumSystemVersion` to that release, so macOS declines to open the app
      instead of it failing to load a library. `--require-deployment-target`,
      which the release workflow passes, exits 1 instead.
+   - A `minos` says nothing about the system libraries a file loads, so every
+     one the app, the extension or a library to bundle loads unconditionally
+     must be in `SYSTEM_LIBRARIES` (`scripts/package.py`), the `/usr/lib`
+     libraries known to ship with macOS 15.0; the app's and extension's own
+     executables may also load Apple frameworks and the Swift runtime, which
+     Xcode links at the deployment target. Anything else, such as the
+     `/usr/lib/libhvf.dylib` that macOS has only from 15.4, stops packaging
+     before the bundle changes: dyld would refuse to start the app on an older
+     release. A weak load is not checked.
 1. **Dylib relocation.** Starting from the app and extension binaries, it walks `otool -L` transitively. Every dependency under
    the Homebrew prefix is copied into `Contents/Frameworks`, including a
    sibling a Homebrew library loads through `@rpath` and its own
-   `@loader_path/../lib` rpath (Brotli's decoder, which FreeType loads from
-   2.15, loads its common library that way; only rpaths that stay inside the
+   `@loader_path/../lib` rpath (Brotli's decoder, which the app loads for
+   FreeType, loads its common library that way; only rpaths that stay inside the
    prefix are followed), given an
    `@rpath/<name>` install name, and rewritten in its dependents with
    `install_name_tool -change`. Absolute `LC_RPATH` entries pointing into the
