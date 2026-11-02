@@ -104,6 +104,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     /// The signal that asked for the quit being requested, until `applicationShouldTerminate`
     /// reads it. Cleared when a quit is refused, so a later Quit is not taken for the signal's.
     private var terminationSignal: Int32?
+    /// Set while the app's own Quit or Exit runs `terminate`, so the quit line can say so.
+    private var quitChosenFromMenu = false
     private var themeSubscription: AnyCancellable?
     private var iconSubscription: AnyCancellable?
     private var diagnostics: RuntimeDiagnosticsSession?
@@ -1285,7 +1287,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     /// request that arrives while a quit is already running. The Apple event is only
     /// readable here, while it is being handled.
     private func logQuitRequest() -> (reason: QuitReason, mode: QuitMode, signal: Int32?) {
-        let appleEventReason = QuitReason.appleEventReason(from: NSAppleEventManager.shared().currentAppleEvent)
+        let event = NSAppleEventManager.shared().currentAppleEvent
+        let appleEventReason = QuitReason.appleEventReason(from: event)
+        let requester = QuitRequester.resolve(
+            menuChosen: quitChosenFromMenu, senderPID: QuitRequester.senderPID(of: event))
+        quitChosenFromMenu = false
         let signal = terminationSignal
         terminationSignal = nil
         let powerOffNotified = powerOffNotice.isCurrent()
@@ -1299,6 +1305,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         let frontmost = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "none"
         AppLog.info(
             "quit: reason=\(reason.rawValue) mode=\(mode.rawValue) "
+                + "from=\(requester.logText()) "
                 + "frontmost=\(frontmost) "
                 + "panelVisible=\(controlPanelWindow?.isVisible ?? false) "
                 + "updateInstallPending=\(updateInstallPending) "
@@ -2661,6 +2668,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     }
 
     @objc private func exitApplication() {
+        quitChosenFromMenu = true
+        defer { quitChosenFromMenu = false }
         NSApp.terminate(nil)
     }
 

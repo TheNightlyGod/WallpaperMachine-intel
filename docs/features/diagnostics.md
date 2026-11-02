@@ -175,13 +175,21 @@ anything is torn down. The line is written for a request that arrives while a qu
 already running too, which is how a second Exit or a logout during a user quit shows up:
 
 ```
-quit: reason=logout mode=powerOff frontmost=com.apple.loginwindow panelVisible=false updateInstallPending=false alreadyInProgress=false powerOffNotified=true appleEventReason='rlgo' signal=none
+quit: reason=logout mode=powerOff from=com.apple.loginwindow (pid 412) frontmost=com.apple.loginwindow panelVisible=false updateInstallPending=false alreadyInProgress=false powerOffNotified=true appleEventReason='rlgo' signal=none
 ```
 
 `mode` is how the quit behaves: `powerOff` when the reason is a logout, restart or shutdown or
 macOS announced one (a signal that arrives during a shutdown is still `powerOff`), otherwise
 `interactive`. A power-off quit has shorter deadlines and is never refused; see
 [desktop picture](desktop-picture.md#logout-restart-and-shutdown).
+
+`from` (`QuitRequester`) says who asked: `menu` for the app's own Quit or Exit, the bundle
+identifier (or, for a program without one, its file name) and pid of the process that sent
+the quit Apple event (`com.apple.dock`, `com.apple.loginwindow`, `osascript`, another app;
+`exited` when it is already gone), `self` for an event the app sent itself, and `none` when
+neither applies (a signal, the updater). `frontmost` is not the requester: choosing Exit in
+the menu-bar menu leaves the other app frontmost, so only `from` tells that Exit apart from
+a quit another program sent.
 
 `reason` (`QuitReason`) is the first of these that applies:
 
@@ -191,7 +199,7 @@ macOS announced one (a signal that arrives during a shutdown is still `powerOff`
 | `logout`, `restart`, `shutdown` | the quit Apple event names that kind (`why?`: `rlgo`/`logo`, `rest`/`rrst`, `shut`/`rsdn`), or macOS announced a power-off (`NSWorkspace.willPowerOffNotification`) and the event named none. The announcement cannot say which kind it is, so that case reads `shutdown`; `appleEventReason=none` in the line tells it apart |
 | `update` | the updater has started its installer and is waiting for the app to quit (`AppUpdateStore.isInstallPending`). A Quit chosen while the update is still being prepared is the user's: it cancels the preparation |
 | `unknown` | the event carries a reason code this build does not know |
-| `user` | anything else: the menu, the Dock, another app's plain quit |
+| `user` | anything else: the menu, the Dock, another app's plain quit; `from` names which |
 
 The event's reason is a parameter of the quit event, readable only while that event is being
 handled, so it is read at the top of `applicationShouldTerminate` and nowhere else. A quit

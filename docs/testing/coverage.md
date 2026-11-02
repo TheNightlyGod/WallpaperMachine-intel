@@ -612,7 +612,10 @@ on [manual-smoke.md](manual-smoke.md).
   announcement stops counting after its lifetime and after a refused quit. They also pin which
   reasons make a power-off quit (the three kinds, and a signal that arrives during an announced
   shutdown, but not a user's quit, an update or an unknown reason) and the text the session
-  ledger keeps for a quit that left the desktop unrestored or a stage running.
+  ledger keeps for a quit that left the desktop unrestored or a stage running. Who asked
+  (`QuitRequester`): an event's sender beats the menu, an event built in place names no sender,
+  one the Apple Event Manager delivers (sent to the test process itself) does, and the log names
+  a sender by bundle identifier or file name, never a path.
 - `QuitTimingsTests` — stages keep their own duration in the order they were settled, a stage
   that failed is timed and says why in the log, a stage that was left behind is marked and keeps
   how long it was waited for, the total covers the work between stages, one line per stage plus
