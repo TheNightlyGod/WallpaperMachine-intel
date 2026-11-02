@@ -414,6 +414,18 @@ final class PixivServiceTests: XCTestCase {
         XCTAssertNil(URLSessionPixivTransport.redirected(signed).value(forHTTPHeaderField: "Cookie"))
     }
 
+    /// pixiv's Cloudflare front answers a signed-in request with a 403 browser check unless its
+    /// user agent has the `Mozilla/5.0` form browsers send; anonymous requests pass either way.
+    func testSignedInRequestsUseABrowserFormUserAgentThatNamesTheApp() throws {
+        let request = URLSessionPixivTransport.request(
+            URL(string: "https://www.pixiv.net/ajax/illust/1/pages")!, accept: "application/json",
+            session: PixivFixtures.session)
+        let agent = try XCTUnwrap(request.value(forHTTPHeaderField: "User-Agent"))
+        XCTAssertTrue(agent.hasPrefix("Mozilla/5.0 ("), agent)
+        XCTAssertTrue(agent.contains(" WallpaperMachine/"), agent)
+        XCTAssertFalse(agent.contains("Safari"), "the app does not claim to be Safari: \(agent)")
+    }
+
     func testOnlySignedInSessionValuesAreAccepted() {
         XCTAssertTrue(PixivService.isSessionValue(PixivFixtures.session))
         XCTAssertEqual(PixivService.userID(fromSession: PixivFixtures.session), "31415926")

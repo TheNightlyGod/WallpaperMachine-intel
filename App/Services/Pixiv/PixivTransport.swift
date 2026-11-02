@@ -53,9 +53,13 @@ struct URLSessionPixivTransport: PixivTransport {
         return URLSession(configuration: configuration, delegate: RedirectGuard(), delegateQueue: nil)
     }()
 
+    /// WebKit's default user agent form, naming the app instead of Safari: pixiv's
+    /// Cloudflare front answers a signed-in request whose user agent lacks the `Mozilla/5.0`
+    /// form with a 403 browser check.
     private static let userAgent: String = {
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
-        return "WallpaperMachine/\(version ?? "1.0") (macOS; pixiv browser)"
+        return "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) "
+            + "WallpaperMachine/\(version ?? "1.0")"
     }()
 
     static func request(_ url: URL, accept: String, session: String? = nil) -> URLRequest {

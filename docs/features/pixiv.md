@@ -55,7 +55,11 @@ filter only the app applies cost no request; the page after the one on show is
 fetched ahead of time. The summary line names the listing and how many works on
 the page the filters hide, and a page whose works are all hidden offers **Clear
 filters** and **Next page**. JSON requests are spaced at least 350 ms apart and
-carry an honest user agent (`WallpaperMachine/<version> (macOS; pixiv browser)`);
+carry WebKit's user agent form naming the app instead of Safari
+(`Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)
+WallpaperMachine/<version>`): pixiv's Cloudflare front answers a signed-in request whose user
+agent lacks the `Mozilla/5.0` form with a 403 browser check ("Just a moment…") on every
+endpoint, while anonymous requests pass either way;
 thumbnails come from `i.pximg.net`, which answers only requests that name pixiv
 as their referrer, through a thumbnail cache of their own
 (`Cache/PixivThumbnails`, 256 MB, six fetches at a time), which the panel's image
@@ -71,9 +75,9 @@ browser on the same network still opens pixiv. Such a refusal (a 403/503 from
 error reference such as 1010 or 1020: `error code: 1010`, `cf-error-1010`, `Error reference
 number: 1010`) is reported as a block by pixiv's protection service with its reference, and
 the error advises switching proxy node or network; it is never mapped to the R-18 sign-in
-handling below. The app keeps its honest user agent: URLSession shares Safari's TLS
-fingerprint but not its HTTP/2 one, so a Safari user agent would not make the app look like
-Safari and would only add a mismatch. Failed HTTP responses log the status code, the pixiv
+handling below. The app does not claim to be Safari: URLSession shares Safari's TLS
+fingerprint but not its HTTP/2 one, so a full Safari user agent would not make the app look
+like Safari and would only add a mismatch. Failed HTTP responses log the status code, the pixiv
 host and whether Cloudflare refused it (with its reference), never URLs, searches, cookies or
 response bodies, for the [diagnostics report](diagnostics.md#diagnostics-report).
 R-18 ranking denials have the account-specific handling described below.
