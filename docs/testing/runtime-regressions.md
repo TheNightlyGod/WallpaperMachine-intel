@@ -368,11 +368,15 @@ device.
   `CVMetalTextureCache`: each texture it vends maps the whole surface, one mapping per plane,
   and it keeps every texture it vended for a second after release
   (`kCVMetalTextureCacheMaximumTextureAgeKey`; a flush does not shorten that second and an age
-  of 0 disables aging, so nothing is ever freed). It reuses a texture only when it can match
-  the buffer to the one it made before, which it did for buffers made on a surface but never
-  for the ones VideoToolbox's pool hands out as `ClockedVideoSource` queues them, ahead of the
-  clock on its own thread (frames decoded on the importing thread were reused; why the queued ones are
-  not was not established). Every import then made a new pair, and a 7232x3100 60 fps scene
+  of 0 disables aging, so nothing is ever freed). It reuses a texture only when the surface
+  and a 56-byte block of texture parameters both match, and on macOS 27 that block carries
+  five stack bytes Core Video never initializes (padding in
+  `CVMetalTextureCache::createTextureFromImageWithParams`). Reuse therefore depends on what
+  last ran at that depth of the importing thread, not on the buffer: imports after
+  `ClockedVideoSource`'s queue mostly found different bytes, frames decoded on the importing
+  thread happened to find the same ones, and a single-thread `CVPixelBufferPool` misses every
+  time once those bytes change per frame. A texture that missed is freed a second after its
+  frame, and with it every other texture the cache holds for that surface. Every import then made a new pair, and a 7232x3100 60 fps scene
   video held 4.5 GB of device allocations at 60 draws a second and 8.2 GB drawn as fast as
   possible, against 0.47 GB with the textures made on the surface (`phys_footprint` about 1 GB
   either way, measured with `metal_scene_draw_smoke`'s local-project run). The old cache
