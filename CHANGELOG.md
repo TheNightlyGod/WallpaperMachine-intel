@@ -12,6 +12,89 @@ app's update window shows the sections of every version newer than the installed
 one, in the app's language; the GitHub Release body repeats only the English notes.
 See [docs/release.md](docs/release.md) for how a version is cut.
 
+## [1.8.0](https://github.com/MMFoundation/WallpaperMachine/compare/v1.7.1...v1.8.0) (2026-11-02)
+
+### English
+
+This release lets WallpaperMachine update itself to notarized, Developer ID signed downloads and adds an easy way to join its community, alongside fixes for desktops, Steam sign-in and scenes
+
+#### Highlights
+
+- WallpaperMachine can now update itself to releases signed with its Apple Developer ID and notarized by Apple ([6172d14](https://github.com/MMFoundation/WallpaperMachine/commit/6172d14ef4526fdc7f4fc1cd789d061bdf375a29))
+- Join MMFoundation's Discord from About or the Help menu to talk with the people who build the app and other users ([8c438e9](https://github.com/MMFoundation/WallpaperMachine/commit/8c438e99b101a4f3a501c3a904cff9a50c6d0101))
+- Different wallpaper for each desktop now also works on Macs that used to report desktop information as unavailable (closes [#139](https://github.com/MMFoundation/WallpaperMachine/issues/139)) ([bfc1391](https://github.com/MMFoundation/WallpaperMachine/commit/bfc13912c4c6a425f38dbdf3299a0a289df4c64d))
+- Styled text in scenes now renders cleanly with .otf and CJK fonts instead of putting each character inside a box ([ff1dbf3](https://github.com/MMFoundation/WallpaperMachine/commit/ff1dbf379bfed48a245b73998d6ad984457a7b8c))
+
+#### Features
+
+- The in-app updater now installs releases signed with WallpaperMachine's Apple Developer ID, so this version can move on to notarized downloads ([6172d14](https://github.com/MMFoundation/WallpaperMachine/commit/6172d14ef4526fdc7f4fc1cd789d061bdf375a29))
+- Join Discord in About and the Help menu opens MMFoundation's Discord server, where you can ask questions and share ideas ([8c438e9](https://github.com/MMFoundation/WallpaperMachine/commit/8c438e99b101a4f3a501c3a904cff9a50c6d0101))
+- After about three weeks of use, WallpaperMachine invites you once to its Discord, and Not now dismisses the invitation for good ([8c438e9](https://github.com/MMFoundation/WallpaperMachine/commit/8c438e99b101a4f3a501c3a904cff9a50c6d0101))
+- An MMFoundation button in About opens the website of the organization behind WallpaperMachine and its other open-source Mac apps ([5f12486](https://github.com/MMFoundation/WallpaperMachine/commit/5f12486a81a1af6aa981ef1019cce3038d4605cc))
+
+#### Bug Fixes
+
+- Different wallpaper for each desktop no longer reports desktop information as unavailable, and the first desktop can now get its own wallpaper (closes [#139](https://github.com/MMFoundation/WallpaperMachine/issues/139)) ([bfc1391](https://github.com/MMFoundation/WallpaperMachine/commit/bfc13912c4c6a425f38dbdf3299a0a289df4c64d))
+- Steam account names starting with an underscore can sign in and download from the Workshop again, and their saved sign-ins work again (closes [#140](https://github.com/MMFoundation/WallpaperMachine/issues/140)) ([31d52b5](https://github.com/MMFoundation/WallpaperMachine/commit/31d52b56ca103cc0fd1ff1f1f4e0d0f555477d7d))
+- Styled text layers using .otf fonts or macOS CJK fallback fonts no longer draw each character inside a solid box ([ff1dbf3](https://github.com/MMFoundation/WallpaperMachine/commit/ff1dbf379bfed48a245b73998d6ad984457a7b8c))
+- Surfaces lit at a grazing angle, such as a planet's rings, no longer show fine light and dark stripes with Shadows on High or Ultra (closes [#141](https://github.com/MMFoundation/WallpaperMachine/issues/141)) ([0da387c](https://github.com/MMFoundation/WallpaperMachine/commit/0da387c324ccbc6f8e80e0c54014311167980621))
+
+Thanks to [@BxnIceLemon](https://github.com/BxnIceLemon) for contributing to this release.
+
+### 简体中文
+
+本次更新让 WallpaperMachine 能够自动更新到经过公证、使用 Developer ID 签名的版本，新增加入社区的便捷入口，并修复了桌面、Steam 登录和场景中的问题
+
+#### 亮点
+
+- WallpaperMachine 现在可以自动更新到使用其 Apple Developer ID 签名并经过 Apple 公证的版本 ([6172d14](https://github.com/MMFoundation/WallpaperMachine/commit/6172d14ef4526fdc7f4fc1cd789d061bdf375a29))
+- 在“关于”或“帮助”菜单中即可加入 MMFoundation 的 Discord，与开发者和其他用户交流 ([8c438e9](https://github.com/MMFoundation/WallpaperMachine/commit/8c438e99b101a4f3a501c3a904cff9a50c6d0101))
+- 为每个桌面设置不同壁纸的功能，现在在此前提示桌面信息不可用的 Mac 上也能正常使用 (closes [#139](https://github.com/MMFoundation/WallpaperMachine/issues/139)) ([bfc1391](https://github.com/MMFoundation/WallpaperMachine/commit/bfc13912c4c6a425f38dbdf3299a0a289df4c64d))
+- 场景中带样式的文字使用 .otf 和中日韩字体时显示清晰，不再把每个字符框在方块里 ([ff1dbf3](https://github.com/MMFoundation/WallpaperMachine/commit/ff1dbf379bfed48a245b73998d6ad984457a7b8c))
+
+#### 新功能
+
+- 应用内更新现在可以安装使用 WallpaperMachine 的 Apple Developer ID 签名的版本，从此版本起可升级到经过公证的下载版本 ([6172d14](https://github.com/MMFoundation/WallpaperMachine/commit/6172d14ef4526fdc7f4fc1cd789d061bdf375a29))
+- “关于”和“帮助”菜单新增“加入 Discord”，可前往 MMFoundation 的 Discord 服务器提问和分享想法 ([8c438e9](https://github.com/MMFoundation/WallpaperMachine/commit/8c438e99b101a4f3a501c3a904cff9a50c6d0101))
+- 使用约三周后，WallpaperMachine 会邀请你加入 Discord，仅此一次，选择“以后再说”即不再出现 ([8c438e9](https://github.com/MMFoundation/WallpaperMachine/commit/8c438e99b101a4f3a501c3a904cff9a50c6d0101))
+- “关于”中新增 MMFoundation 按钮，可打开开发 WallpaperMachine 及其他开源 Mac 应用的组织的网站 ([5f12486](https://github.com/MMFoundation/WallpaperMachine/commit/5f12486a81a1af6aa981ef1019cce3038d4605cc))
+
+#### 问题修复
+
+- 为每个桌面设置不同壁纸时不再提示桌面信息不可用，第一个桌面也可以设置自己的壁纸了 (closes [#139](https://github.com/MMFoundation/WallpaperMachine/issues/139)) ([bfc1391](https://github.com/MMFoundation/WallpaperMachine/commit/bfc13912c4c6a425f38dbdf3299a0a289df4c64d))
+- 以下划线开头的 Steam 帐户名可以重新登录并从创意工坊下载，已保存的登录状态也恢复正常 (closes [#140](https://github.com/MMFoundation/WallpaperMachine/issues/140)) ([31d52b5](https://github.com/MMFoundation/WallpaperMachine/commit/31d52b56ca103cc0fd1ff1f1f4e0d0f555477d7d))
+- 使用 .otf 字体或 macOS 中日韩备用字体的带样式文字图层，不再把每个字符画在实心方块中 ([ff1dbf3](https://github.com/MMFoundation/WallpaperMachine/commit/ff1dbf379bfed48a245b73998d6ad984457a7b8c))
+- 阴影设为高或极高时，以掠射角受光的表面（如行星光环）不再出现细密的明暗条纹 (closes [#141](https://github.com/MMFoundation/WallpaperMachine/issues/141)) ([0da387c](https://github.com/MMFoundation/WallpaperMachine/commit/0da387c324ccbc6f8e80e0c54014311167980621))
+
+感谢 [@BxnIceLemon](https://github.com/BxnIceLemon) 为本版本做出的贡献。
+
+### 한국어
+
+이번 릴리스로 WallpaperMachine은 Developer ID로 서명되고 공증된 버전으로 스스로 업데이트할 수 있으며, 커뮤니티에 쉽게 참여할 수 있고 데스크탑, Steam 로그인, 장면 문제도 수정되었습니다
+
+#### 주요 변경 사항
+
+- 이제 WallpaperMachine은 Apple Developer ID로 서명되고 Apple의 공증을 받은 릴리스로 스스로 업데이트할 수 있습니다 ([6172d14](https://github.com/MMFoundation/WallpaperMachine/commit/6172d14ef4526fdc7f4fc1cd789d061bdf375a29))
+- 정보 또는 도움말 메뉴에서 MMFoundation의 Discord에 참여해 개발자 및 다른 사용자와 이야기할 수 있습니다 ([8c438e9](https://github.com/MMFoundation/WallpaperMachine/commit/8c438e99b101a4f3a501c3a904cff9a50c6d0101))
+- 데스크탑마다 다른 배경화면 기능이 이전에 데스크탑 정보를 사용할 수 없다고 표시하던 Mac에서도 작동합니다 (closes [#139](https://github.com/MMFoundation/WallpaperMachine/issues/139)) ([bfc1391](https://github.com/MMFoundation/WallpaperMachine/commit/bfc13912c4c6a425f38dbdf3299a0a289df4c64d))
+- 장면의 스타일 텍스트가 .otf 및 한중일 글꼴에서 글자마다 상자에 갇히지 않고 깔끔하게 표시됩니다 ([ff1dbf3](https://github.com/MMFoundation/WallpaperMachine/commit/ff1dbf379bfed48a245b73998d6ad984457a7b8c))
+
+#### 새로운 기능
+
+- 앱 내 업데이트가 WallpaperMachine의 Apple Developer ID로 서명된 릴리스를 설치할 수 있어, 이 버전부터 공증된 다운로드로 넘어갈 수 있습니다 ([6172d14](https://github.com/MMFoundation/WallpaperMachine/commit/6172d14ef4526fdc7f4fc1cd789d061bdf375a29))
+- 정보와 도움말 메뉴의 Discord 참여를 누르면 MMFoundation의 Discord 서버로 이동해 질문하고 아이디어를 나눌 수 있습니다 ([8c438e9](https://github.com/MMFoundation/WallpaperMachine/commit/8c438e99b101a4f3a501c3a904cff9a50c6d0101))
+- 약 3주 동안 사용하면 WallpaperMachine이 Discord 참여를 한 번 제안하며, 나중에를 누르면 다시 표시되지 않습니다 ([8c438e9](https://github.com/MMFoundation/WallpaperMachine/commit/8c438e99b101a4f3a501c3a904cff9a50c6d0101))
+- 정보에 추가된 MMFoundation 버튼으로 WallpaperMachine과 다른 오픈 소스 Mac 앱을 만드는 조직의 웹사이트를 열 수 있습니다 ([5f12486](https://github.com/MMFoundation/WallpaperMachine/commit/5f12486a81a1af6aa981ef1019cce3038d4605cc))
+
+#### 버그 수정
+
+- 데스크탑마다 다른 배경화면에서 데스크탑 정보를 사용할 수 없다는 메시지가 더 이상 나타나지 않으며, 첫 번째 데스크탑에도 배경화면을 따로 지정할 수 있습니다 (closes [#139](https://github.com/MMFoundation/WallpaperMachine/issues/139)) ([bfc1391](https://github.com/MMFoundation/WallpaperMachine/commit/bfc13912c4c6a425f38dbdf3299a0a289df4c64d))
+- 밑줄로 시작하는 Steam 계정 이름으로 다시 로그인하고 창작마당에서 다운로드할 수 있으며, 저장된 로그인도 다시 작동합니다 (closes [#140](https://github.com/MMFoundation/WallpaperMachine/issues/140)) ([31d52b5](https://github.com/MMFoundation/WallpaperMachine/commit/31d52b56ca103cc0fd1ff1f1f4e0d0f555477d7d))
+- .otf 글꼴이나 macOS 한중일 대체 글꼴을 쓰는 스타일 텍스트 레이어에서 글자마다 채워진 상자가 더 이상 그려지지 않습니다 ([ff1dbf3](https://github.com/MMFoundation/WallpaperMachine/commit/ff1dbf379bfed48a245b73998d6ad984457a7b8c))
+- 그림자를 높음 또는 울트라로 설정했을 때 행성 고리처럼 비스듬히 빛을 받는 표면에 가는 명암 줄무늬가 더 이상 생기지 않습니다 (closes [#141](https://github.com/MMFoundation/WallpaperMachine/issues/141)) ([0da387c](https://github.com/MMFoundation/WallpaperMachine/commit/0da387c324ccbc6f8e80e0c54014311167980621))
+
+이번 릴리스에 기여해 주신 [@BxnIceLemon](https://github.com/BxnIceLemon) 님께 감사드립니다.
+
 ## [1.7.1](https://github.com/MMFoundation/WallpaperMachine/compare/v1.6.6...v1.7.1) (2026-10-31)
 
 ### English
