@@ -20,7 +20,7 @@ final class ConditionOverrideTests: PanelTestCase {
   private func playback(_ value: Case) -> PlaybackSettings {
     PlaybackSettings(
       wallpapersMuted: false, desktopCoveredAction: .pause, playsOnlyOnActiveDisplay: false,
-      otherAudioAction: .keepRunning, displaySleepAction: .pause, batteryMode: value.batteryMode,
+      otherAudioAction: .keepRunning, otherAppInFrontAction: .keepRunning, displaySleepAction: .pause, batteryMode: value.batteryMode,
       onBatteryPower: value.onBattery, batteryRenderScale: 0.75, batteryTargetFps: 30,
       lowBatteryAction: .pause, lowBatteryThreshold: 20, lowPowerModeAction: .pause,
       thermalAction: .pause, batteryPercent: value.batteryPercent, lowPowerModeIsOn: true,

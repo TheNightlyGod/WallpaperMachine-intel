@@ -108,6 +108,7 @@ struct WallpaperBackupPreferences: Sendable {
         "WallpaperMachine.favoriteWallpaperIDs", "WallpaperMachine.appTheme",
         "WallpaperMachine.appLanguage", "AppleLanguages", "WallpaperMachine.hotKeys",
         "WallpaperMachine.displaySleepAction", "WallpaperMachine.otherAudioAction",
+        "WallpaperMachine.otherAppInFrontAction",
         "WallpaperMachine.desktopCoveredAction", "WallpaperMachine.appRules",
         "WallpaperMachine.lowPowerModeAction", "WallpaperMachine.thermalAction",
         "WallpaperMachine.lowBatteryAction", "WallpaperMachine.lowBatteryThreshold",
@@ -254,6 +255,7 @@ struct WallpaperBackupPreferences: Sendable {
         case "AppleLanguages": guard let values = value as? [String], values.count <= 32, values.allSatisfy({ !$0.isEmpty && !$0.contains("\0") && $0.count <= 128 }) else { throw invalid() }
         case "WallpaperMachine.displaySleepAction": guard let raw = value as? String, DisplaySleepAction(rawValue: raw) != nil else { throw invalid() }
         case "WallpaperMachine.otherAudioAction": guard let raw = value as? String, OtherAudioAction(rawValue: raw) != nil else { throw invalid() }
+        case "WallpaperMachine.otherAppInFrontAction": guard let raw = value as? String, OtherAppInFrontAction(rawValue: raw) != nil else { throw invalid() }
         case "WallpaperMachine.desktopCoveredAction": guard let raw = value as? String, DesktopCoveredAction(rawValue: raw) != nil else { throw invalid() }
         case "WallpaperMachine.lowPowerModeAction", "WallpaperMachine.thermalAction", "WallpaperMachine.lowBatteryAction":
             guard let raw = value as? String, SystemConditionAction(rawValue: raw) != nil else { throw invalid() }

@@ -11,6 +11,23 @@ enum OtherAudioAction: String, Codable, CaseIterable, Sendable {
     case pause
 }
 
+/// What wallpapers do while an app other than the desktop is in front: any app but Finder (which
+/// clicking the desktop brings forward) and this app itself.
+enum OtherAppInFrontAction: String, Codable, CaseIterable, Sendable {
+    case keepRunning
+    case mute
+    case pause
+
+    /// The rule action it contributes, the same way an app rule's does; nil while it keeps running.
+    var ruleAction: AppRuleAction? {
+        switch self {
+        case .keepRunning: nil
+        case .mute: .mute
+        case .pause: .pause
+        }
+    }
+}
+
 /// What a wallpaper does while other windows cover its display's working area.
 enum DesktopCoveredAction: String, Codable, CaseIterable, Sendable {
     case pause
@@ -81,7 +98,7 @@ struct AppRule: Codable, Equatable, Identifiable, Sendable {
     var action: AppRuleAction
 }
 
-/// UserDefaults-backed playback rules for display sleep, other-app audio, a
+/// UserDefaults-backed playback rules for display sleep, other-app audio, another app in front, a
 /// covered desktop, Low Power Mode, a hot Mac, a low battery, playing only on the display in use
 /// and per-app pause, mute and stop, whether every wallpaper is muted, and whether the macOS
 /// desktop picture is written at all. Mutations post `didChangeNotification` once.
@@ -98,6 +115,7 @@ final class PlaybackPreferences {
 
     private static let displaySleepKey = "WallpaperMachine.displaySleepAction"
     private static let otherAudioKey = "WallpaperMachine.otherAudioAction"
+    private static let otherAppInFrontKey = "WallpaperMachine.otherAppInFrontAction"
     private static let desktopCoveredKey = "WallpaperMachine.desktopCoveredAction"
     private static let appRulesKey = "WallpaperMachine.appRules"
     private static let lowPowerModeKey = "WallpaperMachine.lowPowerModeAction"
@@ -128,6 +146,12 @@ final class PlaybackPreferences {
     var otherAudioAction: OtherAudioAction {
         get { storedEnum(Self.otherAudioKey, default: .keepRunning) }
         set { store(newValue.rawValue, forKey: Self.otherAudioKey) }
+    }
+
+    /// Off until chosen: which app is in front alone never changes playback.
+    var otherAppInFrontAction: OtherAppInFrontAction {
+        get { storedEnum(Self.otherAppInFrontKey, default: .keepRunning) }
+        set { store(newValue.rawValue, forKey: Self.otherAppInFrontKey) }
     }
 
     var desktopCoveredAction: DesktopCoveredAction {
@@ -261,7 +285,7 @@ final class PlaybackPreferences {
     /// announced once.
     func resetToDefaults() {
         for key in [
-            Self.displaySleepKey, Self.otherAudioKey, Self.desktopCoveredKey, Self.appRulesKey,
+            Self.displaySleepKey, Self.otherAudioKey, Self.otherAppInFrontKey, Self.desktopCoveredKey, Self.appRulesKey,
             Self.lowPowerModeKey, Self.thermalKey, Self.lowBatteryActionKey, Self.lowBatteryThresholdKey,
             Self.periodicDesktopPictureKey, Self.writeDesktopPictureKey, Self.playOnlyOnActiveDisplayKey,
             Self.wallpapersMutedKey,

@@ -231,7 +231,7 @@ the rest opens in a popover from the ⓘ beside the title.
   see [edits on the desktop](wallpaper-properties.md#showing-edits-on-the-desktop)),
   then the Lock screen and Screen saver groups.
 - **Playback & Power** holds the Playback group (mute all, occlusion, other-app
-  audio, display sleep, playing only on the display in use, battery, low battery,
+  audio, another app in front, display sleep, playing only on the display in use, battery, low battery,
   Low Power Mode, heat, Focus, app rules) and the **What these settings change**
   disclosure. The battery, low-battery, Low Power Mode and heat choices can each
   lower quality instead of pausing, and the page names which one is lowering it. See

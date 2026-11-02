@@ -9,6 +9,17 @@ level.
 These are historical results about the trees they were taken on. They are not
 evidence about the current tree and must never be cited as such.
 
+## 2026-10-30 — WE parity: rope geometry stage, event-death children, createLayer angles, planar reflection
+
+- Rope materials with a `.geom` draw through the lowered geometry stage (four strip vertices a piece): WE trail probe ribbon width 19.9 px vs WE 19.6-19.9 and centre within 0.2 px; trail length unchanged (about 75 vs 83 px).
+- Shader `metal_compile.rs` translates and system-compiles the shipped rope program with its geometry stage for 384 combinations; a 264k-piece offscreen rope probe showed no cost beyond run-to-run noise (upper bound about 0.3 ms/frame).
+- `eventdeath` children keep emitting after the death that made them (native 0x140236CD0): parent-copy probe 64/64 particle and control-point samples, including the eight event-death samples that were blank.
+- `createLayer` angles are scene-file radians: WE model-matrix readback matches on all four panels; the 3D perspective MVP z column remains different.
+- Planar reflection integrated after cost approval; particle control-point probes G 128/128 and I 144/144.
+- `check_rust.py` passed; `check_renderer.py` 3,311 passed, 0 failed, 7 skipped; `build.py --renderer-only` OK; `test.py` 4,150 passed, 0 failed, 50 skipped (first run blocked by File Provider xattrs on `build/`, cleared per docs/build.md).
+- 17-scene sweep, paced: 34/34 frames, no visible rendering regression; 2998757800 and 3662790108 improved; metric increases are calendar/clock text (render date 10-30 vs captures 10-25) or stochastic particles.
+- Not done: Release build, desktop run, GPU-side rope subdivision, 64-segment trail length, 3D ModelData projection.
+
 ## 2026-10-30 — Scene parity: shader contracts, HDR framing, particle frames and volumetrics
 
 - Integrated shader R8 author validation, puppet axis links, HDR pre-bloom framing, parent/world particle frames, volumetric lights, and the shared-depth state transition repair; planar reflection remains a separately verified private candidate pending resource-cost approval.

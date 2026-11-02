@@ -15,7 +15,7 @@ it ([below](#low-battery-low-power-mode-heat-and-focus)).
 Every engine control is applied through the bridge and the page re-renders from the
 snapshot the engine returns, so the page never shows a setting the engine did not
 accept. Playback choices that the app owns (muting everything, other-app audio,
-display sleep, app rules) are stored in `PlaybackPreferences` and published on the
+another app in front, display sleep, app rules) are stored in `PlaybackPreferences` and published on the
 same snapshot.
 
 Nothing in these sections promises a measured power saving. A lower frame rate or
@@ -463,6 +463,7 @@ wins. There is no timer and no per-frame check (bridge `tests::playback_reconcil
 | Mute all wallpapers | On, Off | Off |
 | When windows cover the desktop | **Pause**, **Keep running** | Pause |
 | When another app plays sound | **Keep running**, **Mute**, **Pause** | Keep running |
+| When another app is in front | **Keep running**, **Mute**, **Pause** | Keep running |
 | When displays sleep | **Pause**, **Stop (free memory)** | Pause |
 | Only play on the display I’m using | On, Off; shown with two or more displays | Off |
 | On battery | **Keep running**, **Reduced quality**, **Pause** | Keep running |
@@ -556,6 +557,20 @@ These are matched by their full path on the system volume
 those names still counts. Sound must last 0.5 s before it counts and silence 2 s before it clears,
 so a gap between tracks does not restart the wallpaper. Nothing is observed while
 the choice is **Keep running**.
+
+**When another app is in front** mutes or pauses every wallpaper while any app
+other than the desktop is the active one, the way Wallpaper Engine's choice for
+another application being focused does. Finder counts as the desktop, because clicking
+the desktop brings it to the front (a Finder window in front therefore counts too), and
+so does this app, whose panel and menus are about the wallpapers. A moment with no app
+in front is not another app. **Mute** and **Pause** behave as they do for other-app
+sound above, and the user's own Play/Pause is untouched. It is the frontmost-app check
+of the app rules applied to every app: `AppRuleMonitor` adds the chosen action to the
+rule actions it publishes (`AppRuleMonitor.defaultDesktopBundleIDs` names the desktop
+apps), so it composes with the app rules, Focus filters and the user's mute instead of
+replacing them. Workspace activation notifications are observed only while it or an app
+rule can do something; there is no polling. A full-screen app needs no choice: its
+display already pauses because the wallpaper cannot be seen.
 
 **Stop** on display sleep frees renderer memory. The wallpaper is reloaded when the
 display wakes. **Pause** keeps it loaded.
@@ -749,7 +764,8 @@ conflicts with that mode; screen-saver-only ownership does not.
 
 ### App rules
 
-The **App rules** row on Playback & Power opens an inline list. Each row is an app name, a condition (**Running**
+The **App rules** row on Playback & Power opens an inline list, for a rule about one app;
+**When another app is in front** above is the same check for every app. Each row is an app name, a condition (**Running**
 or **In front**), an action (**Pause**, **Mute** or **Stop**) and **Remove**. **Add
 app…** opens a native panel for one `.app` bundle. An app with no bundle identifier
 is refused. The same bundle is not added twice. Rules pause, mute or stop

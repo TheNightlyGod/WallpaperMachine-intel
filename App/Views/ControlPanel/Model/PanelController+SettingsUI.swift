@@ -130,6 +130,16 @@ extension OtherAudioAction {
   }
 }
 
+extension OtherAppInFrontAction {
+  @MainActor var title: String {
+    switch self {
+    case .keepRunning: L("Keep running")
+    case .mute: L("Mute")
+    case .pause: L("Pause")
+    }
+  }
+}
+
 extension DisplaySleepAction {
   @MainActor var title: String {
     switch self {

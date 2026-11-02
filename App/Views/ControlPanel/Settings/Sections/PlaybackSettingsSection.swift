@@ -31,6 +31,12 @@ struct PlaybackSettingsSection: View {
     note:
       "Mute silences scene and video wallpapers, and Web wallpapers when page-output mute is available. Pause applies to every wallpaper."
   )
+  static let otherAppInFront = SettingsItem(
+    id: "playback.other-app-in-front", section: .playback, group: playback,
+    title: "When another app is in front",
+    note:
+      "Clicking the desktop brings Finder to the front, so Finder and this app count as the desktop. Mute and Pause work as they do when another app plays sound."
+  )
   static let displaySleep = SettingsItem(
     id: "playback.display-sleep", section: .playback, group: playback,
     title: "When displays sleep",
@@ -96,7 +102,7 @@ struct PlaybackSettingsSection: View {
     title: "What these settings change")
 
   static let items = [
-    muteAll, desktopCovered, activeDisplayOnly, otherAudio, displaySleep, batteryMode, batteryScale,
+    muteAll, desktopCovered, activeDisplayOnly, otherAudio, otherAppInFront, displaySleep, batteryMode, batteryScale,
     batteryFps, reducedQuality, lowBattery, lowBatteryLevel, lowPowerMode, thermal, focus, appRules,
     addAppRule, whatChanges,
   ]
@@ -142,6 +148,12 @@ struct PlaybackSettingsSection: View {
             "otherAudioAction", saved: playback.otherAudioAction,
             options: OtherAudioAction.allCases.map { ($0, $0.title) }
           ) { try await controller.setOtherAudioAction($0) }
+        }
+        SettingsRow(Self.otherAppInFront) {
+          menu(
+            "otherAppInFrontAction", saved: playback.otherAppInFrontAction,
+            options: OtherAppInFrontAction.allCases.map { ($0, $0.title) }
+          ) { try await controller.setOtherAppInFrontAction($0) }
         }
         SettingsRow(Self.displaySleep) {
           menu(
@@ -261,6 +273,9 @@ struct PlaybackSettingsSection: View {
       )
       Text(
         "When another app plays sound, Mute uses each wallpaper’s output mute channel. Web mute availability is shown in its details. Pause stops every wallpaper until that sound ends."
+      )
+      Text(
+        "When another app is in front, Mute or Pause lasts until you click the desktop or return to this app."
       )
       Text(
         "When displays sleep, Pause keeps wallpapers loaded. Stop frees renderer memory and reloads them when the display wakes."

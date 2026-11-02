@@ -251,7 +251,9 @@ picture shows between a window closing and the web page's window opening.
   and other-app audio compose (Stop beats Pause, Keep running ignores audio),
   defaults and corrupt stored values (the battery mode's `reducedQuality` is not a
   condition choice), the stored Reduced quality choice of the three system conditions
-  that is never a rule action, running versus frontmost rules, and the
+  that is never a rule action, running versus frontmost rules, "When another app is
+  in front" (Finder, this app and no app count as the desktop; it composes with a
+  rule and is watched only while chosen), and the
   other-audio settle and the system feedback services (alerts, the volume click, Siri
   listening) it ignores by their system path. The quality channel is one more delivery beside presentation and audio:
   a reduction reaches the bridge on its own without suspending anything, an unchanged set is

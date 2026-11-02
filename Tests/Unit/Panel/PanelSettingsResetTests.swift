@@ -28,6 +28,7 @@ final class PanelSettingsResetTests: PanelTestCase {
       try await controller.setHotKey(.togglePlayback, keyCode: 35, modifierFlags: [.command, .option])
       try await controller.setDesktopCoveredAction(.keepRunning)
       try await controller.setPlaysOnlyOnActiveDisplay(true)
+      try await controller.setOtherAppInFrontAction(.mute)
       controller.playback.addRule(bundleIdentifier: "com.example.game", name: "Game")
       try await controller.setLivePropertyEdits(true)
       try await controller.setConcurrentDownloads(6)
@@ -50,6 +51,7 @@ final class PanelSettingsResetTests: PanelTestCase {
       XCTAssertNil(controller.hotKeys.bindings[.togglePlayback])
       XCTAssertEqual(controller.playback.desktopCoveredAction, .pause)
       XCTAssertFalse(controller.playback.playsOnlyOnActiveDisplay)
+      XCTAssertEqual(controller.playback.otherAppInFrontAction, .keepRunning)
       XCTAssertTrue(controller.playback.appRules.isEmpty)
       XCTAssertFalse(controller.desktopSettings.livePropertyEdits)
       XCTAssertEqual(

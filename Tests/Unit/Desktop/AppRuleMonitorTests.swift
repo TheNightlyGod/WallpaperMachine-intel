@@ -30,7 +30,63 @@ final class AppRuleMonitorTests: XCTestCase {
             preferences: preferences,
             workspaceCenter: workspaceCenter,
             runningBundleIDs: { self.running },
-            frontmostBundleID: { self.frontmost })
+            frontmostBundleID: { self.frontmost },
+            desktopBundleIDs: ["com.apple.finder", "com.example.Self"])
+    }
+
+    private func activate(_ bundleID: String?) {
+        frontmost = bundleID
+        workspaceCenter.post(name: NSWorkspace.didActivateApplicationNotification, object: nil)
+    }
+
+    func testAnotherAppInFrontActsUntilTheDesktopIsInFront() {
+        preferences.otherAppInFrontAction = .mute
+        frontmost = "com.apple.finder"
+        let monitor = makeMonitor()
+        monitor.start()
+        defer { monitor.stop() }
+        XCTAssertTrue(monitor.actions.isEmpty, "Finder in front is the desktop")
+
+        activate("com.example.Editor")
+        XCTAssertEqual(monitor.actions, [.mute])
+        activate("com.example.Self")
+        XCTAssertTrue(monitor.actions.isEmpty, "This app in front counts as the desktop")
+        activate("com.example.Browser")
+        XCTAssertEqual(monitor.actions, [.mute])
+        activate(nil)
+        XCTAssertTrue(monitor.actions.isEmpty, "No app in front is not another app")
+
+        preferences.otherAppInFrontAction = .pause
+        activate("com.example.Editor")
+        XCTAssertEqual(monitor.actions, [.pause], "A changed choice applies at once")
+        preferences.otherAppInFrontAction = .keepRunning
+        XCTAssertTrue(monitor.actions.isEmpty)
+        activate("com.example.Browser")
+        XCTAssertTrue(monitor.actions.isEmpty, "Keep running stops watching for activations")
+    }
+
+    func testAnotherAppInFrontComposesWithAnAppRule() {
+        let rule = preferences.addRule(bundleIdentifier: "com.example.Game", name: "Game")
+        try? preferences.updateRule(id: rule.id, condition: .frontmost)
+        try? preferences.updateRule(id: rule.id, action: .stop)
+        preferences.otherAppInFrontAction = .mute
+        let monitor = makeMonitor()
+        monitor.start()
+        defer { monitor.stop() }
+
+        activate("com.example.Game")
+        XCTAssertEqual(monitor.actions, [.stop, .mute])
+        activate("com.apple.finder")
+        XCTAssertTrue(monitor.actions.isEmpty)
+    }
+
+    func testTheMonitorIsNeededOnlyForARuleOrAnInFrontChoice() {
+        XCTAssertFalse(AppRuleMonitor.isNeeded(for: preferences))
+        preferences.otherAppInFrontAction = .mute
+        XCTAssertTrue(AppRuleMonitor.isNeeded(for: preferences))
+        preferences.otherAppInFrontAction = .keepRunning
+        preferences.addRule(bundleIdentifier: "com.example.Player", name: "Player")
+        XCTAssertTrue(AppRuleMonitor.isNeeded(for: preferences))
     }
 
     func testRunningRuleFiresOnlyWhileThatAppIsRunning() {

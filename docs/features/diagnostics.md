@@ -439,7 +439,8 @@ state table above and ends the audit at the first look where every window is
 The audit says nothing, and repairs nothing, when no window is expected to show:
 
 - the presentation policy has paused or unloaded the wallpaper (display sleep,
-  session lock, an app rule, or other-app audio set to pause);
+  session lock, an app rule, another app in front or other-app audio set to
+  pause);
 - for `notOnActiveSpace` and `offScreenInWindowServer`, the window's display is
   in a full-screen app's Space, which the Space monitor reports as having no
   current desktop. Where the Space topology cannot be read, the fault is

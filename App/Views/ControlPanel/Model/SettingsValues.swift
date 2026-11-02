@@ -152,6 +152,7 @@ struct PlaybackSettings: Equatable {
   var desktopCoveredAction: DesktopCoveredAction
   var playsOnlyOnActiveDisplay: Bool
   var otherAudioAction: OtherAudioAction
+  var otherAppInFrontAction: OtherAppInFrontAction
   var displaySleepAction: DisplaySleepAction
   var batteryMode: BridgeBatteryMode
   var onBatteryPower: Bool

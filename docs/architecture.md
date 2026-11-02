@@ -398,7 +398,7 @@ per-Space getter and setter through optional private CoreGraphics and HIServices
   it went from locked to unlocked calls `onSessionUnlocked` once, after the presentation it
   settles, which the app delegate hands to `PlaylistScheduler.noteUnlock()` for playlists set
   to change when the Mac is unlocked ([playlists](features/playlists.md#each-time-the-mac-is-unlocked)).
-  `AppRuleMonitor` and `OtherAudioMonitor` feed those conditions, and wallpaper audio is
+  `AppRuleMonitor` (the app rules and "When another app is in front") and `OtherAudioMonitor` feed those conditions, and wallpaper audio is
   suppressed separately (`setAudioSuppressed`) for a mute rule, other-app audio set to mute or the
   user's own mute of every wallpaper (`PlaybackPreferences.wallpapersMuted`). The bridge ORs that one
   flag with each wallpaper's saved mute, so the user's mute never rewrites a saved sound setting.

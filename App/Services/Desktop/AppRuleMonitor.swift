@@ -1,9 +1,21 @@
 import AppKit
 
-/// Reports the app-rule actions currently in force. Workspace notifications are
-/// observed only while at least one rule exists.
+/// Reports the app-rule actions currently in force: the per-app rules' and that of
+/// "When another app is in front". Workspace notifications are observed only while at least one
+/// of them can do something.
 @MainActor
 final class AppRuleMonitor {
+    /// The apps that count as the desktop for "When another app is in front": Finder, which
+    /// clicking the desktop brings forward, and this app, whose panel and menus are about the
+    /// wallpapers themselves.
+    nonisolated static let defaultDesktopBundleIDs: Set<String> = Set(
+        ["com.apple.finder", Bundle.main.bundleIdentifier].compactMap { $0 })
+
+    /// Whether the monitor has anything to watch for these preferences.
+    static func isNeeded(for preferences: PlaybackPreferences) -> Bool {
+        !preferences.appRules.isEmpty || preferences.otherAppInFrontAction.ruleAction != nil
+    }
+
     var onChange: (@MainActor () -> Void)?
     private(set) var actions: Set<AppRuleAction> = []
 
@@ -12,6 +24,7 @@ final class AppRuleMonitor {
     private let preferencesCenter: NotificationCenter
     private let runningBundleIDs: @MainActor () -> Set<String>
     private let frontmostBundleID: @MainActor () -> String?
+    private let desktopBundleIDs: Set<String>
 
     private var observers: [(NotificationCenter, NSObjectProtocol)] = []
     private var started = false
@@ -21,8 +34,10 @@ final class AppRuleMonitor {
         workspaceCenter: NotificationCenter = NSWorkspace.shared.notificationCenter,
         preferencesCenter: NotificationCenter = .default,
         runningBundleIDs: (@MainActor () -> Set<String>)? = nil,
-        frontmostBundleID: (@MainActor () -> String?)? = nil
+        frontmostBundleID: (@MainActor () -> String?)? = nil,
+        desktopBundleIDs: Set<String> = AppRuleMonitor.defaultDesktopBundleIDs
     ) {
+        self.desktopBundleIDs = desktopBundleIDs
         self.preferences = preferences
         self.workspaceCenter = workspaceCenter
         self.preferencesCenter = preferencesCenter
@@ -62,7 +77,7 @@ final class AppRuleMonitor {
 
     private func refreshWorkspaceObservation() {
         let watching = observers.contains { $0.0 === workspaceCenter }
-        guard started, !preferences.appRules.isEmpty else {
+        guard started, Self.isNeeded(for: preferences) else {
             removeWorkspaceObservers()
             return
         }
@@ -89,7 +104,7 @@ final class AppRuleMonitor {
     }
 
     private func recompute() {
-        guard started, !preferences.appRules.isEmpty else {
+        guard started, Self.isNeeded(for: preferences) else {
             publish([])
             return
         }
@@ -102,6 +117,11 @@ final class AppRuleMonitor {
             case .frontmost: frontmost == rule.bundleIdentifier
             }
             if matches { next.insert(rule.action) }
+        }
+        // No app in front (a moment between activations) is not another app.
+        if let action = preferences.otherAppInFrontAction.ruleAction,
+           let frontmost, !desktopBundleIDs.contains(frontmost) {
+            next.insert(action)
         }
         publish(next)
     }

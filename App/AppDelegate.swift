@@ -1369,7 +1369,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
 
     private func syncPlaybackMonitors() {
         let preferences = PlaybackPreferences.shared
-        if preferences.appRules.isEmpty {
+        if !AppRuleMonitor.isNeeded(for: preferences) {
             appRuleMonitor?.stop()
         } else {
             appRuleMonitor?.start()

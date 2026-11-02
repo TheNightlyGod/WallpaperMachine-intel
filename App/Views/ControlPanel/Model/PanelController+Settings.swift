@@ -180,6 +180,11 @@ extension PanelController {
     try await change { playback.otherAudioAction = action }
   }
 
+  /// `otherAppInFrontAction`.
+  func setOtherAppInFrontAction(_ action: OtherAppInFrontAction) async throws {
+    try await change { playback.otherAppInFrontAction = action }
+  }
+
   /// `displaySleepAction`.
   func setDisplaySleepAction(_ action: DisplaySleepAction) async throws {
     try await change { playback.displaySleepAction = action }
