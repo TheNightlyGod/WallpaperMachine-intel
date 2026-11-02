@@ -12,6 +12,83 @@ app's update window shows the sections of every version newer than the installed
 one, in the app's language; the GitHub Release body repeats only the English notes.
 See [docs/release.md](docs/release.md) for how a version is cut.
 
+## [1.8.2](https://github.com/MMFoundation/WallpaperMachine/compare/v1.8.1...v1.8.2) (2026-11-02)
+
+### English
+
+This update gets pixiv working again for signed-in accounts and makes large scene videos play smoother with far less graphics memory
+
+#### Features
+
+- Wallpapers can mute or pause while another app is in front and resume when you click the desktop, a new choice in Playback settings, off by default ([320784e](https://github.com/MMFoundation/WallpaperMachine/commit/320784ecd881a8696053f353d733933c3c8bd308))
+
+#### Improvements
+
+- Getting the shared scene resources now downloads only about 360 MB instead of the whole Wallpaper Engine app ([30fc183](https://github.com/MMFoundation/WallpaperMachine/commit/30fc18392b9b8ccf5db46d60329b69355441ff90))
+- Scenes with large videos use far less graphics memory, about 0.5 GB instead of 4.5 GB for a 7232x3100 clip at 60 fps ([1fc0e44](https://github.com/MMFoundation/WallpaperMachine/commit/1fc0e44decb61d00dacffab2d921666ddff51955))
+- When pixiv's Cloudflare protection blocks your connection, the app now says so, shows the error reference and suggests trying another proxy node or network ([f04bc9c](https://github.com/MMFoundation/WallpaperMachine/commit/f04bc9c4d6b608245b86e030b48c3a614dbe2d9a))
+- The diagnostics log now records whether a quit came from the app's own menu or from another app or program ([f16cd82](https://github.com/MMFoundation/WallpaperMachine/commit/f16cd821d5484c34c6f297489758b041821e8267))
+
+#### Bug Fixes
+
+- Browsing, searching and downloading on pixiv work again after signing in, instead of failing with an access denied error ([cb08b69](https://github.com/MMFoundation/WallpaperMachine/commit/cb08b692db74cd74ce6647dcadaabc9106409068))
+- Video wallpapers that the Mac cannot decode at full speed now play on at a lower frame rate instead of freezing every few seconds (closes [#151](https://github.com/MMFoundation/WallpaperMachine/issues/151)) ([414be4e](https://github.com/MMFoundation/WallpaperMachine/commit/414be4e2362018351919133533f6e9dc00274b38))
+- Imported videos now show a picture from the clip on their library tile instead of an empty placeholder, including videos imported earlier (closes [#152](https://github.com/MMFoundation/WallpaperMachine/issues/152)) ([218fcdf](https://github.com/MMFoundation/WallpaperMachine/commit/218fcdf178c46e75b01f6bd9ab8b23fd461f2769))
+- Text layers that fade in, such as a clock after a wallpaper's intro, now appear on cue instead of showing from the start ([252e8d0](https://github.com/MMFoundation/WallpaperMachine/commit/252e8d07c0858c588adc979275f10516295f1e47))
+- Old update downloads no longer pile up on disk, since only the latest downloaded update is kept (closes [#148](https://github.com/MMFoundation/WallpaperMachine/issues/148)) ([6511e10](https://github.com/MMFoundation/WallpaperMachine/commit/6511e108d908d41b6889d57b99e178173c403b1e))
+
+Thanks to [@BxnIceLemon](https://github.com/BxnIceLemon) for contributing to this release.
+
+### 简体中文
+
+本次更新让已登录的 pixiv 账户恢复正常使用，并让场景中的大尺寸视频播放更流畅、占用的显存大幅减少
+
+#### 新功能
+
+- 使用其他 App 时可让壁纸静音或暂停，点按桌面即恢复播放，可在“播放”设置中选择，默认关闭 ([320784e](https://github.com/MMFoundation/WallpaperMachine/commit/320784ecd881a8696053f353d733933c3c8bd308))
+
+#### 改进
+
+- 获取场景共享资源时现在只需下载约 360 MB，不再下载整个 Wallpaper Engine 应用 ([30fc183](https://github.com/MMFoundation/WallpaperMachine/commit/30fc18392b9b8ccf5db46d60329b69355441ff90))
+- 含大尺寸视频的场景占用的显存大幅减少，一段 7232x3100、60 fps 的视频从约 4.5 GB 降至约 0.5 GB ([1fc0e44](https://github.com/MMFoundation/WallpaperMachine/commit/1fc0e44decb61d00dacffab2d921666ddff51955))
+- 当 pixiv 的 Cloudflare 防护拦截连接时，App 现在会明确说明，显示错误编号，并建议更换代理节点或网络 ([f04bc9c](https://github.com/MMFoundation/WallpaperMachine/commit/f04bc9c4d6b608245b86e030b48c3a614dbe2d9a))
+- 诊断日志现在会记录退出请求来自 App 自身的菜单，还是来自其他 App 或程序 ([f16cd82](https://github.com/MMFoundation/WallpaperMachine/commit/f16cd821d5484c34c6f297489758b041821e8267))
+
+#### 问题修复
+
+- 登录 pixiv 后浏览、搜索和下载恢复正常，不再提示访问被拒绝 ([cb08b69](https://github.com/MMFoundation/WallpaperMachine/commit/cb08b692db74cd74ce6647dcadaabc9106409068))
+- Mac 无法全速解码的视频壁纸现在会以较低帧率继续播放，不再每隔几秒卡住 (closes [#151](https://github.com/MMFoundation/WallpaperMachine/issues/151)) ([414be4e](https://github.com/MMFoundation/WallpaperMachine/commit/414be4e2362018351919133533f6e9dc00274b38))
+- 导入的视频现在会在壁纸库缩略图上显示片中画面，不再是空白占位图，之前导入的视频也一样 (closes [#152](https://github.com/MMFoundation/WallpaperMachine/issues/152)) ([218fcdf](https://github.com/MMFoundation/WallpaperMachine/commit/218fcdf178c46e75b01f6bd9ab8b23fd461f2769))
+- 淡入的文字图层（例如壁纸开场后出现的时钟）现在会按时出现，不再一开始就显示 ([252e8d0](https://github.com/MMFoundation/WallpaperMachine/commit/252e8d07c0858c588adc979275f10516295f1e47))
+- 旧的更新下载文件不再堆积占用磁盘，现在只保留最新下载的一个 (closes [#148](https://github.com/MMFoundation/WallpaperMachine/issues/148)) ([6511e10](https://github.com/MMFoundation/WallpaperMachine/commit/6511e108d908d41b6889d57b99e178173c403b1e))
+
+感谢 [@BxnIceLemon](https://github.com/BxnIceLemon) 为本版本做出的贡献。
+
+### 한국어
+
+이번 업데이트로 로그인한 pixiv 계정을 다시 사용할 수 있으며, 장면 속 대용량 동영상이 더 부드럽게 재생되고 그래픽 메모리도 훨씬 적게 사용합니다
+
+#### 새로운 기능
+
+- 다른 앱을 사용하는 동안 배경화면을 음소거하거나 일시 정지하고 데스크톱을 클릭하면 다시 재생할 수 있으며, 재생 설정에서 고를 수 있고 기본적으로 꺼짐 상태입니다 ([320784e](https://github.com/MMFoundation/WallpaperMachine/commit/320784ecd881a8696053f353d733933c3c8bd308))
+
+#### 개선 사항
+
+- 장면 공유 리소스를 받을 때 이제 Wallpaper Engine 앱 전체 대신 약 360MB만 다운로드합니다 ([30fc183](https://github.com/MMFoundation/WallpaperMachine/commit/30fc18392b9b8ccf5db46d60329b69355441ff90))
+- 대용량 동영상이 들어 있는 장면의 그래픽 메모리 사용량이 크게 줄어, 7232x3100 60fps 영상 기준 4.5GB에서 약 0.5GB가 됩니다 ([1fc0e44](https://github.com/MMFoundation/WallpaperMachine/commit/1fc0e44decb61d00dacffab2d921666ddff51955))
+- pixiv의 Cloudflare 보호 기능이 연결을 차단하면 이제 그 사실과 오류 참조 번호를 알려 주고 다른 프록시 노드나 네트워크를 사용해 보도록 안내합니다 ([f04bc9c](https://github.com/MMFoundation/WallpaperMachine/commit/f04bc9c4d6b608245b86e030b48c3a614dbe2d9a))
+- 진단 로그에 이제 앱 종료 요청이 자체 메뉴에서 왔는지 다른 앱이나 프로그램에서 왔는지 기록됩니다 ([f16cd82](https://github.com/MMFoundation/WallpaperMachine/commit/f16cd821d5484c34c6f297489758b041821e8267))
+
+#### 버그 수정
+
+- pixiv에 로그인한 뒤 둘러보기, 검색, 다운로드가 접근 거부 오류 없이 다시 작동합니다 ([cb08b69](https://github.com/MMFoundation/WallpaperMachine/commit/cb08b692db74cd74ce6647dcadaabc9106409068))
+- Mac이 최대 속도로 디코딩하지 못하는 동영상 배경화면이 이제 몇 초마다 멈추지 않고 낮은 프레임 레이트로 계속 재생됩니다 (closes [#151](https://github.com/MMFoundation/WallpaperMachine/issues/151)) ([414be4e](https://github.com/MMFoundation/WallpaperMachine/commit/414be4e2362018351919133533f6e9dc00274b38))
+- 가져온 동영상이 이제 보관함 타일에 빈 자리 대신 영상 속 장면을 보여 주며, 예전에 가져온 동영상도 마찬가지입니다 (closes [#152](https://github.com/MMFoundation/WallpaperMachine/issues/152)) ([218fcdf](https://github.com/MMFoundation/WallpaperMachine/commit/218fcdf178c46e75b01f6bd9ab8b23fd461f2769))
+- 배경화면 인트로 뒤에 나타나는 시계처럼 서서히 나타나는 텍스트 레이어가 이제 처음부터 보이지 않고 제때 나타납니다 ([252e8d0](https://github.com/MMFoundation/WallpaperMachine/commit/252e8d07c0858c588adc979275f10516295f1e47))
+- 이제 가장 최근에 받은 업데이트만 남기므로 예전 업데이트 파일이 디스크에 쌓이지 않습니다 (closes [#148](https://github.com/MMFoundation/WallpaperMachine/issues/148)) ([6511e10](https://github.com/MMFoundation/WallpaperMachine/commit/6511e108d908d41b6889d57b99e178173c403b1e))
+
+이번 릴리스에 기여해 주신 [@BxnIceLemon](https://github.com/BxnIceLemon) 님께 감사드립니다.
+
 ## [1.8.1](https://github.com/MMFoundation/WallpaperMachine/compare/v1.8.0...v1.8.1) (2026-11-02)
 
 ### English
