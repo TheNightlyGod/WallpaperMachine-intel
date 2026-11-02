@@ -658,7 +658,7 @@ if(APPLE)
     add_executable(vt_frame_decoder_test
         ${WESCENE_MEDIA_APPLE_TESTS_DIR}/vt_frame_decoder_test.mm)
     target_link_libraries(vt_frame_decoder_test PRIVATE
-        wmMediaApple wmMedia wescene_testing_media GTest::gtest_main "-framework Metal" "-framework CoreVideo") # ISSUE151-PROBE
+        wmMediaApple wmMedia wescene_testing_media GTest::gtest_main)
     target_include_directories(vt_frame_decoder_test PRIVATE .)
     target_compile_features(vt_frame_decoder_test PRIVATE cxx_std_20)
     set_target_properties(vt_frame_decoder_test PROPERTIES
