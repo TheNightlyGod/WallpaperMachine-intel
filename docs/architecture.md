@@ -23,7 +23,7 @@ flowchart TD
   BridgeLib --> Core["wallpaper-core (windows, media, display)"]
   Core --> Shader["wm-shader (Renderer/Shader, naga)"]
   Core --> OWE["Scene engine (C++ wescene-renderer, Renderer/Engine)"]
-  Core --> Brew["Homebrew: quickjs-ng, freetype, lz4"]
+  Core --> Brew["Homebrew: quickjs-ng, lz4, libpng, brotli"]
   Services -->|"LockScreenExchange/configuration.json + Darwin notification"| Ext["WallpaperMachineExtension (sandboxed)"]
   Ext --> BridgeLib
   Cargo["scripts/build.py: cargo + uniffi-bindgen"] --> Generated
@@ -883,8 +883,9 @@ CMake-builds `wescene-renderer`), `uniffi-bindgen generate` into `App/Bridge/Gen
 
 Both the app and the extension link the same renderer flag set (`project.yml` anchors
 `rendererLibraryPaths` and `rendererLinkerFlags`): `-lwallpaper_bridge`, the C++ runtime,
-`-llz4`, `-lfreetype`, `-lqjs` (quickjs-ng), `-liconv` and the system
-frameworks. Library search paths point at
+`-llz4`, `-lqjs` (quickjs-ng), FreeType's `-lpng16`, `-lbrotlidec`, `-lbz2` and `-lz`
+(FreeType itself is vendored in `ThirdParty/freetype` and statically linked into
+`libwallpaper_bridge.a`), `-liconv` and the system frameworks. Library search paths point at
 `Renderer/target/release` and the Homebrew prefixes. No FFmpeg library is linked:
 video and sound decode with the system frameworks and the project's own readers. The licenses of what the bundle
 links are in [../LICENSING.md](../LICENSING.md#components-and-their-licenses). A freshly built

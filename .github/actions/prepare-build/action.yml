@@ -53,7 +53,7 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        brew install --quiet xcodegen cmake quickjs-ng freetype lz4 \
+        brew install --quiet xcodegen cmake quickjs-ng libpng brotli lz4 \
           nlohmann-json argparse ccache
         # Bottles and compiled objects differ per macOS release, so every
         # cache key carries the runner's (macos-15, macos-26).

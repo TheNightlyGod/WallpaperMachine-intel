@@ -96,8 +96,12 @@ targets:
           - -lwallpaper_bridge
           - -lc++
           - -llz4
-          - -lfreetype
           - -lqjs
+          # FreeType's libraries; FreeType itself is inside libwallpaper_bridge.
+          - -lpng16
+          - -lbrotlidec
+          - -lbz2
+          - -lz
           - -liconv
           - -framework Accelerate
           - -framework AppKit
