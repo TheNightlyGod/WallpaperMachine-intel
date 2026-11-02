@@ -167,7 +167,10 @@ the engine's CMake adds it (the readers' standalone build stays pure C++).
   unknown codecs; a damaged record is a different message. VP9 registers
   VideoToolbox's supplemental decoder once.
 - `VtFrameDecoder.hpp/.mm`: a `VTDecompressionSession` that takes compressed samples and
-  returns IOSurface-backed, Metal-compatible pixel buffers in display order. It
+  returns IOSurface-backed, Metal-compatible pixel buffers in display order (a scene's video
+  import makes its plane textures on that IOSurface for as long as it uses the frame, not
+  through `CVMetalTextureCache`, which reuses nothing for these pooled buffers:
+  [runtime regressions](testing/runtime-regressions.md#video-decode-color-and-import)). It
   decodes asynchronously and, instead of trusting the decoder's own reordering, holds
   `ReorderDepth + 1` frames and releases the earliest-shown (everything at the end of
   the stream), so order does not depend on the codec or the decoder; that depth comes

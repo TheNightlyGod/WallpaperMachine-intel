@@ -64,8 +64,8 @@ struct VideoFramePlanes
 ///
 /// One frame is imported per generation, no matter how many passes sample it,
 /// and every object that frame's texture depends on — the pixel buffer, the
-/// Core Video wrappers, the conversion destination — stays retained until the
-/// command buffer that read it completes.
+/// plane textures made on its IOSurface, the conversion destination — stays
+/// retained until the command buffer that read it completes, and no longer.
 class MetalVideoTextures {
 public:
     MetalVideoTextures();

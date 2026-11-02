@@ -8,10 +8,12 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <memory>
 #include <string>
+#include <thread>
 
 #include "Image.hpp"
 #include "Interface/IImageParser.h"
@@ -609,7 +611,7 @@ TEST_F(MetalVideoTexture, SurvivesReleaseWhileAFrameIsInFlight)
     }];
     [command commit];
 
-    // The frame's pixel buffer, plane wrappers and destination belong to the
+    // The frame's pixel buffer, plane textures and destination belong to the
     // command buffer now, so tearing the renderer down cannot free them.
     textures->release();
     textures.reset();
@@ -617,6 +619,69 @@ TEST_F(MetalVideoTexture, SurvivesReleaseWhileAFrameIsInFlight)
     [command waitUntilCompleted];
     EXPECT_TRUE(completed);
     EXPECT_NE(command.status, MTLCommandBufferStatusError);
+}
+
+TEST_F(MetalVideoTexture, ImportedFramesHoldDeviceMemoryOnlyWhileTheyAreInUse)
+{
+    // Every frame on a surface of its own, as a decoder's pool hands them out
+    // faster than they come back. What the device keeps for imported frames is
+    // bounded by the frames still sampled or in flight, never by how many were
+    // imported: a picture that has been drawn and replaced holds nothing. One
+    // import path per decoder output, each plane mapping its own surface.
+    constexpr uint32_t kSide    = 1024;
+    constexpr int      kWarmup  = 4;
+    constexpr int      kImports = 48;
+    for (const OSType format : { kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+                                 kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
+                                 kCVPixelFormatType_32BGRA }) {
+        SCOPED_TRACE(format);
+        auto video = std::make_unique<metal::MetalVideoTextures>();
+        video->configure(device);
+        auto source = std::make_shared<FakeVideoSource>(kSide, kSide, format);
+        const bool ten_bit = format == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange;
+        const auto produce = [&] {
+            if (ten_bit) source->produceTenBit(512, 512, 512, {});
+            else source->produce(90, 120, 160);
+        };
+        produce();
+        std::string error;
+        ASSERT_TRUE(video->prepareForTests("video", source, &error)) << error;
+
+        const auto frame = [&] {
+            source->resize(kSide, kSide, format);
+            produce();
+            id<MTLCommandBuffer> command = [queue commandBuffer];
+            const bool ok = video->beginFrame(scene, command, &error);
+            [command commit];
+            [command waitUntilCompleted];
+            return ok;
+        };
+        // Destinations and pipelines are the steady state's, not the imports'.
+        for (int i = 0; i < kWarmup; ++i) ASSERT_TRUE(frame()) << error;
+        const uint64_t imports_before = video->importsForTests();
+        const auto     baseline       = static_cast<int64_t>(device.currentAllocatedSize);
+        for (int i = 0; i < kImports; ++i) ASSERT_TRUE(frame()) << error;
+        ASSERT_EQ(video->importsForTests() - imports_before, static_cast<uint64_t>(kImports));
+
+        // Completion handlers, which drop what a command buffer read, run on a
+        // thread of Metal's; give the last one a moment.
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+        int64_t    grown    = 0;
+        IOSurfaceRef surface = CVPixelBufferGetIOSurface(
+            static_cast<CVPixelBufferRef>(source->currentFrame().pixel_buffer));
+        ASSERT_NE(surface, nullptr);
+        const auto frame_bytes = static_cast<int64_t>(IOSurfaceGetAllocSize(surface));
+        // Two planes may each account for the whole surface; the current frame
+        // and one completing are what may still be held.
+        const int64_t bound = 2 * 2 * frame_bytes;
+        do {
+            grown = static_cast<int64_t>(device.currentAllocatedSize) - baseline;
+            if (grown <= bound) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        } while (std::chrono::steady_clock::now() < deadline);
+        EXPECT_LE(grown, bound) << kImports << " imports of " << frame_bytes << "-byte frames grew the device's "
+                                << "allocations by " << grown << " bytes";
+    }
 }
 
 TEST_F(MetalVideoTexture, OwnsTheKeysItPreparedUntilItIsReleased)

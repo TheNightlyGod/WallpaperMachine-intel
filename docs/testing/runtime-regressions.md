@@ -280,7 +280,7 @@ device.
   cannot drift apart.
 - **10-bit and HDR scene video** — `MetalVideoTexture.P010ConvertedMatchesCpuReference`
   in `metal_video_texture_test` imports synthetic `x420` frames through the real
-  Core Video cache and compares the GPU's BGRA with `Renderer/Testing/hdr_reference.hpp`,
+  IOSurface import and compares the GPU's BGRA with `Renderer/Testing/hdr_reference.hpp`,
   a double-precision reference written from BT.2100, ST 2084 and BT.2390 with
   its gamut rotation derived from chromaticities (PQ and HLG greys across the
   range, saturated BT.2020 colour, P3-D65, full range, display-referred 10-bit, and
@@ -357,6 +357,27 @@ device.
   stopped" rather than as a decode failure. `video_source_input_test` owns a private
   `TMPDIR` and asserts that nothing is written to it; never clear the app's decode cache to make
   a test pass.
+- **Imported video frames hold device memory only while they are in use** —
+  `MetalVideoTexture.ImportedFramesHoldDeviceMemoryOnlyWhileTheyAreInUse` in
+  `metal_video_texture_test` imports 48 frames of 1024x1024 NV12, `x420` and BGRA, each on a
+  surface of its own, and requires the device's allocations
+  (`MTLDevice.currentAllocatedSize`) to grow by no more than two frames' planes: the frame on
+  screen and one completing. `MetalVideoTextures` makes each plane a texture on the frame's
+  IOSurface (`newTextureWithDescriptor:iosurface:plane:`) and lets it go with the frame's
+  `FrameBundle` once the last command buffer that read it completes. The trap is
+  `CVMetalTextureCache`: each texture it vends maps the whole surface, one mapping per plane,
+  and it keeps every texture it vended for a second after release
+  (`kCVMetalTextureCacheMaximumTextureAgeKey`; a flush does not shorten that second and an age
+  of 0 disables aging, so nothing is ever freed). It reuses a texture only when it can match
+  the buffer to the one it made before, which it did for buffers made on a surface but never
+  for the ones VideoToolbox's pool hands out as `ClockedVideoSource` queues them, ahead of the
+  clock on its own thread (frames decoded on the importing thread were reused; why the queued ones are
+  not was not established). Every import then made a new pair, and a 7232x3100 60 fps scene
+  video held 4.5 GB of device allocations at 60 draws a second and 8.2 GB drawn as fast as
+  possible, against 0.47 GB with the textures made on the surface (`phys_footprint` about 1 GB
+  either way, measured with `metal_scene_draw_smoke`'s local-project run). The old cache
+  grows by 48 imports' worth in this test. Do not keep these textures past their frame either,
+  for instance by IOSurface: a texture on a surface keeps the decoder's pool from reusing it.
 - **A decoder survives a rebuild of the graph** -
   `MetalVideoTexture.AVideoSetAsideByARebuildIsTakenBackAsItIsAndNotReadAgain`,
   `.AVideoTheNewGraphDoesNotUseIsClosedWithItsCompile`,
