@@ -253,6 +253,42 @@ TEST(RenderGraph, aHiddenFirstWriterLeftOutKeepsTheSceneOutputsLoadAndClear) {
     }
 }
 
+TEST(RenderGraph, aChainClosedOnAnEventDrivenCardKeepsTheClosingPassMaterial) {
+    // A text layer's card is laid out again on events, so its chain closes on a
+    // mesh with that update driver. The closing pass must still draw with the
+    // material its script, property or timeline writes, not with a copy taken
+    // when the chain was laid out (an opacity effect whose script fades the
+    // layer in would otherwise keep the value it had at that moment).
+    SceneNode owner;
+    auto layer = std::make_shared<SceneImageEffectLayer>(&owner, 16, 16, "_rt_ping_a", "_rt_ping_b");
+    layer->SetFinalMeshDynamic(wallpaper::MeshUpdate::OnEvent);
+
+    SceneMaterial authored;
+    authored.name = "effects/opacity";
+    authored.customShader.constValues["g_UserAlpha"] = wallpaper::ShaderValue(1.0f);
+    auto mesh = std::make_shared<SceneMesh>();
+    mesh->AddMaterial(std::move(authored));
+    auto pass = std::make_shared<SceneNode>();
+    pass->AddMesh(mesh);
+    const std::shared_ptr<SceneMaterial> driven = mesh->MaterialSlotPtr(0);
+
+    auto effect = std::make_shared<SceneImageEffect>();
+    effect->nodes.push_back({ std::string(SpecTex_Default), pass });
+    layer->AddEffect(effect);
+    layer->ResolveEffect(SceneMesh {}, "");
+
+    SceneNode* closing = layer->ResolvedFinalRenderNode();
+    ASSERT_EQ(closing, pass.get());
+    ASSERT_NE(closing->Mesh(), nullptr);
+    EXPECT_EQ(closing->Mesh()->UpdateDriver(), wallpaper::MeshUpdate::OnEvent);
+    EXPECT_EQ(closing->Mesh()->MaterialSlotPtr(0), driven);
+
+    driven->customShader.constValues["g_UserAlpha"] = wallpaper::ShaderValue(0.0f);
+    const auto* drawn = closing->Mesh()->Material();
+    ASSERT_NE(drawn, nullptr);
+    EXPECT_EQ(drawn->customShader.constValues.at("g_UserAlpha")[0], 0.0f);
+}
+
 TEST(RenderGraph, anOrdinarySceneHasNoDepthOnlyTiledOrMirroredDraw) {
     // The shadow-atlas and mirrored-view draw options cost nothing when no light casts a
     // shadow and nothing is reflected: no ordinary draw asks for them.

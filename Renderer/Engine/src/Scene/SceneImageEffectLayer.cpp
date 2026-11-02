@@ -181,10 +181,12 @@ void SceneImageEffectLayer::ResolveEffect(const SceneMesh& default_mesh,
     SceneNode& closing = *last_writer->sceneNode;
     last_writer->output = std::string(SpecTex_Default);
 
-    // The closing pass draws with the card's update driver, on a copy of its own material.
+    // The closing pass draws with the card's update driver, on its own material: the
+    // same object, not a copy, because the scripts, properties and timelines that drive
+    // its constants hold that object and a copy would keep the values it had now.
     if (closing.Mesh()->UpdateDriver() != m_final_mesh->UpdateDriver()) {
         auto swapped = std::make_shared<SceneMesh>(m_final_mesh->UpdateDriver());
-        swapped->AddMaterial(SceneMaterial(*closing.Mesh()->Material()));
+        swapped->MaterialSlots().push_back(closing.Mesh()->MaterialSlotPtr(0));
         closing.AddMesh(std::move(swapped));
     }
     SceneMaterial& material = *closing.Mesh()->Material();

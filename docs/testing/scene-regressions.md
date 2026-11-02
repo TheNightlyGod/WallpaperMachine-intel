@@ -906,6 +906,12 @@ All in `script_runtime_compat_test` and `scene_schema_tests` unless noted.
   the layer's colour) and `.AComposeLayersAlphaFollowsWhatDrivesIt` that
   a compose layer's alpha, which lands in its passthrough because its own pass reads no
   `g_Color4`, follows a property and a script as the authored one does.
+  `RenderGraph.aChainClosedOnAnEventDrivenCardKeepsTheClosingPassMaterial`
+  (`rendergraph_smoke`): a text layer's chain closes on a card laid out again on
+  events, and its closing pass keeps the material its script, property or timeline
+  writes; a copy taken when the chain was laid out kept an Opacity's `g_UserAlpha` at
+  that moment's value, so a clock whose script fades it in after a wallpaper's intro
+  showed from the first frame, over the intro's titles.
 - **Property and name bindings** — `ScriptRuntimeCompat.AuthoredColorPropertiesStayVectorsAcrossTicksAndPropertyChanges`:
   `createScriptProperties().addColor(...)` exposes a `Vec3` even when the saved
   `scriptproperties` stores RGB as a space-separated string, and again after
