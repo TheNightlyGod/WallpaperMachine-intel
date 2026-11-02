@@ -200,6 +200,15 @@ bundle is absent.
      `LSMinimumSystemVersion` to that release, so macOS declines to open the app
      instead of it failing to load a library. `--require-deployment-target`,
      which the release workflow passes, exits 1 instead.
+   - A `minos` says nothing about the system libraries a file loads, so every
+     one the app, the extension or a library to bundle loads unconditionally
+     must be in `SYSTEM_LIBRARIES` (`scripts/package.py`), the `/usr/lib`
+     libraries known to ship with macOS 15.0; the app's and extension's own
+     executables may also load Apple frameworks and the Swift runtime, which
+     Xcode links at the deployment target. Anything else, such as the
+     `/usr/lib/libhvf.dylib` that macOS has only from 15.4, stops packaging
+     before the bundle changes: dyld would refuse to start the app on an older
+     release. A weak load is not checked.
 1. **Dylib relocation.** Starting from the app and extension binaries, it walks `otool -L` transitively. Every dependency under
    the Homebrew prefix is copied into `Contents/Frameworks`, including a
    sibling a Homebrew library loads through `@rpath` and its own

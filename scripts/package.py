@@ -16,6 +16,9 @@ Every bundled dylib keeps the minimum macOS it was built for, which for a Homebr
 bottle is the host's release. When one is newer than the app's deployment target the
 bundle's `LSMinimumSystemVersion` is raised to match, so macOS refuses to open it
 instead of it failing at launch; `--require-deployment-target` makes that an error.
+A `minos` does not cover the system libraries a file loads, so every one the bundle
+loads unconditionally must be known to ship with macOS 15.0 (SYSTEM_LIBRARIES), or
+packaging stops: one that macOS lacks makes dyld refuse to start the app.
 
 `--check` runs the preflight against the built bundle and exits without changing it.
 
@@ -46,6 +49,19 @@ IMPORTED_RENDERER_LICENSE = THIRD_PARTY / "received-licenses/wallpaper-engine-fo
 # does not record where those dylibs came from. Repackaging therefore needs fresh
 # build output rather than an incremental rebuild, which leaves Frameworks as it was.
 FRESH_BUILD = "Packaging requires fresh, unrelocated build output; incremental builds retain bundled dylibs. See docs/build.md before cleaning any delivered app"
+# The system libraries the bundle may load unconditionally: each ships with macOS 15.0, the
+# deployment target. A Homebrew bottle is linked against the newest SDK of its macOS release
+# and records that release's `minos`, so a library added later in the release passes the
+# minimum-version check yet stops the app before main() on an earlier one (FreeType 2.15
+# linked /usr/lib/libhvf.dylib, which macOS has only from 15.4). Add a library here only
+# once it is known to ship with macOS 15.0. Weak loads are skipped when missing; not checked.
+SYSTEM_LIBRARIES = frozenset({
+    "/usr/lib/libSystem.B.dylib", "/usr/lib/libc++.1.dylib", "/usr/lib/libobjc.A.dylib",
+    "/usr/lib/libiconv.2.dylib", "/usr/lib/libz.1.dylib", "/usr/lib/libbz2.1.0.dylib",
+})
+# What Xcode links the app and its extension against at the deployment target, weak-linking
+# anything newer: Apple's frameworks and the Swift runtime. Bundled libraries get no such pass.
+LINKED_AT_TARGET = ("/System/Library/Frameworks/", "/usr/lib/swift/")
 
 
 class PackagingError(Exception):
@@ -162,6 +178,29 @@ def minimum_system_version(file):
         if fields[:1] == ["minos"]:
             return fields[1]
     raise PackagingError(f"No minimum macOS version recorded in {file}")
+
+
+def strong_dependencies(file):
+    """The libraries a Mach-O file loads unconditionally; `otool -L` marks the weak ones."""
+    return [line.strip().split(" (compatibility")[0] for line in output(["otool", "-L", file]).splitlines()[1:]
+            if line.strip() and not line.rstrip().endswith(", weak)")]
+
+
+def unavailable_system_libraries(compiled, libraries, prefix):
+    """`<file>: <library>` for every system library outside SYSTEM_LIBRARIES that the bundle loads unconditionally.
+
+    `compiled` are the app's and extension's own executables, which may also load what
+    LINKED_AT_TARGET names; `libraries` are the Homebrew files to bundle. Homebrew and
+    `@rpath` dependencies are the bundle's own and are not system libraries.
+    """
+    found = []
+    for file, exempt in [*((file, LINKED_AT_TARGET) for file in compiled), *((file, ()) for file in libraries)]:
+        for dependency in strong_dependencies(file):
+            if not dependency.startswith("/") or dependency.startswith(str(prefix)):
+                continue
+            if dependency not in SYSTEM_LIBRARIES and not dependency.startswith(exempt):
+                found.append(f"{Path(file).name}: {dependency}")
+    return found
 
 
 def version_key(version):
@@ -297,6 +336,11 @@ def package(args):
     third_party = third_party_notices(app, args.require_notices)
     info = app / "Contents/Info.plist"
     target = output(["/usr/libexec/PlistBuddy", "-c", "Print :LSMinimumSystemVersion", info]).strip()
+    unavailable = unavailable_system_libraries([binary, *extension_binaries], libraries.values(), prefix)
+    if unavailable:
+        raise PackagingError(f"The bundle loads system libraries macOS {target} may not have, so it would stop at launch "
+                             "there; rebuild without them, or list one in SYSTEM_LIBRARIES once it is known to ship with "
+                             "that release:\n  " + "\n  ".join(unavailable))
     floor, newer = raised_minimum(target, {name: minimum_system_version(source) for name, source in libraries.items()})
     if newer:
         detail = ", ".join(f"{name} ({version})" for name, version in sorted(newer.items()))
