@@ -53,8 +53,13 @@ class TestXcodebuildCommand(unittest.TestCase):
 
     def test_only_network_opt_in_extends_the_execution_budget(self):
         for enabled, expected in [("", "90"), ("0", "90"), ("1", "660")]:
-            with self.subTest(enabled=enabled), patch.dict(runner.os.environ, {"WALLPAPER_MACHINE_NETWORK_TESTS": enabled}):
+            with self.subTest(enabled=enabled), patch.dict(runner.os.environ, {
+                "WALLPAPER_MACHINE_NETWORK_TESTS": enabled, "WALLPAPER_MACHINE_WEB_REFERENCE": ""}):
                 self.assertEqual(self.flag("-maximum-test-execution-time-allowance"), expected)
+
+    def test_the_web_reference_renderer_waits_as_long_as_wallpaper_engine_was_shot(self):
+        with patch.dict(runner.os.environ, {"WALLPAPER_MACHINE_WEB_REFERENCE": "/tmp/jobs.json"}):
+            self.assertEqual(self.flag("-maximum-test-execution-time-allowance"), "3600")
 
     def test_parallel_testing_is_on_by_default_and_can_be_turned_off(self):
         self.assertEqual(self.flag("-parallel-testing-enabled"), "YES")
@@ -147,10 +152,10 @@ class ScriptTests(unittest.TestCase):
 
 
 class OptInVariables(unittest.TestCase):
-    def test_both_opt_in_layers_are_forwarded(self):
+    def test_the_opt_in_layers_and_the_web_reference_job_are_forwarded(self):
         self.assertEqual(
             set(runner.OPT_IN_VARIABLES),
-            {"WALLPAPER_MACHINE_MEDIA_TESTS", "WALLPAPER_MACHINE_NETWORK_TESTS"},
+            {"WALLPAPER_MACHINE_MEDIA_TESTS", "WALLPAPER_MACHINE_NETWORK_TESTS", "WALLPAPER_MACHINE_WEB_REFERENCE"},
         )
 
     def test_a_set_layer_reaches_the_test_host_and_an_unset_one_does_not(self):

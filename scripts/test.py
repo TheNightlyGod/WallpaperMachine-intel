@@ -16,6 +16,8 @@ runs it on Linux for every pull request into `main`.
 Opt-in layers are off by default and are requested through the environment:
 `WALLPAPER_MACHINE_MEDIA_TESTS=1` (real video decoding) and
 `WALLPAPER_MACHINE_NETWORK_TESTS=1` (live Steam pages and temporary native SteamCMD install).
+`WALLPAPER_MACHINE_WEB_REFERENCE=<job file>` is not a layer of checks but the web page
+renderer of `scripts/we_reference.py render`, which sets it.
 """
 import argparse
 from concurrent.futures import ThreadPoolExecutor
@@ -37,7 +39,9 @@ UI_TARGET = "WallpaperMachineUITests"
 # Opt-in test layers. xcodebuild does not hand its own environment to the hosted test
 # process; `TEST_RUNNER_`-prefixed variables are forwarded with the prefix stripped,
 # which is what makes these reach the tests that gate themselves on them.
-OPT_IN_VARIABLES = ("WALLPAPER_MACHINE_MEDIA_TESTS", "WALLPAPER_MACHINE_NETWORK_TESTS")
+OPT_IN_VARIABLES = (
+    "WALLPAPER_MACHINE_MEDIA_TESTS", "WALLPAPER_MACHINE_NETWORK_TESTS", "WALLPAPER_MACHINE_WEB_REFERENCE",
+)
 
 # Xcode's thread performance checker runs inside the test host, and its report of a
 # priority inversion is symbolicated on the main thread; under the gate's load that
@@ -90,6 +94,10 @@ def xcodebuild_command(scheme, target, result, only=None, parallel=True):
     # A real CDN install includes downloads and system security assessments. Keep the
     # routine gate bounded tightly; only the explicitly opted-in layer gets more time.
     allowance = "660" if os.environ.get("WALLPAPER_MACHINE_NETWORK_TESTS") == "1" else "90"
+    # The web reference renderer waits for each page as long as Wallpaper Engine was
+    # shot after opening it (tens of seconds), one wallpaper after another.
+    if os.environ.get("WALLPAPER_MACHINE_WEB_REFERENCE"):
+        allowance = "3600"
     command += ["-maximum-test-execution-time-allowance", allowance, "-test-timeouts-enabled", "YES", "test"]
     return command
 

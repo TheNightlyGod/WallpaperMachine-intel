@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unit tests for the capture queue, Workshop fetch and unpack, scene clock and image handling in scripts/we_reference.py."""
+"""Unit tests for the capture queue, Workshop fetch and unpack, scene clock, web page jobs and image handling in scripts/we_reference.py."""
 from __future__ import annotations
 
 from http.server import ThreadingHTTPServer
@@ -247,6 +247,61 @@ class SceneClockTests(unittest.TestCase):
             else:
                 os.environ["TZ"] = saved
             time.tzset()
+
+
+class WebRenderTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.folder = self.root / "444"
+        self.folder.mkdir()
+        self.project = {"type": "web", "file": "page.html", "general": {"properties": {
+            "speed": {"type": "slider", "value": 2.5, "text": "Speed", "min": 0, "max": 5},
+            "mode": {"type": "combo", "value": 3, "options": [{"label": "a", "value": 3}]},
+            "title": {"type": "text", "value": "日本語"},
+            "header": {"type": "group"},
+        }}}
+        (self.folder / "project.json").write_text(json.dumps(self.project), encoding="utf-8")
+        (self.root / "shots").mkdir()
+        (self.root / "shots/444.json").write_text(json.dumps(
+            {"opened": 1_000_000, "taken": [1_030_000, 1_045_500], "screen": [3456, 2024]}))
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_the_page_is_given_its_own_values_as_the_host_first_delivers_them(self):
+        payload = json.loads(we_reference.web_properties(self.project))
+        self.assertEqual(payload, {
+            "speed": {"value": 2.5, "type": "slider"},
+            "mode": {"value": 3, "type": "combo"},
+            "title": {"value": "日本語", "type": "text"},
+        })
+
+    def test_a_job_shoots_the_page_at_the_screenshots_size_and_moments(self):
+        meta = we_reference.shot_meta(self.root / "shots", "444")
+        job = we_reference.web_job(self.folder, self.project, meta, self.root / "out")
+        self.assertEqual(job["entry"], "page.html")
+        self.assertEqual(job["pixels"], [3456, 2024])
+        self.assertEqual([shot["at"] for shot in job["shots"]], [30.0, 45.5])
+        self.assertEqual([Path(shot["out"]).name for shot in job["shots"]], ["444-0.png", "444-1.png"])
+
+    def test_web_pages_are_drawn_by_the_app_page_host_and_need_no_scene_binary(self):
+        calls = []
+        def fake_run(command, env=None, **kwargs):
+            calls.append((command, env))
+            jobs = json.loads(Path(env["WALLPAPER_MACHINE_WEB_REFERENCE"]).read_text())["jobs"]
+            for job in jobs:
+                for shot in job["shots"]:
+                    Path(shot["out"]).write_bytes(b"png")
+            return subprocess.CompletedProcess(command, 0)
+        with mock.patch.object(we_reference.subprocess, "run", fake_run):
+            status = we_reference.main(["--shots", str(self.root / "shots"), "--out", str(self.root / "out"),
+                                        "render", str(self.folder), "--binary", str(self.root / "missing")])
+        self.assertEqual(status, 0)
+        self.assertEqual(len(calls), 1)
+        command, env = calls[0]
+        self.assertIn("WebWallpaperReferenceRenderTests", command)
+        self.assertEqual(Path(command[1]).name, "test.py")
 
 
 class ImageTests(unittest.TestCase):

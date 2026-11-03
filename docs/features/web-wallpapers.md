@@ -241,6 +241,39 @@ callbacks already waiting are kept. It is logged at debug level
 and retunes it with each property delivery, so a page there draws no more often than on
 the desktop; its readiness check waits two paced frames, at most two intervals of the limit.
 
+### Device-pixel layout
+
+Wallpaper Engine starts its Chromium with `force-device-scale-factor=1` (read off
+`webwallpaper64.exe`, 2.8.42), so a web wallpaper is laid out in its display's device pixels:
+`devicePixelRatio` is 1 and `innerWidth` is the display's width in pixels, whatever the
+system's scaling. WebKit lays a page out in points, which on a Retina display gave the page
+half the CSS pixels across: everything a page sizes in CSS pixels (text, panels, a
+visualiser's radius, a game board) came out twice the size Wallpaper Engine draws it at, and
+what did not fit was cut off. `WebWallpaperPage` zooms its web view out by the backing scale of
+the window it is in (`WKWebView.pageZoom`, `WebWallpaperProtocol.pageZoom(forBackingScale:)`),
+which gives the same layout: one CSS pixel per device pixel, `devicePixelRatio` 1, width media
+queries against the pixel width, and still one rendered pixel per device pixel, so nothing is
+drawn softer. WebKit does not apply the zoom to `window.screen`, so the host script reports
+`screen.width`, `height`, `availWidth` and `availHeight` in device pixels while the scale is
+above 1 (a page that sizes its canvas from `screen.width` would otherwise cover part of the
+display), and leaves WebKit's own properties at 1.
+
+The web view reports its window's backing scale itself when it joins the window, which the host
+does before the first load, so a document starts with the layout and the first read of a page
+already sees it; it is part of each document's script like the frame-rate limit. A window that
+moves to a display with another scale relays the running page out without a reload, and WebKit
+raises a `resize` event for it. The preview lays its page out the same way for its own window,
+and the lock-screen and screen-saver surface zooms its page out by the scale it draws at, so
+the wallpaper keeps its layout when the Mac locks. Compared with Wallpaper Engine's frames of
+the local Workshop pages in a VM ([reference frames](../testing/wallpaper-engine-reference.md)),
+a fixed-size game board and a visualiser's circle that were twice Wallpaper Engine's size now
+match it.
+
+A page that sizes a canvas from `innerWidth` without `devicePixelRatio` used to draw a quarter of
+the display's pixels and be stretched; it now draws every pixel, as under Wallpaper Engine. The
+pages that read the ratio draw the same number of pixels as before. The **Internal render scale**
+below still multiplies the ratio, now from 1.
+
 ### Render scale
 
 WebKit has no render target the host can shrink, so the **Internal render scale**
@@ -472,6 +505,16 @@ values may occasionally exceed 1.0 and tells pages to clamp themselves, so this 
 documented deviation. How the spectrum is computed is in
 [audio-response.md](audio-response.md#what-wallpapers-receive).
 
+**A listener with Audio response off.** Wallpaper Engine calls a page's audio listener on its
+cadence whether or not anything plays, and pages are written for that: a visualiser that turns
+its lights or its idle animation on only once its listener has been called stayed dark here,
+because with the setting off nothing reached the listener at all. A registered listener that
+no audio reaches is therefore called with silence, 128 zeros, once a second while the page
+plays (not while it is paused or suspended), the spacing below; nothing is captured for it, no
+tap opens, and **Audio and media status** does not count it as delivery. With the setting on,
+the audio pump feeds the page, silence included, and this stays off. The lock screen feeds a
+subscribed page the same way ([lock screen](lock-screen.md)).
+
 **Silence.** When the sound stops, the analyser publishes one all-zero spectrum and
 then no more, so a visualizer that smooths in its callback would freeze part-way
 through its decay. The pump therefore repeats an all-zero spectrum
@@ -553,6 +596,11 @@ never substitutes Pause for an unavailable mute.
   interpolates by frame count rather than by time may judder at 30. The effective
   cadence snaps to the display's: 30 on a 60 Hz cadence is exactly every second
   frame, 40 averages 40 with uneven spacing.
+- The [device-pixel layout](#device-pixel-layout) zooms the page; `matchMedia` resolution
+  queries (`(resolution: 1dppx)`, `-webkit-min-device-pixel-ratio`) still answer the
+  display's own density, subframes see the display's `screen` in points, and a page that
+  sized itself for a smaller viewport has its fixed-size parts as small as Wallpaper Engine
+  draws them on a display with as many pixels.
 - The render scale only helps a page that sizes its canvases or WebGL buffers from
   `devicePixelRatio` and reads it again on `resize`. A page that reads the ratio
   once at start keeps full resolution until it reloads, `matchMedia` resolution
@@ -613,7 +661,11 @@ rebuilt when a frame rate crosses a fast display's refresh with its render scale
 limit and pointer rate carried over, render scale on `devicePixelRatio` including the
 resize rebuild of a canvas page, the audio pump with its silence cadence on a
 hand-moved clock, the inspection switch on running, new and preview pages,
-`WebWallpaperIdleCallbackTests` (a page that asks for an idle callback before its first
+`WebWallpaperDeviceLayoutTests` (a page in a window is laid out in its display's device pixels
+from its first line with `screen` in device pixels, a scale change relays out the running
+document without a reload and 1 restores WebKit's own `screen`, a reload starts at the
+committed scale), the silence a listener with Audio response off hears
+(`WebWallpaperAuthorAPITests`), `WebWallpaperIdleCallbackTests` (a page that asks for an idle callback before its first
 frame gets to its frame, a self-repeating callback runs once per 50 ms period, order,
 cancellation, a throwing callback and the timeout, a native function kept, and every frame
 of every surface given the script), `WebWallpaperErrorStackTests` (a logger built at start-up

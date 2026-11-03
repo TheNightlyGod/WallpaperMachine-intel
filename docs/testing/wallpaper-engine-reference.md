@@ -22,9 +22,11 @@ fix is in [wallpaper-fixes.md](wallpaper-fixes.md).
   Engine. A comparison is evidence for a fix, not a gate: it needs the VM, and its
   numbers are coarse.
 
-`render` draws scenes only. Web and video wallpapers can be captured, and their
-frames are still the target, but they are compared by eye with the app's own
-picture.
+`render` draws scenes with Native Metal and web pages with the app's own page host
+(`WebWallpaperPage`, through the opt-in `WebWallpaperReferenceRenderTests`, which
+`render` runs with `scripts/test.py` and never puts on the desktop). Video wallpapers can
+be captured, and their frames are still the target, but they are compared by eye with the
+app's own picture.
 
 ## Setup
 
@@ -115,6 +117,19 @@ closely as the harness allows:
   wallpaper, so clocks and day/night scripts show the same hour. The date can differ;
 - the pointer at the centre of the screen, silence (`WE_TEST_AUDIO_HZ=0`), and a fixed
   particle seed.
+
+A web page is shown at the shot's pixel size on this Mac's backing scale (3456 x 2024
+pixels is 1728 x 1012 points on a Retina display), given the project's own property values
+as the host first delivers them, with no audio captured and nothing saved, and snapshotted
+as long after loading as Wallpaper Engine's shot was taken after opening. Beside the
+pictures, `<id>.json` records the page's viewport, `devicePixelRatio`, the errors it raised,
+and, over the 10 s after the last shot, the CPU its WebContent process and the WebKit GPU
+process used, the Mac's GPU utilization, the WebContent footprint (mean and peak of four
+readings a second; a page's heap rises and falls with its garbage collection, so one
+reading says little) and the animation frames per second, so a change that costs
+performance shows next to the picture it buys. The figures come from a page in a window
+that is never shown, at whatever else this Mac is doing (the GPU figure is the whole
+Mac's): compare them between renders made one after the other.
 
 `compare` writes one sheet per shot: Wallpaper Engine's frame, each render in
 `--labels` order, and the difference between Wallpaper Engine and the last render

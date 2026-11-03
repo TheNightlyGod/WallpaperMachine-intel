@@ -40,6 +40,29 @@ enum WebWallpaperProtocol {
         /// Multiplies `window.devicePixelRatio`; see `clampedRenderScale`. At 1
         /// the page keeps WebKit's own property.
         var renderScale = 1.0
+        /// Device pixels per point of the display the page is on, by which the page's
+        /// `screen` size is reported; see `pageZoom(forBackingScale:)`. At 1 the page
+        /// keeps WebKit's own properties.
+        var screenScale = 1.0
+    }
+
+    /// Wallpaper Engine starts its Chromium with `force-device-scale-factor=1`, so a web
+    /// wallpaper is laid out in the display's device pixels: `devicePixelRatio` is 1 and
+    /// `innerWidth` is the display's width in pixels, whatever the system's scaling. WebKit
+    /// lays a page out in points instead, which on a Retina display gives the page half the
+    /// CSS pixels across, so everything sized in CSS pixels (text, panels, a visualiser's
+    /// radius) came out twice the size Wallpaper Engine draws it at, and cropped. Zooming
+    /// the page out by the display's backing scale gives it the same layout: one CSS pixel
+    /// per device pixel, `devicePixelRatio` 1, and still one rendered pixel per device
+    /// pixel, so nothing is drawn softer.
+    static func pageZoom(forBackingScale scale: Double) -> Double {
+        1 / clampedScreenScale(scale)
+    }
+
+    /// A backing scale as the page's screen scale: 1 for anything that is not a number of
+    /// device pixels per point of at least 1.
+    static func clampedScreenScale(_ scale: Double) -> Double {
+        scale.isFinite && scale >= 1 ? scale : 1
     }
 
     /// The range a web page's internal render scale is held to. The bridge
@@ -165,7 +188,7 @@ enum WebWallpaperProtocol {
     static func makeHostScript(seed: Seed) -> String {
         """
         \(hostScriptSource)({ framePacing: \(seed.framePacing), frameLimit: \(seed.frameLimit), \
-        renderScale: \(clampedRenderScale(seed.renderScale)) })
+        renderScale: \(clampedRenderScale(seed.renderScale)), screenScale: \(clampedScreenScale(seed.screenScale)) })
         """
     }
 
@@ -245,6 +268,34 @@ enum WebWallpaperProtocol {
         return true;
       };
       setScale(seed.renderScale);
+      // Screen size in device pixels. The page is zoomed out by the display's backing
+      // scale so that it is laid out in device pixels as under Wallpaper Engine
+      // (WebWallpaperProtocol.pageZoom), which WebKit applies to the viewport but not
+      // to window.screen; a page that sizes its canvas from screen.width would cover
+      // only part of the display. The four sizes are reported in device pixels while
+      // the scale is above 1 and are WebKit's own at 1.
+      const screenSizes = ["width", "height", "availWidth", "availHeight"];
+      const nativeScreen = {};
+      for (const name of screenSizes) {
+        const descriptor = typeof Screen === "function" && Object.getOwnPropertyDescriptor(Screen.prototype, name);
+        if (descriptor && typeof descriptor.get === "function") nativeScreen[name] = descriptor.get;
+      }
+      let screenScale = 1;
+      const setScreenScale = value => {
+        const next = Number.isFinite(value) && value >= 1 ? value : 1;
+        if (next === screenScale || !window.screen) return false;
+        screenScale = next;
+        for (const name of screenSizes) {
+          const native = nativeScreen[name];
+          if (!native) continue;
+          if (next === 1) { delete window.screen[name]; continue; }
+          Object.defineProperty(window.screen, name, {
+            configurable: true, enumerable: true, get() { return Math.round(native.call(this) * screenScale); },
+          });
+        }
+        return true;
+      };
+      setScreenScale(seed.screenScale);
       const nativeConsoleError = console.error;
       const post = message => {
         try { window.webkit.messageHandlers.\(WebWallpaperProtocol.messageHandlerName).postMessage(message); }
@@ -482,6 +533,8 @@ enum WebWallpaperProtocol {
           resizePending = true;
           queueMicrotask(() => { resizePending = false; nativeDispatch.call(window, new NativeEvent("resize")); });
         },
+        // The page's zoom changes with it, and WebKit raises the resize event for that.
+        setScreenScale(scale) { setScreenScale(scale); },
         setPaused(paused) { lastPaused = !!paused; deliverPaused(); },
         deliverAudio(bins) {
           if (!audioListener) return false;

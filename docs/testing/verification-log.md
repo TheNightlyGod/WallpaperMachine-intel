@@ -25,6 +25,15 @@ and moves whatever falls past ten verbatim into a monthly file under
 [archive/](archive/); promote anything durable before it goes. Editing an
 entry's recorded result is not allowed.
 
+## 2026-11-03 — Web wallpapers laid out in device pixels and fed silence, compared with Wallpaper Engine
+
+Read off Wallpaper Engine 2.8.42's webwallpaper64.exe (CEF 146) in IDA: force-device-scale-factor=1, disable-web-security, autoplay without a gesture, CefSettings background black, the listener contract. Applied the two differences the local Workshop pages showed: the layout in device pixels and the audio listener called through silence.
+
+- `python3 scripts/we_reference.py capture` of 9 local Workshop web wallpapers in the Parallels VM (Wallpaper Engine 2.8.0.42), then `render --label before/after` and `compare`: mean difference to Wallpaper Engine's frame 3.6 → 0.9 (RE4 case), 2.7 → 0.0 (Audio Visualizer), 3.6 → 1.0 (a visualiser that stayed dark), 19.1 → 15.6 (ZZZ capsules); the others unchanged within noise
+- Performance A/B, same jobs back to back, 30 s per page on this Mac: WebContent CPU unchanged on all 9; frame rate unchanged on 7, Rhine Lab 60 → 52 (its renderer supersamples 1.8x at the device-pixel layout, as under Wallpaper Engine), ZZZ capsules 38 → 33 (GPU-bound before); pages that size a canvas from innerWidth draw 4x the pixels (Audio Visualizer GPU 9 → 19 %). WebKit's zoom itself costs no more memory than a native scale of 1 (probe: 69 vs 70 MB)
+- `python3 scripts/test.py` after the rebase — 4335 passed, 1 failed (AppUpdateTests installer test over its 2-minute allowance under load; passes alone), 61 skipped; `--only WebWallpaperDeviceLayoutTests --only ScreenSaverWebSurfaceTests` — 22 passed
+- Not checked: the desktop app on a real display (offscreen pages only), how a page reads matchMedia resolution queries, the GPU figures are the whole Mac's
+
 ## 2026-11-03 — Moving-layer effect reuse on by default
 
 Developer decision: accept rare one-level texel differences from joined render passes for the GPU time layer-local reuse saves (WALLPAPER_MACHINE_LAYER_LOCAL_SIGNATURES, now on unless =0). Supersedes the opt-in line of the power and performance entry.
@@ -110,12 +119,3 @@ Branch t3/optimize-power-usage (PR #156) against the v1.8.2 renderer on an M5 Pr
 - python3 scripts/test.py: Python stage OK; native 4287 passed, 0 failed, 53 skipped.
 - Localization catalog and panel localization checks pass; five languages added for title, note and prose.
 - Not checked: the setting on a real desktop (no desktop run requested); the app was not rebuilt.
-
-## 2026-11-01 — Discord invitation, About entry and Help menu item
-
-A fifth one-time prompt, Join us on Discord?, invites once to MMFoundation's Discord through https://mmfoundation.dev/discord (ExternalLink.discord, allowlisted; never the invite itself), last in priority, after 21 days and 7 days of panel use on the star prompt's clock. Settings › About gains Join Discord beside MMFoundation and the Help menu gains Join Discord; either spends the invitation. Strings in all six languages.
-
-- `python3 scripts/test.py --only SupportPromptStoreTests --only PanelSupportPromptTests --only SupportPromptPresenterTests --only WelcomeRenderTests --only SettingsSectionsLocalizationTests --only ExternalLinkTests` — 62 passed (after `xattr -cr build/Build/Products/Debug`, docs/build.md)
-- `python3 scripts/test.py` — 4268 passed, 0 failed, 52 skipped
-- `python3 scripts/build.py --swift-only --configuration Release` — OK
-- Sheet (en, zh-Hans) and Settings › About (en, zh-Hans) rendered offscreen from a never-shown window to check the layout; the app was not launched and the Help menu item was not opened by hand

@@ -369,6 +369,7 @@
 		5D4364273A09AF1EE89637BE /* NativeVideoWallpaperHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = 43C92D05A282380D4607428F /* NativeVideoWallpaperHost.swift */; };
 		5E06E71B2086456236657BE4 /* SteamCMDReportedFailure.swift in Sources */ = {isa = PBXBuildFile; fileRef = 279EA9A0FBA438E4D75E86F9 /* SteamCMDReportedFailure.swift */; };
 		5E32132584206475D57DE110 /* PixivWallpaperPackagerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77DC78681079F6A64BB49C3D /* PixivWallpaperPackagerTests.swift */; };
+		5E326F7ED97E923E59048D38 /* WebWallpaperReferenceRenderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D470D9562F439D94395ED04 /* WebWallpaperReferenceRenderTests.swift */; };
 		5EBB28F47B92175EE277C64A /* WallpaperBackupFiles.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C47996749D567B8A761084F /* WallpaperBackupFiles.swift */; };
 		5EBD0CD9D68BEE99511A359C /* ExternalLinkTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1562D61E203E6EA51068FF37 /* ExternalLinkTests.swift */; };
 		5EE08F0A5B0C03EC1DCCB54A /* WallpaperBackupTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D30E997411637543C4B9B43E /* WallpaperBackupTests.swift */; };
@@ -415,6 +416,7 @@
 		662E47747535ABADC0943677 /* InspectorWordingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8BB091D33B8037F44D65E6D1 /* InspectorWordingTests.swift */; };
 		66B8FC34C5BF911B07E70ADF /* DiagnosticsBundleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3C6750EC44FE7719033B28A /* DiagnosticsBundleTests.swift */; };
 		671E7F2C9A0AA4B2209F5188 /* DisplayConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = F99A08B5FFF247118CA021A0 /* DisplayConfiguration.swift */; };
+		676BDA16BE11C8C3711DAFA3 /* WebWallpaperDeviceLayoutTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1315A17A22FDA9C6A66B16C0 /* WebWallpaperDeviceLayoutTests.swift */; };
 		67FBE0F4A7D136F284EAC8B9 /* PanelController+LibraryRemoval.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C115B4808AE759DC0E6F803 /* PanelController+LibraryRemoval.swift */; };
 		6807BF3C4DC71CDBE363207A /* StatusMenuModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F9DC4BED69EC070AE3355FD /* StatusMenuModelTests.swift */; };
 		682B170F4C7F8ADEF51928A4 /* ConditionOverrideTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA4264DD5277CE169A3141C6 /* ConditionOverrideTests.swift */; };
@@ -1148,6 +1150,7 @@
 		0CC9CBA0E4EFAED2CF3738B6 /* PanelController+Automation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "PanelController+Automation.swift"; sourceTree = "<group>"; };
 		0CCEDEC005ADF0563237BB76 /* DesktopWindowDiagnosticsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DesktopWindowDiagnosticsTests.swift; sourceTree = "<group>"; };
 		0D2F52E979627634A3C87E53 /* WebWallpaperMouseForwarder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebWallpaperMouseForwarder.swift; sourceTree = "<group>"; };
+		0D470D9562F439D94395ED04 /* WebWallpaperReferenceRenderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebWallpaperReferenceRenderTests.swift; sourceTree = "<group>"; };
 		0D8721AC6B121C6523F3E7B5 /* WorkshopTile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkshopTile.swift; sourceTree = "<group>"; };
 		0E814A4AA934E1F9D8A32ED9 /* PixivBrowserPage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PixivBrowserPage.swift; sourceTree = "<group>"; };
 		0EC8F26EEAEC3C347AC30E6A /* LibraryMetricsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryMetricsTests.swift; sourceTree = "<group>"; };
@@ -1164,6 +1167,7 @@
 		11EC2CBD8FEF3F3676BF4540 /* WelcomeOverlayHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WelcomeOverlayHost.swift; sourceTree = "<group>"; };
 		11ED0E45DF46C242485EB30E /* WorkshopBrowserPage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkshopBrowserPage.swift; sourceTree = "<group>"; };
 		124B0E34FCA8854A7022EEDF /* SystemConditionMonitorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemConditionMonitorTests.swift; sourceTree = "<group>"; };
+		1315A17A22FDA9C6A66B16C0 /* WebWallpaperDeviceLayoutTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebWallpaperDeviceLayoutTests.swift; sourceTree = "<group>"; };
 		1361920CB4478C52AEBBE43C /* PanelSettingsValuesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PanelSettingsValuesTests.swift; sourceTree = "<group>"; };
 		13D8391E4A5278E5408424FB /* AppLanguage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppLanguage.swift; sourceTree = "<group>"; };
 		141232018FDCC74791E87444 /* InspectorWording.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InspectorWording.swift; sourceTree = "<group>"; };
@@ -3542,6 +3546,7 @@
 				3FA5F8C179419D9DDD24183C /* WebWallpaperAudioMediaTests.swift */,
 				1BB363D36FDABA0A035BC7EE /* WebWallpaperAudioOutputTests.swift */,
 				4A8A0E059EAE416F64A9243B /* WebWallpaperAuthorAPITests.swift */,
+				1315A17A22FDA9C6A66B16C0 /* WebWallpaperDeviceLayoutTests.swift */,
 				92FED378E8CD2FC16118EEAD /* WebWallpaperErrorStackTests.swift */,
 				59458F12EF55385E9B06ABDF /* WebWallpaperFontAliasTests.swift */,
 				BC8EFE01D1A14B2C04BB2C9E /* WebWallpaperFrameConfirmationTests.swift */,
@@ -3556,6 +3561,7 @@
 				FB971B62174C5F9F826731BB /* WebWallpaperPageTests.swift */,
 				B0777849706ED56E761824ED /* WebWallpaperPropertyPayloadTests.swift */,
 				ADA296B41B97A9B3F58937FD /* WebWallpaperRecoveryTests.swift */,
+				0D470D9562F439D94395ED04 /* WebWallpaperReferenceRenderTests.swift */,
 				8B78CB4489C4C0EDA11D42AC /* WebWallpaperRenderScaleTests.swift */,
 				7852ABA48B66BA2F88F25C4F /* WebWallpaperSuspensionTests.swift */,
 			);
@@ -4356,6 +4362,7 @@
 				2E0988260C41000B0E60E7EA /* WebWallpaperAudioMediaTests.swift in Sources */,
 				41672CD77EDB28CDCE87F09B /* WebWallpaperAudioOutputTests.swift in Sources */,
 				532F522F77BD37A5E6BED73E /* WebWallpaperAuthorAPITests.swift in Sources */,
+				676BDA16BE11C8C3711DAFA3 /* WebWallpaperDeviceLayoutTests.swift in Sources */,
 				F28210CD4D5B0A8E28A1B47F /* WebWallpaperErrorStackTests.swift in Sources */,
 				1853226D6C099A40B5D1BD42 /* WebWallpaperFontAliasTests.swift in Sources */,
 				F82D90D23F9BA988F7E98479 /* WebWallpaperFrameConfirmationTests.swift in Sources */,
@@ -4371,6 +4378,7 @@
 				5B77C14B816F4DD4A6D92AD2 /* WebWallpaperPreviewSurfaceTests.swift in Sources */,
 				644E8167357626A415226899 /* WebWallpaperPropertyPayloadTests.swift in Sources */,
 				89C03CF3091075195D642390 /* WebWallpaperRecoveryTests.swift in Sources */,
+				5E326F7ED97E923E59048D38 /* WebWallpaperReferenceRenderTests.swift in Sources */,
 				F5EB708D1BD4F55C0B3B69A6 /* WebWallpaperRenderScaleTests.swift in Sources */,
 				441BD9AB7633DDF7CC98AF53 /* WebWallpaperSuspensionTests.swift in Sources */,
 				A037861283CAD6F0C98D5825 /* WelcomeRenderHarness.swift in Sources */,

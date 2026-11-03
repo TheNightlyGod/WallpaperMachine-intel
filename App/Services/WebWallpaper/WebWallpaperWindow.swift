@@ -107,6 +107,9 @@ final class WebWallpaperPage: NSObject, WKNavigationDelegate {
         var displayRefreshRate = 0
         /// Multiplies the page's `devicePixelRatio`; 1 is the display's own.
         var renderScale: Float = 1
+        /// Device pixels per point of the window the page is in, which the page
+        /// is zoomed out by (`WebWallpaperProtocol.pageZoom(forBackingScale:)`).
+        var backingScale: Double = 1
         var volume: Float = 1
         var muted = false
         /// The bridge's composed pause, not only the Play/Pause button: user
@@ -217,6 +220,11 @@ final class WebWallpaperPage: NSObject, WKNavigationDelegate {
     private var audioResponseEnabled = false
     private var mediaIntegrationEnabled = false
     private var audioDemand = false
+    /// Feeds silence to a listener that no audio reaches; see `refreshSilence()`.
+    private var silenceTask: Task<Void, Never>?
+    /// How often a listener that no audio reaches is called with silence: the
+    /// spacing the audio pump keeps a quiet stretch fed at.
+    static let silenceInterval: Duration = .seconds(1)
     private var mediaDemand = MediaDemand()
     private var pendingRandomFileRequests: Set<String> = []
     /// Answers and directory deltas that arrived while the page was suspended.
@@ -232,6 +240,28 @@ final class WebWallpaperPage: NSObject, WKNavigationDelegate {
     private static let maximumPendingRandomFileRequests = 32
     private static let maximumDeferredDirectoryChanges = 64
     private let messageProxy = ScriptMessageProxy()
+
+    /// Tells the page which display it is laid out for: the backing scale of the
+    /// window it is in, when it joins one and whenever that changes (the window
+    /// moved to a display with another scale). It says nothing while detached.
+    private final class PageWebView: WKWebView {
+        var onBackingScale: (@MainActor (Double) -> Void)?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            reportBackingScale()
+        }
+
+        override func viewDidChangeBackingProperties() {
+            super.viewDidChangeBackingProperties()
+            reportBackingScale()
+        }
+
+        private func reportBackingScale() {
+            guard let scale = window?.backingScaleFactor else { return }
+            onBackingScale?(Double(scale))
+        }
+    }
     /// Installing the host script replaces the controller's whole script list,
     /// so the scripts the page's owner adds beside it (the preview denies
     /// capture) are kept here and installed again after it.
@@ -338,9 +368,11 @@ final class WebWallpaperPage: NSObject, WKNavigationDelegate {
             Self.fullRefreshUnavailableLogged = true
             AppLog.warn("WebKit rendering-rate control unavailable; web wallpapers stay near 60 fps")
         }
-        webView = WKWebView(frame: .zero, configuration: configuration)
+        let pageView = PageWebView(frame: .zero, configuration: configuration)
+        webView = pageView
         super.init()
         messageProxy.page = self
+        pageView.onBackingScale = { [weak self] scale in self?.applyBackingScale(scale) }
         // Registered on the web view's own controller: `WKWebView` copies the
         // configuration it is given, so only the one reached through the web
         // view is guaranteed to be the live object. The host script is added
@@ -426,7 +458,8 @@ final class WebWallpaperPage: NSObject, WKNavigationDelegate {
     /// running document in step afterwards.
     private func installUserScripts() {
         let seed = WebWallpaperProtocol.Seed(
-            framePacing: true, frameLimit: frameLimit, renderScale: Double(committed.renderScale))
+            framePacing: true, frameLimit: frameLimit, renderScale: Double(committed.renderScale),
+            screenScale: committed.backingScale)
         let controller = webView.configuration.userContentController
         controller.removeAllUserScripts()
         for script in WebWallpaperProtocol.userScripts(seed: seed) { controller.addUserScript(script) }
@@ -498,6 +531,23 @@ final class WebWallpaperPage: NSObject, WKNavigationDelegate {
         posterOwed = true
         resetFirstFrameWindow()
         reconcileHostSuspension()
+    }
+
+    /// The backing scale of the display the page is on. The page is laid out in
+    /// that display's device pixels, as Wallpaper Engine lays one out
+    /// (`WebWallpaperProtocol.pageZoom(forBackingScale:)`): the web view is zoomed
+    /// out by the scale and the page's `screen` size is reported in device pixels.
+    /// The web view reports it itself when it joins a window, which the host does
+    /// before the first load, so a document starts with it; a later change (the
+    /// window moved to a display with another scale) reaches the running document,
+    /// which WebKit tells with a `resize` event.
+    func applyBackingScale(_ scale: Double) {
+        let clamped = WebWallpaperProtocol.clampedScreenScale(scale)
+        guard clamped != committed.backingScale else { return }
+        committed.backingScale = clamped
+        webView.pageZoom = WebWallpaperProtocol.pageZoom(forBackingScale: clamped)
+        AppLog.debug("web wallpaper \(projectURL.lastPathComponent): laid out at \(clamped)x", load: logLoad)
+        deliverScreenScale()
     }
 
     func applyGeneralProperties(fps: UInt32) {
@@ -816,6 +866,11 @@ final class WebWallpaperPage: NSObject, WKNavigationDelegate {
         run("window.__mweWallpaperHost.setRenderScale(scale)", arguments: ["scale": Double(committed.renderScale)])
     }
 
+    private func deliverScreenScale() {
+        guard isLoaded else { return }
+        run("window.__mweWallpaperHost.setScreenScale(scale)", arguments: ["scale": committed.backingScale])
+    }
+
     private func deliverAudioOutput() {
         audioOutputCapabilities = WebWallpaperAudioOutput.apply(
             volume: committed.volume, muted: committed.muted || committed.volume == 0, to: webView)
@@ -835,6 +890,7 @@ final class WebWallpaperPage: NSObject, WKNavigationDelegate {
         deliverUserProperties()
         deliverGeneralProperties()
         deliverRenderScale()
+        deliverScreenScale()
         deliverPaused()
     }
 
@@ -950,6 +1006,36 @@ final class WebWallpaperPage: NSObject, WKNavigationDelegate {
         if media != mediaDemand {
             mediaDemand = media
             onMediaDemandChanged?(media)
+        }
+        refreshSilence()
+    }
+
+    /// Wallpaper Engine calls a page's audio listener on its fixed cadence whether
+    /// or not anything is playing, and pages are written for that: a visualiser that
+    /// starts its idle animation, or turns its lights on, only once the listener has
+    /// been called stayed dark here while the user had not turned Audio response on,
+    /// because nothing reached the listener at all. A registered listener that no
+    /// audio reaches (Audio response is off for this wallpaper) is therefore called
+    /// with silence, 128 zeros, once a second while the page plays: the spacing the
+    /// audio pump keeps a quiet stretch fed at. Nothing is captured for it, and the
+    /// inspector's audio status does not count it as delivery. With Audio response on,
+    /// the pump feeds the page, silence included, and this stays off.
+    private func refreshSilence() {
+        let wanted = isLoaded && !hostSuspended && !committed.userPaused
+            && audioListenerRegistered && !audioResponseEnabled
+        guard wanted != (silenceTask != nil) else { return }
+        silenceTask?.cancel()
+        silenceTask = nil
+        guard wanted else { return }
+        let generation = documentGeneration
+        silenceTask = Task { @MainActor [weak self, wait] in
+            while !Task.isCancelled {
+                guard let page = self, page.documentGeneration == generation else { return }
+                _ = try? await page.webView.callAsyncJavaScript(
+                    "return window.__mweWallpaperHost.deliverAudio(bins)",
+                    arguments: ["bins": [Double](repeating: 0, count: 128)], in: nil, contentWorld: .page)
+                do { try await wait(WebWallpaperPage.silenceInterval) } catch { return }
+            }
         }
     }
 

@@ -107,9 +107,11 @@ final class ScreenSaverWebSurface: NSObject, WKNavigationDelegate, WKUIDelegate 
     // Unlike desktop pages, native saver content gets no universal file access.
     // Its `requestAnimationFrame` is held to the published frame rate as the desktop page's is,
     // so the lock screen and the screen saver draw no more often than the frame-rate limit
-    // and the reduced rate on battery; `deliverCommitted` retunes it when that changes.
+    // and the reduced rate on battery; `deliverCommitted` retunes it when that changes. It is
+    // laid out in the display's device pixels like the desktop page; see `pageZoom` below.
     let seed = WebWallpaperProtocol.Seed(
-      framePacing: true, frameLimit: WebWallpaperProtocol.frameLimit(forFPS: fps))
+      framePacing: true, frameLimit: WebWallpaperProtocol.frameLimit(forFPS: fps),
+      screenScale: Double(scale))
     for script in WebWallpaperProtocol.userScripts(seed: seed) { configuration.userContentController.addUserScript(script) }
     configuration.userContentController.addUserScript(WKUserScript(
       source: Self.denyCaptureScript, injectionTime: .atDocumentStart, forMainFrameOnly: false))
@@ -130,6 +132,9 @@ final class ScreenSaverWebSurface: NSObject, WKNavigationDelegate, WKUIDelegate 
     let selector = NSSelectorFromString("_setOverrideDeviceScaleFactor:")
     typealias SetScale = @convention(c) (AnyObject, Selector, CGFloat) -> Void
     unsafeBitCast(webView.method(for: selector), to: SetScale.self)(webView, selector, scale)
+    // Wallpaper Engine lays a page out in device pixels, and so does the desktop
+    // (`WebWallpaperProtocol.pageZoom(forBackingScale:)`); the lock screen shows the same layout.
+    webView.pageZoom = WebWallpaperProtocol.pageZoom(forBackingScale: Double(scale))
     proxy.owner = self
     webView.configuration.userContentController.add(proxy, name: WebWallpaperProtocol.messageHandlerName)
     webView.navigationDelegate = self

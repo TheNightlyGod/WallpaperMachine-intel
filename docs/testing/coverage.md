@@ -1483,7 +1483,8 @@ with no desktop window. It covers the page contract (`WebWallpaperPageTests`,
 `WebWallpaperLocalRequestTests`, which also covers the file-request fixes in iframe,
 `srcdoc` and script-created frames), property payloads and file staging
 (`WebWallpaperPropertyPayloadTests`), the author API (`WebWallpaperAuthorAPITests`:
-audio, media, random-file and directory listeners), audio delivery, output and
+audio, the silence a listener with Audio response off hears, media, random-file and
+directory listeners), audio delivery, output and
 single-owner rules (`WebWallpaperAudioMediaTests`, `WebWallpaperAudioOutputTests`,
 `MirrorAudioOwnershipTests`), host lifecycle, crash budget and reload
 recovery (`WebWallpaperHostLifecycleTests`, `WebWallpaperRecoveryTests`),
@@ -1504,8 +1505,10 @@ following (`WebWallpaperRenderScaleTests`, plus the render-scale cases of
 `WebWallpaperHostLifecycleTests`), `requestIdleCallback` where WebKit lacks it
 (`WebWallpaperIdleCallbackTests`), V8's `Error().stack` format for the errors a page
 builds (`WebWallpaperErrorStackTests`), the Windows font names a page asks for drawn in macOS
-faces (`WebWallpaperFontAliasTests`) and the screen-saver surface
-(`ScreenSaverWebSurfaceTests`). Detail and limits:
+faces (`WebWallpaperFontAliasTests`), the layout in the display's device pixels that
+Wallpaper Engine gives a page (`WebWallpaperDeviceLayoutTests`) and the screen-saver surface
+(`ScreenSaverWebSurfaceTests`). `WebWallpaperReferenceRenderTests` is not a check: it skips
+unless `scripts/we_reference.py render` hands it real pages to draw. Detail and limits:
 [web wallpapers](../features/web-wallpapers.md#verification).
 
 ## Workshop

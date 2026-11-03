@@ -278,7 +278,9 @@ through silence, and a visualiser that starts its idle animation only after the 
 otherwise never moves. Its `requestAnimationFrame` is held to the published frame rate,
 as on the desktop ([frame-rate limit](web-wallpapers.md#frame-rate-limit)), so a 30 fps
 cap or the reduced rate on battery applies here too instead of WebKit's cadence near 60.
-Pausing or resuming waits on the page itself for at most
+The page is laid out in the display's device pixels as on the desktop
+([device-pixel layout](web-wallpapers.md#device-pixel-layout)), so it keeps its layout when the
+Mac locks. Pausing or resuming waits on the page itself for at most
 5 seconds (its properties, its media, the held frame) and then goes on without it: a heavy
 page can take longer to rebuild after a resume, especially when its WebKit process has
 reached its memory limit, and that is not a failure. Only WebKit not suspending or
