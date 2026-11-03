@@ -12,6 +12,146 @@ app's update window shows the sections of every version newer than the installed
 one, in the app's language; the GitHub Release body repeats only the English notes.
 See [docs/release.md](docs/release.md) for how a version is cut.
 
+## [1.9.0](https://github.com/MMFoundation/WallpaperMachine/compare/v1.8.2...v1.9.0) (2026-11-03)
+
+### English
+
+This release brings web wallpapers to the experimental animated lock screen, makes the app open cleanly on first launch, and makes heavy scene wallpapers much lighter and smoother to run
+
+#### Highlights
+
+- Web wallpapers now play on the experimental animated lock screen and screen saver ([74979d6](https://github.com/MMFoundation/WallpaperMachine/commit/74979d668c03161b6c4fbda30bf713de02d2e142), [d7ce675](https://github.com/MMFoundation/WallpaperMachine/commit/d7ce675cd9a2f6b1b928c8e78766b2c6b0e9a7bd))
+- WallpaperMachine is now signed and notarized by Apple, so it opens on first launch without a trip to System Settings ([582fb25](https://github.com/MMFoundation/WallpaperMachine/commit/582fb2506146b5061336f392cb87965d86785ebe))
+- Heavy scene wallpapers need far less GPU and CPU work each frame and play more evenly on high refresh rate displays ([c4598c9](https://github.com/MMFoundation/WallpaperMachine/commit/c4598c9de152c119dad15f178b9cb652711d8c00))
+- Web wallpapers now appear at the same size as in Wallpaper Engine on Retina displays instead of twice as large ([aa9db5e](https://github.com/MMFoundation/WallpaperMachine/commit/aa9db5ee7c60f0dbfda9e033543de59ca58b5d34))
+- Connection errors with pixiv and Steam now point to the likely proxy problem instead of a vague system message ([a4cda69](https://github.com/MMFoundation/WallpaperMachine/commit/a4cda69f6dd4fbaeed255aeb2feb59b4d2246738))
+
+#### Breaking Changes
+
+- The first signed version asks once more for system audio and Apple Events access, and macOS asks once before sharing your saved pixiv and Steam sign-ins ([582fb25](https://github.com/MMFoundation/WallpaperMachine/commit/582fb2506146b5061336f392cb87965d86785ebe))
+- Copies older than 1.8.0 cannot install this update from the in-app updater, so download it from the release page instead ([582fb25](https://github.com/MMFoundation/WallpaperMachine/commit/582fb2506146b5061336f392cb87965d86785ebe))
+
+#### Features
+
+- Web wallpapers now play on the experimental animated lock screen and screen saver, holding to each wallpaper's frame rate ([74979d6](https://github.com/MMFoundation/WallpaperMachine/commit/74979d668c03161b6c4fbda30bf713de02d2e142), [d7ce675](https://github.com/MMFoundation/WallpaperMachine/commit/d7ce675cd9a2f6b1b928c8e78766b2c6b0e9a7bd))
+- An experimental option under Performance in Settings, off by default, draws only the visible part of cropped scenes to save GPU work and memory ([c4598c9](https://github.com/MMFoundation/WallpaperMachine/commit/c4598c9de152c119dad15f178b9cb652711d8c00))
+
+#### Improvements
+
+- WallpaperMachine downloads are now signed and notarized by Apple, so the app opens on first launch, even offline, without Open Anyway ([582fb25](https://github.com/MMFoundation/WallpaperMachine/commit/582fb2506146b5061336f392cb87965d86785ebe))
+- Scenes with many effects, large pictures, motion blur, bloom or 3D models now cause much less GPU memory traffic each frame ([c4598c9](https://github.com/MMFoundation/WallpaperMachine/commit/c4598c9de152c119dad15f178b9cb652711d8c00))
+- Unchanged parts of a scene are reused instead of redrawn, including audio visualizers in silence, repeated video frames and hidden or faded-out layers ([c4598c9](https://github.com/MMFoundation/WallpaperMachine/commit/c4598c9de152c119dad15f178b9cb652711d8c00))
+- Scenes with many scripts or particles use less CPU per frame, as does the Music and Spotify fallback for track information ([c4598c9](https://github.com/MMFoundation/WallpaperMachine/commit/c4598c9de152c119dad15f178b9cb652711d8c00))
+- Muted or silenced video wallpapers stop decoding their sound, and unmuting brings it back at once without reopening the clip ([c4598c9](https://github.com/MMFoundation/WallpaperMachine/commit/c4598c9de152c119dad15f178b9cb652711d8c00))
+- With fast user switching, wallpapers pause while another account has the screen and resume the moment you switch back ([c4598c9](https://github.com/MMFoundation/WallpaperMachine/commit/c4598c9de152c119dad15f178b9cb652711d8c00))
+- When a connection to pixiv or Steam is cut off or refused, the panel explains that traffic may be bypassing your proxy and how to fix it ([a4cda69](https://github.com/MMFoundation/WallpaperMachine/commit/a4cda69f6dd4fbaeed255aeb2feb59b4d2246738))
+- A scene's energy rating now starts over when you change its resolution, quality or upscaling, instead of mixing different costs ([c4598c9](https://github.com/MMFoundation/WallpaperMachine/commit/c4598c9de152c119dad15f178b9cb652711d8c00))
+
+#### Bug Fixes
+
+- Web wallpapers on Retina displays no longer appear twice as large as in Wallpaper Engine with their edges cut off ([aa9db5e](https://github.com/MMFoundation/WallpaperMachine/commit/aa9db5ee7c60f0dbfda9e033543de59ca58b5d34))
+- Scenes play evenly on 120 Hz and ProMotion displays, and on 60 Hz displays they no longer add delay to clicks and cursor effects ([c4598c9](https://github.com/MMFoundation/WallpaperMachine/commit/c4598c9de152c119dad15f178b9cb652711d8c00))
+- Workshop downloads on a Mac set to a mainland China time zone now use mainland servers instead of stalling on distant ones ([c32fb8d](https://github.com/MMFoundation/WallpaperMachine/commit/c32fb8d49e5f731bc7a34946fb6e431a0f191a30))
+- Web visualizers that wait for sound before lighting up no longer stay dark while Audio response is off ([aa9db5e](https://github.com/MMFoundation/WallpaperMachine/commit/aa9db5ee7c60f0dbfda9e033543de59ca58b5d34))
+- pixiv and Steam sign-in windows no longer stay blank when a page fails to load, and show why with a Retry button ([a4cda69](https://github.com/MMFoundation/WallpaperMachine/commit/a4cda69f6dd4fbaeed255aeb2feb59b4d2246738))
+- Mission Control and Spaces pictures no longer pile up on disk as a playlist changes wallpapers ([c4598c9](https://github.com/MMFoundation/WallpaperMachine/commit/c4598c9de152c119dad15f178b9cb652711d8c00))
+- A scene restarting or rewinding a video layer no longer freezes for up to two seconds ([c4598c9](https://github.com/MMFoundation/WallpaperMachine/commit/c4598c9de152c119dad15f178b9cb652711d8c00))
+- Scene wallpapers no longer show a stale or blank picture after Display HDR is turned on or off ([c4598c9](https://github.com/MMFoundation/WallpaperMachine/commit/c4598c9de152c119dad15f178b9cb652711d8c00))
+- Audio visualizer bars no longer mix two moments of sound in one frame ([c4598c9](https://github.com/MMFoundation/WallpaperMachine/commit/c4598c9de152c119dad15f178b9cb652711d8c00))
+- HDR scenes at Display resolution no longer appear stretched under layers that compose the whole picture ([c4598c9](https://github.com/MMFoundation/WallpaperMachine/commit/c4598c9de152c119dad15f178b9cb652711d8c00))
+
+### 简体中文
+
+本次更新让网页壁纸登上实验性的动态锁定屏幕，应用首次启动即可顺利打开，复杂的场景壁纸运行起来也更轻快流畅
+
+#### 亮点
+
+- 网页壁纸现在可以在实验性的动态锁定屏幕和屏幕保护程序上播放 ([74979d6](https://github.com/MMFoundation/WallpaperMachine/commit/74979d668c03161b6c4fbda30bf713de02d2e142), [d7ce675](https://github.com/MMFoundation/WallpaperMachine/commit/d7ce675cd9a2f6b1b928c8e78766b2c6b0e9a7bd))
+- WallpaperMachine 现已通过 Apple 签名和公证，首次启动即可直接打开，无需前往系统设置 ([582fb25](https://github.com/MMFoundation/WallpaperMachine/commit/582fb2506146b5061336f392cb87965d86785ebe))
+- 复杂的场景壁纸每帧所需的 GPU 和 CPU 工作大幅减少，在高刷新率显示器上播放也更流畅 ([c4598c9](https://github.com/MMFoundation/WallpaperMachine/commit/c4598c9de152c119dad15f178b9cb652711d8c00))
+- 网页壁纸在 Retina 显示器上的大小现在与 Wallpaper Engine 一致，不再放大一倍 ([aa9db5e](https://github.com/MMFoundation/WallpaperMachine/commit/aa9db5ee7c60f0dbfda9e033543de59ca58b5d34))
+- 连接 pixiv 和 Steam 失败时，现在会指出可能的代理问题，而不是显示含糊的系统提示 ([a4cda69](https://github.com/MMFoundation/WallpaperMachine/commit/a4cda69f6dd4fbaeed255aeb2feb59b4d2246738))
+
+#### 不兼容变更
+
+- 首个签名版本会再次请求系统音频和 Apple 事件权限，macOS 也会在提供钥匙串中保存的 pixiv 和 Steam 登录信息前询问一次 ([582fb25](https://github.com/MMFoundation/WallpaperMachine/commit/582fb2506146b5061336f392cb87965d86785ebe))
+- 1.8.0 之前的版本无法通过应用内更新安装此版本，请改从发布页面下载 ([582fb25](https://github.com/MMFoundation/WallpaperMachine/commit/582fb2506146b5061336f392cb87965d86785ebe))
+
+#### 新功能
+
+- 网页壁纸现在可以在实验性的动态锁定屏幕和屏幕保护程序上播放，并遵循各壁纸的帧率 ([74979d6](https://github.com/MMFoundation/WallpaperMachine/commit/74979d668c03161b6c4fbda30bf713de02d2e142), [d7ce675](https://github.com/MMFoundation/WallpaperMachine/commit/d7ce675cd9a2f6b1b928c8e78766b2c6b0e9a7bd))
+- 设置的性能中新增一个实验性选项，默认关闭，可只绘制被裁剪场景的可见部分，减少 GPU 工作和内存占用 ([c4598c9](https://github.com/MMFoundation/WallpaperMachine/commit/c4598c9de152c119dad15f178b9cb652711d8c00))
+
+#### 改进
+
+- WallpaperMachine 下载版现已经过 Apple 签名和公证，首次启动即可打开，即使离线也无需点按“仍要打开” ([582fb25](https://github.com/MMFoundation/WallpaperMachine/commit/582fb2506146b5061336f392cb87965d86785ebe))
+- 包含大量特效、大幅图片、动态模糊、泛光或 3D 模型的场景，每帧占用的 GPU 内存带宽大幅减少 ([c4598c9](https://github.com/MMFoundation/WallpaperMachine/commit/c4598c9de152c119dad15f178b9cb652711d8c00))
+- 场景中没有变化的部分现在会直接复用，包括静音时的音频可视化、重复的视频画面以及隐藏或已淡出的图层 ([c4598c9](https://github.com/MMFoundation/WallpaperMachine/commit/c4598c9de152c119dad15f178b9cb652711d8c00))
+- 脚本或粒子较多的场景每帧占用的 CPU 更少，从“音乐”和 Spotify 获取曲目信息的备用方式也更省 CPU ([c4598c9](https://github.com/MMFoundation/WallpaperMachine/commit/c4598c9de152c119dad15f178b9cb652711d8c00))
+- 静音的视频壁纸不再解码声音，取消静音后声音会立即恢复，无需重新打开视频 ([c4598c9](https://github.com/MMFoundation/WallpaperMachine/commit/c4598c9de152c119dad15f178b9cb652711d8c00))
+- 使用快速用户切换时，其他账户使用屏幕期间壁纸会暂停，切换回来后立即继续播放 ([c4598c9](https://github.com/MMFoundation/WallpaperMachine/commit/c4598c9de152c119dad15f178b9cb652711d8c00))
+- 与 pixiv 或 Steam 的连接被中断或拒绝时，控制面板会说明流量可能未经过代理，并给出解决办法 ([a4cda69](https://github.com/MMFoundation/WallpaperMachine/commit/a4cda69f6dd4fbaeed255aeb2feb59b4d2246738))
+- 更改场景分辨率、画质或超分辨率设置后，场景的能耗评级会重新计算，不再混合不同设置下的数据 ([c4598c9](https://github.com/MMFoundation/WallpaperMachine/commit/c4598c9de152c119dad15f178b9cb652711d8c00))
+
+#### 问题修复
+
+- Retina 显示器上的网页壁纸不再比 Wallpaper Engine 中大一倍，边缘也不再被裁掉 ([aa9db5e](https://github.com/MMFoundation/WallpaperMachine/commit/aa9db5ee7c60f0dbfda9e033543de59ca58b5d34))
+- 场景在 120 Hz 和 ProMotion 显示器上播放更均匀，在 60 Hz 显示器上也不再让点击和光标效果出现延迟 ([c4598c9](https://github.com/MMFoundation/WallpaperMachine/commit/c4598c9de152c119dad15f178b9cb652711d8c00))
+- 时区设为中国大陆的 Mac 现在会使用大陆服务器下载创意工坊内容，不再卡在远端服务器上 ([c32fb8d](https://github.com/MMFoundation/WallpaperMachine/commit/c32fb8d49e5f731bc7a34946fb6e431a0f191a30))
+- 等待声音才会亮起的网页可视化壁纸，在音频响应关闭时不再一直保持黑屏 ([aa9db5e](https://github.com/MMFoundation/WallpaperMachine/commit/aa9db5ee7c60f0dbfda9e033543de59ca58b5d34))
+- pixiv 和 Steam 登录窗口在页面加载失败时不再一片空白，而是显示原因并提供重试按钮 ([a4cda69](https://github.com/MMFoundation/WallpaperMachine/commit/a4cda69f6dd4fbaeed255aeb2feb59b4d2246738))
+- 播放列表切换壁纸时，调度中心和空间使用的桌面图片不再持续堆积占用磁盘空间 ([c4598c9](https://github.com/MMFoundation/WallpaperMachine/commit/c4598c9de152c119dad15f178b9cb652711d8c00))
+- 场景中的视频图层重新开始或倒回时，整个场景不再卡住最多两秒 ([c4598c9](https://github.com/MMFoundation/WallpaperMachine/commit/c4598c9de152c119dad15f178b9cb652711d8c00))
+- 开启或关闭显示器 HDR 后，场景壁纸不再显示过时画面或空白 ([c4598c9](https://github.com/MMFoundation/WallpaperMachine/commit/c4598c9de152c119dad15f178b9cb652711d8c00))
+- 音频可视化的频谱条不再在同一帧中混合两个时刻的声音 ([c4598c9](https://github.com/MMFoundation/WallpaperMachine/commit/c4598c9de152c119dad15f178b9cb652711d8c00))
+- 采用显示器分辨率的 HDR 场景中，合成整幅画面的图层下方内容不再被拉伸 ([c4598c9](https://github.com/MMFoundation/WallpaperMachine/commit/c4598c9de152c119dad15f178b9cb652711d8c00))
+
+### 한국어
+
+이번 릴리스는 실험적 기능인 움직이는 잠금 화면에 웹 배경화면을 지원하고, 첫 실행부터 앱이 바로 열리게 하며, 무거운 장면 배경화면을 훨씬 가볍고 부드럽게 만듭니다
+
+#### 주요 변경 사항
+
+- 이제 실험적 기능인 움직이는 잠금 화면과 화면 보호기에서도 웹 배경화면이 재생됩니다 ([74979d6](https://github.com/MMFoundation/WallpaperMachine/commit/74979d668c03161b6c4fbda30bf713de02d2e142), [d7ce675](https://github.com/MMFoundation/WallpaperMachine/commit/d7ce675cd9a2f6b1b928c8e78766b2c6b0e9a7bd))
+- WallpaperMachine이 Apple 서명과 공증을 받아 첫 실행 시 시스템 설정을 거치지 않고 바로 열립니다 ([582fb25](https://github.com/MMFoundation/WallpaperMachine/commit/582fb2506146b5061336f392cb87965d86785ebe))
+- 무거운 장면 배경화면이 프레임마다 훨씬 적은 GPU 및 CPU 작업으로 그려지고, 고주사율 디스플레이에서 더 고르게 재생됩니다 ([c4598c9](https://github.com/MMFoundation/WallpaperMachine/commit/c4598c9de152c119dad15f178b9cb652711d8c00))
+- 웹 배경화면이 Retina 디스플레이에서 두 배로 커지지 않고 Wallpaper Engine과 같은 크기로 표시됩니다 ([aa9db5e](https://github.com/MMFoundation/WallpaperMachine/commit/aa9db5ee7c60f0dbfda9e033543de59ca58b5d34))
+- pixiv와 Steam 연결 오류가 모호한 시스템 메시지 대신 프록시 문제일 가능성을 알려 줍니다 ([a4cda69](https://github.com/MMFoundation/WallpaperMachine/commit/a4cda69f6dd4fbaeed255aeb2feb59b4d2246738))
+
+#### 호환되지 않는 변경 사항
+
+- 서명된 첫 버전은 시스템 오디오와 Apple 이벤트 접근 권한을 한 번 더 요청하며, macOS도 키체인에 저장된 pixiv 및 Steam 로그인 정보를 넘기기 전에 한 번 확인합니다 ([582fb25](https://github.com/MMFoundation/WallpaperMachine/commit/582fb2506146b5061336f392cb87965d86785ebe))
+- 1.8.0 이전 버전은 앱 내 업데이트로 이 버전을 설치할 수 없으므로 릴리스 페이지에서 직접 내려받으세요 ([582fb25](https://github.com/MMFoundation/WallpaperMachine/commit/582fb2506146b5061336f392cb87965d86785ebe))
+
+#### 새로운 기능
+
+- 이제 실험적 기능인 움직이는 잠금 화면과 화면 보호기에서 웹 배경화면이 각 배경화면의 프레임 속도에 맞춰 재생됩니다 ([74979d6](https://github.com/MMFoundation/WallpaperMachine/commit/74979d668c03161b6c4fbda30bf713de02d2e142), [d7ce675](https://github.com/MMFoundation/WallpaperMachine/commit/d7ce675cd9a2f6b1b928c8e78766b2c6b0e9a7bd))
+- 설정의 성능에 기본적으로 꺼져 있는 실험적 옵션이 추가되어, 잘린 장면의 보이는 부분만 그려 GPU 작업과 메모리를 줄일 수 있습니다 ([c4598c9](https://github.com/MMFoundation/WallpaperMachine/commit/c4598c9de152c119dad15f178b9cb652711d8c00))
+
+#### 개선 사항
+
+- WallpaperMachine 다운로드가 Apple 서명과 공증을 거쳐, 오프라인에서도 ‘그래도 열기’ 없이 첫 실행부터 바로 열립니다 ([582fb25](https://github.com/MMFoundation/WallpaperMachine/commit/582fb2506146b5061336f392cb87965d86785ebe))
+- 효과가 많거나 큰 이미지, 모션 블러, 블룸, 3D 모델이 있는 장면이 프레임마다 GPU 메모리를 훨씬 적게 읽고 씁니다 ([c4598c9](https://github.com/MMFoundation/WallpaperMachine/commit/c4598c9de152c119dad15f178b9cb652711d8c00))
+- 무음 상태의 오디오 시각화, 반복되는 동영상 프레임, 숨겨지거나 사라진 레이어 등 변하지 않은 장면 요소를 다시 그리지 않고 재사용합니다 ([c4598c9](https://github.com/MMFoundation/WallpaperMachine/commit/c4598c9de152c119dad15f178b9cb652711d8c00))
+- 스크립트나 파티클이 많은 장면이 프레임당 CPU를 덜 사용하며, 음악 및 Spotify에서 곡 정보를 가져오는 대체 방식도 더 가벼워졌습니다 ([c4598c9](https://github.com/MMFoundation/WallpaperMachine/commit/c4598c9de152c119dad15f178b9cb652711d8c00))
+- 음소거된 동영상 배경화면은 소리를 디코딩하지 않으며, 음소거를 해제하면 영상을 다시 열지 않고 즉시 소리가 돌아옵니다 ([c4598c9](https://github.com/MMFoundation/WallpaperMachine/commit/c4598c9de152c119dad15f178b9cb652711d8c00))
+- 빠른 사용자 전환 시 다른 계정이 화면을 쓰는 동안 배경화면이 일시 정지되고, 다시 돌아오면 바로 재생됩니다 ([c4598c9](https://github.com/MMFoundation/WallpaperMachine/commit/c4598c9de152c119dad15f178b9cb652711d8c00))
+- pixiv나 Steam 연결이 끊기거나 거부되면, 제어판이 트래픽이 프록시를 거치지 않고 있을 수 있다고 알리고 해결 방법을 안내합니다 ([a4cda69](https://github.com/MMFoundation/WallpaperMachine/commit/a4cda69f6dd4fbaeed255aeb2feb59b4d2246738))
+- 장면 해상도, 품질 또는 업스케일링을 바꾸면 해당 장면의 에너지 등급이 서로 다른 비용을 섞지 않고 새로 측정됩니다 ([c4598c9](https://github.com/MMFoundation/WallpaperMachine/commit/c4598c9de152c119dad15f178b9cb652711d8c00))
+
+#### 버그 수정
+
+- Retina 디스플레이에서 웹 배경화면이 Wallpaper Engine보다 두 배로 커지고 가장자리가 잘리던 문제가 해결되었습니다 ([aa9db5e](https://github.com/MMFoundation/WallpaperMachine/commit/aa9db5ee7c60f0dbfda9e033543de59ca58b5d34))
+- 120Hz 및 ProMotion 디스플레이에서 장면이 고르게 재생되고, 60Hz 디스플레이에서 클릭과 커서 효과가 지연되던 문제도 해결되었습니다 ([c4598c9](https://github.com/MMFoundation/WallpaperMachine/commit/c4598c9de152c119dad15f178b9cb652711d8c00))
+- 중국 본토 시간대로 설정된 Mac에서 창작마당 다운로드가 먼 서버에서 멈추지 않고 본토 서버를 사용합니다 ([c32fb8d](https://github.com/MMFoundation/WallpaperMachine/commit/c32fb8d49e5f731bc7a34946fb6e431a0f191a30))
+- 소리를 기다렸다가 켜지는 웹 시각화 배경화면이 오디오 반응이 꺼져 있을 때 계속 어둡게 남던 문제가 해결되었습니다 ([aa9db5e](https://github.com/MMFoundation/WallpaperMachine/commit/aa9db5ee7c60f0dbfda9e033543de59ca58b5d34))
+- pixiv 및 Steam 로그인 창이 페이지를 불러오지 못할 때 빈 화면 대신 원인과 다시 시도 버튼을 보여 줍니다 ([a4cda69](https://github.com/MMFoundation/WallpaperMachine/commit/a4cda69f6dd4fbaeed255aeb2feb59b4d2246738))
+- 재생 목록이 배경화면을 바꿀 때 Mission Control과 Spaces용 이미지가 디스크에 계속 쌓이던 문제가 해결되었습니다 ([c4598c9](https://github.com/MMFoundation/WallpaperMachine/commit/c4598c9de152c119dad15f178b9cb652711d8c00))
+- 장면의 동영상 레이어가 처음부터 다시 재생되거나 되감길 때 장면이 최대 2초간 멈추던 문제가 해결되었습니다 ([c4598c9](https://github.com/MMFoundation/WallpaperMachine/commit/c4598c9de152c119dad15f178b9cb652711d8c00))
+- 디스플레이 HDR을 켜거나 끈 뒤 장면 배경화면에 이전 화면이나 빈 화면이 표시되던 문제가 해결되었습니다 ([c4598c9](https://github.com/MMFoundation/WallpaperMachine/commit/c4598c9de152c119dad15f178b9cb652711d8c00))
+- 오디오 시각화 막대가 한 프레임에 서로 다른 두 순간의 소리를 섞어 보여 주지 않습니다 ([c4598c9](https://github.com/MMFoundation/WallpaperMachine/commit/c4598c9de152c119dad15f178b9cb652711d8c00))
+- 디스플레이 해상도의 HDR 장면에서 전체 화면을 합성하는 레이어 아래 내용이 늘어나 보이던 문제가 해결되었습니다 ([c4598c9](https://github.com/MMFoundation/WallpaperMachine/commit/c4598c9de152c119dad15f178b9cb652711d8c00))
+
 ## [1.8.2](https://github.com/MMFoundation/WallpaperMachine/compare/v1.8.1...v1.8.2) (2026-11-02)
 
 ### English
