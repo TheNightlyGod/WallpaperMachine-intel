@@ -244,7 +244,7 @@ actor WorkshopService {
             request.setValue("steamLoginSecure=\(account.cookie)", forHTTPHeaderField: "Cookie")
             redirects = SteamCookieRedirectGuard()
         }
-        let (data, response) = try await session.data(for: request, delegate: redirects)
+        let (data, response) = try await fetch(request, delegate: redirects)
         try Task.checkCancellation()
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             throw WorkshopFailure(message: String(localized: "Steam could not load the Workshop. Check your connection or open Steam in your browser, then retry."))
@@ -253,6 +253,19 @@ actor WorkshopService {
             throw WorkshopFailure(message: String(localized: "Steam returned an unreadable Workshop page. Try again or browse on Steam."))
         }
         return html
+    }
+
+    /// Every Steam request goes through here, so a connection the network cut off or refused
+    /// says how to route Steam through a proxy instead of showing the system's "An SSL error has
+    /// occurred"; any other failure, cancellation included, is thrown as it is.
+    private func fetch(
+        _ request: URLRequest, delegate: (any URLSessionTaskDelegate)? = nil
+    ) async throws -> (Data, URLResponse) {
+        do {
+            return try await session.data(for: request, delegate: delegate)
+        } catch {
+            throw ConnectionInterrupted.explaining(error, site: request.url?.host ?? "steamcommunity.com")
+        }
     }
 
     /// The Steam session cookie goes to steamcommunity.com over HTTPS and nowhere else.
@@ -287,7 +300,7 @@ actor WorkshopService {
             URLQueryItem(name: "steamid", value: account.steamID),
         ]
         request.httpBody = Data((form.percentEncodedQuery ?? "").utf8)
-        let (data, response) = try await session.data(for: request, delegate: SteamNoRedirects())
+        let (data, response) = try await fetch(request, delegate: SteamNoRedirects())
         try Task.checkCancellation()
         guard let http = response as? HTTPURLResponse else { throw SteamSignInRequired() }
         if http.statusCode == 401 || http.statusCode == 403 { throw SteamSignInRequired() }
@@ -316,7 +329,7 @@ actor WorkshopService {
             try Task.checkCancellation()
             let batch = Array(ids[start..<min(ids.count, start + Self.detailsBatchSize)])
             start += batch.count
-            let (data, response) = try await session.data(for: Self.detailsRequest(ids: batch))
+            let (data, response) = try await fetch(Self.detailsRequest(ids: batch))
             guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
                 throw WorkshopFailure(message: String(localized: "Steam did not answer the request for Workshop details. Check your connection and try again."))
             }
@@ -373,7 +386,7 @@ actor WorkshopService {
     /// The one tile for a Workshop item named by a pasted link or id, as a page of one. The
     /// sidebar's age rating and tags are not applied: the item was asked for by name.
     func itemPage(id: String) async throws -> WorkshopPage {
-        let (data, response) = try await session.data(for: Self.detailsRequest(ids: [id]))
+        let (data, response) = try await fetch(Self.detailsRequest(ids: [id]))
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             throw WorkshopFailure(message: String(localized: "Steam did not answer the request for Workshop details. Check your connection and try again."))
         }
@@ -490,7 +503,7 @@ actor WorkshopService {
     /// collection inside it is shown as a collection unless an age rating is hidden, when there
     /// is nothing to vouch for what it holds.
     func collectionPage(id: String, page: Int, tags: [String], excludedTags: [String]) async throws -> WorkshopPage {
-        let (data, response) = try await session.data(for: Self.collectionRequest(id: id))
+        let (data, response) = try await fetch(Self.collectionRequest(id: id))
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             throw WorkshopFailure(message: String(localized: "Steam did not answer the request for Workshop details. Check your connection and try again."))
         }
@@ -572,7 +585,7 @@ actor WorkshopService {
         request.httpShouldHandleCookies = false
         request.setValue("steamLoginSecure=\(account.cookie); sessionid=\(token)", forHTTPHeaderField: "Cookie")
         request.httpBody = Data("id=\(itemID)&appid=431960&sessionid=\(token)".utf8)
-        let (data, response) = try await session.data(for: request, delegate: SteamCookieRedirectGuard())
+        let (data, response) = try await fetch(request, delegate: SteamCookieRedirectGuard())
         try Task.checkCancellation()
         guard let http = response as? HTTPURLResponse else { throw SteamSignInRequired() }
         if http.statusCode == 401 || http.statusCode == 403 { throw SteamSignInRequired() }
@@ -611,7 +624,7 @@ actor WorkshopService {
         request.timeoutInterval = 35
         request.httpShouldHandleCookies = false
         request.setValue("WallpaperMachine/1.0 (macOS; public Workshop browser)", forHTTPHeaderField: "User-Agent")
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await fetch(request)
         try Task.checkCancellation()
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
               data.count < 4_000_000,

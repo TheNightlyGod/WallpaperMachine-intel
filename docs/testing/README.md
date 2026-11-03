@@ -174,7 +174,7 @@ afterwards. Standalone isolated checks do not replace the app-hosted gate.
 
 `Tests/Unit/` is grouped by domain, mirroring `App/Services/`: Appearance,
 Automation, Desktop, Diagnostics, GitHub, Library, Lifecycle, Localization,
-LockScreen, NativeVideo, Panel, Pixiv, Playlist, Preview, Steam, SystemMedia,
+LockScreen, NativeVideo, Network, Panel, Pixiv, Playlist, Preview, Steam, SystemMedia,
 UserAssets, WebWallpaper, Workshop; shared fixtures live in `Support/`.
 
 ### Opt-in layers

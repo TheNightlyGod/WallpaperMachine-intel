@@ -258,7 +258,9 @@ Steam shows an account's subscriptions only to that account, so **Your
 subscriptions** needs a Steam Community sign-in. This is a different sign-in from
 SteamCMD's (see [Steam sign-in](#steam-sign-in)), and the app never sees the
 password: **Sign in to Steam…** opens Steam's own sign-in page in a window
-(`WebSignInWindowController` with its `.steam` site, the same one pixiv uses) and
+(`WebSignInWindowController` with its `.steam` site, the same one pixiv uses; a page
+that does not load is replaced by its reason and **Retry**, see
+[pixiv](pixiv.md#signing-in-and-r-18-works)) and
 takes the `steamLoginSecure` cookie Steam sets, and with it the
 `steamRefresh_steam` renewal token Steam sets on `login.steampowered.com` when the page
 set one for the same account. The session (`WorkshopStore.steamWebSession`) is kept in
@@ -608,6 +610,18 @@ A proxy client in rule mode still decides per host name. Its Steam
 rules decide whether SteamCMD's traffic is proxied; rule sets that send them `DIRECT`
 give the same result as no proxy. Route those domains through the proxy, or use
 global mode while downloading. A TUN ("enhanced") mode applies the same rules.
+
+Where a site is reachable only through a proxy, a request that goes direct usually
+fails before the site answers: the network resets or drops the TLS handshake, which
+the system reports as "An SSL error has occurred" and its relatives. Such failures
+(`ConnectionInterrupted` in `App/Services/Network/`: a failed TLS handshake, an untrusted
+or rejected certificate, a refused, lost or timed-out connection, an unresolved name)
+are therefore shown as the connection to the failing host having been cut off or
+refused, with the advice to turn on the proxy client's system proxy or TUN mode or to
+route that domain through the proxy. Workshop browsing, item details, collections,
+comments, subscriptions and the Steam session renewal (every `WorkshopService`
+request), pixiv, and the [sign-in windows](#subscriptions) use it. Being offline and every
+other failure keep the system's own description.
 
 ## The download queue
 

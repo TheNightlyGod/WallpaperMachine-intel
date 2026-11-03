@@ -18,7 +18,7 @@ extension URLSessionPixivTransport {
         } catch let error as URLError where error.code == .cancelled {
             throw CancellationError()
         } catch let error as URLError {
-            throw PixivFailure(code: .network(error.localizedDescription))
+            throw PixivFailure(code: .network(ConnectionInterrupted.message(for: error, site: "www.pixiv.net")))
         }
     }
 

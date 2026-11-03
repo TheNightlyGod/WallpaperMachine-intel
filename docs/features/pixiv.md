@@ -65,6 +65,14 @@ as their referrer, through a thumbnail cache of their own
 (`Cache/PixivThumbnails`, 256 MB, six fetches at a time), which the panel's image
 pipeline reads only for `i.pximg.net` addresses and decodes at the size a tile draws.
 
+A request that gets no HTTP answer is reported as "Couldn’t reach pixiv" with the reason.
+When the connection was cut off or refused before pixiv answered (a failed TLS handshake,
+which the system calls "An SSL error has occurred", a reset, refused or timed-out
+connection, an unresolved name), the reason names the failing host (`www.pixiv.net`,
+`i.pximg.net`) and explains that its traffic is probably not going through the proxy, as
+described under [Proxies](workshop-downloads.md#proxies); being offline and other
+failures keep the system's description.
+
 A general HTTP 403 is reported as a denied request, not as a confirmed rate limit, and
 the error asks users to check access in a browser and their network/proxy connection (a
 working browser does not prove the app's requests are accepted); HTTP 429 has separate
@@ -140,7 +148,12 @@ runs in a private website data store that disappears with the window; the app
 reads exactly one thing from it, the `PHPSESSID` cookie pixiv sets on
 `.pixiv.net` once someone has signed in, and only in its signed-in shape
 (account id, underscore, token). The password, and anything else typed into the
-page, stays between the page and pixiv. Closing the window cancels.
+page, stays between the page and pixiv. Closing the window cancels. When the page
+does not load (a cancelled or replaced navigation aside), WebKit would leave the window
+blank, so the window covers it with **Couldn’t open the sign-in page**, the reason and
+**Retry**, which loads the site's sign-in address again; the next page that loads clears
+it. A connection the network cut off or refused gets the proxy explanation described
+under [Proxies](workshop-downloads.md#proxies), naming the host that failed.
 
 The session is then checked with pixiv (`/touch/ajax/user/self/status`). The
 account's name comes from that answer or, failing that, from its profile

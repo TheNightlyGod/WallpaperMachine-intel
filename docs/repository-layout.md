@@ -52,6 +52,9 @@ App/                               WallpaperMachine application target sources o
     NativeVideo/                   native video backend: the AVFoundation player and the WebM player's window, the
                                    host, and the format check Apply uses (the admission rule, the layout rules
                                    and the WebM player itself are in Shared/)
+    Network/                       ConnectionInterrupted: a connection the network cut off or refused (TLS handshake,
+                                   reset, refused, timed out, unresolved name), explained as a proxy routing problem
+                                   for pixiv, the Workshop and the sign-in windows
     Pixiv/                         pixiv browsing, sign-in session, downloads and still-wallpaper packaging
     Playlist/                      per-display playlists: model, planner, store and the scheduler that switches wallpapers
     Preview/                       isolated live preview inputs, lifecycle, WebKit and scene/video surfaces
