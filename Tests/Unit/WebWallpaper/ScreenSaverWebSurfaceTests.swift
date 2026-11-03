@@ -389,7 +389,9 @@ final class ScreenSaverWebSurfaceTests: XCTestCase {
     try await start(surface)
     let deliveries = { (try await self.state(surface)["capture"] as? [String])?.count ?? 0 }
     try await poll(timeout: .seconds(4)) { try await deliveries() >= 2 }
-    XCTAssertEqual(Set(try XCTUnwrap(try await state(surface)["capture"] as? [String])), ["silence"])
+    let current = try await state(surface)
+    let heard = try XCTUnwrap(current["capture"] as? [String])
+    XCTAssertEqual(Set(heard), ["silence"])
 
     surface.setPaused(true)
     try await poll { surface.isPaused }

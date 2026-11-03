@@ -268,7 +268,10 @@ a scene: the page loads and draws its first frame live, settles as the desktop p
 then holds a frame and runs again while the Mac is locked. The page's paused state is the
 one the surface tracks: a page loaded paused while the surface counted it as playing kept
 its first frame (often black or grey) through the settling and through a lock in its first
-seconds. Pausing or resuming waits on the page itself for at most
+seconds. A page with an audio listener hears silence (128 zeros) once a second while it
+plays, the desktop's spacing for a quiet stretch: Wallpaper Engine keeps calling the listener
+through silence, and a visualiser that starts its idle animation only after the first call
+otherwise never moves. Pausing or resuming waits on the page itself for at most
 5 seconds (its properties, its media, the held frame) and then goes on without it: a heavy
 page can take longer to rebuild after a resume, especially when its WebKit process has
 reached its memory limit, and that is not a failure. Only WebKit not suspending or
@@ -541,7 +544,10 @@ renderer again, and waits for its first frame. A process macOS started in its pl
 that has already drawn the committed revision is watched instead. More than three
 exits within ten minutes restore the system wallpaper with "The lock-screen renderer
 stopped repeatedly" and **Retry**. An extension copy older than the field is not
-watched.
+watched. Publishing a new revision (applying another wallpaper, or one of these
+recoveries) reloads WallpaperAgent, which ends the processes that drew the old one, so
+the app stops watching them before it publishes and watches the processes that draw the
+new revision once they acknowledge it: switching wallpapers never counts as an exit.
 
 While the Mac is unlocked, macOS also closes every connection to a renderer that is
 drawing nothing wrong and then ends its process, sometimes a few times within minutes.

@@ -795,6 +795,62 @@ final class LockScreenWallpaperServiceTests: XCTestCase {
     XCTAssertFalse(try storeOwnsDisplayOne())
   }
 
+  /// Applying another wallpaper selects a new revision, which reloads WallpaperAgent, and that ends
+  /// the renderer process that drew the previous one. However often the wallpaper changes, that is
+  /// not a renderer failing and does not hand the lock screen back to macOS.
+  @MainActor
+  func testSwitchingWallpapersIsNotCountedAsTheRendererFailing() async throws {
+    @MainActor final class Renderers {
+      var watches: [Int32: @MainActor () -> Void] = [:]
+      var serving: Int32 = 999_930
+      var ended: [Int32] = []
+    }
+    let renderers = Renderers()
+    var record = scene()
+    record.displayId = 1
+    var records = [record]
+    let service = LockScreenWallpaperService(prepareExtension: {}, notifyConfigurationChanged: {}, scenes: { records },
+      selection: LockScreenWallpaperSelection(storeURL: store, journalURL: journal, reload: {
+        // The reload ends the process serving the old revision a moment later.
+        let ending = renderers.serving
+        Task { @MainActor in
+          renderers.ended.append(ending)
+          renderers.watches[ending]?()
+        }
+      }),
+      exchange: exchange, defaults: defaults, scheduleMonitor: scheduleMonitor,
+      displayUUID: { [1: "one"][$0] },
+      watchProcessExit: { pid, exited in
+        renderers.watches[pid] = exited
+        return {}
+      })
+    var responder = readinessResponder(processID: renderers.serving)
+    defer { responder.cancel() }
+    try service.start()
+    service.setEnabled(true)
+    await waitFor("lock screen ready") { service.isEnabled && !service.isBusy }
+    for change in 1...(LockScreenWallpaperService.rendererRecoveryLimit + 2) {
+      let previous = renderers.serving
+      let first = try publishedRevision()
+      responder.cancel()
+      responder = readinessResponder(processID: previous + 1)
+      record.fps = 30 + UInt32(change)
+      records = [record]
+      service.refresh()
+      await waitFor("wallpaper change \(change)") {
+        !service.isBusy && (try? self.publishedRevision()) != first && renderers.ended.contains(previous)
+          && renderers.watches[previous + 1] != nil
+      }
+      renderers.serving = previous + 1
+      // Let a miscounted exit's republication run before checking.
+      try await Task.sleep(for: .milliseconds(200))
+      await waitFor("settled after change \(change)") { !service.isBusy }
+      XCTAssertTrue(service.isEnabled, "change \(change)")
+      XCTAssertNil(service.errorMessage, "change \(change)")
+    }
+    XCTAssertTrue(try storeOwnsDisplayOne())
+  }
+
   /// While the Mac is unlocked macOS closes its connections to the renderer and then ends the
   /// process, minutes apart and with nothing wrong. Each is published again, and more of them
   /// than the limit for other exits do not restore the system wallpaper. A renderer that keeps
