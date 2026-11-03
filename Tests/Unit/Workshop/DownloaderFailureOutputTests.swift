@@ -26,7 +26,7 @@ final class DownloaderFailureOutputTests: DownloaderTestCase {
     }
 
     let manager = WorkshopDownloadManager(
-      sessionDirectory: root.appendingPathComponent("SteamSession"), runtimeProvider: ShellRuntimeProvider())
+      sessionDirectory: root.appendingPathComponent("SteamSession"), runtimeProvider: ShellRuntimeProvider(), downloadRegion: { .steamsChoice })
     var reported: [String] = []
     manager.onUnexplainedSignInFailure = { reported.append($0.id) }
     manager.start(
@@ -47,7 +47,7 @@ final class DownloaderFailureOutputTests: DownloaderTestCase {
       """)
     defer { try? FileManager.default.removeItem(at: refused) }
     let manager = WorkshopDownloadManager(
-      sessionDirectory: refused.appendingPathComponent("SteamSession"), runtimeProvider: ShellRuntimeProvider())
+      sessionDirectory: refused.appendingPathComponent("SteamSession"), runtimeProvider: ShellRuntimeProvider(), downloadRegion: { .steamsChoice })
     var reported: [String] = []
     manager.onUnexplainedSignInFailure = { reported.append($0.id) }
     manager.start(

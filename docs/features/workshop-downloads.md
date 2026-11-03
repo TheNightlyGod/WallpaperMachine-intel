@@ -610,6 +610,38 @@ A proxy client in rule mode still decides per host name. Its Steam
 rules decide whether SteamCMD's traffic is proxied; rule sets that send them `DIRECT`
 give the same result as no proxy. Route those domains through the proxy, or use
 global mode while downloading. A TUN ("enhanced") mode applies the same rules.
+In mainland China a direct connection works for sign-in and downloads too (next
+section); only Discover, subscriptions and other `steamcommunity.com` pages need
+the proxy.
+
+### Download region in mainland China
+
+Steam picks a download region (a "cell") at every sign-in from the address it sees.
+For a mainland China address it does not always pick a mainland one: measured from a
+mainland connection with no proxy, one fresh SteamCMD sign-in in three came back
+with Singapore (cell 35) and fetched every chunk from `cache*-sgp1.steamcontent.com`
+across the border. At busy hours that ran at 0.04–0.08 Mbps with hundreds of
+failed chunks and never finished, while Steam's mainland partner CDNs
+(`xz.pphimalayanrt.com`, `dl.steam.clngaa.com`, `st.dl.eccdnx.com`) delivered the
+same 68 MB item in about 3 s. Because a saved sign-in keeps SteamCMD's
+`config.vdf`, one unlucky first sign-in held every later download on the far
+servers.
+
+So on a Mac whose time zone is in mainland China (`Asia/Shanghai`, `Asia/Urumqi` and
+their aliases), every run writes a mainland cell (`CellIDServerOverride` 47,
+Shanghai) into the `config.vdf` of its private SteamCMD home before launch, after
+the saved sign-in is restored, replacing a far region and leaving every other value,
+the cached sign-in included, as it was. A mainland cell Steam already chose is kept.
+Steam narrows the hint to its own nearest mainland cell (observed: 47 became 202,
+Dongguan), serves its mainland CDNs, and asks for the connection-server list with
+that cell, so Hong Kong and Tokyo servers are tried first and sign-in no longer
+falls back to US servers when `api.steampowered.com` stalls. From an address outside
+mainland China Steam ignores a mainland cell and assigns its own (observed: a
+Singapore proxy exit got 35 and Valve's Singapore caches), so a Mac set to a China
+time zone abroad, or one whose proxy carries Steam's traffic, downloads exactly as
+before. Elsewhere the config is not touched. The implementation is
+`App/Services/Steam/SteamCMDDownloadRegion.swift`, called from
+`WorkshopDownloader.run`.
 
 Where a site is reachable only through a proxy, a request that goes direct usually
 fails before the site answers: the network resets or drops the TLS handshake, which

@@ -31,7 +31,7 @@ final class DownloadQueueTests: DownloaderTestCase {
     defer { try? FileManager.default.removeItem(at: root) }
     let manager = WorkshopDownloadManager(
       sessionDirectory: root.appendingPathComponent("SteamSession"),
-      runtimeProvider: ShellRuntimeProvider())
+      runtimeProvider: ShellRuntimeProvider(), downloadRegion: { .steamsChoice })
     var imported = Set<String>()
     func enqueue(_ id: String) throws -> WorkshopDownload {
       let requested = WorkshopItem(
@@ -114,7 +114,7 @@ final class DownloadQueueTests: DownloaderTestCase {
     defer { try? FileManager.default.removeItem(at: root) }
     let manager = WorkshopDownloadManager(
       sessionDirectory: root.appendingPathComponent("SteamSession"),
-      runtimeProvider: ShellRuntimeProvider())
+      runtimeProvider: ShellRuntimeProvider(), downloadRegion: { .steamsChoice })
     let executable = root.appendingPathComponent("runtime/steamcmd")
     for id in ["1", "2"] {
       manager.start(
@@ -159,7 +159,7 @@ final class DownloadQueueTests: DownloaderTestCase {
     defer { try? FileManager.default.removeItem(at: root) }
     let manager = WorkshopDownloadManager(
       sessionDirectory: root.appendingPathComponent("SteamSession"),
-      runtimeProvider: ShellRuntimeProvider())
+      runtimeProvider: ShellRuntimeProvider(), downloadRegion: { .steamsChoice })
     for id in ["123456", "234567"] {
       let requested = WorkshopItem(
         id: id, title: id, creator: "Test", summary: "", previewURL: nil, tags: ["Video"], size: 0,
@@ -194,7 +194,7 @@ final class DownloadQueueTests: DownloaderTestCase {
     defer { try? FileManager.default.removeItem(at: root) }
     let manager = WorkshopDownloadManager(
       sessionDirectory: root.appendingPathComponent("SteamSession"),
-      runtimeProvider: ShellRuntimeProvider(), maximumConcurrentDownloads: 2)
+      runtimeProvider: ShellRuntimeProvider(), maximumConcurrentDownloads: 2, downloadRegion: { .steamsChoice })
     var imported = Set<String>()
     let jobs = try ["1", "2", "3", "4"].map { id in
       manager.start(
@@ -255,7 +255,7 @@ final class DownloadQueueTests: DownloaderTestCase {
     defer { try? FileManager.default.removeItem(at: root) }
     let manager = WorkshopDownloadManager(
       sessionDirectory: root.appendingPathComponent("SteamSession"),
-      runtimeProvider: ShellRuntimeProvider(), maximumConcurrentDownloads: 1)
+      runtimeProvider: ShellRuntimeProvider(), maximumConcurrentDownloads: 1, downloadRegion: { .steamsChoice })
     let queueFolder = root.appendingPathComponent("Queue", isDirectory: true)
     manager.configurePersistence(at: queueFolder)
     let jobs = try ["1", "2", "3", "4"].map { id in
@@ -304,7 +304,7 @@ final class DownloadQueueTests: DownloaderTestCase {
     defer { try? FileManager.default.removeItem(at: root) }
     let manager = WorkshopDownloadManager(
       sessionDirectory: root.appendingPathComponent("SteamSession"),
-      runtimeProvider: ShellRuntimeProvider())
+      runtimeProvider: ShellRuntimeProvider(), downloadRegion: { .steamsChoice })
     var imported = Set<String>()
     func enqueue(_ id: String) throws -> WorkshopDownload {
       manager.start(
@@ -348,7 +348,7 @@ final class DownloadQueueTests: DownloaderTestCase {
     defer { try? FileManager.default.removeItem(at: root) }
     let manager = WorkshopDownloadManager(
       sessionDirectory: root.appendingPathComponent("SteamSession"),
-      runtimeProvider: ShellRuntimeProvider(), maximumConcurrentDownloads: 1)
+      runtimeProvider: ShellRuntimeProvider(), maximumConcurrentDownloads: 1, downloadRegion: { .steamsChoice })
     var imported = Set<String>()
     func enqueue(_ id: String) throws -> WorkshopDownload {
       manager.start(
@@ -418,7 +418,7 @@ final class DownloadQueueTests: DownloaderTestCase {
     defer { try? FileManager.default.removeItem(at: root) }
     let manager = WorkshopDownloadManager(
       sessionDirectory: root.appendingPathComponent("SteamSession"),
-      runtimeProvider: ShellRuntimeProvider())
+      runtimeProvider: ShellRuntimeProvider(), downloadRegion: { .steamsChoice })
     var imported = Set<String>()
     let jobs = try ["1", "2"].map { id in
       manager.start(
@@ -479,7 +479,7 @@ final class DownloadQueueTests: DownloaderTestCase {
     defer { try? FileManager.default.removeItem(at: root) }
     let manager = WorkshopDownloadManager(
       sessionDirectory: root.appendingPathComponent("SteamSession"),
-      runtimeProvider: ShellRuntimeProvider())
+      runtimeProvider: ShellRuntimeProvider(), downloadRegion: { .steamsChoice })
     for id in ["1", "2", "3"] {
       let requested = WorkshopItem(
         id: id, title: id, creator: "Test", summary: "", previewURL: nil, tags: ["Video"], size: 0,
@@ -515,7 +515,7 @@ final class DownloadQueueTests: DownloaderTestCase {
     try setSessionMode("cancel", in: root)
     let manager = WorkshopDownloadManager(
       sessionDirectory: root.appendingPathComponent("SteamSession"),
-      runtimeProvider: ShellRuntimeProvider())
+      runtimeProvider: ShellRuntimeProvider(), downloadRegion: { .steamsChoice })
     manager.start(
       item: item, username: "localtest",
       executable: root.appendingPathComponent("runtime/steamcmd"),
@@ -597,7 +597,7 @@ final class DownloadQueueTests: DownloaderTestCase {
     do {
       let manager = WorkshopDownloadManager(
         sessionDirectory: root.appendingPathComponent("SteamSession"),
-        runtimeProvider: ShellRuntimeProvider(), wakeCenter: center)
+        runtimeProvider: ShellRuntimeProvider(), wakeCenter: center, downloadRegion: { .steamsChoice })
       XCTAssertEqual(center.added, 1)
       XCTAssertEqual(center.removed, 0)
       XCTAssertTrue(manager.downloads.isEmpty)
@@ -614,7 +614,7 @@ final class DownloadQueueTests: DownloaderTestCase {
     let manager = WorkshopDownloadManager(
       sessionDirectory: root.appendingPathComponent("SteamSession"),
       runtimeProvider: ShellRuntimeProvider(), maximumConcurrentDownloads: 1,
-      networkMonitorFactory: { FixtureNetworkMonitor() }, wakeCenter: center)
+      networkMonitorFactory: { FixtureNetworkMonitor() }, wakeCenter: center, downloadRegion: { .steamsChoice })
     func enqueue(_ id: String) throws -> WorkshopDownload {
       manager.start(
         item: WorkshopItem(

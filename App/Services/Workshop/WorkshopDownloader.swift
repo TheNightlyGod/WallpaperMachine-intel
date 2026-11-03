@@ -55,6 +55,8 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
     private(set) var sessionWarning: String?
     @ObservationIgnored private let sessionDirectory: URL
     @ObservationIgnored private let runtimeProvider: any SteamCMDRuntimeProviding
+    /// The download region each run's SteamCMD config starts from, read as the run starts.
+    @ObservationIgnored private let downloadRegion: @Sendable () -> SteamCMDDownloadRegion
     @ObservationIgnored private let networkMonitor: any ProcessNetworkMonitoring
     @ObservationIgnored private var cachedCredentialsRejected = false
     @ObservationIgnored private var assetsDownloadCompleted = false
@@ -182,8 +184,10 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
          now: @escaping () -> Date = Date.init,
          freeSpace: @escaping @Sendable (URL) -> Int64? = WorkshopDownloader.systemFreeSpace,
          retryDelays: [TimeInterval] = [2, 8, 30], resumeGrace: TimeInterval = 45,
-         itemDetails: @escaping ItemDetails = WorkshopDownloader.publicItemDetails) {
+         itemDetails: @escaping ItemDetails = WorkshopDownloader.publicItemDetails,
+         downloadRegion: @escaping @Sendable () -> SteamCMDDownloadRegion = { .steamsChoice }) {
         self.sessionDirectory = sessionDirectory
+        self.downloadRegion = downloadRegion
         self.checkpointDirectory = checkpointDirectory
         self.inactivityTimeout = inactivityTimeout
         self.passTimeout = passTimeout
@@ -404,6 +408,9 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
                     try Self.restoreSession(from: directory, account: account, to: staging)
                 }.value
             }
+            // After the restore, so a saved sign-in's config keeps everything but a far region.
+            let region = downloadRegion()
+            await Task.detached(priority: .utility) { region.seed(home: staging) }.value
             try Task.checkCancellation()
             try await ensureFreeSpace(under: root, staging: content, item: itemID, label: label)
 

@@ -63,7 +63,8 @@ final class WorkshopDownload: Identifiable {
   fileprivate init(
     id: String, item: WorkshopItem?, account: String, rememberSession: Bool,
     sessionDirectory: URL, runtimeProvider: any SteamCMDRuntimeProviding, checkpointDirectory: URL? = nil,
-    networkMonitor: (any ProcessNetworkMonitoring)? = nil
+    networkMonitor: (any ProcessNetworkMonitoring)? = nil,
+    downloadRegion: @escaping @Sendable () -> SteamCMDDownloadRegion
   ) {
     self.id = id
     self.item = item
@@ -71,7 +72,7 @@ final class WorkshopDownload: Identifiable {
     self.rememberSession = rememberSession
     worker = WorkshopDownloader(
       sessionDirectory: sessionDirectory, runtimeProvider: runtimeProvider,
-      networkMonitor: networkMonitor, checkpointDirectory: checkpointDirectory)
+      networkMonitor: networkMonitor, checkpointDirectory: checkpointDirectory, downloadRegion: downloadRegion)
   }
 }
 
@@ -104,6 +105,8 @@ final class WorkshopDownloadManager: SteamCMDDownloadActivity {
   @ObservationIgnored private let sessionDirectory: URL
   @ObservationIgnored private let runtimeProvider: any SteamCMDRuntimeProviding
   @ObservationIgnored private let networkMonitorFactory: (@MainActor () -> any ProcessNetworkMonitoring)?
+  /// Where each SteamCMD run starts looking for download servers (`SteamCMDDownloadRegion`).
+  @ObservationIgnored private let downloadRegion: @Sendable () -> SteamCMDDownloadRegion
   @ObservationIgnored private var isShuttingDown = false
   @ObservationIgnored private var persistenceDirectory: URL?
   @ObservationIgnored private let wakeCenter: NotificationCenter
@@ -135,7 +138,7 @@ final class WorkshopDownloadManager: SteamCMDDownloadActivity {
       let job = WorkshopDownload(id: record.id, item: record.item, account: record.account,
         rememberSession: record.rememberSession, sessionDirectory: sessionDirectory,
         runtimeProvider: runtimeProvider, checkpointDirectory: checkpointDirectory(for: record.id),
-        networkMonitor: networkMonitorFactory?())
+        networkMonitor: networkMonitorFactory?(), downloadRegion: downloadRegion)
       job.isQueued = false
       job.isPaused = true
       downloads.append(job)
@@ -186,9 +189,11 @@ final class WorkshopDownloadManager: SteamCMDDownloadActivity {
     runtimeProvider: any SteamCMDRuntimeProviding = SteamCMDRuntimeService(),
     maximumConcurrentDownloads: Int = WorkshopDownloadManager.defaultConcurrentDownloads,
     networkMonitorFactory: (@MainActor () -> any ProcessNetworkMonitoring)? = nil,
-    wakeCenter: NotificationCenter = NSWorkspace.shared.notificationCenter
+    wakeCenter: NotificationCenter = NSWorkspace.shared.notificationCenter,
+    downloadRegion: @escaping @Sendable () -> SteamCMDDownloadRegion = { .current }
   ) {
     self.sessionDirectory = sessionDirectory
+    self.downloadRegion = downloadRegion
     self.runtimeProvider = runtimeProvider
     self.networkMonitorFactory = networkMonitorFactory
     self.wakeCenter = wakeCenter
@@ -385,7 +390,8 @@ final class WorkshopDownloadManager: SteamCMDDownloadActivity {
     let job = WorkshopDownload(
       id: id, item: item, account: account, rememberSession: rememberSession,
       sessionDirectory: sessionDirectory, runtimeProvider: runtimeProvider,
-      checkpointDirectory: checkpointDirectory(for: id), networkMonitor: networkMonitorFactory?())
+      checkpointDirectory: checkpointDirectory(for: id), networkMonitor: networkMonitorFactory?(),
+      downloadRegion: downloadRegion)
     job.begin = { [weak job] in
       guard let job else { return }
       begin(job.worker, account)

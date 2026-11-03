@@ -29,7 +29,8 @@ class DownloaderTestCase: XCTestCase {
     networkMonitor: (any ProcessNetworkMonitoring)? = nil, checkpointDirectory: URL? = nil,
     freeSpace: (@Sendable (URL) -> Int64?)? = nil, retryDelays: [TimeInterval] = [0, 0, 0],
     runtimeProvider: (any SteamCMDRuntimeProviding)? = nil,
-    presetBaseDetails: @escaping WorkshopDownloader.ItemDetails = { _ in nil }
+    presetBaseDetails: @escaping WorkshopDownloader.ItemDetails = { _ in nil },
+    downloadRegion: SteamCMDDownloadRegion = .steamsChoice
   ) -> WorkshopDownloader {
     let downloader = WorkshopDownloader(
       sessionDirectory: root.appendingPathComponent("SteamSession"),
@@ -37,7 +38,7 @@ class DownloaderTestCase: XCTestCase {
       networkMonitor: networkMonitor ?? FixtureNetworkMonitor(),
       checkpointDirectory: checkpointDirectory,
       freeSpace: freeSpace ?? WorkshopDownloader.systemFreeSpace, retryDelays: retryDelays,
-      itemDetails: presetBaseDetails)
+      itemDetails: presetBaseDetails, downloadRegion: { downloadRegion })
     let requestedItem = item ?? WorkshopItem(
       id: itemID, title: "Session fixture", creator: "Test", summary: "", previewURL: nil,
       tags: ["Video"], size: 0, subscriptions: 0)
