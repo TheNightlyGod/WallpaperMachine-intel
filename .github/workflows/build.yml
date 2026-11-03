@@ -138,10 +138,19 @@ jobs:
           security import "${certificate}" -k "${keychain}" -P "${DEVELOPER_ID_CERTIFICATE_PASSWORD}" -T /usr/bin/codesign
           rm -f "${certificate}"
           # Apple's Developer ID intermediates, so codesign can build the chain whichever
-          # one issued the certificate; the runner image does not promise either.
+          # one issued the certificate; the runner image does not promise either. A .p12
+          # exported from Keychain Access usually carries its issuer already, and
+          # `security import` fails on a certificate the keychain holds: that one is skipped.
           for intermediate in DeveloperIDCA DeveloperIDG2CA; do
             curl -fsSL --retry 3 "https://www.apple.com/certificateauthority/${intermediate}.cer" -o "${RUNNER_TEMP}/${intermediate}.cer"
-            security import "${RUNNER_TEMP}/${intermediate}.cer" -k "${keychain}"
+            if output="$(security import "${RUNNER_TEMP}/${intermediate}.cer" -k "${keychain}" 2>&1)"; then
+              echo "${output}"
+            else
+              case "${output}" in
+                *"already exists"*) echo "${intermediate}: already in the keychain" ;;
+                *) echo "${output}" >&2; exit 1 ;;
+              esac
+            fi
           done
           # Lets codesign use the key without a keychain prompt.
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${password}" "${keychain}" > /dev/null

@@ -395,7 +395,8 @@ is kept only by the maintainer, outside the repository. To export it, choose the
 **Developer ID Application** certificate in Keychain Access, **File → Export Items…**
 as a `.p12`, and store `base64 -i <file>.p12` as the first secret. The workflow also
 imports both of Apple's Developer ID intermediates, so the chain builds whichever one
-issued the certificate.
+issued the certificate; one the `.p12` already carries (an export usually includes
+its issuer) is skipped.
 
 Create the certificate with the **G2 Sub-CA** profile type in the Apple Developer
 portal. One made with **Previous Sub-CA** ends with that intermediate on 2027-02-01;
