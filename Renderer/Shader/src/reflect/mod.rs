@@ -21,6 +21,9 @@ use crate::reflection::{
 };
 use crate::request::StageKind;
 
+mod coverage;
+mod reads;
+
 /// The names a vertex input is reported under (D R58): the legalizer may declare an input the
 /// shader writes under another name, and reflection reports the author's.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -187,6 +190,10 @@ pub fn reflect_module(
         uniform_blocks: blocks,
         vertex_inputs,
         active_texture_slots: slots,
+        vertex_position: if kind == StageKind::Vertex { coverage::vertex_position(module, index, names) } else { None },
+        fragment_always_writes: kind == StageKind::Fragment && coverage::fragment_always_writes(module, index),
+        read_uniforms: reads::read_members(module, index),
+        fragment_colour: if kind == StageKind::Fragment { coverage::fragment_colour(module, info, index) } else { None },
     };
     reflection.check_limits()?;
     Ok(reflection)

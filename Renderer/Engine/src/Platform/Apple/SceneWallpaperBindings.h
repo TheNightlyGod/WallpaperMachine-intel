@@ -452,6 +452,21 @@ void owe_set_scene_video_plane_sampling_enabled(bool enabled);
 bool owe_scene_video_plane_sampling_enabled(void);
 
 /*
+ * SDR display framing, process-wide. Off by default.
+ *
+ * An SDR scene at Display resolution whose canvas overhangs the display (Fill,
+ * or original size, cropping it) is then drawn only over the part the display
+ * shows, as Wallpaper Engine's window-sized frame is, instead of over the whole
+ * canvas-cover raster and cropped. Not byte-identical: pixels near the edges
+ * and along fine geometry can differ slightly. A running scene takes a change
+ * at its next frame by sizing its render targets again; nothing is compiled.
+ * WALLPAPER_MACHINE_SDR_FRAMING=1 or =0 overrides the setting either way; the
+ * getter answers the setting.
+ */
+void owe_set_scene_display_framing_enabled(bool enabled);
+bool owe_scene_display_framing_enabled(void);
+
+/*
  * MetalFX upscaling of a scene drawn below full resolution, process-wide. Off
  * by default.
  *

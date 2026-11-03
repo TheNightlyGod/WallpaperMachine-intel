@@ -736,6 +736,22 @@ impl WallpaperEngine {
         self.backend.set_scene_video_plane_sampling_enabled(enabled)
     }
 
+    /// Turns SDR display framing on or off inside native Metal scenes.
+    ///
+    /// Off by default. An SDR scene at Display resolution whose canvas
+    /// overhangs the display (Fill, or original size, crops it) then draws
+    /// only the part the display shows instead of the whole layout cropped.
+    /// It is not byte-identical to drawing the whole layout. A running scene
+    /// takes the change at its next frame, sizing its targets again in place;
+    /// nothing is rebuilt. `WALLPAPER_MACHINE_SDR_FRAMING` overrides it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the renderer rejects the call.
+    pub fn set_scene_display_framing_enabled(&self, enabled: bool) -> Result<(), EngineError> {
+        self.backend.set_scene_display_framing_enabled(enabled)
+    }
+
     /// Brings a scene drawn below full resolution back to full size with
     /// MetalFX instead of a bilinear stretch, for every scene.
     ///

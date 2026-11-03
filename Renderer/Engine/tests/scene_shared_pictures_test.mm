@@ -289,3 +289,38 @@ TEST_F(SharedPictures, PicturesTheRuntimeFillsStayPerDisplay)
     EXPECT_EQ(MetalRender::SharedImageBytesForTests(), bytes_before) << "no runtime picture is shared";
     EXPECT_EQ(MetalRender::ImageUploadsForTests(), uploads_before);
 }
+
+// Every picture a scene loads is rearranged for sampling once; the frames drawn from it are the
+// frames drawn from the same picture left as the CPU wrote it (`WALLPAPER_MACHINE_OPTIMIZE_IMAGES=0`),
+// byte for byte, filtered and minified included.
+TEST_F(SharedPictures, AnOptimizedPictureDrawsTheSameBytesAsOneLeftAsWritten)
+{
+    struct OnAtExit {
+        ~OnAtExit() { MetalRender::SetImageOptimizationForTests(true); }
+    } restore;
+    const Image  picture = Pattern(300, 200, 7);
+    ScenePackage optimized_package;
+    MakePictureScene(optimized_package, "optimized_pic", picture, 4);
+    ScenePackage written_package;
+    MakePictureScene(written_package, "written_pic", picture, 4);
+    GpuSceneOptions minified;
+    minified.width  = 187;
+    minified.height = 105;
+
+    const uint64_t before = MetalRender::ImagesOptimizedForTests();
+    MetalRender::SetImageOptimizationForTests(true);
+    GpuScene optimized(optimized_package, minified);
+    ASSERT_TRUE(optimized.ok()) << optimized.error();
+    EXPECT_EQ(MetalRender::ImagesOptimizedForTests() - before, 1u) << "the picture was not optimized";
+
+    MetalRender::SetImageOptimizationForTests(false);
+    GpuScene written(written_package, minified);
+    ASSERT_TRUE(written.ok()) << written.error();
+    EXPECT_EQ(MetalRender::ImagesOptimizedForTests() - before, 1u) << "the switch did not leave it as written";
+
+    const Image a = optimized.Run(2);
+    const Image b = written.Run(2);
+    EXPECT_EQ(CountDifferingPixels(a, b), 0u) << "an optimized picture drew other bytes";
+    EXPECT_GT(CountDifferingPixels(a, Image::Solid(a.width, a.height, { 0, 0, 0, 255 })), 0u)
+        << "nothing was drawn";
+}

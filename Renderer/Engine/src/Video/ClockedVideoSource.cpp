@@ -141,8 +141,7 @@ bool ClockedVideoSource::syncPlayback(const VideoPlaybackState& state, std::stri
         const double desired   = currentDesiredAbsoluteLocked();
         const double threshold = std::max(0.5, m_frame_duration_seconds * 8.0);
         if (desired < m_display_frame.absolute_seconds - threshold) {
-            clearDisplayFrameLocked();
-            requestSeekLocked(desired);
+            seekBackLocked(desired);
             m_condition.notify_all();
         }
     }
@@ -157,16 +156,14 @@ bool ClockedVideoSource::refreshFrame(std::string* error)
 
     const auto   started  = std::chrono::steady_clock::now();
     const double desired  = currentDesiredAbsoluteLocked();
-    const double period   = m_frame_duration_seconds;
     const double slack    = presentationSlackSeconds();
-    const double backward = std::max(0.05, period * 2.0);
-    const double forward  = ForwardResyncSeconds(period, static_cast<double>(kDecodedFrameQueueCapacity),
-                                                 m_seek.landing_lag);
+    const double backward = backwardSlackSecondsLocked();
+    const double forward  = forwardSlackSecondsLocked();
 
-    // A clock that went back past what is shown gets a seek of its own, display emptied first.
+    // A clock that went back past what is shown gets a seek of its own; the picture shown stays
+    // until the seek's first frame replaces it.
     if (m_display_frame_ready && desired < m_display_frame.absolute_seconds - backward) {
-        clearDisplayFrameLocked();
-        requestSeekLocked(desired);
+        seekBackLocked(desired);
     }
     // One seek per jump: while a seek is on its way and still fetches what the clock wants, wait for it.
     if (!seekInFlightCoversLocked(desired, backward, forward)) {
@@ -282,6 +279,7 @@ void ClockedVideoSource::clearDisplayFrameLocked()
 {
     releaseFrameSlot(&m_display_frame);
     m_display_frame_ready = false;
+    m_display_frame_stale = false;
 }
 
 void ClockedVideoSource::clearFrames()
@@ -316,6 +314,32 @@ void ClockedVideoSource::requestSeekLocked(double absolute_seconds)
 {
     clearPendingFramesLocked();
     m_seek.Arm(std::max(0.0, absolute_seconds), std::chrono::steady_clock::now());
+}
+
+double ClockedVideoSource::backwardSlackSecondsLocked() const
+{
+    return std::max(0.05, m_frame_duration_seconds * 2.0);
+}
+
+double ClockedVideoSource::forwardSlackSecondsLocked() const
+{
+    return ForwardResyncSeconds(m_frame_duration_seconds, static_cast<double>(kDecodedFrameQueueCapacity),
+                                m_seek.landing_lag);
+}
+
+/// The clock went back past the picture on display (a script restarting its clip, say): the
+/// decoder is sent back for it, once per jump. The picture stays on display until the seek's
+/// first frame replaces it (`queueDecodedFrame`). Emptying the display instead made the next
+/// `refreshFrame` wait for that frame, holding every layer of the scene for as long as the seek
+/// takes, which for a target in the middle of a long group of pictures is many frames.
+void ClockedVideoSource::seekBackLocked(double desired_absolute_seconds)
+{
+    if (seekInFlightCoversLocked(desired_absolute_seconds, backwardSlackSecondsLocked(),
+                                 forwardSlackSecondsLocked())) {
+        return;
+    }
+    requestSeekLocked(desired_absolute_seconds);
+    m_display_frame_stale = true;
 }
 
 double ClockedVideoSource::secondsSinceSeekRequestedLocked() const
@@ -356,12 +380,14 @@ bool ClockedVideoSource::promoteNextFrameLocked()
     if (m_pending_frames.empty()) return false;
     DecodedFrameSlot next = m_pending_frames.front();
     m_pending_frames.pop_front();
-    if (m_display_frame_ready && next.loop_index > m_display_frame.loop_index) {
+    // A picture a seek replaces was never played through to the next one: no pass is counted.
+    if (m_display_frame_ready && !m_display_frame_stale && next.loop_index > m_display_frame.loop_index) {
         m_loop_count += next.loop_index - m_display_frame.loop_index;
     }
     releaseFrameSlot(&m_display_frame);
     m_display_frame       = next;
     m_display_frame_ready = true;
+    m_display_frame_stale = false;
     return true;
 }
 
@@ -431,14 +457,16 @@ void ClockedVideoSource::queueDecodedFrame(DecodedFrameSlot frame_slot, uint64_t
         m_seek.landing_lag = ClockRunOnSeconds(secondsSinceSeekRequestedLocked(), m_playback_state.rate);
     }
 
-    const bool display_was_empty = !m_display_frame_ready;
+    // An empty display, or one still showing the picture from before a backward seek, takes the
+    // first frame at once.
+    const bool replace_display   = !m_display_frame_ready || m_display_frame_stale;
     frame_slot.ready             = true;
     frame_slot.frame.generation  = m_next_generation;
     m_pacing.Observe(frame_slot.absolute_seconds, frame_slot.loop_index, seek_epoch);
     m_pending_frames.push_back(std::move(frame_slot));
     ++m_next_generation;
     ++m_decoded_frame_count;
-    if (display_was_empty) promoteNextFrameLocked();
+    if (replace_display) promoteNextFrameLocked();
     m_condition.notify_all();
 }
 

@@ -20,7 +20,7 @@ struct TimerAdmissionTestAccess {
         i32 busy;
         std::optional<Clock::time_point> owed;
         Clock::time_point due;
-        std::chrono::microseconds floor;
+        std::chrono::nanoseconds floor;
     };
 
     static State Read(FrameTimer& frame) {
@@ -110,7 +110,7 @@ private:
 
 struct Draw {
     Clock::time_point posted, due;
-    std::chrono::microseconds floor;
+    std::chrono::nanoseconds floor;
     int busy;
 };
 

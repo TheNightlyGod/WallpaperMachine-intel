@@ -79,6 +79,8 @@ enum ClientPaths {
     static var libraryThumbnailCacheURL: URL { cacheURL.appendingPathComponent("LibraryThumbnails", isDirectory: true) }
     /// The last poster of each wallpaper a desktop Space is set to, for desktops not visited yet.
     static var spacePosterCacheURL: URL { cacheURL.appendingPathComponent("SpacePosters", isDirectory: true) }
+    /// The settled poster each wallpaper last had on each display, for a wallpaper that comes back.
+    static var settledPosterCacheURL: URL { cacheURL.appendingPathComponent("SettledPosters", isDirectory: true) }
     /// The saved Steam sign-in. Kept out of backups so a token never travels to a backup drive.
     static func steamSessionURL(in support: URL = supportURL) -> URL {
         support.appendingPathComponent("SteamSession", isDirectory: true)

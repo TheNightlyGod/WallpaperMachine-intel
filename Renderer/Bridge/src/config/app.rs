@@ -253,6 +253,10 @@ impl SceneQualityCfg {
 #[serde(default)]
 pub struct ExperimentalCfg {
     pub scene_video_plane_sampling: bool,
+    /// Draw only the part of an SDR scene at Display resolution that the display shows,
+    /// instead of its whole canvas-cover layout cropped. Off by default: it is not
+    /// byte-identical to drawing the whole layout.
+    pub scene_display_framing: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

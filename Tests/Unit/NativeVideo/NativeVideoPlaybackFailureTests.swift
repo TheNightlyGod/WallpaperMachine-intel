@@ -4,12 +4,13 @@ import XCTest
 @testable import WallpaperMachine
 
 /// What the native player does with a playback failure, short of playing
-/// anything: the detail the host is told, and the video-only item the player
-/// falls back to when the clip failed with its audio.
+/// anything: the detail the host is told, the video-only item the player
+/// falls back to when the clip failed with its audio, and the audio track it
+/// switches off while the clip cannot be heard.
 ///
 /// No player, no window, no audio device: this is error values, track
-/// metadata and a composition. The fallback itself, played against an audio
-/// output that cannot start, is in `NativeVideoPlayerMediaTests`.
+/// metadata and a composition. The fallback and the switched-off track, played
+/// against an audio output that cannot start, are in `NativeVideoPlayerMediaTests`.
 @MainActor
 final class NativeVideoPlaybackFailureTests: XCTestCase {
     private var directory: URL!
@@ -69,6 +70,36 @@ final class NativeVideoPlaybackFailureTests: XCTestCase {
         XCTAssertEqual(
             CMTimeCompare(duration, sourceRange.duration), 0,
             "the picture keeps its full length, so the loop seam does not move")
+    }
+
+    /// The audio track switched off while a clip cannot be heard is the one
+    /// the platform would play, and switching it back on restores that only
+    /// when there is exactly one: with several, the platform's choice between
+    /// them is not known, and the clip keeps its sound running muted.
+    func testOnlyAClipWithOneEnabledAudioTrackHasItsSoundSwitchedOff() async throws {
+        func silenceable(_ name: String, audio: [Bool]?) async throws -> (CMPersistentTrackID?, [CMPersistentTrackID]) {
+            var request = SyntheticVideoFixture.Request.constantRate(
+                name: name, numerator: 30, denominator: 1, frames: 10)
+            if let audio {
+                request.withAudio = true
+                request.audioTracksEnabled = audio
+            }
+            let asset = AVURLAsset(url: try await SyntheticVideoFixture.write(request, into: directory))
+            let tracks = try await asset.loadTracks(withMediaType: .audio)
+            XCTAssertEqual(tracks.count, audio?.count ?? 0, "\(name): the fixture's audio tracks")
+            return (await NativeVideoPlayer.silenceableAudioTrack(of: asset), tracks.map(\.trackID))
+        }
+
+        let (one, oneIDs) = try await silenceable("one-audio", audio: [true])
+        XCTAssertEqual(one, oneIDs.first)
+        let (beside, besideIDs) = try await silenceable("one-enabled-one-not", audio: [false, true])
+        XCTAssertEqual(beside, besideIDs.last, "a track the file leaves off is never played, so it does not count")
+        let (two, _) = try await silenceable("two-enabled", audio: [true, true])
+        XCTAssertNil(two)
+        let (none, _) = try await silenceable("no-audio", audio: nil)
+        XCTAssertNil(none)
+        let (off, _) = try await silenceable("only-disabled", audio: [false])
+        XCTAssertNil(off)
     }
 
     func testASilentClipHasNoAudioToLeaveOut() async throws {

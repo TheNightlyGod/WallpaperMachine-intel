@@ -913,6 +913,13 @@ pub struct BridgeSettingsSnapshot {
     /// the `video_path` of each `scene_renderers` row is what actually
     /// happened.
     pub scene_video_plane_sampling_enabled: bool,
+    /// The saved preference for SDR display framing: an SDR scene at Display
+    /// resolution draws only the part of its canvas-cover layout the display
+    /// shows. Off by default, experimental. A preference, not a read-back:
+    /// `WALLPAPER_MACHINE_SDR_FRAMING` can override it, and a scene that
+    /// cannot be framed (Fit, a zoom below 1, one MetalFX upscales) draws the
+    /// whole layout whatever this says.
+    pub scene_display_framing_enabled: bool,
     /// `"display"` or `"canvas"`: how many pixels a 2D scene is rasterized
     /// with before the render scale divides them. The saved preference, which
     /// every running 2D scene follows; perspective scenes and plain videos
@@ -988,7 +995,7 @@ pub struct BridgeDisplayMutationBundle {
 /// Renderer work counters for one wallpaper surface.
 ///
 /// The fields are split on purpose. `timer_wakeups` through
-/// `presents_skipped_unchanged` are work this surface alone performs and must
+/// `present_gaps_3plus_vsync` are work this surface alone performs and must
 /// stop when nobody can see it.
 /// The `video_*` fields describe the decoded source, which may legitimately keep
 /// running while one of its consumers is hidden as long as another consumer
@@ -1033,9 +1040,24 @@ pub struct BridgeRendererSurfaceCounters {
     /// because they would have put exactly the pixels already on the surface
     /// back. Neither a dropped draw nor a present request.
     pub presents_skipped_unchanged: u64,
+    /// Presented drawables the display reported as shown. Reports arrive a
+    /// refresh or two after the request, so a window's count trails
+    /// `present_requests` by the frames still in flight.
+    pub presented_frames: u64,
+    /// Presented drawables the display reported as never shown: replaced by a
+    /// newer frame or discarded before any refresh showed them.
+    pub presents_dropped: u64,
+    /// Time from one shown frame to the next, in refreshes of the display:
+    /// one, two, three or more. Zero while `vsync_period_micros` is unknown.
+    pub present_gaps_1_vsync: u64,
+    pub present_gaps_2_vsync: u64,
+    pub present_gaps_3plus_vsync: u64,
     pub tick_interval_micros: u64,
     /// 0 when the content cannot prove how often it changes.
     pub content_period_micros: u64,
+    /// Refresh period of the display the present gaps are measured in; 0 when
+    /// the renderer could not read it.
+    pub vsync_period_micros: u64,
     pub video_decode_outputs: u64,
     pub video_seeks: u64,
     pub video_frames_selected: u64,
@@ -1069,9 +1091,9 @@ pub struct BridgeRendererCountersReport {
     /// Scenes that both enable audio response and are not paused for their own
     /// display. Zero means the capture tap has no consumer.
     pub audio_active_consumers: u32,
-    /// Whether the platform can report which frames were actually displayed.
-    /// This backend cannot, so present requests are never reported as
-    /// presented frames.
+    /// Whether the surfaces' `presented_frames`, `presents_dropped` and present
+    /// gaps come from the display's own reports. Present requests are never
+    /// reported as presented frames either way.
     pub presentation_feedback_available: bool,
 }
 

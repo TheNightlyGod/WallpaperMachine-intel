@@ -25,7 +25,7 @@ use std::sync::LazyLock;
 /// reset or reused would make a later build return a string an earlier build returned, so a stored
 /// program of different output would hit. The table of shipped identities and the digest of their Metal
 /// text is `SHIPPED` in `pipeline/tests/golden.rs`; a change of output appends a row there.
-pub const PIPELINE_REVISION: u32 = 8;
+pub const PIPELINE_REVISION: u32 = 10;
 
 /// Version of the vendored compiler library, checked against its manifest by a test.
 pub const NAGA_VERSION: &str = "29.0.3";

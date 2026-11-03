@@ -6,6 +6,8 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -173,6 +175,66 @@ struct MetalPipelineKey
 /// Highest supported sample count no greater than requested. The mask contains
 /// the sample-count bits 1, 2, 4 and 8; single-sample is always the fallback.
 [[nodiscard]] uint32_t SelectSceneSampleCount(uint32_t requested, uint32_t supported_mask);
+
+/// Four corners and the two triangles over them, in the order a draw issues them: the
+/// geometry of a draw that may write every texel of its target (an effect pass's card).
+struct MetalQuad
+{
+    std::array<std::array<float, 3>, 4> corners {};
+    std::array<std::array<uint8_t, 3>, 2> triangles {};
+};
+
+/// Whether what a draw with `blend` leaves in a texel it covers is its fragment's output alone,
+/// whatever the texel held: blending off without alpha to coverage, or `One`/`Zero` added. With
+/// `One`/`Zero` the held value is still multiplied by zero, which is zero only when it is finite;
+/// the caller decides whether the target's format can hold anything else.
+[[nodiscard]] bool BlendReplacesDestination(const MetalBlendState& blend);
+
+/// Whether what a draw with `blend` leaves in a texel is exactly what the texel held whenever
+/// the fragment's alpha is 0 and its colour finite: the colour is added scaled by its own alpha
+/// (`SourceAlpha`) onto the held colour kept whole (`One` or `OneMinusSourceAlpha`), and the
+/// alpha is added as `As * As` or `As * 1` onto the held alpha kept whole, or is the larger of
+/// the two (`Max`, which is the held alpha only where alpha is never negative). Blending off and
+/// alpha to coverage write the fragment; a multiply scales the held colour by the fragment's.
+/// The caller decides whether the target's format brings the held value back unchanged.
+[[nodiscard]] bool BlendKeepsDestinationAtZeroAlpha(const MetalBlendState& blend);
+
+/// For each description, `std::nullopt` or the passes whose drawing decides whether its clear is
+/// seen at all: the clear (a clear step, or a draw that clears its target first) of a target
+/// whose next frame, through every pass ahead of it in `order` until one clears the target
+/// again, reads none of what it leaves, whatever those passes draw then; and which, in its own
+/// frame, only draws read (sample it, or draw onto it without clearing) up to the target's next
+/// clear: those are listed. A copy that reads the target makes its clear one that is always seen.
+/// A clear ends the span only when it applies whatever is visible: not a clear that is switched
+/// on and off with the order (`conditional_scene_clear`), nor a draw dropped for an input nothing
+/// produces (`produced` false).
+///
+/// `order` is the execution order, empty for the descriptions' own; `considered` says which
+/// descriptions' clears may be planned at all (the caller's target rules).
+[[nodiscard]] std::vector<std::optional<std::vector<std::size_t>>> PlanUnreadClears(
+    const std::vector<ScenePassDescription>& descriptions, const std::vector<std::size_t>& order,
+    const std::function<bool(std::size_t)>& considered, const std::function<bool(std::size_t)>& produced);
+
+/// For each description, `std::nullopt` or the draws that are all a copy's result is for: the
+/// copy is the only pass that writes its destination, nothing copies the destination on, and
+/// every draw that samples it runs after the copy in `order` (empty for the descriptions' own),
+/// so in a frame none of them draws in, nothing reads what the copy would have left before the
+/// next frame's copy replaces it. A copy no draw samples is not planned: removing it is the copy
+/// plan's (`CopyElision`), which keeps it while scene optimisation is off. `considered` says which
+/// copies may be planned at all.
+[[nodiscard]] std::vector<std::optional<std::vector<std::size_t>>> PlanUnreadCopies(
+    const std::vector<ScenePassDescription>& descriptions, const std::vector<std::size_t>& order,
+    const std::function<bool(std::size_t)>& considered);
+
+/// Whether drawing `quad` with its corners at clip position `matrix * vec4(corner, 1.0)`
+/// (`matrix` column-major, as the shader's `float4x4` reads it) covers the centre of every texel
+/// of a full `width` x `height` viewport. Every corner must be in front (w > 0) and inside the
+/// depth range, so nothing is clipped away, and the two triangles must tile one convex
+/// quadrilateral that contains the viewport shrunk by a quarter texel on each side: the GPU's
+/// own float rounding of the corners is far smaller than that, so no texel centre can fall
+/// outside. Anything else is "not covered", which only costs the caller the load it keeps.
+[[nodiscard]] bool QuadCoversViewport(const MetalQuad& quad, const std::array<float, 16>& matrix,
+                                      uint32_t width, uint32_t height);
 
 struct MetalPipelineKeyHash
 {

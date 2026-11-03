@@ -251,7 +251,10 @@ private:
 };
 
 /// Stable 64-bit mix used to fold per-frame values into a pass sample. Exposed
-/// so the renderer and the tests agree on one definition.
+/// so the renderer and the tests agree on one definition. Values live only in
+/// memory and only their equality is ever asked: what one is, is not a contract.
+/// `StaticHashMix` folds one 64-bit value; `StaticHashBytes` folds a run of bytes
+/// eight at a time, then its length.
 uint64_t StaticHashMix(uint64_t seed, uint64_t value);
 uint64_t StaticHashBytes(uint64_t seed, const void* data, std::size_t size);
 

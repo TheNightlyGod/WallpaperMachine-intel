@@ -54,7 +54,7 @@ final class PlaybackPolicyCompositionTests: XCTestCase {
             lockCenter: lockCenter,
             windowCenter: windowCenter,
             surfaces: { [WallpaperSurfaceVisibility(displayID: 1, isVisible: true)] },
-            isSessionLocked: { probe.sessionLocked },
+            sessionState: { .init(locked: probe.sessionLocked) },
             displaySleepAction: { probe.sleepAction },
             appRuleActions: { probe.rules.union(conditions?.actions ?? []) },
             otherAudioActive: { probe.otherAudio },

@@ -83,6 +83,22 @@ unattached `CAMetalLayer`s and injected notification and encoding services:
   own picture back at once and a pass with the same windows asks for nothing and
   does not look at the desktops, unless a picture could not be put back; periodic captures only while enabled; later captures skip displays that
   are not presenting.
+- Settled posters given back: a wallpaper that comes back with the same look gets
+  the same poster file with nothing asked, now or as it settles, and keeps it through
+  an unasked frame, a resume and a Space change; a changed look or one that cannot
+  be told is taken again, and each display and wallpaper keeps only its newest
+  settled poster; a frame whose look changed between its request and its arrival is
+  kept under neither; a periodic capture replaces a poster given back; a poster
+  scoped to a desktop is neither kept nor given back. `DesktopSettledPosterStoreTests`:
+  one file per display and wallpaper, only the same look given back, the least
+  recently used going past the capacity, a wallpaper that left the library forgotten
+  on disk, an earlier run's posters emptied, a file changed on disk not given back;
+  the look changing with saved settings, files, scaling, screen size and scale,
+  render scale, 2D scene resolution, post-processing, MetalFX and appearance but not
+  the frame rate, and no look for another wallpaper, a mirror, a disabled display, a
+  scene still being read or held in a failure, or a host page or video not ready.
+  Not covered: which wallpaper the app's windows report, and the real readback; the
+  `AppDelegate` wiring is not unit-tested.
 - Unsaved looks: a display that draws property edits nobody applied is asked for
   nothing by a new wallpaper, a settle capture or a Space change, a frame already on
   its way is dropped, the poster stays the saved look, and it is retaken once the
@@ -226,7 +242,10 @@ picture shows between a window closing and the web page's window opening.
 
 - `WallpaperPresentationPolicyTests` — display sleep and wake, session lock
   (asked only when it can have changed, re-asked on wake and user switch, a
-  missed unlock clearing at the next evaluation), the unlock reported once to
+  missed unlock clearing at the next evaluation), a session switched away from
+  without a lock (suspended and unattended until it is back on the console, also
+  from the start, a missed return clearing at the next evaluation, no unlock
+  reported, and a session dictionary without the key read as on the console), the unlock reported once to
   `onSessionUnlocked` (also when missed, after a wake or a user switch, never at start
   while locked or at stop), full occlusion and a covered
   working area suspending after the settle delay, per-display independence,
@@ -448,8 +467,10 @@ per-Space assignments; see
   pages already charged to the host; its 32 MB growth margin and bounded attempts
   stay unchanged. A real pressure transition is not provoked.
 - `EnergyUsageMonitorTests` and `WallpaperEnergyRatingsTests` — coalition
-  readings, contention, before/after comparisons, grades, battery share and the
-  rating recorder; two `testKernelCounters…` cases read the test process's real
+  readings, contention, before/after comparisons, grades, battery share, the scene
+  settings (2D scene resolution, scene quality, MetalFX) as conditions of a scene's
+  rating and not of a video's, older-version ratings still read and replaced rather
+  than averaged, the rating recorder, and the recorder asking nothing while parked; two `testKernelCounters…` cases read the test process's real
   kernel counters.
 
 Log line format, retention and the verbose setting are covered in Rust; see
@@ -718,7 +739,8 @@ or depend on a second physical monitor.
   picture, and an out-of-range or non-finite position is invalid.
 - `LockScreenWallpaperServiceTests` — activation failure hands the Desktop back
   to the poster provider; surviving lock screens are not cleared by topology
-  changes; screen-saver-only, lock-only and both modes disable and roll back
+  changes, and a display that leaves while the Mac is away keeps its lock screen while
+  steady monitor ticks never ask whether the Mac is away; screen-saver-only, lock-only and both modes disable and roll back
   independently; shared-extension and Idle-only publication failures roll back;
   stale failure reports are ignored while a current renderer failure restores the
   selection; one bounded automatic retry repairs a wrong extension copy; shutdown
@@ -798,8 +820,9 @@ or depend on a second physical monitor.
   the sleeping schedule running each check once and not running a cancelled one.
 - `WallpaperPresentationAuthorityTests` — both display/host wake orders, user
   pause surviving sleep and wake, a lock-screen surface presenting only while
-  locked, and an unlocked one settling for `desktopSettleBudget` before it holds
-  a frame.
+  locked, an unlocked one settling for `desktopSettleBudget` before it holds
+  a frame, and no lock-screen surface presenting (or settling) while fast user
+  switching has another session on the screens.
 
 Not covered: the extension drawing a moved picture at its position, real lock-screen
 visual timing, private XPC snapshot transport, the wallpaper service's wake and
@@ -844,7 +867,12 @@ need an authorized runtime check
   wraps, repositioning to the key frame before a time and dropping sound the clock has passed, a turned
   clip's axes), and the player on a layer that is not in a window: first picture, running and looping,
   pause and resume, start paused, a restart that spends its allowance, an upright poster, a decoder
-  that refuses the frames. `LockScreenWebMPlayerTests` (the lock screen's WebM player: the first frame composed at the display's size, pause with a frame still readable, a stop before the first picture ending `prepare`, a held failure delivered once) and the planner's WebM cases (`LockScreenVideoPlannerTests`: an unplayable answer goes to the reader, only that answer, and a file the reader refuses keeps AVFoundation's reason). `WebMVideoWallpaperWindowTests` — the desktop surface for WebM: ready and
+  that refuses the frames; a clip with sound that cannot be heard (muted, or at zero volume) decodes
+  no audio buffer while its picture plays and loops, being heard feeds the sound from the buffer that
+  covers the clock in the clock's pass without moving the clock or losing the picture, and silencing it
+  again stops the decoding; with `WALLPAPER_MACHINE_MUTED_VIDEO_AUDIO=1` a muted clip still decodes
+  its sound. The sound goes to an output device that does not exist, and is fed only while the clip is
+  held, so no real output plays it. `LockScreenWebMPlayerTests` (the lock screen's WebM player: the first frame composed at the display's size, pause with a frame still readable, a stop before the first picture ending `prepare`, a held failure delivered once) and the planner's WebM cases (`LockScreenVideoPlannerTests`: an unplayable answer goes to the reader, only that answer, and a file the reader refuses keeps AVFoundation's reason). `WebMVideoWallpaperWindowTests` — the desktop surface for WebM: ready and
   playing, user pause and suspension as separate reasons, the scaling choice and position moving the
   picture, a file that cannot be opened failing as a verdict (held until a handler arrives), a window
   opening its own file, the poster at the display's size, stopping.
@@ -862,8 +890,18 @@ need an authorized runtime check
   `AppDelegate` makes the call after each delivery is not run by any test),
   posters from replaced surfaces not published, and the switch hold (see
   [Wallpaper switching](#wallpaper-switching)). `NativeVideoPlaybackFailureTests` — the
-  reported failure keeps the codes under the localized message and a clip with
-  sound is rebuilt with its picture alone.
+  reported failure keeps the codes under the localized message, a clip with
+  sound is rebuilt with its picture alone, and the audio track switched off while a clip
+  cannot be heard is its one track the file marks enabled (none for a clip with two
+  enabled tracks, only disabled ones or no audio). `NativeVideoPlayerMediaTests` (opt-in) play
+  it: a muted or zero-volume clip whose audio goes to an output that does not exist plays
+  and loops, its recycled copies included, with every copy's audio track off and without
+  the failure that output gives a clip that starts its audio; a muted clip with the switch
+  off, an audible clip and a clip that becomes audible (the same item, its picture kept,
+  every copy's audio track back on) do start it, a rebuilt silent clip keeps its audio off,
+  and a muted clip with two enabled tracks keeps the platform's own choice. Whether
+  switching the track on a playing clip disturbs its picture on a real output is not
+  checked.
 - The metadata-read bound, in the host suite with a hand-fired clock
   (`ManualSleeper`) and a read held open by a gate: a read that never returns is
   abandoned after the limit for its storage (8, 30 or 60 seconds, per class) and the
@@ -1083,7 +1121,8 @@ never to `.shared`.
   visible, a failure falls back without looping, a stale or cancelled read never overwrites a newer
   one), `EnergyReadoutTests` and `PanelEnergyRestartTests` (each rendering setting restarts the
   comparison once, other settings and refused changes do not).
-- Window and shell: `ControlPanelLaunchTests` (a login launch keeps the panel closed once set up),
+- Window and shell: `ControlPanelLaunchTests` (a login launch, or one with
+  `WALLPAPER_MACHINE_PANEL_AT_LAUNCH=0`, keeps the panel closed once set up),
   `ControlPanelViewTests` (the hosted root starts its controller and stops it when the window
   closes), `ControlPanelWindowSizingTests` (the 760×560 floor in a hosted window, the key-view
   loop, moving to the active Space while keeping full-screen capability, fronting that
@@ -1418,9 +1457,10 @@ Not covered: the live website endpoint, and the energy cost of a frame window
 against fake streams, injected script results and a manual timer scheduler. They
 cover fragmented messages and timeline
 interpolation, consumer lifetime and late callbacks, unexpected exit without a
-restart loop, the adapter-to-AppleScript fallback, artwork caching and
-downscaling, the cleared cover reaching scenes before metadata, and the wire
-format. Not covered: a real player or OS version publishing every field
+restart loop, the adapter-to-AppleScript fallback, each fallback script compiled
+once however often it runs (with a stand-in script that contacts no application),
+artwork caching and downscaling, the cleared cover reaching scenes before metadata,
+and the wire format. Not covered: a real player or OS version publishing every field
 ([media integration](../features/media-integration.md#verification)).
 
 ## UserAssets

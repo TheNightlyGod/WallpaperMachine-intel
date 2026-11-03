@@ -7,6 +7,7 @@
 #include "SpecTexs.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <functional>
 #include <unordered_map>
 
@@ -17,6 +18,201 @@ uint32_t SelectSceneSampleCount(uint32_t requested, uint32_t supported_mask)
     for (const uint32_t count : { 8u, 4u, 2u })
         if (count <= requested && (supported_mask & count) != 0) return count;
     return 1;
+}
+
+bool BlendReplacesDestination(const MetalBlendState& blend)
+{
+    if (blend.alpha_to_coverage) return false;
+    if (! blend.blending_enabled) return true;
+    return blend.rgb_operation == MetalBlendOperation::Add &&
+           blend.alpha_operation == MetalBlendOperation::Add &&
+           blend.source_rgb == MetalBlendFactor::One && blend.destination_rgb == MetalBlendFactor::Zero &&
+           blend.source_alpha == MetalBlendFactor::One &&
+           blend.destination_alpha == MetalBlendFactor::Zero;
+}
+
+bool BlendKeepsDestinationAtZeroAlpha(const MetalBlendState& blend)
+{
+    if (blend.alpha_to_coverage || ! blend.blending_enabled) return false;
+    // Cs * As + Cd * k with As = 0 and Cs finite: Cd * k, and k must be 1.
+    if (blend.rgb_operation != MetalBlendOperation::Add || blend.source_rgb != MetalBlendFactor::SourceAlpha) return false;
+    if (blend.destination_rgb != MetalBlendFactor::One &&
+        blend.destination_rgb != MetalBlendFactor::OneMinusSourceAlpha) {
+        return false;
+    }
+    switch (blend.alpha_operation) {
+    case MetalBlendOperation::Add:
+        return (blend.source_alpha == MetalBlendFactor::SourceAlpha || blend.source_alpha == MetalBlendFactor::One ||
+                blend.source_alpha == MetalBlendFactor::Zero) &&
+               (blend.destination_alpha == MetalBlendFactor::One ||
+                blend.destination_alpha == MetalBlendFactor::OneMinusSourceAlpha);
+    case MetalBlendOperation::Max:
+        // max(As, Ad) = max(0, Ad), whether or not the factors are applied, with `One` for both.
+        return blend.source_alpha == MetalBlendFactor::One && blend.destination_alpha == MetalBlendFactor::One;
+    default:
+        return false;
+    }
+}
+
+std::vector<std::optional<std::vector<std::size_t>>> PlanUnreadClears(
+    const std::vector<ScenePassDescription>& descriptions, const std::vector<std::size_t>& order,
+    const std::function<bool(std::size_t)>& considered, const std::function<bool(std::size_t)>& produced)
+{
+    const std::size_t count = descriptions.size();
+    std::vector<std::optional<std::vector<std::size_t>>> plan(count);
+    if (! order.empty() && order.size() != count) return plan;
+    const auto at = [&order](std::size_t position) { return order.empty() ? position : order[position]; };
+    // Clears its target whatever is visible, in every frame it is not itself left out.
+    const auto resets = [&](std::size_t j, const std::string& key) {
+        const auto& d = descriptions[j];
+        return d.enabled && d.target_key == key && d.load_action == MetalLoadAction::Clear &&
+               ! d.conditional_scene_clear && ! d.depth_only &&
+               (d.kind == MetalPassKind::Clear || d.kind == MetalPassKind::CustomShader) &&
+               (d.kind != MetalPassKind::CustomShader || produced(j));
+    };
+    // Sees what the target holds: a copy of it always, a draw sampling it or drawing onto it
+    // without clearing it when it draws.
+    enum class Read : uint8_t { None, Draw, Always };
+    const auto reads = [&](std::size_t j, const std::string& key) {
+        const auto& d = descriptions[j];
+        if (! d.enabled) return Read::None;
+        if (d.kind == MetalPassKind::Copy) return d.source_key == key ? Read::Always : Read::None;
+        if (d.kind != MetalPassKind::CustomShader) return Read::None;
+        if (std::find(d.texture_keys.begin(), d.texture_keys.end(), key) != d.texture_keys.end() ||
+            (d.target_key == key && d.load_action != MetalLoadAction::Clear)) {
+            return Read::Draw;
+        }
+        return Read::None;
+    };
+    for (std::size_t position = 0; position < count; ++position) {
+        const std::size_t i   = at(position);
+        const auto&       key = descriptions[i].target_key;
+        if (i >= count || key.empty() || ! resets(i, key) || ! considered(i)) continue;
+        std::vector<std::size_t> readers;
+        bool                     ends = false;
+        bool                     seen = false;
+        for (std::size_t later = position + 1; later < count && ! seen; ++later) {
+            const std::size_t j = at(later);
+            if (resets(j, key)) {
+                ends = true;
+                break;
+            }
+            const auto read = reads(j, key);
+            if (read == Read::Always) seen = true;
+            else if (read == Read::Draw) readers.push_back(j);
+        }
+        // Through the end of the frame: the next frame's passes ahead of this one, whatever they
+        // draw then, until one clears the target (this one, at the latest).
+        for (std::size_t earlier = 0; earlier < position && ! seen && ! ends; ++earlier) {
+            const std::size_t j = at(earlier);
+            if (resets(j, key)) break;
+            if (reads(j, key) != Read::None) seen = true;
+        }
+        if (! seen) plan[i] = std::move(readers);
+    }
+    return plan;
+}
+
+std::vector<std::optional<std::vector<std::size_t>>> PlanUnreadCopies(
+    const std::vector<ScenePassDescription>& descriptions, const std::vector<std::size_t>& order,
+    const std::function<bool(std::size_t)>& considered)
+{
+    const std::size_t count = descriptions.size();
+    std::vector<std::optional<std::vector<std::size_t>>> plan(count);
+    if (! order.empty() && order.size() != count) return plan;
+    const auto at = [&order](std::size_t position) { return order.empty() ? position : order[position]; };
+    for (std::size_t position = 0; position < count; ++position) {
+        const std::size_t i    = at(position);
+        const auto&       copy = descriptions[i];
+        if (i >= count || ! copy.enabled || copy.kind != MetalPassKind::Copy || copy.target_key.empty() ||
+            ! considered(i)) {
+            continue;
+        }
+        const auto&              key = copy.target_key;
+        std::vector<std::size_t> readers;
+        bool                     alone = true;
+        for (std::size_t other = 0; other < count && alone; ++other) {
+            const std::size_t j = at(other);
+            const auto&       d = descriptions[j];
+            if (j == i || ! d.enabled) continue;
+            // Another writer, a copy of it, or a reader of the frame before.
+            if (d.target_key == key || (d.kind == MetalPassKind::Copy && d.source_key == key)) {
+                alone = false;
+            } else if (std::find(d.texture_keys.begin(), d.texture_keys.end(), key) != d.texture_keys.end()) {
+                if (d.kind != MetalPassKind::CustomShader || other < position) alone = false;
+                else readers.push_back(j);
+            }
+        }
+        // A copy nothing samples at all is the copy plan's to remove, while scene optimisation
+        // is on; with it off every such copy is made, so its image can be looked at.
+        if (alone && ! readers.empty()) plan[i] = std::move(readers);
+    }
+    return plan;
+}
+
+bool QuadCoversViewport(const MetalQuad& quad, const std::array<float, 16>& matrix, uint32_t width,
+                        uint32_t height)
+{
+    if (width == 0 || height == 0) return false;
+    // Depth within [0, w] by a margin the GPU's rounding cannot cross, unless every term of the
+    // depth row is an exact zero (an orthographic card at z = 0), which no rounding moves.
+    constexpr double kDepthMargin = 1e-5;
+    std::array<std::array<double, 2>, 4> ndc {};
+    for (std::size_t k = 0; k < 4; ++k) {
+        const std::array<double, 4> v { quad.corners[k][0], quad.corners[k][1], quad.corners[k][2], 1.0 };
+        std::array<double, 4> clip {};
+        bool                  exact_zero_depth = true;
+        for (std::size_t c = 0; c < 4; ++c) {
+            for (std::size_t r = 0; r < 4; ++r) clip[r] += double(matrix[c * 4 + r]) * v[c];
+            exact_zero_depth = exact_zero_depth && (matrix[c * 4 + 2] == 0.0f || v[c] == 0.0);
+        }
+        for (const double value : clip)
+            if (! std::isfinite(value)) return false;
+        const double w = clip[3];
+        if (! (w > 0.0)) return false;
+        if (! exact_zero_depth && ! (clip[2] >= kDepthMargin * w && clip[2] <= (1.0 - kDepthMargin) * w))
+            return false;
+        ndc[k] = { clip[0] / w, clip[1] / w };
+    }
+
+    // The two triangles share exactly one edge (p, q); the corner each has of its own (r, s)
+    // makes the quad r-p-s-q, which they tile when it is convex.
+    const auto& first  = quad.triangles[0];
+    const auto& second = quad.triangles[1];
+    for (const auto& triangle : quad.triangles) {
+        for (const auto index : triangle)
+            if (index >= 4) return false;
+        if (triangle[0] == triangle[1] || triangle[1] == triangle[2] || triangle[0] == triangle[2]) return false;
+    }
+    std::vector<uint8_t> shared;
+    int                  own_first = -1;
+    for (const auto index : first) {
+        if (std::find(second.begin(), second.end(), index) != second.end()) shared.push_back(index);
+        else own_first = index;
+    }
+    int own_second = -1;
+    for (const auto index : second)
+        if (std::find(first.begin(), first.end(), index) == first.end()) own_second = index;
+    if (shared.size() != 2 || own_first < 0 || own_second < 0) return false;
+    const std::array<std::array<double, 2>, 4> ring { ndc[std::size_t(own_first)], ndc[shared[0]],
+                                                      ndc[std::size_t(own_second)], ndc[shared[1]] };
+    const auto turn = [](const std::array<double, 2>& a, const std::array<double, 2>& b,
+                         const std::array<double, 2>& c) {
+        return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+    };
+    const double orientation = turn(ring[0], ring[1], ring[2]) > 0.0 ? 1.0 : -1.0;
+    for (std::size_t i = 0; i < 4; ++i) {
+        if (! (orientation * turn(ring[i], ring[(i + 1) % 4], ring[(i + 2) % 4]) > 0.0)) return false;
+    }
+    const double inset_x = 1.0 - 0.5 / double(width);
+    const double inset_y = 1.0 - 0.5 / double(height);
+    for (const auto& point : { std::array<double, 2> { -inset_x, -inset_y }, std::array<double, 2> { inset_x, -inset_y },
+                               std::array<double, 2> { inset_x, inset_y }, std::array<double, 2> { -inset_x, inset_y } }) {
+        for (std::size_t i = 0; i < 4; ++i) {
+            if (! (orientation * turn(ring[i], ring[(i + 1) % 4], point) > 0.0)) return false;
+        }
+    }
+    return true;
 }
 
 namespace

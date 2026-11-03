@@ -105,6 +105,14 @@ public:
     }
 
     const uint32_t* Data() const { return m_pData; }
+    /// Names the bytes written so far, process-wide: it changes when the array is made or a
+    /// write lands on bytes an earlier one wrote, and holds while writes only append (particle
+    /// indices are a fixed pattern only ever extended). A copy of the first `n` bytes, taken
+    /// under a revision with `n <= WrittenBytes()`, matches the array for as long as the
+    /// revision holds.
+    uint64_t        ContentRevision() const noexcept { return m_revision; }
+    /// Bytes from the start any write reached; beyond them the storage is still zero.
+    usize           WrittenBytes() const noexcept { return m_written_bytes; }
     usize           DataCount() const { return m_size; }
     usize           DataSizeOf() const { return m_size * sizeof(uint32_t); }
 
@@ -171,11 +179,16 @@ private:
         if (bytes > static_cast<uint64_t>(m_capacity) * sizeof(uint32_t)) return;
         std::memcpy(reinterpret_cast<char*>(m_pData) + index * element, source, count * element);
         m_size = std::max<usize>(m_size, static_cast<usize>((bytes + 3) / 4));
+        if (index * element < m_written_bytes) m_revision = NewRevision();
+        m_written_bytes = std::max<usize>(m_written_bytes, static_cast<usize>(bytes));
     }
+    static uint64_t NewRevision() noexcept;
 
     uint32_t* m_pData { nullptr };
     usize     m_size { 0 };
     usize     m_capacity { 0 };
+    usize     m_written_bytes { 0 };
+    uint64_t  m_revision { NewRevision() };
 
     usize m_render_size { std::numeric_limits<usize>::max() };
     usize m_explicit_draw_count { std::numeric_limits<usize>::max() };

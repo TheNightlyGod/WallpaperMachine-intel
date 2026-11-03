@@ -18,7 +18,7 @@ import XCTest
 ///
 /// They still open no window and touch no desktop: an `AVPlayerLayer` that is
 /// never added to a window's layer tree presents nothing. Nor is any audio
-/// session configured — every fixture is silent, and the one clip with an
+/// session configured — every fixture is silent, and every clip with an
 /// audio track is routed to an output device that does not exist.
 ///
 /// **Evidence discipline.** `readyForDisplay` means the layer has a frame it
@@ -646,6 +646,189 @@ final class NativeVideoPlayerMediaTests: XCTestCase {
             snapshot.value(.nativeVideoItemReleased, for: surface), 2,
             "the item that failed with its audio must be released, not leaked")
         print("[media] audio cannot start -> \(dropped ?? "none")")
+    }
+
+    /// A playing clip with sound whose audio goes to an output that does not
+    /// exist, given `volume` and `muted` before it loads, as the host does.
+    /// An audio output that starts for it fails the item at once (issue 31),
+    /// which is what makes a started audio path observable without a real device.
+    private func silentCandidate(
+        name: String, volume: Float, muted: Bool, audioTracks: [Bool] = [true], audioFirst: Bool = false,
+        releasesSilentAudio: Bool = true
+    ) async throws -> (NativeVideoPlayer, dropped: () -> String?, failure: () -> String?) {
+        var request = SyntheticVideoFixture.Request.constantRate(
+            name: name, numerator: 30, denominator: 1, frames: 30)
+        request.withAudio = true
+        request.audioTracksEnabled = audioTracks
+        request.audioTrackFirst = audioFirst
+        let url = try await SyntheticVideoFixture.write(request, into: directory)
+        let player = NativeVideoPlayer(
+            surface: surface, counters: counters, paused: false, releasesSilentAudio: releasesSilentAudio)
+        var dropped: String?
+        var failure: String?
+        player.onAudioDropped = { dropped = $0 }
+        player.onPreparationFailure = { _, detail, _ in failure = detail }
+        player.setAudioOutputDeviceForTest("org.wallpapermachine.tests.missing-output")
+        player.setVolume(volume, muted: muted)
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: 64, height: 36))
+        view.wantsLayer = true
+        player.attach(to: view)
+        player.load(url: url)
+        self.player = player
+        return (player, { dropped }, { failure })
+    }
+
+    /// Plays `player` until the loop has wrapped `wraps` times, returning how
+    /// many distinct copies of the item were current and whether any queued
+    /// copy had its audio track on at any look.
+    private func play(_ player: NativeVideoPlayer, wraps target: Int) async -> (copies: Int, wraps: Int, audioSeen: Bool) {
+        var copies = Set<ObjectIdentifier>()
+        var wraps = 0
+        var audioSeen = false
+        var previous = player.playbackTimeForTest
+        let deadline = ContinuousClock.now + .seconds(Double(target) * 1.5 + 6)
+        while ContinuousClock.now < deadline && wraps < target {
+            try? await Task.sleep(for: .milliseconds(20))
+            if let item = player.currentItemForTest { copies.insert(ObjectIdentifier(item)) }
+            if player.queuedAudioTracksEnabledForTest.joined().contains(true) { audioSeen = true }
+            let now = player.playbackTimeForTest
+            if now.isValid && previous.isValid && CMTimeCompare(now, previous) < 0 { wraps += 1 }
+            previous = now
+        }
+        return (copies.count, wraps, audioSeen)
+    }
+
+    func testAClipThatCannotBeHeardNeverStartsItsAudio() async throws {
+        // Muted, and at zero volume: the two ways a surface is silent. The
+        // audio track is off on every copy the looper plays, the copies it
+        // recycles included, so no audio output starts: the output that does
+        // not exist never fails the item, as it does a muted clip without this
+        // (`testWithTheSwitchOffAMutedClipStillStartsItsAudio`).
+        for (volume, muted, recycling) in [(Float(1), true, true), (Float(0), false, false)] {
+            let (player, dropped, failure) = try await silentCandidate(
+                name: "silent-\(volume)-\(muted)", volume: volume, muted: muted)
+            let ready = await wait(upTo: .seconds(10)) { player.layerIsReadyForDisplayForTest }
+            XCTAssertTrue(ready, "no picture: \(player.stateSummary)")
+            // Every copy plays once, and the first again, when the loop recycles them.
+            let target = recycling ? player.loopCopyCountForTest + 1 : 2
+            let played = await play(player, wraps: target)
+            XCTAssertGreaterThanOrEqual(played.wraps, target, "the clip did not loop \(target) times")
+            XCTAssertGreaterThanOrEqual(played.copies, min(target, player.loopCopyCountForTest))
+            XCTAssertFalse(played.audioSeen, "a copy was queued with its audio on")
+            XCTAssertTrue(
+                player.queuedAudioTracksEnabledForTest.contains { !$0.isEmpty },
+                "no queued copy ever loaded its audio track")
+            XCTAssertNil(dropped(), "no audio output may start for a clip that cannot be heard")
+            XCTAssertNil(failure())
+            XCTAssertTrue(player.isPlaying)
+            player.stop()
+            XCTAssertEqual(counters.snapshot().value(.nativeVideoItemCreated, for: surface), 1)
+            print("[media] silent volume \(volume) muted \(muted): \(played.wraps) wraps over \(played.copies) copies")
+            counters = RuntimeCounters()
+            counters.startSession(duration: .seconds(120))
+        }
+    }
+
+    func testWithTheSwitchOffAMutedClipStillStartsItsAudio() async throws {
+        // `WALLPAPER_MACHINE_MUTED_VIDEO_AUDIO=1` keeps the old path: muting
+        // only turns the sound down, the audio output still starts, and on an
+        // output that cannot start the clip fails with it (issue 31).
+        let (_, dropped, failure) = try await silentCandidate(
+            name: "muted-switch-off", volume: 1, muted: true, releasesSilentAudio: false)
+        let started = await wait(upTo: .seconds(20)) { dropped() != nil }
+        XCTAssertTrue(started, "a muted clip with its audio track on must start its audio output")
+        XCTAssertNil(failure())
+        XCTAssertEqual(counters.snapshot().value(.nativeVideoItemCreated, for: surface), 2)
+    }
+
+    func testAnAudibleClipStartsItsAudio() async throws {
+        let (_, dropped, failure) = try await silentCandidate(name: "audible", volume: 0.5, muted: false)
+        let started = await wait(upTo: .seconds(20)) { dropped() != nil }
+        XCTAssertTrue(started, "a clip that is heard starts its audio output")
+        XCTAssertNil(failure())
+    }
+
+    func testAMutedClipWithSeveralAudioTracksKeepsItsSoundRunning() async throws {
+        // Which of two enabled tracks the platform plays is its choice, which
+        // switching one back on could not restore: such a clip is left as it was.
+        // (Two enabled tracks are mixed, and that path does not fail on the
+        // missing output, so the tracks themselves are what is checked.)
+        let (player, _, failure) = try await silentCandidate(
+            name: "muted-two-tracks", volume: 1, muted: true, audioTracks: [true, true])
+        let ready = await wait(upTo: .seconds(10)) {
+            player.layerIsReadyForDisplayForTest && player.queuedAudioTracksEnabledForTest.contains { !$0.isEmpty }
+        }
+        XCTAssertTrue(ready, "no picture: \(player.stateSummary)")
+        let played = await play(player, wraps: 1)
+        XCTAssertTrue(played.audioSeen, "the platform's own choice of the tracks must stand")
+        XCTAssertEqual(player.queuedAudioTracksEnabledForTest.first, [true, true])
+        XCTAssertNil(failure())
+    }
+
+    func testBecomingAudibleTurnsTheAudioBackOnWithoutANewItem() async throws {
+        let (player, dropped, failure) = try await silentCandidate(name: "unmute", volume: 1, muted: true)
+        let ready = await wait(upTo: .seconds(10)) {
+            player.layerIsReadyForDisplayForTest && player.queuedAudioTracksEnabledForTest.contains { !$0.isEmpty }
+        }
+        XCTAssertTrue(ready, "no picture: \(player.stateSummary)")
+        let item = try XCTUnwrap(player.currentItemForTest)
+        XCTAssertFalse(player.queuedAudioTracksEnabledForTest.joined().contains(true))
+
+        player.setVolume(1, muted: false)
+
+        XCTAssertTrue(player.currentItemForTest === item, "the playing item is kept")
+        XCTAssertTrue(player.layerIsReadyForDisplayForTest, "the picture is kept")
+        XCTAssertFalse(
+            player.queuedAudioTracksEnabledForTest.joined().contains(false), "every copy's audio is back on")
+        XCTAssertEqual(counters.snapshot().value(.nativeVideoItemCreated, for: surface), 1)
+        // The audio output starts again: on this missing output it fails the
+        // clip, which goes on without its sound, as an audible clip does.
+        let started = await wait(upTo: .seconds(20)) { dropped() != nil }
+        XCTAssertTrue(started, "the audio output must start again once the clip can be heard")
+        XCTAssertNil(failure())
+    }
+
+    func testARebuiltSilentClipKeepsItsAudioOff() async throws {
+        // A restart replaces the looper and all of its copies; the new ones are
+        // switched off before the platform prepares them.
+        let (player, dropped, failure) = try await silentCandidate(name: "silent-rebuild", volume: 1, muted: true)
+        let ready = await wait(upTo: .seconds(10)) { player.layerIsReadyForDisplayForTest }
+        XCTAssertTrue(ready, "no picture: \(player.stateSummary)")
+        let before = try XCTUnwrap(player.currentItemForTest)
+
+        XCTAssertTrue(player.restartPlayback(reason: "test"))
+        let replaced = await wait(upTo: .seconds(10)) {
+            player.currentItemForTest.map { $0 !== before } == true && player.layerIsReadyForDisplayForTest
+        }
+        XCTAssertTrue(replaced, "the rebuilt item never showed a picture: \(player.stateSummary)")
+        let played = await play(player, wraps: 2)
+        XCTAssertGreaterThanOrEqual(played.wraps, 2)
+        XCTAssertFalse(played.audioSeen)
+        XCTAssertNil(dropped())
+        XCTAssertNil(failure())
+        XCTAssertEqual(counters.snapshot().value(.nativeVideoItemCreated, for: surface), 2)
+    }
+
+    func testMutingAClipPlayingWithoutItsAudioLeavesItsPictureOn() async throws {
+        // The item a clip falls back to is a composition that numbers its one
+        // video track 1, the number this file gave its audio track: muting
+        // must not take the one for the other.
+        let (player, dropped, failure) = try await silentCandidate(
+            name: "audio-track-first", volume: 1, muted: false, audioFirst: true)
+        let fellBack = await wait(upTo: .seconds(20)) {
+            dropped() != nil && player.itemStatusForTest == .readyToPlay && player.layerIsReadyForDisplayForTest
+        }
+        XCTAssertTrue(fellBack, "the clip must fall back to its picture alone: \(player.stateSummary)")
+
+        player.setVolume(1, muted: true)
+
+        let tracks = try XCTUnwrap(player.currentItemForTest?.tracks)
+        XCTAssertFalse(tracks.isEmpty)
+        XCTAssertTrue(tracks.allSatisfy(\.isEnabled), "the picture's track must stay on")
+        let played = await play(player, wraps: 1)
+        XCTAssertGreaterThanOrEqual(played.wraps, 1, "the picture must keep playing")
+        XCTAssertTrue(player.currentItemForTest?.tracks.allSatisfy(\.isEnabled) == true)
+        XCTAssertNil(failure())
     }
 
     func testEveryLoopPassStopsAtTheEndOfThePicture() async throws {

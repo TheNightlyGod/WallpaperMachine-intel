@@ -2,6 +2,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include <bit>
+
 namespace wallpaper::metal
 {
 namespace
@@ -122,6 +124,66 @@ bool ParseMetalShaderReflection(std::string_view json, MetalShaderReflection& ou
 
         for (const auto& slot : document.value("active_texture_slots", nlohmann::json::array())) {
             out.active_texture_slots.push_back(slot.get<uint32_t>());
+        }
+
+        // The coverage facts: absent or malformed means not proven, never an error.
+        if (const auto position = document.find("vertex_position");
+            position != document.end() && position->is_object()) {
+            const auto input  = position->find("input");
+            const auto matrix = position->find("matrix");
+            if (input != position->end() && input->is_string() &&
+                (matrix == position->end() || matrix->is_string())) {
+                out.vertex_position = MetalVertexPosition {
+                    .input  = input->get<std::string>(),
+                    .matrix = matrix == position->end() ? std::string {} : matrix->get<std::string>(),
+                };
+            }
+        }
+        if (const auto writes = document.find("fragment_always_writes");
+            writes != document.end() && writes->is_boolean()) {
+            out.fragment_always_writes = writes->get<bool>();
+        }
+        // The same for the read members: a list of anything but names says nothing.
+        if (const auto read = document.find("read_uniforms");
+            read != document.end() && read->is_array()) {
+            std::unordered_set<std::string> names;
+            bool                            names_only = true;
+            for (const auto& name : *read) {
+                if (! name.is_string()) {
+                    names_only = false;
+                    break;
+                }
+                names.insert(name.get<std::string>());
+            }
+            if (names_only) out.read_uniforms = std::move(names);
+        }
+        // Likewise for the fragment colour: a channel whose factors are not all readable is
+        // left unproven, never guessed.
+        if (const auto colour = document.find("fragment_colour");
+            colour != document.end() && colour->is_array() && colour->size() == 4) {
+            for (std::size_t channel = 0; channel < 4; ++channel) {
+                const auto& factors = (*colour)[channel];
+                if (! factors.is_array() || factors.empty()) continue;
+                std::vector<MetalColourFactor> parsed;
+                bool                           readable = true;
+                for (const auto& factor : factors) {
+                    const auto uniform   = factor.is_object() ? factor.find("uniform") : factor.end();
+                    const auto component = factor.is_object() ? factor.find("component") : factor.end();
+                    const auto bits      = factor.is_object() ? factor.find("constant_bits") : factor.end();
+                    if (uniform != factor.end() && uniform->is_string() && component != factor.end() &&
+                        component->is_number_unsigned() && component->get<uint64_t>() < 4) {
+                        parsed.push_back({ .member    = uniform->get<std::string>(),
+                                           .component = component->get<uint32_t>() });
+                    } else if (bits != factor.end() && bits->is_number_unsigned() &&
+                               bits->get<uint64_t>() <= 0xffffffffull) {
+                        parsed.push_back({ .constant = std::bit_cast<float>(bits->get<uint32_t>()) });
+                    } else {
+                        readable = false;
+                        break;
+                    }
+                }
+                if (readable) out.fragment_colour[channel] = std::move(parsed);
+            }
         }
     } catch (const std::exception& e) {
         if (error != nullptr) {

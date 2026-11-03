@@ -78,6 +78,14 @@ struct ScriptStartupMetrics {
     uint64_t script_compiles { 0 };              // scripts compiled
 };
 
+// How often the host crossed into the script runtime and back, on the calling thread.
+// Deterministic for a scene and a clock, so two builds compare by counts, not timings.
+struct ScriptCallCounts {
+    uint64_t library_calls { 0 };       // host calls into the script library (`update`, events, refreshes)
+    uint64_t native_calls { 0 };        // calls from scripts into the host
+    uint64_t skipped_evaluations { 0 }; // frames of a program without `update` that needed no call
+};
+
 enum class PropertyScriptValueSemantic
 {
     Generic,
@@ -221,6 +229,13 @@ public:
 
     static void                 ResetStartupMetrics();          // zeroes the counters
     static ScriptStartupMetrics GetStartupMetrics();            // a copy of them
+    static void                 ResetCallCounts();              // zeroes this thread's call counts
+    static ScriptCallCounts     GetCallCounts();                // a copy of them
+    /// Whether a frame of a value program without `update` is skipped while no timer is due
+    /// and no audio buffer is registered (the call would change nothing a script can see).
+    /// On unless `WALLPAPER_MACHINE_SCRIPT_TICK_SKIP=0`; process-wide, test-only. Answers the
+    /// setting it replaced.
+    static bool                 SetIdleEvaluationSkipForTests(bool enabled);
 
     /// One-shot evaluation of a property script against `current_value`.
     DynamicValueUniquePtr Evaluate(const std::string& script_source,

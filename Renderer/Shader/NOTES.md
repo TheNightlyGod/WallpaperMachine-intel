@@ -43,7 +43,9 @@ sampler ranks of C2 R88, is gone: part D R46 ranks every namespace of a stage, s
 Step 5 (part D of the spec) is three modules and a pipeline. `backend` reads one legalized stage with
 naga's GLSL front end, builds the Metal binding map, validates, and runs the Metal writer
 (`StageCompiler`, `NagaBackend`, `compile_glsl`, `translate_module`). `reflect` describes the module
-that was translated (`StageReflector`, `NagaReflector`, `reflect_module`, `reflect_untranslated`).
+that was translated (`StageReflector`, `NagaReflector`, `reflect_module`, `reflect_untranslated`);
+`reflect::coverage` proves the two coverage facts of note 140 and the fragment colour of note 142,
+and `reflect::reads` the read uniforms of note 141.
 `nagair` holds what both need to know about the globals of a naga module. `pipeline` drives a request
 through `prepare`, `legalize`, the compiler and the reflector, merges the stage reflections, and
 computes the key (`Pipeline`, `compile`, `CompiledProgram`). The compiler and the reflector are the two
@@ -1062,6 +1064,64 @@ complete coverage of all remaining builtin names, constructor syntax or builtin 
     controls independently of shader names. Revision 8 appends cache-key,
     converted-text and MSL rows without changing rows 1–7; fixed converted/MSL
     digests remain unchanged after migrating their authored input syntax.
+140. **Coverage facts; pipeline revision 9.** The reflection document gains two keys,
+    written only when they hold so an older or newer reader takes their absence as "not
+    proven": `"vertex_position":{"input":…,"matrix":…}` and `"fragment_always_writes":true`
+    (`src/reflect/coverage.rs`). The engine opens a render pass with a clear instead of a
+    load when one draw provably writes every texel of its target, and these are the
+    shader half of that proof. The fragment fact: no `Kill` anywhere in the module, no
+    sample-mask output and a float `vec4` at location 0. The vertex fact: the entry point
+    returns its position from one top-level `return`, and that value is
+    `vec4(input.xyz, 1.0)` or a `mat4` uniform block member times it (matrix on the left, as
+    `mul(vec4(…), m)` lowers), followed through private and local variables that have
+    exactly one write, a whole store at the top level of its function, reached (no
+    `return`/`discard` before it) and ordered before the load: in the same function by
+    statement index, across the entry point and `main` through their single call site.
+    Any other statement kind in the module, any second or nested write, a pointer passed to
+    a call, a clip or cull distance output, or a component that is not the input's x, y, z
+    and the constant 1 leaves the fact out. Shipped effects: waterwaves, tint, spin (its
+    copy of `a_Position`), blur's gaussian kernels in every `#if` and skew, transform and
+    foliagesway in `MODE` 0 are proven; the last three in `MODE` 1 move the corners and are
+    not. Revision 9 appends cache-key, converted-text and MSL rows with the MSL and
+    converted digests unchanged; the parity goldens gained the two keys and nothing else.
+141. **Read uniforms; pipeline revision 10.** The reflection document gains
+    `"read_uniforms":[…]`, the names of the uniform block members anything the program
+    produces can depend on, ascending, written only when every stage answered so a reader
+    takes its absence as "every declared member is read" (`src/reflect/reads.rs`). A
+    declaration, and even a name in the translated text, is not a read: Wallpaper Engine's
+    `genericimage4.vert` forms `g_EyePosition - worldPos` in every variant and uses it only
+    when lit or fogged. The engine leaves a layer's world transform and the active camera out
+    of a reuse sample when no read uniform derives from them. The analysis is a backward
+    liveness over the module that is translated: the entry point's returned value and every
+    `If`, `Switch` and `break_if` condition of a reached function are used; a used expression
+    uses its operands; a used load of a variable (local, private, or a parameter) uses every
+    store into it in any reached function, its initializer and the stored element's indices;
+    a used `CallResult` uses the callee's returned values; a used parameter uses the argument
+    at every call; a pointer argument joins the caller's variable and the parameter both
+    ways; a member is read when a used `AccessIndex` selects it from a `Uniform` global, every
+    member when the global is used otherwise. It iterates to a fixed point and only ever
+    over-states the reads. Atomics, image stores, workgroup loads, subgroup, ray-query and
+    cooperative forms, or a store through a pointer not rooted in a variable or parameter,
+    leave the key out. Every shipped program of the sweep answers (161, 243 declared members
+    unread). Revision 10 appends cache-key, converted-text and MSL rows with the MSL and
+    converted digests unchanged; the parity goldens gained the key and nothing else.
+142. **Fragment colour; pipeline revision 10.** The reflection document gains
+    `"fragment_colour"`, an array of four channels (red, green, blue, alpha), each `null` or
+    the factors whose product the channel is: `{"uniform":member,"component":k}` for a
+    32-bit float uniform block member (a scalar's component is 0) and
+    `{"constant_bits":bits}` for a float constant, its bits so NaN and infinity survive. It
+    is written only when the alpha channel is proven. The analysis (`Prover::colour` in
+    `src/reflect/coverage.rs`) starts at the location-0 output of the entry point's single
+    final `return` (no dual-source output) and follows compositions, splats, swizzles,
+    component accesses, `*` of scalars and vectors channel by channel, float literals and
+    constants, loads of uniform block members (whole or one component) and the same
+    once-written private and local variables as the vertex fact; it needs the validated
+    module's expression types for the channel counts. Anything else (a texture sample, a
+    varying, a sum, a function call, a matrix, an array element, a second write) leaves that
+    channel `null`. The engine leaves out a draw whose frame's uniforms make the alpha 0 and
+    every factor finite, under a blend that keeps the destination at alpha 0. Wallpaper
+    Engine's `flat.frag` (the solid layer) without `VERTEXCOLOR` is proven. It shares
+    revision 10 with note 141.
 
 The shipped sweeps now include `volumetricsfront` (167 programs legalized and compiled, 1 failing
 as before: `shadowcasterfoliage4`'s undeclared `g_Texture1Texel`); every `SHADOW`, `POINTLIGHT`

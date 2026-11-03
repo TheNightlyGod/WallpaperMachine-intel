@@ -103,7 +103,7 @@ use crate::{
             SetVerboseLogging,
             SetRendererCountersEnabled, SetScalingFactor, SetScalingMode,
             SetSceneOnDemandEnabled, SetSceneOptimizationEnabled, SetSceneQuality,
-            SetSceneResolution, SetSceneVideoPlaneSamplingEnabled,
+            SetSceneDisplayFramingEnabled, SetSceneResolution, SetSceneVideoPlaneSamplingEnabled,
             SetTargetFps, SetVolume,
             SetWebAudioSubscribed, Shutdown,
         },
@@ -311,6 +311,10 @@ impl<E: crate::engine::EngineFacade> BridgeBuilder<E> {
         log::info!(
             "Requested video-plane sampling: {}",
             config.experimental.scene_video_plane_sampling,
+        );
+        log::info!(
+            "Requested SDR display framing: {}",
+            config.experimental.scene_display_framing,
         );
         log::info!(
             "Requested MetalFX upscaling: {}",
@@ -860,6 +864,13 @@ impl EngineFacade for ArcEngineFacade {
         enabled: bool,
     ) -> Result<(), wallpaper_core::EngineError> {
         self.0.set_scene_video_plane_sampling_enabled(enabled)
+    }
+
+    fn set_scene_display_framing_enabled(
+        &self,
+        enabled: bool,
+    ) -> Result<(), wallpaper_core::EngineError> {
+        self.0.set_scene_display_framing_enabled(enabled)
     }
 
     fn set_metalfx_upscaling_enabled(
@@ -2186,6 +2197,33 @@ impl WallpaperBridge {
     ) -> Result<BridgeSnapshotBundle, BridgeError> {
         self.actor
             .ask(SetSceneVideoPlaneSamplingEnabled { enabled })
+            .await
+    }
+
+    /// Lets an SDR scene at Display resolution whose canvas overhangs the
+    /// display (Fill, or original size, crops it) draw only the part the
+    /// display shows, instead of its whole layout cropped.
+    ///
+    /// Off by default, and experimental: it saves GPU work and memory on a
+    /// scene whose shape differs from the display's, but the picture is not
+    /// byte-identical to the whole layout's. A running scene picks it up at
+    /// its next frame by sizing its render targets again in place; nothing is
+    /// reparsed or restarted. Fit, Stretch, Fit with blurred backdrop, a zoom
+    /// below 1 and a scene MetalFX upscales draw the whole layout whatever
+    /// this says; an HDR scene keeps its own framing to the display.
+    /// `WALLPAPER_MACHINE_SDR_FRAMING=1` or `=0` overrides it in the renderer
+    /// for a measurement.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the setting cannot be saved or the renderer
+    /// rejects the call.
+    pub async fn set_scene_display_framing_enabled(
+        &self,
+        enabled: bool,
+    ) -> Result<BridgeSnapshotBundle, BridgeError> {
+        self.actor
+            .ask(SetSceneDisplayFramingEnabled { enabled })
             .await
     }
 

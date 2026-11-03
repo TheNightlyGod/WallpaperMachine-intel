@@ -325,15 +325,34 @@ fn the_response_documents_are_compact_and_keyed_in_the_documented_order() {
         keys(&c.metadata()),
         ["combos", "aliases", "default_uniforms", "default_textures", "active_texture_slots"]
     );
+    // The textured quad draws its card unmoved through the matrix and never discards, so both
+    // coverage facts follow the four documented keys, and what it reads is known.
     #[cfg(not(feature = "observer-uniform-layout"))]
     assert_eq!(
         keys(&c.reflection()),
-        ["descriptor_bindings", "uniform_blocks", "vertex_inputs", "active_texture_slots"]
+        [
+            "descriptor_bindings",
+            "uniform_blocks",
+            "vertex_inputs",
+            "active_texture_slots",
+            "vertex_position",
+            "fragment_always_writes",
+            "read_uniforms"
+        ]
     );
     #[cfg(feature = "observer-uniform-layout")]
     assert_eq!(
         keys(&c.reflection()),
-        ["descriptor_bindings", "uniform_blocks", "vertex_inputs", "active_texture_slots", "observer_uniform_layout"]
+        [
+            "descriptor_bindings",
+            "uniform_blocks",
+            "vertex_inputs",
+            "active_texture_slots",
+            "vertex_position",
+            "fragment_always_writes",
+            "read_uniforms",
+            "observer_uniform_layout"
+        ]
     );
     let diagnostics = c.diagnostics();
     for entry in items(&diagnostics) {

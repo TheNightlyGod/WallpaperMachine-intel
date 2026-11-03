@@ -1380,6 +1380,28 @@ public protocol WallpaperBridgeProtocol : AnyObject {
     func setScalingMode(wallpaperId: String, displayId: String, mode: BridgeScalingMode) async throws  -> BridgeWallpaperMutationBundle
     
     /**
+     * Lets an SDR scene at Display resolution whose canvas overhangs the
+     * display (Fill, or original size, crops it) draw only the part the
+     * display shows, instead of its whole layout cropped.
+     *
+     * Off by default, and experimental: it saves GPU work and memory on a
+     * scene whose shape differs from the display's, but the picture is not
+     * byte-identical to the whole layout's. A running scene picks it up at
+     * its next frame by sizing its render targets again in place; nothing is
+     * reparsed or restarted. Fit, Stretch, Fit with blurred backdrop, a zoom
+     * below 1 and a scene MetalFX upscales draw the whole layout whatever
+     * this says; an HDR scene keeps its own framing to the display.
+     * `WALLPAPER_MACHINE_SDR_FRAMING=1` or `=0` overrides it in the renderer
+     * for a measurement.
+     *
+     * # Errors
+     *
+     * Returns an error when the setting cannot be saved or the renderer
+     * rejects the call.
+     */
+    func setSceneDisplayFramingEnabled(enabled: Bool) async throws  -> BridgeSnapshotBundle
+    
+    /**
      * Turns whole-scene on-demand updating on or off for the renderer
      * process.
      *
@@ -3470,6 +3492,43 @@ open func setScalingMode(wallpaperId: String, displayId: String, mode: BridgeSca
             completeFunc: ffi_wallpaper_bridge_rust_future_complete_rust_buffer,
             freeFunc: ffi_wallpaper_bridge_rust_future_free_rust_buffer,
             liftFunc: FfiConverterTypeBridgeWallpaperMutationBundle.lift,
+            errorHandler: FfiConverterTypeBridgeError.lift
+        )
+}
+    
+    /**
+     * Lets an SDR scene at Display resolution whose canvas overhangs the
+     * display (Fill, or original size, crops it) draw only the part the
+     * display shows, instead of its whole layout cropped.
+     *
+     * Off by default, and experimental: it saves GPU work and memory on a
+     * scene whose shape differs from the display's, but the picture is not
+     * byte-identical to the whole layout's. A running scene picks it up at
+     * its next frame by sizing its render targets again in place; nothing is
+     * reparsed or restarted. Fit, Stretch, Fit with blurred backdrop, a zoom
+     * below 1 and a scene MetalFX upscales draw the whole layout whatever
+     * this says; an HDR scene keeps its own framing to the display.
+     * `WALLPAPER_MACHINE_SDR_FRAMING=1` or `=0` overrides it in the renderer
+     * for a measurement.
+     *
+     * # Errors
+     *
+     * Returns an error when the setting cannot be saved or the renderer
+     * rejects the call.
+     */
+open func setSceneDisplayFramingEnabled(enabled: Bool)async throws  -> BridgeSnapshotBundle {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_wallpaper_bridge_fn_method_wallpaperbridge_set_scene_display_framing_enabled(
+                    self.uniffiClonePointer(),
+                    FfiConverterBool.lower(enabled)
+                )
+            },
+            pollFunc: ffi_wallpaper_bridge_rust_future_poll_rust_buffer,
+            completeFunc: ffi_wallpaper_bridge_rust_future_complete_rust_buffer,
+            freeFunc: ffi_wallpaper_bridge_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeBridgeSnapshotBundle.lift,
             errorHandler: FfiConverterTypeBridgeError.lift
         )
 }
@@ -6709,9 +6768,9 @@ public struct BridgeRendererCountersReport {
      */
     public var audioActiveConsumers: UInt32
     /**
-     * Whether the platform can report which frames were actually displayed.
-     * This backend cannot, so present requests are never reported as
-     * presented frames.
+     * Whether the surfaces' `presented_frames`, `presents_dropped` and present
+     * gaps come from the display's own reports. Present requests are never
+     * reported as presented frames either way.
      */
     public var presentationFeedbackAvailable: Bool
 
@@ -6729,9 +6788,9 @@ public struct BridgeRendererCountersReport {
          * display. Zero means the capture tap has no consumer.
          */audioActiveConsumers: UInt32, 
         /**
-         * Whether the platform can report which frames were actually displayed.
-         * This backend cannot, so present requests are never reported as
-         * presented frames.
+         * Whether the surfaces' `presented_frames`, `presents_dropped` and present
+         * gaps come from the display's own reports. Present requests are never
+         * reported as presented frames either way.
          */presentationFeedbackAvailable: Bool) {
         self.recording = recording
         self.surfaces = surfaces
@@ -6824,7 +6883,7 @@ public func FfiConverterTypeBridgeRendererCountersReport_lower(_ value: BridgeRe
  * Renderer work counters for one wallpaper surface.
  *
  * The fields are split on purpose. `timer_wakeups` through
- * `presents_skipped_unchanged` are work this surface alone performs and must
+ * `present_gaps_3plus_vsync` are work this surface alone performs and must
  * stop when nobody can see it.
  * The `video_*` fields describe the decoded source, which may legitimately keep
  * running while one of its consumers is hidden as long as another consumer
@@ -6885,11 +6944,34 @@ public struct BridgeRendererSurfaceCounters {
      * back. Neither a dropped draw nor a present request.
      */
     public var presentsSkippedUnchanged: UInt64
+    /**
+     * Presented drawables the display reported as shown. Reports arrive a
+     * refresh or two after the request, so a window's count trails
+     * `present_requests` by the frames still in flight.
+     */
+    public var presentedFrames: UInt64
+    /**
+     * Presented drawables the display reported as never shown: replaced by a
+     * newer frame or discarded before any refresh showed them.
+     */
+    public var presentsDropped: UInt64
+    /**
+     * Time from one shown frame to the next, in refreshes of the display:
+     * one, two, three or more. Zero while `vsync_period_micros` is unknown.
+     */
+    public var presentGaps1Vsync: UInt64
+    public var presentGaps2Vsync: UInt64
+    public var presentGaps3plusVsync: UInt64
     public var tickIntervalMicros: UInt64
     /**
      * 0 when the content cannot prove how often it changes.
      */
     public var contentPeriodMicros: UInt64
+    /**
+     * Refresh period of the display the present gaps are measured in; 0 when
+     * the renderer could not read it.
+     */
+    public var vsyncPeriodMicros: UInt64
     public var videoDecodeOutputs: UInt64
     public var videoSeeks: UInt64
     public var videoFramesSelected: UInt64
@@ -6946,10 +7028,27 @@ public struct BridgeRendererSurfaceCounters {
          * Frames that ran (the scene ticked) but were not drawn or presented,
          * because they would have put exactly the pixels already on the surface
          * back. Neither a dropped draw nor a present request.
-         */presentsSkippedUnchanged: UInt64, tickIntervalMicros: UInt64, 
+         */presentsSkippedUnchanged: UInt64, 
+        /**
+         * Presented drawables the display reported as shown. Reports arrive a
+         * refresh or two after the request, so a window's count trails
+         * `present_requests` by the frames still in flight.
+         */presentedFrames: UInt64, 
+        /**
+         * Presented drawables the display reported as never shown: replaced by a
+         * newer frame or discarded before any refresh showed them.
+         */presentsDropped: UInt64, 
+        /**
+         * Time from one shown frame to the next, in refreshes of the display:
+         * one, two, three or more. Zero while `vsync_period_micros` is unknown.
+         */presentGaps1Vsync: UInt64, presentGaps2Vsync: UInt64, presentGaps3plusVsync: UInt64, tickIntervalMicros: UInt64, 
         /**
          * 0 when the content cannot prove how often it changes.
-         */contentPeriodMicros: UInt64, videoDecodeOutputs: UInt64, videoSeeks: UInt64, videoFramesSelected: UInt64, videoFramesReused: UInt64, 
+         */contentPeriodMicros: UInt64, 
+        /**
+         * Refresh period of the display the present gaps are measured in; 0 when
+         * the renderer could not read it.
+         */vsyncPeriodMicros: UInt64, videoDecodeOutputs: UInt64, videoSeeks: UInt64, videoFramesSelected: UInt64, videoFramesReused: UInt64, 
         /**
          * Decoded frames superseded before they were ever displayed. A rising
          * count is how a demand-driven clock is falsified.
@@ -6982,8 +7081,14 @@ public struct BridgeRendererSurfaceCounters {
         self.gpuCompletions = gpuCompletions
         self.simulationTicks = simulationTicks
         self.presentsSkippedUnchanged = presentsSkippedUnchanged
+        self.presentedFrames = presentedFrames
+        self.presentsDropped = presentsDropped
+        self.presentGaps1Vsync = presentGaps1Vsync
+        self.presentGaps2Vsync = presentGaps2Vsync
+        self.presentGaps3plusVsync = presentGaps3plusVsync
         self.tickIntervalMicros = tickIntervalMicros
         self.contentPeriodMicros = contentPeriodMicros
+        self.vsyncPeriodMicros = vsyncPeriodMicros
         self.videoDecodeOutputs = videoDecodeOutputs
         self.videoSeeks = videoSeeks
         self.videoFramesSelected = videoFramesSelected
@@ -7061,10 +7166,28 @@ extension BridgeRendererSurfaceCounters: Equatable, Hashable {
         if lhs.presentsSkippedUnchanged != rhs.presentsSkippedUnchanged {
             return false
         }
+        if lhs.presentedFrames != rhs.presentedFrames {
+            return false
+        }
+        if lhs.presentsDropped != rhs.presentsDropped {
+            return false
+        }
+        if lhs.presentGaps1Vsync != rhs.presentGaps1Vsync {
+            return false
+        }
+        if lhs.presentGaps2Vsync != rhs.presentGaps2Vsync {
+            return false
+        }
+        if lhs.presentGaps3plusVsync != rhs.presentGaps3plusVsync {
+            return false
+        }
         if lhs.tickIntervalMicros != rhs.tickIntervalMicros {
             return false
         }
         if lhs.contentPeriodMicros != rhs.contentPeriodMicros {
+            return false
+        }
+        if lhs.vsyncPeriodMicros != rhs.vsyncPeriodMicros {
             return false
         }
         if lhs.videoDecodeOutputs != rhs.videoDecodeOutputs {
@@ -7121,8 +7244,14 @@ extension BridgeRendererSurfaceCounters: Equatable, Hashable {
         hasher.combine(gpuCompletions)
         hasher.combine(simulationTicks)
         hasher.combine(presentsSkippedUnchanged)
+        hasher.combine(presentedFrames)
+        hasher.combine(presentsDropped)
+        hasher.combine(presentGaps1Vsync)
+        hasher.combine(presentGaps2Vsync)
+        hasher.combine(presentGaps3plusVsync)
         hasher.combine(tickIntervalMicros)
         hasher.combine(contentPeriodMicros)
+        hasher.combine(vsyncPeriodMicros)
         hasher.combine(videoDecodeOutputs)
         hasher.combine(videoSeeks)
         hasher.combine(videoFramesSelected)
@@ -7164,8 +7293,14 @@ public struct FfiConverterTypeBridgeRendererSurfaceCounters: FfiConverterRustBuf
                 gpuCompletions: FfiConverterUInt64.read(from: &buf), 
                 simulationTicks: FfiConverterUInt64.read(from: &buf), 
                 presentsSkippedUnchanged: FfiConverterUInt64.read(from: &buf), 
+                presentedFrames: FfiConverterUInt64.read(from: &buf), 
+                presentsDropped: FfiConverterUInt64.read(from: &buf), 
+                presentGaps1Vsync: FfiConverterUInt64.read(from: &buf), 
+                presentGaps2Vsync: FfiConverterUInt64.read(from: &buf), 
+                presentGaps3plusVsync: FfiConverterUInt64.read(from: &buf), 
                 tickIntervalMicros: FfiConverterUInt64.read(from: &buf), 
                 contentPeriodMicros: FfiConverterUInt64.read(from: &buf), 
+                vsyncPeriodMicros: FfiConverterUInt64.read(from: &buf), 
                 videoDecodeOutputs: FfiConverterUInt64.read(from: &buf), 
                 videoSeeks: FfiConverterUInt64.read(from: &buf), 
                 videoFramesSelected: FfiConverterUInt64.read(from: &buf), 
@@ -7200,8 +7335,14 @@ public struct FfiConverterTypeBridgeRendererSurfaceCounters: FfiConverterRustBuf
         FfiConverterUInt64.write(value.gpuCompletions, into: &buf)
         FfiConverterUInt64.write(value.simulationTicks, into: &buf)
         FfiConverterUInt64.write(value.presentsSkippedUnchanged, into: &buf)
+        FfiConverterUInt64.write(value.presentedFrames, into: &buf)
+        FfiConverterUInt64.write(value.presentsDropped, into: &buf)
+        FfiConverterUInt64.write(value.presentGaps1Vsync, into: &buf)
+        FfiConverterUInt64.write(value.presentGaps2Vsync, into: &buf)
+        FfiConverterUInt64.write(value.presentGaps3plusVsync, into: &buf)
         FfiConverterUInt64.write(value.tickIntervalMicros, into: &buf)
         FfiConverterUInt64.write(value.contentPeriodMicros, into: &buf)
+        FfiConverterUInt64.write(value.vsyncPeriodMicros, into: &buf)
         FfiConverterUInt64.write(value.videoDecodeOutputs, into: &buf)
         FfiConverterUInt64.write(value.videoSeeks, into: &buf)
         FfiConverterUInt64.write(value.videoFramesSelected, into: &buf)
@@ -8067,6 +8208,15 @@ public struct BridgeSettingsSnapshot {
      */
     public var sceneVideoPlaneSamplingEnabled: Bool
     /**
+     * The saved preference for SDR display framing: an SDR scene at Display
+     * resolution draws only the part of its canvas-cover layout the display
+     * shows. Off by default, experimental. A preference, not a read-back:
+     * `WALLPAPER_MACHINE_SDR_FRAMING` can override it, and a scene that
+     * cannot be framed (Fit, a zoom below 1, one MetalFX upscales) draws the
+     * whole layout whatever this says.
+     */
+    public var sceneDisplayFramingEnabled: Bool
+    /**
      * `"display"` or `"canvas"`: how many pixels a 2D scene is rasterized
      * with before the render scale divides them. The saved preference, which
      * every running 2D scene follows; perspective scenes and plain videos
@@ -8161,6 +8311,14 @@ public struct BridgeSettingsSnapshot {
          * happened.
          */sceneVideoPlaneSamplingEnabled: Bool, 
         /**
+         * The saved preference for SDR display framing: an SDR scene at Display
+         * resolution draws only the part of its canvas-cover layout the display
+         * shows. Off by default, experimental. A preference, not a read-back:
+         * `WALLPAPER_MACHINE_SDR_FRAMING` can override it, and a scene that
+         * cannot be framed (Fit, a zoom below 1, one MetalFX upscales) draws the
+         * whole layout whatever this says.
+         */sceneDisplayFramingEnabled: Bool, 
+        /**
          * `"display"` or `"canvas"`: how many pixels a 2D scene is rasterized
          * with before the render scale divides them. The saved preference, which
          * every running 2D scene follows; perspective scenes and plain videos
@@ -8221,6 +8379,7 @@ public struct BridgeSettingsSnapshot {
         self.sceneOnDemandEnabled = sceneOnDemandEnabled
         self.metalfxUpscalingEnabled = metalfxUpscalingEnabled
         self.sceneVideoPlaneSamplingEnabled = sceneVideoPlaneSamplingEnabled
+        self.sceneDisplayFramingEnabled = sceneDisplayFramingEnabled
         self.sceneResolution = sceneResolution
         self.sceneQuality = sceneQuality
         self.sceneUpdateModes = sceneUpdateModes
@@ -8290,6 +8449,9 @@ extension BridgeSettingsSnapshot: Equatable, Hashable {
         if lhs.sceneVideoPlaneSamplingEnabled != rhs.sceneVideoPlaneSamplingEnabled {
             return false
         }
+        if lhs.sceneDisplayFramingEnabled != rhs.sceneDisplayFramingEnabled {
+            return false
+        }
         if lhs.sceneResolution != rhs.sceneResolution {
             return false
         }
@@ -8352,6 +8514,7 @@ extension BridgeSettingsSnapshot: Equatable, Hashable {
         hasher.combine(sceneOnDemandEnabled)
         hasher.combine(metalfxUpscalingEnabled)
         hasher.combine(sceneVideoPlaneSamplingEnabled)
+        hasher.combine(sceneDisplayFramingEnabled)
         hasher.combine(sceneResolution)
         hasher.combine(sceneQuality)
         hasher.combine(sceneUpdateModes)
@@ -8393,6 +8556,7 @@ public struct FfiConverterTypeBridgeSettingsSnapshot: FfiConverterRustBuffer {
                 sceneOnDemandEnabled: FfiConverterBool.read(from: &buf), 
                 metalfxUpscalingEnabled: FfiConverterBool.read(from: &buf), 
                 sceneVideoPlaneSamplingEnabled: FfiConverterBool.read(from: &buf), 
+                sceneDisplayFramingEnabled: FfiConverterBool.read(from: &buf), 
                 sceneResolution: FfiConverterString.read(from: &buf), 
                 sceneQuality: FfiConverterTypeBridgeSceneQuality.read(from: &buf), 
                 sceneUpdateModes: FfiConverterSequenceTypeBridgeSceneUpdateModeReport.read(from: &buf), 
@@ -8427,6 +8591,7 @@ public struct FfiConverterTypeBridgeSettingsSnapshot: FfiConverterRustBuffer {
         FfiConverterBool.write(value.sceneOnDemandEnabled, into: &buf)
         FfiConverterBool.write(value.metalfxUpscalingEnabled, into: &buf)
         FfiConverterBool.write(value.sceneVideoPlaneSamplingEnabled, into: &buf)
+        FfiConverterBool.write(value.sceneDisplayFramingEnabled, into: &buf)
         FfiConverterString.write(value.sceneResolution, into: &buf)
         FfiConverterTypeBridgeSceneQuality.write(value.sceneQuality, into: &buf)
         FfiConverterSequenceTypeBridgeSceneUpdateModeReport.write(value.sceneUpdateModes, into: &buf)
@@ -12523,6 +12688,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_wallpaper_bridge_checksum_method_wallpaperbridge_set_scaling_mode() != 14052) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_wallpaper_bridge_checksum_method_wallpaperbridge_set_scene_display_framing_enabled() != 55184) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_wallpaper_bridge_checksum_method_wallpaperbridge_set_scene_on_demand_enabled() != 64117) {

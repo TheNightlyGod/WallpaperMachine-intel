@@ -1045,6 +1045,96 @@ async fn video_plane_sampling_defaults_off_and_survives_a_restart() {
 }
 
 #[tokio::test]
+async fn display_framing_defaults_off_and_survives_a_restart() {
+    // The picture is not byte-identical to drawing the whole layout, so it is
+    // off unless asked for; a running scene resizes its targets in place, so
+    // it is pushed straight at the renderer rather than through a rebuild;
+    // and it is pushed back in on the next launch, because the value lives in
+    // C, not in the config the bridge reads.
+    let temp = tempfile::tempdir().unwrap();
+    let store = crate::config::ConfigStore::open(temp.path().to_path_buf());
+    let engine = FakeEngineFacade::default();
+    let bridge = BridgeBuilder::new(engine.clone())
+        .with_config_store(store.clone())
+        .build()
+        .unwrap();
+
+    assert!(
+        !bridge
+            .settings_snapshot()
+            .await
+            .unwrap()
+            .scene_display_framing_enabled,
+        "a framing that moves pixels is opted into"
+    );
+    bridge.bootstrap().await.unwrap();
+    assert_eq!(
+        engine.scene_display_framing_calls().last().copied(),
+        Some(false),
+        "the renderer is told the saved default before anything opens"
+    );
+
+    let rendered = engine.rendered_scenes().len();
+    let snapshot = bridge
+        .set_scene_display_framing_enabled(true)
+        .await
+        .unwrap()
+        .settings;
+    assert!(snapshot.scene_display_framing_enabled);
+    assert!(
+        !snapshot.scene_video_plane_sampling_enabled,
+        "one experimental switch does not turn another on"
+    );
+    assert_eq!(
+        engine.scene_display_framing_calls().last().copied(),
+        Some(true),
+        "the renderer is told directly; a running scene resizes its targets in place"
+    );
+    assert_eq!(
+        engine.rendered_scenes().len(),
+        rendered,
+        "changing it must not reopen, reparse or restart anything"
+    );
+
+    drop(bridge);
+    let restarted_engine = FakeEngineFacade::default();
+    let restarted = BridgeBuilder::new(restarted_engine.clone())
+        .with_config_store(store)
+        .build()
+        .unwrap();
+    assert!(
+        restarted
+            .settings_snapshot()
+            .await
+            .unwrap()
+            .scene_display_framing_enabled
+    );
+    restarted.bootstrap().await.unwrap();
+    assert_eq!(
+        restarted_engine
+            .scene_display_framing_calls()
+            .last()
+            .copied(),
+        Some(true),
+        "a process-wide renderer switch lives in C, so a saved opt-in has to be pushed back in"
+    );
+
+    let snapshot = restarted
+        .set_scene_display_framing_enabled(false)
+        .await
+        .unwrap()
+        .settings;
+    assert!(!snapshot.scene_display_framing_enabled);
+    assert_eq!(
+        restarted_engine
+            .scene_display_framing_calls()
+            .last()
+            .copied(),
+        Some(false)
+    );
+}
+
+#[tokio::test]
 async fn metalfx_upscaling_defaults_off_and_survives_a_restart() {
     // Like the other process-wide renderer switches: off unless asked for,
     // pushed straight at the renderer without reopening a scene, and pushed

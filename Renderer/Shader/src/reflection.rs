@@ -254,6 +254,68 @@ impl VertexInput {
     }
 }
 
+/// Where the vertex stage's clip-space position comes from, when the module proves it is one of
+/// the two forms a host can evaluate itself: `vec4(input.xyz, 1.0)`, or that vector multiplied
+/// by a `mat4` uniform with the matrix on the left (`mul(vec4(input, 1.0), matrix)` in the
+/// author's dialect).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PositionSource {
+    /// The vertex input, under its author's name (R58), whose x, y and z the position carries.
+    pub input: String,
+    /// The uniform block member the vector is multiplied by; `None` for the input itself.
+    pub matrix: Option<String>,
+}
+
+impl PositionSource {
+    pub fn to_json(&self) -> String {
+        let mut fields = vec![("input", json::string(&self.input))];
+        if let Some(matrix) = &self.matrix {
+            fields.push(("matrix", json::string(matrix)));
+        }
+        json::object(&fields)
+    }
+}
+
+/// One factor of a channel of the fragment colour, when the channel is proven to be a product.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ColourFactor {
+    /// Component `component` (0 for a scalar) of the 32-bit float uniform block member `member`,
+    /// read as the uniform buffer holds it.
+    Uniform { member: String, component: u32 },
+    /// A constant of the module, as the bits of its 32-bit float: exact, and NaN and infinity
+    /// survive the document.
+    Constant { bits: u32 },
+}
+
+impl ColourFactor {
+    pub fn to_json(&self) -> String {
+        match self {
+            ColourFactor::Uniform { member, component } => {
+                json::object(&[("uniform", json::string(member)), ("component", component.to_string())])
+            }
+            ColourFactor::Constant { bits } => json::object(&[("constant_bits", bits.to_string())]),
+        }
+    }
+}
+
+/// Fragment stage: the channels of colour 0 (red, green, blue, alpha) that are proven to be the
+/// product of uniform block members and constants, each as its factors; `None` for a channel
+/// that is not proven. With the uniforms of a frame a host can tell that a draw writes alpha 0
+/// over finite colour, which a blend that keeps the destination at alpha 0 turns into nothing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FragmentColour {
+    pub channels: [Option<Vec<ColourFactor>>; 4],
+}
+
+impl FragmentColour {
+    pub fn to_json(&self) -> String {
+        json::array(self.channels.iter().map(|channel| match channel {
+            Some(factors) => json::array(factors.iter().map(ColourFactor::to_json)),
+            None => json::null(),
+        }))
+    }
+}
+
 /// What the engine has to supply for a program, or for one of its stages.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Reflection {
@@ -262,6 +324,21 @@ pub struct Reflection {
     pub vertex_inputs: Vec<VertexInput>,
     /// Ascending, no duplicates by construction; identical in the metadata document (R52).
     pub active_texture_slots: BTreeSet<u8>,
+    /// Vertex stage: the position's source, when it is proven (`"vertex_position"`, written
+    /// only when present).
+    pub vertex_position: Option<PositionSource>,
+    /// Fragment stage: every fragment the rasterizer produces writes colour 0: nothing
+    /// discards and no sample mask is written (`"fragment_always_writes":true`, written only
+    /// when proven).
+    pub fragment_always_writes: bool,
+    /// The uniform block members the stage's output can depend on (`"read_uniforms"`, written
+    /// only when the analysis answered for every stage): a member a stage declares and even
+    /// names, but only in values nothing it produces uses, is left out. `None` when unknown,
+    /// which a host reads as "every declared member is read".
+    pub read_uniforms: Option<BTreeSet<String>>,
+    /// Fragment stage: the proven channels of colour 0 (`"fragment_colour"`, written only when
+    /// its alpha is proven).
+    pub fragment_colour: Option<FragmentColour>,
 }
 
 /// A problem found while building or merging reflection.
@@ -420,6 +497,19 @@ impl Reflection {
         let mut blocks: BTreeMap<(u32, u32, &str), &UniformBlock> = BTreeMap::new();
         let mut inputs: BTreeMap<u32, VertexInput> = BTreeMap::new();
         let mut slots = BTreeSet::new();
+        // Each fact belongs to one stage, so the stage that reflected it decides.
+        let vertex_position = parts.iter().find_map(|p| p.vertex_position.clone());
+        let fragment_always_writes = parts.iter().any(|p| p.fragment_always_writes);
+        // What the program reads is what any stage reads, known only when every stage is known.
+        let read_uniforms = if parts.is_empty() {
+            None
+        } else {
+            parts.iter().try_fold(BTreeSet::new(), |mut all, p| {
+                all.extend(p.read_uniforms.as_ref()?.iter().cloned());
+                Some(all)
+            })
+        };
+        let fragment_colour = parts.iter().find_map(|p| p.fragment_colour.clone());
 
         for part in parts {
             for d in &part.descriptor_bindings {
@@ -457,19 +547,38 @@ impl Reflection {
             uniform_blocks: blocks.into_values().cloned().collect(),
             vertex_inputs: inputs.into_values().collect(),
             active_texture_slots: slots,
+            vertex_position,
+            fragment_always_writes,
+            read_uniforms,
+            fragment_colour,
         };
         merged.check_limits()?;
         Ok(merged)
     }
 
-    /// The reflection document, keys in the order of spec 2.6.3.
+    /// The reflection document, keys in the order of spec 2.6.3. The two coverage facts follow,
+    /// each only when it holds, so a document without them reads as "not proven", then the read
+    /// uniforms when they are known and the fragment colour when its alpha is proven.
     pub fn to_json(&self) -> String {
-        json::object(&[
+        let mut fields = vec![
             ("descriptor_bindings", json::array(self.descriptor_bindings.iter().map(DescriptorBinding::to_json))),
             ("uniform_blocks", json::array(self.uniform_blocks.iter().map(UniformBlock::to_json))),
             ("vertex_inputs", json::array(self.vertex_inputs.iter().map(VertexInput::to_json))),
             ("active_texture_slots", json::array(self.active_texture_slots.iter().map(u8::to_string))),
-        ])
+        ];
+        if let Some(position) = &self.vertex_position {
+            fields.push(("vertex_position", position.to_json()));
+        }
+        if self.fragment_always_writes {
+            fields.push(("fragment_always_writes", json::boolean(true)));
+        }
+        if let Some(read) = &self.read_uniforms {
+            fields.push(("read_uniforms", json::array(read.iter().map(|name| json::string(name)))));
+        }
+        if let Some(colour) = &self.fragment_colour {
+            fields.push(("fragment_colour", colour.to_json()));
+        }
+        json::object(&fields)
     }
 }
 
@@ -719,6 +828,7 @@ mod tests {
             uniform_blocks: vec![block("GlobalUniforms", 1, 0)],
             vertex_inputs: vec![input("a_Position", 0)],
             active_texture_slots: BTreeSet::from([0]),
+            ..Reflection::default()
         };
         let text = r.to_json();
         assert!(!text.contains(' ') && !text.contains('\n'));

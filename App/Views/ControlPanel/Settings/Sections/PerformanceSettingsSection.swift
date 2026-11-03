@@ -137,13 +137,19 @@ struct PerformanceSettingsSection: View {
     note:
       "Experimental. In scenes drawn by Native Metal, lets a layer’s shader read video frames directly instead of converting them to a color image every frame. Only works with 8-bit NV12 video and shaders that support it; everything else converts as before. Live diagnostics under Scene wallpapers shows which path each scene uses."
   )
+  static let displayFraming = SettingsItem(
+    id: "performance.display-framing", section: .performance, group: experimental,
+    inside: advanced, title: "Draw only the visible part of cropped scenes",
+    note:
+      "Experimental. When your display crops part of a 2D scene because their shapes differ, draws only the part you see instead of the whole scene. This saves some GPU work and memory, most when much of the scene is cropped. Applies only with 2D scene resolution set to Display resolution, the wallpaper set to Fill or Original size, and MetalFX not upscaling the scene. A few pixels can look very slightly different, mostly along fine lines and at the edges of the screen. Turn it off if something looks wrong."
+  )
 
   static let items = [
     energyUse, energyMethod, preset, frameRateLimit, renderScale, metalFXUpscaling, renderScaleEffective,
     sceneResolution, msaa, shadows, volumetrics, reflections, postProcessing, advanced,
     videoDiagnostics, videoInUse, sceneOptimization, sceneOnDemand,
     sceneDiagnostics, sceneDrawnBy, sceneInForce, sceneQualityInForce, sceneUpdating, sceneCompatibility,
-    videoPlaneSampling,
+    videoPlaneSampling, displayFraming,
   ]
 
   /// The live rows this page leaves out while they have nothing to say, by the values its body
@@ -305,6 +311,9 @@ struct PerformanceSettingsSection: View {
     SettingsGroup(Self.experimental, in: .performance) {
       SettingsRow(Self.videoPlaneSampling) {
         SettingsSwitchControl(key: .sceneVideoPlaneSampling)
+      }
+      SettingsRow(Self.displayFraming) {
+        SettingsSwitchControl(key: .sceneDisplayFraming)
       }
     }
   }

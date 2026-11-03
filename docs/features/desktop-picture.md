@@ -173,6 +173,39 @@ Each poster is a second decode of a few frames and is counted as
   not at the next snapshot. A pass that leaves the windows as they were asks for
   nothing, does not look at the desktops and keeps a settled poster, unless the last
   look could not put a picture back: then it tries again.
+- **A wallpaper comes back with the same look.** A playlist turning back to a
+  wallpaper, a switch back, or another display's change retaking every poster would
+  take it three times again, each a readback, an encode and a new file macOS keeps
+  ([below](#a-new-file-for-every-new-frame)). Instead `DesktopSettledPosterStore`
+  (in `App/Services/Desktop/DesktopSettledPosterStore.swift`) keeps the last settled
+  poster of each wallpaper on each display, and a surface whose wallpaper comes back
+  with the same `DesktopPosterLook` gets that poster at once: nothing is asked, no
+  settle capture follows, and the JPEG is byte for byte the one the desktop had, so
+  the ledger names the same file and WallpaperAgent's cache does not grow. The look
+  is the display (physical id) and wallpaper, and a digest of everything else that
+  decides the picture: the display's scaling and factor, the screen's size and
+  scale, the wallpaper's saved settings file (`<support>/wallpapers/<id>.json`:
+  properties, framing, engine options), its files (the content revision a library
+  refresh, a reload or a changed web asset moves), the render scale in force, 2D
+  scene resolution, scene quality, MetalFX and the other scene switches, the
+  appearance, the label languages and a web page's still-image placement. There is
+  no look, and the old capture sequence runs, unless the display shows that
+  wallpaper on its own (enabled, not mirroring) and it is drawing: a scene Native
+  Metal draws without a failure (not one still being read or held), or a web page or
+  video whose host reports it ready. A poster is kept only from a frame asked for,
+  while the display presents and outside Space selection, a whole settle window
+  (15 s) after every poster was last taken again, the wallpaper last resumed or its
+  look last changed, and only when the look still holds when the frame arrives and
+  when its poster is accepted, so an apply that lands between a request and its frame
+  keeps nothing. A poster given back counts as settled; a frame nobody asked for (a
+  renderer's first, often an intro) does not replace it, nor does a periodic one
+  until it could itself be kept. A display showing edits nobody applied is never
+  given one. The store holds one JPEG per display and wallpaper under
+  `<support>/Cache/SettledPosters/`, at most 48 (the least recently used goes
+  first), forgets a wallpaper that leaves the library, and is emptied when the app
+  starts, since files or settings may have changed while it was not running.
+  `WALLPAPER_MACHINE_DESKTOP_POSTER_REUSE=0` turns it off for an A/B comparison
+  ([power benchmark](../testing/power-benchmark.md#ab-comparison-entry-points)).
 - **Periodically**, every `periodicRefreshInterval` (300 s), while the setting is on.
 - Settling and periodic captures ask only displays whose wallpaper is presenting
   (`canCapture`: the presentation policy has not suspended playback globally or for
@@ -208,7 +241,8 @@ and does not delete it, even after the poster file itself is gone: 17.8 MB per p
 on a 14-inch MacBook Pro (3024 × 1964 at 24 bits). When every engine snapshot retook
 every poster three times, and a Space change, a wake or a resume retook any poster
 older than two minutes, that cache grew to about 100 GB. That is why a settled poster
-is kept until the wallpaper changes and why the periodic setting is off by default. The
+is kept until the wallpaper changes, why a wallpaper that comes back with the same
+look gets its settled poster back, and why the periodic setting is off by default. The
 app does not clear the cache: it belongs to WallpaperAgent, lives in another app's
 container, and changing it behind the system's back is unsupported.
 
@@ -454,7 +488,8 @@ the animated lock screen in
 
 `DesktopWallpaperTests` cover posters, timing, refusals, originals, quit and the
 switch's restore with synthetic pixels and an in-memory workspace that never touches
-the user's wallpaper;
+the user's wallpaper, and `DesktopSettledPosterStoreTests` the settled posters kept for
+a wallpaper's return and the look that decides whether one is given back;
 the inventory is under [Posters](../testing/coverage.md#posters-mission-control). What
 Mission Control actually shows, its refresh latency, and macOS accepting and restoring
 the native selections are not covered and need an authorized desktop run

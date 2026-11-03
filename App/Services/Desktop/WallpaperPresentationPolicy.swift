@@ -44,8 +44,9 @@ enum GlobalPresentation: Comparable, Sendable {
 ///
 /// The split matters for power: a window covering the wallpaper on one display
 /// must stop that display's decoding and rendering, and must not stop a display
-/// the user is still looking at. Display sleep, session lock, app rules and
-/// other-app audio can also suspend or unload every display, and mute wallpaper
+/// the user is still looking at. Display sleep, session lock, a session switched away
+/// from (fast user switching), app rules and other-app audio can also suspend or unload
+/// every display, and mute wallpaper
 /// audio, without touching that choice. The user's own mute of every wallpaper silences them
 /// as well, whatever the rules say, and leaves each wallpaper's saved sound alone.
 ///
@@ -61,7 +62,7 @@ final class WallpaperPresentationPolicy {
     private let lockCenter: NotificationCenter
     private let windowCenter: NotificationCenter
     private let surfaces: @MainActor () -> [WallpaperSurfaceVisibility]
-    private let isSessionLocked: @MainActor () -> Bool
+    private let sessionState: @MainActor () -> WallpaperPresentationAuthority.SessionState
     private let displaySleepAction: @MainActor () -> DisplaySleepAction
     private let appRuleActions: @MainActor () -> Set<AppRuleAction>
     private let otherAudioActive: @MainActor () -> Bool
@@ -87,8 +88,13 @@ final class WallpaperPresentationPolicy {
     /// synchronous round trip, and evaluate() runs after every snapshot the engine
     /// applies, so it is asked again only where the answer can have changed: a lock
     /// or unlock, waking displays, a user switch, and every evaluation while the
-    /// session counts as locked, so a stale lock can never hold the wallpaper.
+    /// session counts as locked or switched away, so a stale answer can never hold the
+    /// wallpaper.
     private var sessionLocked = false
+    /// False while fast user switching has another session (or the login window) on the
+    /// screens, read from the same answer as the lock. A session whose answer leaves the
+    /// key out counts as on the console.
+    private var sessionOnConsole = true
     /// Set until the first evaluation, which covers a session locked before start().
     private var sessionLockStale = true
     /// The screens and working areas the last screen change found.
@@ -122,7 +128,9 @@ final class WallpaperPresentationPolicy {
     var isSuspended: Bool { globalPresentation != .running }
 
     /// Nobody is at the Mac: the displays sleep or the session is locked. An app rule or the
-    /// Focus filter suspends presentation too, but while someone works.
+    /// Focus filter suspends presentation too, but while someone works. A session switched away
+    /// from the console pauses its wallpapers but does not count: someone may still be watching
+    /// it remotely, and an automatic update must not restart it then.
     var isUnattended: Bool { displaysAsleep || sessionLocked }
 
     /// The suspended displays that something hides from the user (a full-screen app, a covered
@@ -168,7 +176,7 @@ final class WallpaperPresentationPolicy {
         lockCenter: NotificationCenter = DistributedNotificationCenter.default(),
         windowCenter: NotificationCenter = .default,
         surfaces: (@MainActor () -> [WallpaperSurfaceVisibility])? = nil,
-        isSessionLocked: (@MainActor () -> Bool)? = nil,
+        sessionState: (@MainActor () -> WallpaperPresentationAuthority.SessionState)? = nil,
         displaySleepAction: (@MainActor () -> DisplaySleepAction)? = nil,
         appRuleActions: (@MainActor () -> Set<AppRuleAction>)? = nil,
         otherAudioActive: (@MainActor () -> Bool)? = nil,
@@ -190,7 +198,7 @@ final class WallpaperPresentationPolicy {
         self.lockCenter = lockCenter
         self.windowCenter = windowCenter
         self.surfaces = surfaces ?? { Self.systemSurfaces() }
-        self.isSessionLocked = isSessionLocked ?? { Self.sessionIsLocked() }
+        self.sessionState = sessionState ?? { .current() }
         self.displaySleepAction = displaySleepAction ?? { .pause }
         self.appRuleActions = appRuleActions ?? { [] }
         self.otherAudioActive = otherAudioActive ?? { false }
@@ -237,7 +245,8 @@ final class WallpaperPresentationPolicy {
                 }
             }))
         }
-        // Switching users away and back changes the session without a lock notification.
+        // Switching users away and back changes the session without a lock notification:
+        // away, another session has the screens; back, this one has them again.
         for name in [
             NSWorkspace.sessionDidResignActiveNotification,
             NSWorkspace.sessionDidBecomeActiveNotification,
@@ -296,6 +305,7 @@ final class WallpaperPresentationPolicy {
         probes?.removeAll()
         displaysAsleep = false
         sessionLocked = false
+        sessionOnConsole = true
         sessionLockStale = true
         evaluatedScreenLayout = nil
         // Teardown must never leave a surface suspended or muted.
@@ -356,11 +366,6 @@ final class WallpaperPresentationPolicy {
     /// Each screen's frame and working area: what the coverage probes cover.
     static func systemScreenLayout() -> [NSRect] {
         NSScreen.screens.flatMap { [$0.frame, $0.visibleFrame] }
-    }
-
-    static func sessionIsLocked() -> Bool {
-        (CGSessionCopyCurrentDictionary() as? [String: Any])?["CGSSessionScreenIsLocked"] as? Bool
-            ?? false
     }
 
     /// Wallpaper visibility with a covered working area counted as hidden when
@@ -424,12 +429,18 @@ final class WallpaperPresentationPolicy {
         var unlocked = false
         defer { if unlocked { onSessionUnlocked?() } }
         syncProbes()
-        if sessionLockStale || sessionLocked {
+        if sessionLockStale || sessionLocked || !sessionOnConsole {
             let wasLocked = sessionLocked
-            sessionLocked = isSessionLocked()
+            let wasOnConsole = sessionOnConsole
+            let session = sessionState()
+            sessionLocked = session.locked
+            sessionOnConsole = session.onConsole
             sessionLockStale = false
             unlocked = wasLocked && !sessionLocked
             if unlocked { AppLog.info("session unlocked") }
+            if wasOnConsole != sessionOnConsole {
+                AppLog.info(sessionOnConsole ? "session is on the console again" : "session switched away from the console")
+            }
         }
         let presentation = resolvedPresentation()
         let audio = resolvedAudioSuppressed()
@@ -501,7 +512,8 @@ final class WallpaperPresentationPolicy {
         if displaysAsleep {
             strongest = max(strongest, displaySleepAction() == .stop ? .unloaded : .suspended)
         }
-        if sessionLocked {
+        // Another session on the screens hides every display as a lock does.
+        if sessionLocked || !sessionOnConsole {
             strongest = max(strongest, .suspended)
         }
         let rules = appRuleActions()

@@ -78,6 +78,7 @@ fn assert_default_app(config: &AppConfig) {
         }
     );
     assert!(!config.experimental.scene_video_plane_sampling);
+    assert!(!config.experimental.scene_display_framing);
     assert_eq!(config.quality.render_scale, 1.0);
     assert_eq!(config.quality.frame_rate_cap, None);
     assert_eq!(config.quality.legacy_battery_profile_enabled, None);
@@ -259,6 +260,7 @@ fn all_app_fields_and_selector_variants_round_trip_without_normalizing_preferenc
                     },
                     experimental: ExperimentalCfg {
                         scene_video_plane_sampling: true,
+                        scene_display_framing: true,
                     },
                     quality: QualityCfg {
                         render_scale: 1.75,
@@ -417,6 +419,7 @@ last_selected_wallpaper = "retained"
 extra = { flag = false }
 [experimental]
 scene_video_plane_sampling = true
+scene_display_framing = true
 native_video_backend = false
 content_pacing = [3]
 shared_video_decode = { anything = "valid" }
@@ -433,6 +436,7 @@ x = 1
         Some("retained")
     );
     assert!(loaded.config.experimental.scene_video_plane_sampling);
+    assert!(loaded.config.experimental.scene_display_framing);
     assert_eq!(loaded.config.quality.render_scale, 0.5);
     assert_eq!(loaded.config.power.on_battery, BatteryModeCfg::KeepRunning);
     assert_eq!(fs::read_to_string(app_path(&store)).unwrap(), raw);
@@ -481,6 +485,21 @@ x = 1
     assert!(output["audio"].get("discard").is_none());
     assert!(output["monitors"][0].get("discard").is_none());
     assert_eq!(output["property_overrides"], raw["property_overrides"]);
+}
+
+// A configuration saved before SDR display framing existed: the switch beside it is
+// kept, framing reads off, and the next save writes it out off.
+#[test]
+fn an_experimental_section_saved_before_display_framing_existed_loads_it_off() {
+    let (_temporary, store) = isolated_store();
+    put(&app_path(&store), "[experimental]\nscene_video_plane_sampling = true\n");
+    let loaded = store.load().unwrap();
+    assert!(loaded.config.experimental.scene_video_plane_sampling);
+    assert!(!loaded.config.experimental.scene_display_framing);
+    store.save_app_config(&loaded.config).unwrap();
+    let output = app_output(&store);
+    assert_eq!(output["experimental"]["scene_video_plane_sampling"].as_bool(), Some(true));
+    assert_eq!(output["experimental"]["scene_display_framing"].as_bool(), Some(false));
 }
 
 // C04: every legacy presence/value pair crossed with absent and every explicit mode.

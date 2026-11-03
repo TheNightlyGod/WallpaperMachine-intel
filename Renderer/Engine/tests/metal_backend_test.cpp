@@ -1046,3 +1046,396 @@ TEST(MetalMultisampling, ChoosesTheBestSupportedCountWithoutIncreasingTheRequest
     EXPECT_EQ(SelectSceneSampleCount(4, 1 | 8), 1u);
     EXPECT_EQ(SelectSceneSampleCount(8, 1), 1u);
 }
+
+// ---- a draw that writes every texel of its target
+
+namespace
+{
+
+/// The effect card as the parser builds it: corners bottom-left, top-left, bottom-right,
+/// top-right, two triangles sharing the top-left to bottom-right diagonal.
+MetalQuad EffectCard(float half = 1.0f, float z = 0.0f)
+{
+    MetalQuad quad;
+    quad.corners   = { { { -half, -half, z }, { -half, half, z }, { half, -half, z }, { half, half, z } } };
+    quad.triangles = { { { 0, 2, 1 }, { 1, 2, 3 } } };
+    return quad;
+}
+
+constexpr std::array<float, 16> kIdentity { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+
+} // namespace
+
+TEST(MetalOverwrite, TheReflectionCarriesTheCoverageFactsOnlyWhenTheyAreThere)
+{
+    MetalShaderReflection reflection;
+    std::string           error;
+    ASSERT_TRUE(ParseMetalShaderReflection(
+        R"({"descriptor_bindings":[],"uniform_blocks":[],"vertex_inputs":[],"active_texture_slots":[],)"
+        R"("vertex_position":{"input":"a_Position","matrix":"g_ModelViewProjectionMatrix"},"fragment_always_writes":true})",
+        reflection, &error))
+        << error;
+    ASSERT_TRUE(reflection.vertex_position.has_value());
+    EXPECT_EQ(reflection.vertex_position->input, "a_Position");
+    EXPECT_EQ(reflection.vertex_position->matrix, "g_ModelViewProjectionMatrix");
+    EXPECT_TRUE(reflection.fragment_always_writes);
+
+    ASSERT_TRUE(ParseMetalShaderReflection(
+        R"({"descriptor_bindings":[],"uniform_blocks":[],"vertex_inputs":[],"active_texture_slots":[],)"
+        R"("vertex_position":{"input":"a_Position"}})",
+        reflection, &error))
+        << error;
+    ASSERT_TRUE(reflection.vertex_position.has_value());
+    EXPECT_TRUE(reflection.vertex_position->matrix.empty());
+    EXPECT_FALSE(reflection.fragment_always_writes);
+
+    // A document of a compiler that knows nothing of them proves nothing.
+    ASSERT_TRUE(ParseMetalShaderReflection(
+        R"({"descriptor_bindings":[],"uniform_blocks":[],"vertex_inputs":[],"active_texture_slots":[]})", reflection,
+        &error))
+        << error;
+    EXPECT_FALSE(reflection.vertex_position.has_value());
+    EXPECT_FALSE(reflection.fragment_always_writes);
+
+    // Facts of the wrong shape prove nothing either, and do not fail the shader.
+    ASSERT_TRUE(ParseMetalShaderReflection(
+        R"({"descriptor_bindings":[],"uniform_blocks":[],"vertex_inputs":[],"active_texture_slots":[],)"
+        R"("vertex_position":{"input":7,"matrix":"g_ModelViewProjectionMatrix"},"fragment_always_writes":"yes"})",
+        reflection, &error))
+        << error;
+    EXPECT_FALSE(reflection.vertex_position.has_value());
+    EXPECT_FALSE(reflection.fragment_always_writes);
+    ASSERT_TRUE(ParseMetalShaderReflection(
+        R"({"descriptor_bindings":[],"uniform_blocks":[],"vertex_inputs":[],"active_texture_slots":[],)"
+        R"("vertex_position":{"matrix":"g_ModelViewProjectionMatrix"}})",
+        reflection, &error))
+        << error;
+    EXPECT_FALSE(reflection.vertex_position.has_value());
+}
+
+TEST(MetalReflection, AMemberIsUnreadOnlyWhenTheCompilerSaysWhatIsRead)
+{
+    const std::string block =
+        R"({"descriptor_bindings":[],"uniform_blocks":[{"name":"GlobalUniforms","size":80,"binding":1,)"
+        R"("members":[{"name":"g_ModelViewProjectionMatrix","offset":0,"size":64},)"
+        R"({"name":"g_EyePosition","offset":64,"size":12}]}],"vertex_inputs":[],"active_texture_slots":[])";
+    MetalShaderReflection reflection;
+    std::string           error;
+    ASSERT_TRUE(ParseMetalShaderReflection(block + R"(,"read_uniforms":["g_ModelViewProjectionMatrix"]})",
+                                           reflection, &error))
+        << error;
+    EXPECT_TRUE(reflection.hasMember("g_EyePosition"));
+    EXPECT_FALSE(reflection.readsMember("g_EyePosition"));
+    EXPECT_TRUE(reflection.readsMember("g_ModelViewProjectionMatrix"));
+    // A name the block does not declare is not read, whatever the list says.
+    ASSERT_TRUE(ParseMetalShaderReflection(block + R"(,"read_uniforms":["g_Time"]})", reflection, &error)) << error;
+    EXPECT_FALSE(reflection.readsMember("g_Time"));
+
+    // Without the list, and with a list that is not one of names, every declared member is read.
+    for (const std::string tail : { std::string("}"), std::string(R"(,"read_uniforms":["g_ModelViewProjectionMatrix",7]})"),
+                                    std::string(R"(,"read_uniforms":"g_ModelViewProjectionMatrix"})") }) {
+        SCOPED_TRACE(tail);
+        ASSERT_TRUE(ParseMetalShaderReflection(block + tail, reflection, &error)) << error;
+        EXPECT_FALSE(reflection.read_uniforms.has_value());
+        EXPECT_TRUE(reflection.readsMember("g_EyePosition"));
+        EXPECT_TRUE(reflection.readsMember("g_ModelViewProjectionMatrix"));
+    }
+}
+
+TEST(MetalOverwrite, OnlyBlendingThatReplacesTheTexelLetsADrawOverwriteIt)
+{
+    EXPECT_TRUE(BlendReplacesDestination(ToMetalBlendState(BlendMode::Disable, AlphaBlendRule::Material, 1)));
+    EXPECT_TRUE(BlendReplacesDestination(ToMetalBlendState(BlendMode::Normal, AlphaBlendRule::Material, 1)));
+    EXPECT_TRUE(BlendReplacesDestination(ToMetalBlendState(BlendMode::Normal, AlphaBlendRule::Max, 1)));
+    for (const auto mode : { BlendMode::Translucent, BlendMode::Additive, BlendMode::Multiply,
+                             BlendMode::AlphaToCoverage }) {
+        EXPECT_FALSE(BlendReplacesDestination(ToMetalBlendState(mode, AlphaBlendRule::Material, 1)))
+            << static_cast<int>(mode);
+    }
+    auto subtract          = ToMetalBlendState(BlendMode::Normal, AlphaBlendRule::Material, 1);
+    subtract.rgb_operation = MetalBlendOperation::ReverseSubtract;
+    EXPECT_FALSE(BlendReplacesDestination(subtract));
+}
+
+TEST(MetalNoopDraw, OnlyBlendingThatKeepsTheTexelAtZeroAlphaLetsADrawBeLeftOut)
+{
+    // Source over (alpha by the colour's factors or by source-over coverage), additive, and both
+    // under the maximum alpha rule: Cs * 0 + Cd * 1, and an alpha of As * As, As or max(As, Ad).
+    for (const auto rule : { AlphaBlendRule::Material, AlphaBlendRule::SourceOver, AlphaBlendRule::Max }) {
+        for (const auto mode : { BlendMode::Translucent, BlendMode::Additive }) {
+            EXPECT_TRUE(BlendKeepsDestinationAtZeroAlpha(ToMetalBlendState(mode, rule, 1)))
+                << static_cast<int>(mode) << " " << static_cast<int>(rule);
+        }
+        // Blending off and `normal` (One/Zero) write the fragment; multiply scales the held
+        // colour by the fragment's; alpha to coverage decides coverage, not a blend.
+        for (const auto mode : { BlendMode::Disable, BlendMode::Normal, BlendMode::Multiply,
+                                 BlendMode::AlphaToCoverage }) {
+            EXPECT_FALSE(BlendKeepsDestinationAtZeroAlpha(ToMetalBlendState(mode, rule, 1)))
+                << static_cast<int>(mode) << " " << static_cast<int>(rule);
+        }
+    }
+    const auto translucent = ToMetalBlendState(BlendMode::Translucent, AlphaBlendRule::Material, 1);
+    // Factors and operations that do not give the held texel back whole.
+    auto subtract          = translucent;
+    subtract.rgb_operation = MetalBlendOperation::ReverseSubtract;
+    EXPECT_FALSE(BlendKeepsDestinationAtZeroAlpha(subtract));
+    auto source_colour       = translucent;
+    source_colour.source_rgb = MetalBlendFactor::One;
+    EXPECT_FALSE(BlendKeepsDestinationAtZeroAlpha(source_colour)) << "Cs * 1 is the fragment's colour";
+    auto destination_colour            = translucent;
+    destination_colour.destination_rgb = MetalBlendFactor::SourceColor;
+    EXPECT_FALSE(BlendKeepsDestinationAtZeroAlpha(destination_colour));
+    auto destination_alpha              = translucent;
+    destination_alpha.destination_alpha = MetalBlendFactor::Zero;
+    EXPECT_FALSE(BlendKeepsDestinationAtZeroAlpha(destination_alpha)) << "Ad * 0 drops the held alpha";
+    auto minimum            = translucent;
+    minimum.alpha_operation = MetalBlendOperation::Min;
+    EXPECT_FALSE(BlendKeepsDestinationAtZeroAlpha(minimum)) << "min(0, Ad) is 0";
+    auto coverage              = translucent;
+    coverage.alpha_to_coverage = true;
+    EXPECT_FALSE(BlendKeepsDestinationAtZeroAlpha(coverage));
+}
+
+TEST(MetalNoopDraw, TheFragmentColourFactsAreReadAndAMalformedChannelProvesNothing)
+{
+    MetalShaderReflection reflection;
+    std::string           error;
+    ASSERT_TRUE(ParseMetalShaderReflection(
+        R"({"descriptor_bindings":[],"uniform_blocks":[],"vertex_inputs":[],"active_texture_slots":[],)"
+        R"("fragment_colour":[[{"uniform":"g_Color","component":0}],[{"uniform":"g_Color","component":1},)"
+        R"({"constant_bits":1056964608}],null,[{"uniform":"g_Alpha","component":0}]]})",
+        reflection, &error))
+        << error;
+    ASSERT_TRUE(reflection.fragment_colour[0].has_value());
+    EXPECT_EQ((*reflection.fragment_colour[0])[0].member, "g_Color");
+    ASSERT_TRUE(reflection.fragment_colour[1].has_value());
+    ASSERT_EQ(reflection.fragment_colour[1]->size(), 2u);
+    EXPECT_EQ((*reflection.fragment_colour[1])[1].member, "");
+    EXPECT_EQ((*reflection.fragment_colour[1])[1].constant, 0.5f);
+    EXPECT_FALSE(reflection.fragment_colour[2].has_value()) << "an unproven channel stays unproven";
+    ASSERT_TRUE(reflection.fragment_colour[3].has_value());
+    EXPECT_EQ((*reflection.fragment_colour[3])[0].member, "g_Alpha");
+
+    // A factor of an unknown shape, a component beyond a vector, or a document without the fact.
+    ASSERT_TRUE(ParseMetalShaderReflection(
+        R"({"descriptor_bindings":[],"uniform_blocks":[],"vertex_inputs":[],"active_texture_slots":[],)"
+        R"("fragment_colour":[[{"uniform":"g_Color"}],[{"uniform":"g_Color","component":7}],[{"texture":0}],[]]})",
+        reflection, &error))
+        << error;
+    for (const auto& channel : reflection.fragment_colour) EXPECT_FALSE(channel.has_value());
+    ASSERT_TRUE(ParseMetalShaderReflection(
+        R"({"descriptor_bindings":[],"uniform_blocks":[],"vertex_inputs":[],"active_texture_slots":[]})", reflection,
+        &error))
+        << error;
+    for (const auto& channel : reflection.fragment_colour) EXPECT_FALSE(channel.has_value());
+}
+
+namespace
+{
+
+ScenePassDescription ClearStep(const std::string& target)
+{
+    ScenePassDescription d;
+    d.kind        = MetalPassKind::Clear;
+    d.name        = "clear " + target;
+    d.target_key  = target;
+    d.load_action = MetalLoadAction::Clear;
+    return d;
+}
+
+ScenePassDescription DrawStep(const std::string& target, MetalLoadAction load, std::vector<std::string> samples = {})
+{
+    ScenePassDescription d;
+    d.kind         = MetalPassKind::CustomShader;
+    d.name         = "draw " + target;
+    d.target_key   = target;
+    d.load_action  = load;
+    d.texture_keys = std::move(samples);
+    return d;
+}
+
+std::vector<std::optional<std::vector<std::size_t>>> Plan(const std::vector<ScenePassDescription>& passes,
+                                                          const std::vector<std::size_t>& order = {})
+{
+    return PlanUnreadClears(passes, order, [](std::size_t) { return true; }, [](std::size_t) { return true; });
+}
+
+} // namespace
+
+TEST(MetalHiddenClears, AClearIsSeenOnlyByTheDrawsUpToTheTargetsNextClear)
+{
+    // A hidden layer's chain: its card clears A, the effect reads A into B (clearing B first),
+    // the next effect draws back onto A, the layer goes onto the scene; the next layer clears A
+    // again, and a draw after that reads A for itself.
+    const std::vector<ScenePassDescription> passes {
+        DrawStep("A", MetalLoadAction::Clear),                 // 0 card
+        DrawStep("B", MetalLoadAction::Clear, { "A" }),        // 1 effect
+        DrawStep("A", MetalLoadAction::Load, { "B" }),         // 2 effect onto A
+        DrawStep("scene", MetalLoadAction::Load, { "A" }),     // 3 composite
+        ClearStep("A"),                                        // 4 the next layer's clear
+        DrawStep("scene", MetalLoadAction::Load, { "A" }),     // 5 reads the next layer's A
+    };
+    const auto plan = Plan(passes);
+    ASSERT_TRUE(plan[0].has_value());
+    EXPECT_EQ(*plan[0], (std::vector<std::size_t> { 1, 2, 3 })) << "the readers stop at the next clear of A";
+    ASSERT_TRUE(plan[1].has_value());
+    EXPECT_EQ(*plan[1], (std::vector<std::size_t> { 2 }));
+    ASSERT_TRUE(plan[4].has_value());
+    EXPECT_EQ(*plan[4], (std::vector<std::size_t> { 5 }));
+    for (const auto index : { 2, 3, 5 }) EXPECT_FALSE(plan[index].has_value()) << index << " clears nothing";
+}
+
+TEST(MetalHiddenClears, AClearTheNextFrameReadsBeforeItIsClearedAgainIsAlwaysSeen)
+{
+    // The scene's first pass reads A as the frame before left it; A's only clear comes later.
+    // Whatever that pass draws then, the clear is what it reads: never left out.
+    std::vector<ScenePassDescription> passes {
+        DrawStep("scene", MetalLoadAction::Clear, { "A" }), // 0 reads last frame's A
+        DrawStep("A", MetalLoadAction::Clear),              // 1 hidden card
+        DrawStep("scene", MetalLoadAction::Load, { "A" }),  // 2
+    };
+    EXPECT_FALSE(Plan(passes)[1].has_value());
+    // A draw onto A before the clear reads it too; one that clears A first ends the span.
+    passes[0] = DrawStep("A", MetalLoadAction::Load);
+    EXPECT_FALSE(Plan(passes)[1].has_value());
+    passes[0] = DrawStep("A", MetalLoadAction::Clear);
+    ASSERT_TRUE(Plan(passes)[1].has_value());
+    EXPECT_EQ(*Plan(passes)[1], (std::vector<std::size_t> { 2 }));
+    // In another execution order the reader runs first again.
+    passes[0] = DrawStep("scene", MetalLoadAction::Clear, { "A" });
+    EXPECT_TRUE(Plan(passes, { 1, 2, 0 })[1].has_value());
+    EXPECT_FALSE(Plan(passes, { 0, 1, 2 })[1].has_value());
+}
+
+TEST(MetalHiddenClears, ACopyOfTheTargetOrAClearThatMayNotApplyKeepsTheClear)
+{
+    // A copy runs whatever is visible, so a clear it reads is always seen.
+    ScenePassDescription copy;
+    copy.kind       = MetalPassKind::Copy;
+    copy.source_key = "A";
+    copy.target_key = "C";
+    std::vector<ScenePassDescription> passes { DrawStep("A", MetalLoadAction::Clear), copy };
+    EXPECT_FALSE(Plan(passes)[0].has_value());
+
+    // A later clear that is switched with the order, or a draw dropped for an input nothing
+    // produces, does not end the span: the readers past it count, and with none past it the
+    // next frame's passes ahead of the clear do.
+    auto conditional                    = ClearStep("A");
+    conditional.conditional_scene_clear = true;
+    passes = { DrawStep("A", MetalLoadAction::Clear), conditional, DrawStep("scene", MetalLoadAction::Load, { "A" }) };
+    ASSERT_TRUE(Plan(passes)[0].has_value());
+    EXPECT_EQ(*Plan(passes)[0], (std::vector<std::size_t> { 2 }));
+    passes = { DrawStep("scene", MetalLoadAction::Load, { "A" }), DrawStep("A", MetalLoadAction::Clear),
+               DrawStep("A", MetalLoadAction::Clear) };
+    const auto unproduced = PlanUnreadClears(
+        passes, {}, [](std::size_t) { return true; }, [](std::size_t j) { return j != 2; });
+    EXPECT_FALSE(unproduced[1].has_value()) << "a dropped draw cleared nothing, so the next frame's reader sees it";
+    EXPECT_TRUE(Plan(passes)[1].has_value());
+    // A clear its caller does not consider is never planned.
+    EXPECT_FALSE(PlanUnreadClears(passes, {}, [](std::size_t) { return false; },
+                                  [](std::size_t) { return true; })[1]
+                     .has_value());
+}
+
+TEST(MetalHiddenClears, ACopyIsForTheDrawsAfterItThatSampleItsResultAlone)
+{
+    ScenePassDescription copy;
+    copy.kind       = MetalPassKind::Copy;
+    copy.source_key = "scene";
+    copy.target_key = "C";
+    // A lens copies the scene so far and samples the copy while drawing into the scene.
+    std::vector<ScenePassDescription> passes {
+        DrawStep("scene", MetalLoadAction::Clear), copy, DrawStep("scene", MetalLoadAction::Load, { "C" }),
+        DrawStep("scene", MetalLoadAction::Load, { "C" }),
+    };
+    const auto all = [](std::size_t) { return true; };
+    ASSERT_TRUE(PlanUnreadCopies(passes, {}, all)[1].has_value());
+    EXPECT_EQ(*PlanUnreadCopies(passes, {}, all)[1], (std::vector<std::size_t> { 2, 3 }));
+    EXPECT_FALSE(PlanUnreadCopies(passes, {}, [](std::size_t) { return false; })[1].has_value());
+    // A reader ahead of it sees the frame before's copy.
+    EXPECT_FALSE(PlanUnreadCopies(passes, { 2, 0, 1, 3 }, all)[1].has_value());
+    // Another pass that writes the copy's name, or a copy of the copy, sees or changes it otherwise.
+    auto other = passes;
+    other.push_back(DrawStep("C", MetalLoadAction::Load));
+    EXPECT_FALSE(PlanUnreadCopies(other, {}, all)[1].has_value());
+    other = passes;
+    auto onward       = copy;
+    onward.source_key = "C";
+    onward.target_key = "D";
+    other.push_back(onward);
+    EXPECT_FALSE(PlanUnreadCopies(other, {}, all)[1].has_value());
+    // A copy nobody samples is the copy plan's to remove, which keeps it while scene
+    // optimisation is off.
+    passes.resize(2);
+    EXPECT_FALSE(PlanUnreadCopies(passes, {}, all)[1].has_value());
+}
+
+TEST(MetalOverwrite, TheEffectCardCoversEveryTexelCentreHoweverItIsFolded)
+{
+    for (const auto [width, height] : { std::pair { 1u, 1u }, { 7u, 5u }, { 3840u, 2160u }, { 16384u, 16384u } }) {
+        SCOPED_TRACE(::testing::Message() << width << "x" << height);
+        EXPECT_TRUE(QuadCoversViewport(EffectCard(), kIdentity, width, height));
+        // Metal's clip-space fold mirrors y; the card covers the same square.
+        auto folded = kIdentity;
+        folded[5]   = -1.0f;
+        EXPECT_TRUE(QuadCoversViewport(EffectCard(), folded, width, height));
+        // The same card drawn as a strip, and as a larger card the viewport clips.
+        auto strip      = EffectCard();
+        strip.triangles = { { { 0, 1, 2 }, { 1, 2, 3 } } };
+        EXPECT_TRUE(QuadCoversViewport(strip, kIdentity, width, height));
+        EXPECT_TRUE(QuadCoversViewport(EffectCard(4.0f), kIdentity, width, height));
+    }
+    // A layer's card through an orthographic matrix that maps it onto the whole canvas.
+    std::array<float, 16> ortho {};
+    ortho[0]  = 2.0f / 384.0f;
+    ortho[5]  = 2.0f / 256.0f;
+    ortho[10] = -2.0f / 10000.0f;
+    ortho[14] = 0.5f;
+    ortho[15] = 1.0f;
+    EXPECT_TRUE(QuadCoversViewport(EffectCard(192.0f), ortho, 384, 256)) << "x and y scale differently";
+    auto wide = EffectCard(192.0f);
+    for (auto& corner : wide.corners) corner[1] *= 256.0f / 384.0f;
+    EXPECT_TRUE(QuadCoversViewport(wide, ortho, 384, 256));
+}
+
+TEST(MetalOverwrite, ACardThatMayMissATexelCentreIsNotACover)
+{
+    constexpr uint32_t width = 1000, height = 600;
+    // Shrunk, moved, or pulled in by less than a texel: the outermost centres are at
+    // 1 - 1/1000, so a card ending at 1 - 0.6/1000 still covers them, but the proof keeps a
+    // quarter-texel margin and gives up.
+    EXPECT_FALSE(QuadCoversViewport(EffectCard(0.5f), kIdentity, width, height));
+    EXPECT_FALSE(QuadCoversViewport(EffectCard(1.0f - 0.6f / width), kIdentity, width, height));
+    auto moved = kIdentity;
+    moved[12]  = 0.01f;
+    EXPECT_FALSE(QuadCoversViewport(EffectCard(), moved, width, height));
+    // Clipped by depth: in front of the near plane, past the far one, or on it but not exactly.
+    EXPECT_FALSE(QuadCoversViewport(EffectCard(1.0f, -0.5f), kIdentity, width, height));
+    EXPECT_FALSE(QuadCoversViewport(EffectCard(1.0f, 2.0f), kIdentity, width, height));
+    auto skewed = kIdentity;
+    skewed[2]   = 1e-7f;     // z picks up x: rounding could put a corner behind the near plane
+    EXPECT_FALSE(QuadCoversViewport(EffectCard(), skewed, width, height));
+    EXPECT_TRUE(QuadCoversViewport(EffectCard(1.0f, 0.5f), kIdentity, width, height));
+    // Behind the eye, or a matrix that is not finite.
+    auto behind = kIdentity;
+    behind[15]  = -1.0f;
+    EXPECT_FALSE(QuadCoversViewport(EffectCard(), behind, width, height));
+    auto broken = kIdentity;
+    broken[0]   = std::nanf("");
+    EXPECT_FALSE(QuadCoversViewport(EffectCard(), broken, width, height));
+    // Triangles that do not tile the quad: both on one side of their shared edge, the same
+    // triangle twice, or a degenerate one. The other diagonal tiles it as well as the first.
+    auto diagonal      = EffectCard();
+    diagonal.triangles = { { { 0, 1, 3 }, { 0, 3, 2 } } };
+    EXPECT_TRUE(QuadCoversViewport(diagonal, kIdentity, width, height));
+    auto one_side      = EffectCard();
+    one_side.triangles = { { { 0, 2, 3 }, { 0, 2, 1 } } };
+    EXPECT_FALSE(QuadCoversViewport(one_side, kIdentity, width, height)) << "both stand on the bottom edge";
+    auto twice      = EffectCard();
+    twice.triangles = { { { 0, 2, 1 }, { 0, 2, 1 } } };
+    EXPECT_FALSE(QuadCoversViewport(twice, kIdentity, width, height));
+    auto flat        = EffectCard();
+    flat.corners[3]  = flat.corners[2];
+    EXPECT_FALSE(QuadCoversViewport(flat, kIdentity, width, height));
+    EXPECT_FALSE(QuadCoversViewport(EffectCard(), kIdentity, 0, height));
+}

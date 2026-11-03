@@ -3,6 +3,7 @@
 #include "Runtime/RuntimeImageSource.hpp"
 #include "Runtime/SceneRuntimeContext.hpp"
 
+#import <CoreGraphics/CoreGraphics.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
 
@@ -16,6 +17,7 @@
 
 #include "MetalRender/MetalBlend.hpp"
 #include "MetalRender/MetalCapability.hpp"
+#include "MetalRender/MetalDisplayFraming.hpp"
 #include "MetalRender/MetalUpscaling.hpp"
 #include "MetalRender/MetalVideoSupport.hpp"
 #include "MetalRender/MetalProjection.hpp"
@@ -34,6 +36,7 @@
 #include "RenderCommon/StaticSubgraphCache.hpp"
 #include "RenderCommon/UnchangedPresent.hpp"
 
+#include "Core/PresentFeedback.hpp"
 #include "Image.hpp"
 #include "Interface/IImageParser.h"
 #include "Interface/IShaderValueUpdater.h"
@@ -356,9 +359,9 @@ MTLSamplerMinMagFilter ToMetalFilter(TextureFilter filter)
     return MTLSamplerMinMagFilterLinear;
 }
 
-/// Uncompressed formats only. Block-compressed source images are rejected
-/// rather than decoded here: silently expanding them would change memory use
-/// and filtering behaviour.
+/// The Metal format a source image is uploaded in, as stored. A block-compressed (BC) image keeps
+/// its blocks in the matching native BC format when the device has them (`block_compression`) and
+/// is refused otherwise; it is never decoded here, which would change memory use and filtering.
 /// `block_bytes` is non-zero for a block-compressed format, where a row is
 /// counted in 4x4 blocks rather than pixels and `bytes_per_pixel` means nothing.
 bool ToMetalImageFormat(TextureFormat format, bool block_compression, MTLPixelFormat& out,
@@ -382,7 +385,7 @@ bool ToMetalImageFormat(TextureFormat format, bool block_compression, MTLPixelFo
         out             = MTLPixelFormatR8Unorm;
         bytes_per_pixel = 1;
         return true;
-    // The three block-compressed formats, uploaded as the blocks the file already holds. A device
+    // The four block-compressed formats, uploaded as the blocks the file already holds. A device
     // without them refuses the image, and with it the scene, rather than
     // decoding on the CPU into a texture four to eight times the size.
     case TextureFormat::BC1:
@@ -1404,6 +1407,68 @@ std::atomic<bool>& TargetSharingSwitch()
     return enabled;
 }
 
+/// Whether a pass that samples a scene video may be reused while the video's frame is the
+/// one it drew, and a frame that imported no video frame may skip its present. On by
+/// default; `WALLPAPER_MACHINE_VIDEO_REUSE=0` redraws every such pass and presents every
+/// frame of a scene with a video, for an A/B in one binary. Both ways draw the same bytes.
+/// Read once, like the other A/B switches; a graph takes the value it was compiled with.
+std::atomic<bool>& VideoReuseSwitch()
+{
+    static std::atomic<bool> enabled { [] {
+        const char* value = std::getenv("WALLPAPER_MACHINE_VIDEO_REUSE");
+        return value == nullptr || std::string_view(value) != "0";
+    }() };
+    return enabled;
+}
+
+/// Whether a pass that reads the audio spectrum may be reused while the spectrum arrays it
+/// binds hold the bands it drew (silence, above all, which is all zeros). On by default;
+/// `WALLPAPER_MACHINE_AUDIO_REUSE=0` redraws every such pass on every frame, for an A/B in one
+/// binary. Both ways draw the same bytes. Read once, like the other A/B switches; a graph takes
+/// the value it was compiled with.
+std::atomic<bool>& AudioReuseSwitch()
+{
+    static std::atomic<bool> enabled { [] {
+        const char* value = std::getenv("WALLPAPER_MACHINE_AUDIO_REUSE");
+        return value == nullptr || std::string_view(value) != "0";
+    }() };
+    return enabled;
+}
+
+/// Whether a pass drawn through a layer-local or effect camera folds into its reuse sample only
+/// the transforms and cameras its program's read uniforms are derived from
+/// (`IShaderValueUpdater::TransformInputs`), so a layer that moves or a camera that shakes
+/// leaves a still effect chain reusable. On unless `WALLPAPER_MACHINE_LAYER_LOCAL_SIGNATURES=0`.
+///
+/// A pass reused that way holds exactly the pixels drawing it gives, but where the scene's objects
+/// are drawn in their own order (a layer reads another's picture, sorted transparency) its layer's
+/// buffers sit between two draws into the scene's image. Left out, they let those draws share one
+/// render pass that drawing them splits in two, and an Apple GPU can then blend a later draw one
+/// level apart in a texel (an M5 Pro did, in a few frames of a scene with bone-attached layers).
+/// That one-level difference is accepted for the GPU time the reuse saves. Read once, like the
+/// other A/B switches; a graph takes the value it was compiled with.
+std::atomic<bool>& LayerLocalSignaturesSwitch()
+{
+    static std::atomic<bool> enabled { [] {
+        const char* value = std::getenv("WALLPAPER_MACHINE_LAYER_LOCAL_SIGNATURES");
+        return value == nullptr || std::string_view(value) != "0";
+    }() };
+    return enabled;
+}
+
+/// Whether a frame's copy of rewritten geometry into its slot leaves out what the slot holds
+/// already (see `uploadDynamicMesh`). On by default;
+/// `WALLPAPER_MACHINE_PARTICLE_UPLOAD_DELTA=0` copies everything every frame, for an A/B in one
+/// binary. Both ways the draw reads the same bytes. Read once, like the other A/B switches.
+std::atomic<bool>& DynamicUploadDeltaSwitch()
+{
+    static std::atomic<bool> enabled { [] {
+        const char* value = std::getenv("WALLPAPER_MACHINE_PARTICLE_UPLOAD_DELTA");
+        return value == nullptr || std::string_view(value) != "0";
+    }() };
+    return enabled;
+}
+
 bool FeedbackCopiesForcedByEnvironment()
 {
     static const bool forced = [] {
@@ -1413,7 +1478,342 @@ bool FeedbackCopiesForcedByEnvironment()
     return forced;
 }
 
+/// Whether a present asks its drawable to report when it was shown, while the
+/// renderer counters are on. On by default; `WALLPAPER_MACHINE_PRESENT_FEEDBACK=0`
+/// leaves the reports out, so a comparison can measure what they cost. Counting
+/// off, no report is asked for either way. Read once, like the other switches.
+bool PresentFeedbackEnabled()
+{
+    static const bool enabled = [] {
+        const char* value = std::getenv("WALLPAPER_MACHINE_PRESENT_FEEDBACK");
+        return value == nullptr || std::string_view(value) != "0";
+    }();
+    return enabled;
+}
+
+/// Whether a present holds the frame on screen for the frame clock's hold
+/// (`SetPresentHold`) before the next one replaces it, so a ceiling below the
+/// display's rate shows its frames an even number of refreshes apart. On by
+/// default; `WALLPAPER_MACHINE_VSYNC_PACING=0` presents every frame at the next
+/// refresh, for an A/B in one binary. Either way the frames hold the same pixels.
+std::atomic<bool>& PresentPacingSwitch()
+{
+    static std::atomic<bool> enabled { [] {
+        const char* value = std::getenv("WALLPAPER_MACHINE_VSYNC_PACING");
+        return value == nullptr || std::string_view(value) != "0";
+    }() };
+    return enabled;
+}
+
+/// Whether a render pass opened by a draw that provably writes every texel of its target
+/// clears the target instead of loading it. On by default;
+/// `WALLPAPER_MACHINE_OVERWRITE_LOAD_ELISION=0` keeps every load, so a power comparison can
+/// measure the saving in one binary. Both ways draw the same bytes.
+std::atomic<bool>& OverwriteLoadElisionSwitch()
+{
+    static std::atomic<bool> enabled { [] {
+        const char* value = std::getenv("WALLPAPER_MACHINE_OVERWRITE_LOAD_ELISION");
+        return value == nullptr || std::string_view(value) != "0";
+    }() };
+    return enabled;
+}
+
+/// Whether a copy whose source is afterwards only read, and then written afresh, gives way to a
+/// trade of the two names' textures once the source's last reader has been encoded (a motion
+/// blur's history copy, the bloom result copied back into the scene's image). On by default;
+/// `WALLPAPER_MACHINE_COPY_TRADES=0` makes every such copy as a copy, for an A/B in one binary.
+/// Both ways draw the same bytes. Read when a graph is compiled.
+std::atomic<bool>& CopyTradesSwitch()
+{
+    static std::atomic<bool> enabled { [] {
+        const char* value = std::getenv("WALLPAPER_MACHINE_COPY_TRADES");
+        return value == nullptr || std::string_view(value) != "0";
+    }() };
+    return enabled;
+}
+
+/// Whether a depth or multisampled colour attachment is left unstored when no later pass of the
+/// frame, nor the next frame, reads what it holds. On by default;
+/// `WALLPAPER_MACHINE_ATTACHMENT_STORE_ELISION=0` stores them all, for an A/B in one binary.
+std::atomic<bool>& AttachmentStoreElisionSwitch()
+{
+    static std::atomic<bool> enabled { [] {
+        const char* value = std::getenv("WALLPAPER_MACHINE_ATTACHMENT_STORE_ELISION");
+        return value == nullptr || std::string_view(value) != "0";
+    }() };
+    return enabled;
+}
+
+/// Whether a draw that, with the frame's uniforms, writes alpha 0 over finite colour under a blend
+/// that keeps the destination there is left out (a layer faded out to nothing). On by default;
+/// `WALLPAPER_MACHINE_SKIP_NOOP_DRAWS=0` draws it, for an A/B in one binary. Both ways draw the
+/// same bytes.
+std::atomic<bool>& NoopDrawSkipSwitch()
+{
+    static std::atomic<bool> enabled { [] {
+        const char* value = std::getenv("WALLPAPER_MACHINE_SKIP_NOOP_DRAWS");
+        return value == nullptr || std::string_view(value) != "0";
+    }() };
+    return enabled;
+}
+
+/// SDR display framing's saved setting (`SetMetalSceneDisplayFramingEnabled`), as the host last
+/// set it. Off by default: drawing the whole canvas-cover raster is what every SDR scene has
+/// drawn, and the window is not byte-identical to it.
+std::atomic<bool> g_sdr_display_framing { false };
+
+/// `WALLPAPER_MACHINE_SDR_FRAMING`, read once: `1` frames whatever the setting says, `0` never
+/// frames, anything else (-1) follows the setting. For an A/B in one binary.
+std::atomic<int>& SdrDisplayFramingOverride()
+{
+    static std::atomic<int> forced { [] {
+        const char* value = std::getenv("WALLPAPER_MACHINE_SDR_FRAMING");
+        if (value == nullptr) return -1;
+        const std::string_view text(value);
+        return text == "1" ? 1 : text == "0" ? 0 : -1;
+    }() };
+    return forced;
+}
+
+/// Whether an SDR Display-resolution scene draws only the window of its canvas-cover raster
+/// the composition reads (`render::SceneRasterWindow`): the override, else the setting. The
+/// picture differs from the whole raster's within a screen-space effect's reach of the
+/// output's edges, and by single levels where the GPU rasterizes the shifted picture to other
+/// sub-pixel positions. A running scene takes a change at its next draw.
+bool SdrRasterWindowEnabled()
+{
+    const int forced = SdrDisplayFramingOverride().load(std::memory_order_relaxed);
+    return forced >= 0 ? forced == 1 : g_sdr_display_framing.load(std::memory_order_relaxed);
+}
+
+/// Whether a clear only hidden passes would read (a layer a script hides keeps its effect buffers
+/// in the graph), and a copy made only for draws after it (a hidden lens's copy of the scene), is
+/// left out while no pass that reads it draws. On by default;
+/// `WALLPAPER_MACHINE_HIDDEN_LAYER_WORK=0` makes them every frame, for an A/B in one binary.
+/// Both ways draw the same bytes. Read when a plan is built.
+std::atomic<bool>& HiddenLayerWorkSwitch()
+{
+    static std::atomic<bool> enabled { [] {
+        const char* value = std::getenv("WALLPAPER_MACHINE_HIDDEN_LAYER_WORK");
+        return value == nullptr || std::string_view(value) != "0";
+    }() };
+    return enabled;
+}
+
+/// Colour formats a blend that keeps the destination (`Cs * 0 + Cd * 1`) gives back bit for bit:
+/// eight bits per channel, linear. Every stored value survives the trip through the blender's
+/// arithmetic and back; an sRGB format's decode and encode, a wider format's precision and a
+/// float format's signed zeros and NaNs are not relied on.
+bool BlendKeepsTexelsExactly(MTLPixelFormat format)
+{
+    return format == MTLPixelFormatRGBA8Unorm || format == MTLPixelFormatBGRA8Unorm;
+}
+
+/// Every render-target key the graph's passes name, read or written, resolved through the
+/// alias table: what `ReferencedRenderTargets` gives once the graph is lowered, known before
+/// the targets are sized.
+std::unordered_set<std::string> GraphRenderTargets(const Scene& scene, const rg::RenderGraph& graph)
+{
+    std::unordered_set<std::string> keys;
+    keys.insert(scene.ResolveRenderTargetName(SpecTex_Default));
+    const auto add = [&](const std::string& name) {
+        if (! name.empty()) keys.insert(scene.ResolveRenderTargetName(name));
+    };
+    for (const auto id : graph.topologicalOrder()) {
+        const auto* pass = graph.getPass(id);
+        if (const auto* draw = dynamic_cast<const rg::DrawPass*>(pass)) {
+            add(draw->desc().output);
+            for (const auto& texture : draw->desc().textures) add(texture);
+        } else if (const auto* copy = dynamic_cast<const rg::CopyPass*>(pass)) {
+            add(copy->desc().src);
+            add(copy->desc().dst);
+        } else if (const auto* clear = dynamic_cast<const rg::ClearPass*>(pass)) {
+            add(clear->desc().result);
+        }
+    }
+    return keys;
+}
+
+/// Bytes one texel of a render target takes, for the encode counters.
+uint64_t TexelBytes(MTLPixelFormat format)
+{
+    switch (format) {
+    case MTLPixelFormatR8Unorm: return 1;
+    case MTLPixelFormatRG8Unorm:
+    case MTLPixelFormatR16Float:
+    case MTLPixelFormatR16Unorm: return 2;
+    case MTLPixelFormatRGBA16Float:
+    case MTLPixelFormatRGBA16Unorm:
+    case MTLPixelFormatRG32Float: return 8;
+    case MTLPixelFormatRGBA32Float: return 16;
+    default: return 4;
+    }
+}
+
+/// Bytes of an image's first level, every sample counted, for the encode counters.
+uint64_t ImageLevelBytes(id<MTLTexture> texture)
+{
+    if (texture == nil) return 0;
+    return uint64_t(texture.width) * texture.height * std::max<NSUInteger>(1, texture.sampleCount) *
+           TexelBytes(texture.pixelFormat);
+}
+
+/// Colour formats every texel of which is finite, so a blend factor of zero times what a texel
+/// held is zero. A float format may hold an infinity or NaN that zero does not cancel.
+bool HoldsOnlyFiniteValues(MTLPixelFormat format)
+{
+    switch (format) {
+    case MTLPixelFormatR8Unorm:
+    case MTLPixelFormatRG8Unorm:
+    case MTLPixelFormatRGBA8Unorm:
+    case MTLPixelFormatRGBA8Unorm_sRGB:
+    case MTLPixelFormatBGRA8Unorm:
+    case MTLPixelFormatBGRA8Unorm_sRGB:
+    case MTLPixelFormatRGB10A2Unorm:
+    case MTLPixelFormatBGR10A2Unorm:
+    case MTLPixelFormatR16Unorm:
+    case MTLPixelFormatRG16Unorm:
+    case MTLPixelFormatRGBA16Unorm:
+        return true;
+    default:
+        return false;
+    }
+}
+
+/// GPU labels (`WALLPAPER_MACHINE_GPU_LABELS`): off (unset or `0`), on (any other value), or
+/// `split`, which also gives every pass a render pass of its own.
+enum class GpuLabelMode : uint8_t
+{
+    Off,
+    On,
+    Split,
+};
+
+std::atomic<GpuLabelMode>& GpuLabelSwitch()
+{
+    static std::atomic<GpuLabelMode> mode { [] {
+        const char* value = std::getenv("WALLPAPER_MACHINE_GPU_LABELS");
+        if (value == nullptr || value[0] == '\0' || std::string_view(value) == "0") return GpuLabelMode::Off;
+        return std::string_view(value) == "split" ? GpuLabelMode::Split : GpuLabelMode::On;
+    }() };
+    return mode;
+}
+
+/// Whether the frame's command buffer and every encoder in it are named after the passes they
+/// run, so Instruments' Metal System Trace attributes GPU time to a pass, its target and the
+/// layer it draws. A diagnostic, off by default and read once: off, no label is built or set.
+bool GpuLabelsEnabled() { return GpuLabelSwitch().load(std::memory_order_relaxed) != GpuLabelMode::Off; }
+
+/// With `split`, passes that would share a render pass each get their own, so the trace times
+/// every draw apart; each then loads and stores its target, which the total includes. The
+/// pictures are the same either way.
+bool GpuLabelsSplitPasses()
+{
+    return GpuLabelSwitch().load(std::memory_order_relaxed) == GpuLabelMode::Split;
+}
+
+/// A short name of a render target format, for the GPU labels.
+std::string PixelFormatLabel(MTLPixelFormat format)
+{
+    switch (format) {
+    case MTLPixelFormatR8Unorm: return "r8";
+    case MTLPixelFormatRG8Unorm: return "rg8";
+    case MTLPixelFormatRGBA8Unorm: return "rgba8";
+    case MTLPixelFormatRGBA8Unorm_sRGB: return "rgba8srgb";
+    case MTLPixelFormatBGRA8Unorm: return "bgra8";
+    case MTLPixelFormatBGRA8Unorm_sRGB: return "bgra8srgb";
+    case MTLPixelFormatR16Float: return "r16f";
+    case MTLPixelFormatRG16Float: return "rg16f";
+    case MTLPixelFormatRGBA16Float: return "rgba16f";
+    case MTLPixelFormatRGB10A2Unorm: return "rgb10a2";
+    case MTLPixelFormatDepth32Float: return "d32f";
+    default: return "fmt" + std::to_string(static_cast<unsigned long>(format));
+    }
+}
+
+/// The layer a pass belongs to, " [<layer name> #<id>]" (an effect pass names the layer whose
+/// chain it is in), or nothing when it has none.
+std::string GpuPassOwnerLabel(const ScenePassDescription& desc)
+{
+    SceneNode* owner = desc.visibility_node != nullptr ? desc.visibility_node
+                       : desc.node != nullptr          ? desc.node
+                                                       : desc.sort_owner;
+    if (owner == nullptr) return {};
+    return " [" + owner->Name() + " #" + std::to_string(owner->ID()) + "]";
+}
+
+/// "<shader or step> -> <target key> <W>x<H> <format>[ x<samples>] [<layer name> #<id>]": what
+/// a pass draws, where, and for which layer. Built when the pass table changes, never per frame.
+std::string GpuPassLabel(const ScenePassDescription& desc, id<MTLTexture> target)
+{
+    std::string label = desc.kind == MetalPassKind::Copy
+                            ? "copy " + desc.source_key + " -> " + desc.target_key
+                            : desc.name + " -> " + desc.target_key;
+    if (target != nil) {
+        label += " " + std::to_string(target.width) + "x" + std::to_string(target.height) + " " +
+                 PixelFormatLabel(target.pixelFormat);
+        if (desc.samples > 1) label += " x" + std::to_string(desc.samples);
+    }
+    return label + GpuPassOwnerLabel(desc);
+}
+
+/// Where the label of a render pass that many draws share is cut, so a trace's rows stay
+/// readable (thirty particle systems on the scene would otherwise name them all).
+constexpr std::size_t kGpuLabelLimit = 250;
+
+/// The label of a render pass that `first` opened and the passes `joined` (indices into
+/// `short_labels`, each "<shader> [<layer>]") were drawn into after it: "[<n> passes] <first>
+/// + <shader> [<layer>] x<count>, ...", runs of one draw counted, cut at `kGpuLabelLimit`.
+std::string GpuJoinedLabel(const std::string& first, const std::vector<std::size_t>& joined,
+                           const std::vector<std::string>& short_labels)
+{
+    std::string label = "[" + std::to_string(joined.size() + 1) + " passes] " + first + " +";
+    for (std::size_t k = 0; k < joined.size();) {
+        const std::string& name = joined[k] < short_labels.size() ? short_labels[joined[k]] : first;
+        std::size_t run = 1;
+        while (k + run < joined.size() && joined[k + run] < short_labels.size() &&
+               short_labels[joined[k + run]] == name)
+            ++run;
+        std::string entry = " " + name + (run > 1 ? " x" + std::to_string(run) : "");
+        if (label.size() + entry.size() > kGpuLabelLimit) {
+            label += " ... " + std::to_string(joined.size() - k) + " more";
+            break;
+        }
+        label += entry + (k + run < joined.size() ? "," : "");
+        k += run;
+    }
+    return label;
+}
+
+/// `text` as an encoder or command buffer label. Instruments records no label that holds a
+/// character outside ASCII (it shows "Render Command <n>" instead), and layer names often do,
+/// so each run of other bytes becomes one '?'.
+NSString* GpuLabel(std::string text)
+{
+    std::size_t out = 0;
+    for (std::size_t in = 0; in < text.size(); ++in) {
+        const auto byte = static_cast<unsigned char>(text[in]);
+        if (byte < 0x80) {
+            text[out++] = static_cast<char>(byte);
+        } else if (out == 0 || text[out - 1] != '?') {
+            text[out++] = '?';
+        }
+    }
+    text.resize(out);
+    return [NSString stringWithUTF8String:text.c_str()];
+}
+
 } // namespace
+
+void SetMetalSceneDisplayFramingEnabled(bool enabled)
+{
+    g_sdr_display_framing.store(enabled, std::memory_order_relaxed);
+}
+
+bool MetalSceneDisplayFramingEnabled()
+{
+    return g_sdr_display_framing.load(std::memory_order_relaxed);
+}
 
 MetalPipelineArchiveStatus MetalPipelineArchiveStatusForDiagnostics()
 {
@@ -1503,11 +1903,44 @@ struct MetalRender::Impl
     bool                 video_paused { false };
     float                video_rate { 1.0f };
     RendererCounters*    counters { nullptr };
+    /// Counts what the display did with the frames presented while counting is
+    /// on. Shared with every drawable's report, which can arrive after this
+    /// renderer is gone; `armed` and `feedback_display` belong to the render thread.
+    std::shared_ptr<PresentFeedback> present_feedback { std::make_shared<PresentFeedback>() };
+    bool                 present_feedback_armed { false };
+    uint32_t             present_feedback_display { 0 };
+    /// How long the frame on screen stays before the next present replaces it,
+    /// in seconds; 0 presents at the next refresh. Set by the frame clock's owner.
+    double               present_hold { 0.0 };
+#ifdef WESCENE_BUILD_TESTS
+    /// What the last present asked for, and how many presents held.
+    double               last_present_hold { 0.0 };
+    uint64_t             held_presents { 0 };
+#endif
     /// The raster extent the last size resolve produced: the authored canvas
     /// through the internal render scale, which is what screen-space shader
     /// inputs have to describe.
     uint32_t             raster_width { 0 };
     uint32_t             raster_height { 0 };
+    /// SDR display framing: the window of its canvas-cover raster a framed SDR scene draws
+    /// (`render::SceneRasterWindow`), which its targets are sized from and the composition
+    /// places. Empty for an unframed or HDR scene.
+    render::SceneRasterWindow raster_window {};
+    /// The multiple the window keeps (`render::ScreenBoundWindowAlignment`) for the
+    /// screen-sized targets the compiled graph names; zero frames nothing.
+    uint32_t             raster_window_alignment { 0 };
+    /// A layout the window no longer holds, or one that would frame an unframed scene or
+    /// unframe a framed one: the next draw sizes the targets again before it draws.
+    bool                 raster_window_stale { false };
+    /// Set once the picture has been moved off the centre: windows planned from then on
+    /// leave room for any further move, so a drag does not resize the targets every step.
+    bool                 raster_window_headroom { false };
+    /// `sdrRasterWindowApplies` when the window was last planned or moved. A draw that finds
+    /// it changed (the setting, or MetalFX taking the upscale) plans the window again.
+    bool                 raster_window_applies { false };
+    /// The SDR framing setting as this compile or draw read it, once: the setting can flip
+    /// on another thread, and every decision of one plan must see the same value.
+    bool                 sdr_window_enabled { false };
 
     struct SortedDraw {
         SceneNode* owner { nullptr };
@@ -1622,6 +2055,13 @@ struct MetalRender::Impl
         Refused = 3,
     };
 
+    /// What one frame slot's index storage holds: the first `bytes` of the index array whose
+    /// content revision is `revision` (see `SceneIndexArray::ContentRevision`).
+    struct IndexSlotContent {
+        uint64_t    revision { 0 };
+        std::size_t bytes { 0 };
+    };
+
     struct SharedGeometry {
         std::shared_ptr<const void> owner;
         std::vector<id<MTLBuffer>> vertices;
@@ -1629,6 +2069,7 @@ struct MetalRender::Impl
         id<MTLBuffer> index {nil};
         std::vector<id<MTLBuffer>> index_ring;
         std::vector<uint64_t> uploaded_generation;
+        std::vector<IndexSlotContent> index_content;
     };
     using GeometryKey = std::tuple<uintptr_t, std::size_t, bool, bool>;
     std::map<GeometryKey, std::weak_ptr<SharedGeometry>> shared_geometry;
@@ -1690,6 +2131,9 @@ struct MetalRender::Impl
         /// The mesh revision each frame slot's storage was filled from, so an
         /// unchanged simulation re-uses what is already there.
         std::vector<uint64_t>              dynamic_uploaded_generation;
+        /// The index bytes each frame slot's storage holds, so a pattern that is only ever
+        /// extended (particles) is copied once per slot rather than every frame.
+        std::vector<IndexSlotContent>      dynamic_index_content;
         /// The layout the pipeline was built against, re-checked on every
         /// upload. A mesh that changes shape after preparation fails the frame
         /// rather than being reinterpreted against the old pipeline.
@@ -1706,11 +2150,73 @@ struct MetalRender::Impl
         id<MTLDepthStencilState>           depth_stencil { nil };
         bool                               depth_test { false };
         bool                               depth_write { false };
+
+        /// What can be proven when the graph is prepared that this pass's one draw writes
+        /// every texel of its target: the shader's coverage facts, the quad it draws, its
+        /// blending, culling and depth. The matrix the quad goes through and the image it
+        /// lands on are checked when the pass is encoded (`passOverwritesTarget`), with the
+        /// last answer kept for the matrix and size it was given.
+        struct OverwriteProof
+        {
+            bool                  candidate { false };
+            /// `One`/`Zero` blending rather than none: the target must hold finite values.
+            bool                  blends { false };
+            /// Byte offset of the position's matrix in this pass's uniform block; -1 when the
+            /// position is the vertex input itself.
+            int32_t               matrix_offset { -1 };
+            MetalQuad             quad {};
+            std::array<float, 16> memo_matrix {};
+            uint32_t              memo_width { 0 };
+            uint32_t              memo_height { 0 };
+            bool                  memo_valid { false };
+            bool                  memo_covers { false };
+        };
+        OverwriteProof                     overwrite;
+
+        /// What can be proven when the graph is prepared that this pass's draw leaves its
+        /// target as it is whenever a frame's uniforms make its colour's alpha 0: each channel
+        /// of the colour, as the shader compiler proved it, a product of uniform members
+        /// (`offset` into this pass's uniform block) and constants (`offset` -1), under a blend
+        /// that keeps the destination at alpha 0, with no depth write, one sample and the
+        /// ordinary program. The values are read each frame (`passLeavesTargetAsIs`).
+        struct NoopFactor
+        {
+            int32_t offset { -1 };
+            float   constant { 0.0f };
+        };
+        struct NoopProof
+        {
+            bool                                   candidate { false };
+            std::array<std::vector<NoopFactor>, 4> channels {};
+        };
+        NoopProof                          noop;
     };
 
+    /// Where the mesh carries the input a shader's proven position reads, for the proof above.
+    struct PositionAttribute
+    {
+        bool        provided { false };
+        std::size_t buffer { 0 };
+        std::size_t offset { 0 };
+        std::size_t stride { 0 };
+        std::string format;
+    };
+    void prepareOverwriteProof(const ScenePassDescription& desc, PreparedPass& out,
+                               const PositionAttribute& position) const;
+    /// Whether pass `index`, encoded into `attachment` this frame with its uniforms at
+    /// `uniform_base`, writes every texel of it, so its render pass can open with a clear in
+    /// place of a load. False whenever any part of the proof is missing.
+    bool passOverwritesTarget(std::size_t index, id<MTLTexture> attachment, const uint8_t* uniform_base);
+
     std::vector<ScenePassDescription>                   descriptions;
+    /// Per pass, its `GpuPassLabel` and its "<shader> [<layer>]"; both empty unless
+    /// `GpuLabelsEnabled()`.
+    std::vector<std::string>                            pass_labels;
+    std::vector<std::string>                            pass_short_labels;
     std::vector<PreparedPass>                           prepared;
     uint64_t model_data_upload_bytes {0};
+    uint64_t dynamic_vertex_upload_bytes {0};
+    uint64_t dynamic_index_upload_bytes {0};
     std::unordered_map<std::string, id<MTLTexture>>     targets;
     // Logical targets remain the single-sample images consumed by copies and shaders.
     // These attachments exist only for targets that actually have an MS writer.
@@ -1739,6 +2245,8 @@ struct MetalRender::Impl
     bool cookie_sources_ready { false }, cookie_binding_ready { false }, cookie_projection_read { false };
 #ifdef WESCENE_BUILD_TESTS
     uint64_t light_feature_updates { 0 };
+    /// The next drawn frame's composition fails, as a failed present pipeline would.
+    bool refuse_next_composition { false };
 #endif
     const SceneLight* bound_cookie_light { nullptr };
     id<MTLTexture> light_cookie_texture { nil };
@@ -1837,6 +2345,21 @@ struct MetalRender::Impl
     /// Filled after the frame's import, because it depends on the format the
     /// decoder actually produced.
     std::vector<uint8_t>       video_plane_active;
+    /// Whether this frame's import took any video frame. A frame that took
+    /// none encoded no conversion and changed nothing a video consumer reads.
+    bool                       video_imported { false };
+    /// `VideoReuseSwitch` as it stood when the reuse table was built: a pass
+    /// that samples a video is then reusable while its frame is unchanged,
+    /// instead of always redrawn. The table and the present gate read this one
+    /// value, so they cannot disagree.
+    bool                       video_reuse { false };
+    /// Per description, whether its sample folds the audio spectrum its uniforms carry
+    /// (`AudioReuseSwitch` as the reuse table was built) instead of the pass counting as
+    /// changing on every frame.
+    std::vector<uint8_t>       audio_sampled;
+    /// Advanced once per reuse plan. Folded into the sample of an audio pass whose spectrum
+    /// cannot be told this frame, so that pass is redrawn rather than reused.
+    uint64_t                   audio_unknown_serial { 0 };
 
     // ---- scene optimisation
     /// The static-reuse analysis, over this backend's own pass list. It is a
@@ -1845,6 +2368,14 @@ struct MetalRender::Impl
     render::StaticSubgraphCache           static_cache;
     std::vector<render::StaticPassSample> static_samples;
     std::vector<uint8_t>                  static_skip;
+    /// Each camera's sample digest, taken once per reuse plan: nearly every pass
+    /// of a frame draws through the same one or two cameras. Emptied at the start
+    /// of every plan, so no frame folds a camera with an earlier frame's matrix.
+    mutable std::vector<std::pair<const SceneCamera*, uint64_t>> camera_digests;
+    /// Per description, what of the scene's moving state its sample folds besides its own camera
+    /// (`LayerLocalSignaturesSwitch`): everything for any pass the updater could not prove
+    /// otherwise for, and for every pass while the switch is off.
+    std::vector<DrawTransformInputs>      transform_inputs;
     /// One entry per description, in the same order. `None` for anything that
     /// is not a copy.
     std::vector<render::CopyElision>      copy_elision;
@@ -1872,9 +2403,47 @@ struct MetalRender::Impl
         uint32_t render_passes { 0 };
         uint32_t scene_output_passes { 0 };
         uint32_t blit_passes { 0 };
+        /// Render passes that load their target (colour, or a depth-only pass's depth image),
+        /// and the bytes those loads read.
+        uint32_t loaded_passes { 0 };
+        uint64_t loaded_bytes { 0 };
+        /// Render passes that open with the copy of a traded feedback image.
+        uint32_t opening_copies { 0 };
+        /// Render passes that store their depth attachment, and their multisampled colour.
+        uint32_t stored_depth_attachments { 0 };
+        uint32_t stored_multisample_attachments { 0 };
+        /// Copies made by the GPU (blits and resampling passes) and the bytes they wrote, and
+        /// copies replaced by a trade of textures, which write nothing.
+        uint64_t copied_bytes { 0 };
+        uint32_t traded_copies { 0 };
+        /// Draws left out because they leave their target as it is, and clears and copies left
+        /// out because nothing drawn reads what they leave.
+        uint32_t noop_draws { 0 };
+        uint32_t skipped_clears { 0 };
+        uint32_t skipped_copies { 0 };
     };
     EncodeCounts frame_encodes;
     EncodeCounts last_frame_encodes;
+
+    // ---- attachment lifetimes in a frame
+    /// Per depth attachment, the last execution position of a pass that attaches it, and the
+    /// depth images that are also named targets something may sample.
+    std::unordered_map<const void*, std::size_t> depth_last_use;
+    std::unordered_set<const void*>              sampled_depths;
+    /// Per multisampled colour attachment, the last execution position of a pass that renders
+    /// into it, and whether its samples can be read by the next frame: its first pass in the
+    /// frame does anything but clear it.
+    struct MultisampleUse
+    {
+        std::size_t last { 0 };
+        bool        carried { true };
+    };
+    std::unordered_map<const void*, MultisampleUse> multisample_use;
+    void planAttachmentStores();
+    /// Whether a later pass, or the next frame, reads what the attachment holds after the
+    /// render pass whose last pass is at execution `position`.
+    bool depthNeededAfter(id<MTLTexture> depth, std::size_t position) const;
+    bool multisampleNeededAfter(id<MTLTexture> attachment, std::size_t position) const;
 
     // ---- per-pass encode inputs
     /// Each description's colour target and, when it depth-tests, its depth
@@ -1920,9 +2489,32 @@ struct MetalRender::Impl
         /// the trade.
         std::vector<std::size_t> source_passes;
         std::vector<std::size_t> copy_passes;
+        /// A copy trade (`planCopyTrades`): later passes read the source before
+        /// anything writes it, so the copy is left out and the names trade
+        /// textures only after the last of them, at execution position
+        /// `trade_after`. The source's texture is then stale until `reader`,
+        /// its next writer, replaces it: in this frame (`reader_in_frame`),
+        /// opening with the copy when it loads (`prefix`), or as the next
+        /// frame's first pass on it. When that pass may leave the source as it
+        /// is (`restores`: a hidden layer's draw, a load nothing proves it
+        /// overwrites), the source is copied back from the copy's name before
+        /// it while `stale`; nothing but the copy writes that name.
+        bool                     deferred { false };
+        bool                     reader_in_frame { true };
+        bool                     restores { false };
+        bool                     stale { false };
+        std::size_t              trade_after { 0 };
     };
     /// One entry per description; meaningful only for copies.
     std::vector<FeedbackSwap>   feedback_swaps;
+    /// Copy trades whose copy step has run in this frame and whose names trade
+    /// once their `trade_after` position has been encoded.
+    std::vector<std::size_t>    pending_copy_trades;
+    /// The copy trades that may restore their source, by the execution
+    /// position of the pass the restore comes before; and those stale when
+    /// the frame began, stale again if it is abandoned.
+    std::vector<std::pair<std::size_t, std::size_t>> copy_restores;
+    std::vector<std::size_t>    stale_at_frame_start;
     /// The trades made while encoding this frame, undone if it is abandoned:
     /// its command buffer never runs, so the textures still hold what they
     /// held when the frame began.
@@ -1964,6 +2556,8 @@ struct MetalRender::Impl
     std::vector<std::pair<__strong id<MTLTexture>*, id<MTLTexture>>> pooled_snapshot;
     /// Pooled copies run this frame; a frame that ran one is not a repeat.
     uint32_t pooled_moves { 0 };
+    /// Pooled copies left out this frame because nothing drawn reads them (`hiddenCopyUnread`).
+    std::vector<std::pair<int, int>> pooled_skipped;
 
     bool fail(std::string message)
     {
@@ -1999,8 +2593,9 @@ struct MetalRender::Impl
     /// scene is drawn below full resolution. `frame` as for `encodeComposition`.
     id<MTLTexture> upscaledPicture(id<MTLCommandBuffer> command, id<MTLTexture> output,
                                    const Scene& scene, bool frame);
+    /// `label` names its encoder (GPU labels on), nil leaves it unnamed.
     bool encodeScaledCopy(id<MTLCommandBuffer> command, id<MTLTexture> source,
-                          id<MTLTexture> destination);
+                          id<MTLTexture> destination, NSString* label = nil);
     bool compile(Scene& scene, rg::RenderGraph& graph);
     /// Gives the compiled graph the render target sizes the scene holds now, keeping
     /// everything else of it: the prepared passes, their pipelines and vertex buffers, the
@@ -2011,6 +2606,17 @@ struct MetalRender::Impl
     void resolveTargetSizes(Scene& scene);
     bool usesDisplayFraming(const Scene& scene) const;
     void refreshRasterFraming(Scene& scene);
+    /// Whether an SDR scene can be framed to a window of its cover raster under the setting,
+    /// the current scaling mode and zoom, and the upscale (`raster_window`).
+    bool sdrRasterWindowApplies(const Scene& scene) const;
+    /// The window `resolveTargetSizes` sizes an SDR scene's targets from; empty when it
+    /// stays unframed.
+    render::SceneRasterWindow planRasterWindow(const Scene& scene, const Extent2D& fallback,
+                                               const render::SceneRasterSurface& surface) const;
+    /// How the unframed composition lays the cover raster on the output, per axis, mirrored
+    /// for a flipped output. `zoom` stands in for the user's scaling factor.
+    std::pair<render::RasterAxisPlacement, render::RasterAxisPlacement>
+    coverPlacement(const Scene& scene, double zoom) const;
     void selectSampleCounts(Scene& scene);
     bool prepareTargets(Scene& scene);
     /// One scene target's image, labelled with its key; nil if Metal refuses it.
@@ -2028,6 +2634,60 @@ struct MetalRender::Impl
     /// Whether the step's clear applies this frame. A step dropped for an input
     /// nothing produces drops its clear with it.
     bool passClears(std::size_t index) const;
+
+    // ---- work nothing visible can see
+    /// Per description, whether its draw leaves its target exactly as it is this frame
+    /// (`markNoopDraws`): set once this frame's uniforms are written, after which `passDraws`
+    /// answers false for it, and cleared again before the next frame writes them.
+    std::vector<uint8_t>     noop_draws;
+    /// The passes whose draw `prepareNoopProof` made a candidate, in pass order.
+    std::vector<std::size_t> noop_candidates;
+    /// Proves, when the pass is prepared, what this frame's uniforms then decide: the shader's
+    /// colour is a product of uniforms and constants on every channel, and its blend keeps the
+    /// destination wherever alpha is 0.
+    void prepareNoopProof(const ScenePassDescription& desc, PreparedPass& out) const;
+    /// Whether pass `index`'s draw, with this frame's uniforms at `uniform_base`, writes alpha 0
+    /// over finite colour into an image whose texels its blend gives back unchanged.
+    bool passLeavesTargetAsIs(std::size_t index, const uint8_t* uniform_base) const;
+    void markNoopDraws(const uint8_t* uniform_base);
+
+    /// A clear that only a hidden layer's passes would see this frame: the clear of an effect
+    /// buffer, or a hidden draw's first-use clear, of a name no other name shares a trade,
+    /// alias, pin or attachment with. `readers` are the passes after it, up to the next pass
+    /// that clears the name again, that sample it or draw into it without clearing; the
+    /// next frame's passes before it read none of it, whatever they draw then. While none of
+    /// `readers` draws, the clear changes nothing any drawn pass or the next frame sees.
+    struct HiddenClear
+    {
+        std::vector<std::size_t> readers;
+    };
+    /// Per description, its entry in `hidden_clears`, or -1.
+    std::vector<int32_t>     hidden_clear_at;
+    std::vector<HiddenClear> hidden_clears;
+    /// Likewise for a copy all of whose readers are draws after it, of a name only it writes:
+    /// while none of them draws, nothing reads what it would leave before the next frame's copy
+    /// replaces it. Names a rebuild carries over (composites, layer links) are left alone.
+    std::vector<int32_t>     hidden_copy_at;
+    std::vector<HiddenClear> hidden_copies;
+    /// Builds `hidden_clear_at` and `hidden_copy_at` for the current plan; called whenever the
+    /// pass targets are.
+    void planHiddenWork(const Scene& scene);
+    /// Whether no reader of hidden clear, or copy, `index` draws this frame.
+    bool hiddenClearUnread(std::size_t index) const;
+    bool hiddenCopyUnread(std::size_t index) const;
+    /// Images a left-out clear left as they were, with the colour the clear would have left in
+    /// them: what they hold is read by nothing before a pass clears them again, but an image
+    /// carried into another plan or graph is given that colour first (`settleHiddenClears`).
+    /// An image a frame writes is no longer one of them.
+    std::vector<std::pair<id<MTLTexture>, MTLClearColor>> hidden_stale;
+    std::vector<std::pair<id<MTLTexture>, MTLClearColor>> hidden_stale_at_frame_start;
+    void forgetHiddenStale(id<MTLTexture> written)
+    {
+        if (hidden_stale.empty()) return;
+        std::erase_if(hidden_stale, [written](const auto& entry) { return entry.first == written; });
+    }
+    /// Clears every image a left-out clear left as it was to that clear's colour, into `command`.
+    void settleHiddenClears(id<MTLCommandBuffer> command);
     /// Decides which copies are replaced by a trade of textures. Called after
     /// the reuse table is built, because a reused image must keep its texture.
     void planFeedbackSwaps();
@@ -2038,6 +2698,20 @@ struct MetalRender::Impl
     /// Turns the traded copies of a source into a pooled trade where every
     /// one of them qualifies. Called after the trades are planned.
     void planPooledTrades(Scene& scene);
+    /// Replaces copies the feedback trades leave alone with a trade made after
+    /// the source's last reader (`FeedbackSwap::deferred`). Called after the
+    /// pooled trades are planned, whose names it leaves alone.
+    void planCopyTrades(Scene& scene);
+    /// Whether copy trade `index`'s next writer of the source replaces it this
+    /// frame; otherwise the copy is made as a copy.
+    bool copyTradeWriterRenders(std::size_t index) const;
+    /// Whether the next frame's first pass on copy trade `index`'s source writes
+    /// all of it in this frame without reading it, so a stale source needs no
+    /// restore.
+    bool copyTradeWriterReplaces(std::size_t index, const uint8_t* uniform_base);
+    /// Copies every stale source back from its copy's name into `command`, before
+    /// the plan that knows it is stale is dropped.
+    void settleCopyTrades(id<MTLCommandBuffer> command);
     /// Gives every pooled copy an image of its own again, before a change of
     /// plan, so nothing is left sharing outside a pooled trade.
     void releasePooledTrades();
@@ -2225,10 +2899,21 @@ void MetalRender::Impl::releaseGraph()
     feedback_swaps.clear();
     frame_swaps.clear();
     opening_copies.clear();
+    pending_copy_trades.clear();
+    copy_restores.clear();
+    stale_at_frame_start.clear();
     pooled_trades.clear();
     pooled_copy_at.clear();
     pooled_release_at.clear();
     pooled_snapshot.clear();
+    noop_draws.clear();
+    noop_candidates.clear();
+    hidden_clear_at.clear();
+    hidden_clears.clear();
+    hidden_copy_at.clear();
+    hidden_copies.clear();
+    hidden_stale.clear();
+    hidden_stale_at_frame_start.clear();
     images.clear();
     cookie_sources_ready = cookie_binding_ready = cookie_projection_read = false;
     bound_cookie_light = nullptr;
@@ -2398,7 +3083,7 @@ bool MetalRender::Impl::ensurePresentPipeline(MTLPixelFormat format, PresentTran
 /// left the destination holding the previous frame while every later pass read
 /// it as if it were fresh.
 bool MetalRender::Impl::encodeScaledCopy(id<MTLCommandBuffer> command, id<MTLTexture> source,
-                                         id<MTLTexture> destination)
+                                         id<MTLTexture> destination, NSString* label)
 {
     if (command == nil || source == nil || destination == nil) return false;
     id<MTLRenderPipelineState> pipeline = presentPipelineFor(destination.pixelFormat);
@@ -2412,6 +3097,7 @@ bool MetalRender::Impl::encodeScaledCopy(id<MTLCommandBuffer> command, id<MTLTex
 
     id<MTLRenderCommandEncoder> encoder = [command renderCommandEncoderWithDescriptor:descriptor];
     if (encoder == nil) return false;
+    if (label != nil) encoder.label = label;
     [encoder setViewport:(MTLViewport) { 0.0, 0.0, (double)destination.width,
                                          (double)destination.height, 0.0, 1.0 }];
     [encoder setScissorRect:(MTLScissorRect) { 0, 0, destination.width, destination.height }];
@@ -2450,7 +3136,22 @@ bool MetalRender::Impl::encodeComposition(id<MTLCommandBuffer> command,
 
     auto layout =
         scalingLayout(scene, (uint32_t)destination.width, (uint32_t)destination.height);
-    if (scene.display_framed) {
+    // Where the picture goes, in destination pixels: the layout's viewport, unless the scene
+    // draws a window of its cover raster.
+    double picture_x = layout.viewport_px.x, picture_y = layout.viewport_px.y;
+    double picture_w = layout.viewport_px.width, picture_h = layout.viewport_px.height;
+    if (scene.display_framed && raster_window.Framed()) {
+        // The window goes where its texels sit in the cover raster the layout's viewport
+        // holds, so every destination pixel samples the very position the whole raster
+        // would give it. The bars and scissor are the unframed composition's.
+        const auto& window = raster_window;
+        std::tie(picture_x, picture_w) = render::RasterWindowFootprint(
+            window.cover.width, window.x, window.size.width, layout.viewport_px.x,
+            layout.viewport_px.width, horizontal_flip);
+        std::tie(picture_y, picture_h) = render::RasterWindowFootprint(
+            window.cover.height, window.y, window.size.height, layout.viewport_px.y,
+            layout.viewport_px.height, false);
+    } else if (scene.display_framed) {
         // The image has already been placed before bloom. Preserve the old
         // scheme-colour bands, and flip the full output only after the
         // pre-raster layout has reflected its placement when requested.
@@ -2463,6 +3164,7 @@ bool MetalRender::Impl::encodeComposition(id<MTLCommandBuffer> command,
         layout.viewport_px = {0, 0, width, height};
         layout.scissor_px = {left, top, std::max(0, right-left), std::max(0, bottom-top)};
         layout.backdrop = false;
+        picture_x = 0.0, picture_y = 0.0, picture_w = width, picture_h = height;
     }
 
     // Before the pass below opens: MetalFX encodes its own work into the command buffer.
@@ -2495,6 +3197,13 @@ bool MetalRender::Impl::encodeComposition(id<MTLCommandBuffer> command,
 
     id<MTLRenderCommandEncoder> encoder = [command renderCommandEncoderWithDescriptor:present];
     if (encoder == nil) return false;
+    if (GpuLabelsEnabled() && ! draw_backdrop) {
+        encoder.label = GpuLabel(std::string(frame ? "composition " : "offscreen composition ") +
+                                 std::to_string(picture.width) + "x" + std::to_string(picture.height) +
+                                 " -> " + std::to_string(destination.width) + "x" +
+                                 std::to_string(destination.height) + " " +
+                                 PixelFormatLabel(destination.pixelFormat));
+    }
     if (draw_backdrop) {
         encoder.label = @"Wallpaper composition with blurred backdrop";
         // Only the room around the picture: its own pixels are the ones Fit draws.
@@ -2513,10 +3222,10 @@ bool MetalRender::Impl::encodeComposition(id<MTLCommandBuffer> command,
                              horizontal_flip);
     }
     const FlippedViewportBox viewport {
-        .x      = (double)layout.viewport_px.x,
-        .y      = (double)(layout.viewport_px.y + std::max(1, layout.viewport_px.height)),
-        .width  = (double)std::max(1, layout.viewport_px.width),
-        .height = -(double)std::max(1, layout.viewport_px.height),
+        .x      = picture_x,
+        .y      = picture_y + std::max(1.0, picture_h),
+        .width  = std::max(1.0, picture_w),
+        .height = -std::max(1.0, picture_h),
     };
     const auto metal_viewport = ToMetalViewport(viewport);
     [encoder setViewport:(MTLViewport) { metal_viewport.origin_x, metal_viewport.origin_y,
@@ -2935,6 +3644,7 @@ id<MTLTexture> MetalRender::Impl::resolveTexture(Scene& scene, const std::string
         request.bytes_per_pixel = bytes_per_pixel;
         request.block_bytes     = block_bytes;
         request.depth           = static_cast<uint32_t>(std::max(slot.depth, 1));
+        request.queue           = queue;
         id<MTLTexture> texture = SharedImageCache::shared().import(request, [&]() -> id<MTLTexture> {
             return MakeImageTexture(device, format, slot, bytes_per_pixel, block_bytes);
         });
@@ -2981,14 +3691,22 @@ void MetalRender::SetPipelineArchivePath(std::string_view path)
 /// of one overwriting the other.
 void MetalRender::Impl::resolveTargetSizes(Scene& scene)
 {
-    scene.display_framed = usesDisplayFraming(scene);
-    refreshRasterFraming(scene);
     const Extent2D fallback { std::max<uint32_t>(1, output_width),
                               std::max<uint32_t>(1, output_height) };
-    const auto extents      = render::ResolveScreenBoundRenderTargetSizes(
-        scene, fallback,
-        render::SceneRasterSurface { .display_scale_factor = NormalizeScaleFactor(display_scale_factor),
-                                     .max_dimension        = MaxTextureDimension(device) });
+    render::SceneRasterSurface surface {
+        .display_scale_factor = NormalizeScaleFactor(display_scale_factor),
+        .max_dimension        = MaxTextureDimension(device),
+    };
+    // HDR frames to the output rectangle; SDR to the window of its cover raster that the
+    // composition reads, or not at all.
+    raster_window         = scene.hdr ? render::SceneRasterWindow {}
+                                      : planRasterWindow(scene, fallback, surface);
+    raster_window_stale   = false;
+    raster_window_applies = sdrRasterWindowApplies(scene);
+    scene.display_framed  = scene.hdr ? usesDisplayFraming(scene) : raster_window.Framed();
+    refreshRasterFraming(scene);
+    if (raster_window.Framed()) surface.window = raster_window.size;
+    const auto extents = render::ResolveScreenBoundRenderTargetSizes(scene, fallback, surface);
     const auto render_scale = render::ResolveSceneRenderScale(scene);
     raster_width            = std::max(1u, extents.raster.width);
     raster_height           = std::max(1u, extents.raster.height);
@@ -3105,6 +3823,23 @@ void MetalRender::Impl::holdTargetsForRebuild()
         if (found == targets.end() || found->second == nil) continue;
         if (owned_per_texture[(__bridge const void*)found->second] != 1) continue;
         held_targets.emplace(name, found->second);
+    }
+    // A copy trade's source left stale for the next frame's first pass on it: a graph that
+    // carried it over would start from that. One the plan can restore is restored, ahead of
+    // the next frame on this queue; one whose first pass always clears it is not held.
+    // An image a left-out clear left as it was is given that clear, the same way.
+    if (! hidden_stale.empty() ||
+        std::any_of(feedback_swaps.begin(), feedback_swaps.end(), [](const FeedbackSwap& swap) {
+            return swap.valid && swap.stale;
+        })) {
+        id<MTLCommandBuffer> command = [queue commandBuffer];
+        settleCopyTrades(command);
+        settleHiddenClears(command);
+        [command commit];
+    }
+    for (const auto& swap : feedback_swaps) {
+        if (swap.valid && swap.deferred && ! swap.reader_in_frame && ! swap.restores)
+            held_targets.erase(swap.source_key);
     }
 }
 
@@ -3326,6 +4061,192 @@ void MetalRender::Impl::refreshPassTargets(Scene& scene)
     }
     scene_output_key    = scene.ResolveRenderTargetName(SpecTex_Default);
     scene_output_target = lookup(targets, scene_output_key);
+    planAttachmentStores();
+    noop_draws.assign(descriptions.size(), uint8_t { 0 });
+    noop_candidates.clear();
+    for (std::size_t i = 0; i < prepared.size() && i < descriptions.size(); ++i) {
+        if (prepared[i].noop.candidate) noop_candidates.push_back(i);
+    }
+    planHiddenWork(scene);
+    // An image no name holds any more is nobody's to settle.
+    std::erase_if(hidden_stale, [this](const auto& entry) {
+        return std::none_of(targets.begin(), targets.end(),
+                            [&entry](const auto& target) { return target.second == entry.first; });
+    });
+    pass_labels.clear();
+    pass_short_labels.clear();
+    if (GpuLabelsEnabled()) {
+        pass_labels.reserve(descriptions.size());
+        pass_short_labels.reserve(descriptions.size());
+        for (std::size_t i = 0; i < descriptions.size(); ++i) {
+            pass_labels.push_back(GpuPassLabel(descriptions[i], pass_targets[i]));
+            pass_short_labels.push_back(descriptions[i].name + GpuPassOwnerLabel(descriptions[i]));
+        }
+    }
+}
+
+void MetalRender::Impl::planAttachmentStores()
+{
+    depth_last_use.clear();
+    sampled_depths.clear();
+    multisample_use.clear();
+    // Every pass counts, drawn this frame or not: a hidden or reused later user still has to
+    // find what the earlier ones left.
+    for (std::size_t position = 0; position < descriptions.size(); ++position) {
+        const auto  i    = passAt(position);
+        const auto& desc = descriptions[i];
+        if (i < pass_depths.size() && pass_depths[i] != nil)
+            depth_last_use[(__bridge const void*)pass_depths[i]] = position;
+        if (desc.samples <= 1 || desc.depth_only || desc.target_key.empty()) continue;
+        const auto ms = ms_targets.find(desc.target_key);
+        if (ms == ms_targets.end() || ms->second == nil) continue;
+        const auto [use, first] = multisample_use.try_emplace((__bridge const void*)ms->second);
+        use->second.last = position;
+        if (! first) continue;
+        // The next frame's first pass on these samples clears them only when it is a clear that
+        // always runs: a conditional clear, or a draw with no input, may not.
+        const bool clears = desc.load_action == MetalLoadAction::Clear && ! desc.conditional_scene_clear &&
+                            (i >= prepared.size() || ! prepared[i].unproduced_input);
+        use->second.carried = ! clears;
+    }
+    // A depth image a pass may also sample (the volumetrics depth) is kept whatever the passes do.
+    for (const auto& [key, texture] : targets) {
+        (void)key;
+        if (texture != nil && depth_last_use.contains((__bridge const void*)texture))
+            sampled_depths.insert((__bridge const void*)texture);
+    }
+}
+
+bool MetalRender::Impl::depthNeededAfter(id<MTLTexture> depth, std::size_t position) const
+{
+    const auto* key = (__bridge const void*)depth;
+    if (sampled_depths.contains(key)) return true;
+    const auto last = depth_last_use.find(key);
+    // Each frame's first render pass on a depth attachment clears it, so nothing carries over.
+    return last == depth_last_use.end() || last->second > position;
+}
+
+bool MetalRender::Impl::multisampleNeededAfter(id<MTLTexture> attachment, std::size_t position) const
+{
+    const auto use = multisample_use.find((__bridge const void*)attachment);
+    return use == multisample_use.end() || use->second.last > position || use->second.carried;
+}
+
+void MetalRender::Impl::prepareOverwriteProof(const ScenePassDescription& desc, PreparedPass& out,
+                                              const PositionAttribute& position) const
+{
+    auto& proof = out.overwrite;
+    proof       = {};
+    const auto& reflection = out.reflection;
+    if (! reflection.fragment_always_writes || ! reflection.vertex_position.has_value()) return;
+    // Nothing but the draw's own geometry may decide which texels it writes, and every channel
+    // of each one it writes is its fragment's.
+    if (desc.depth_only || desc.depth_test || desc.depth_write || desc.scene_depth_attachment ||
+        ! desc.write_alpha || desc.cull_mode != MetalCullMode::None ||
+        desc.viewport != std::array<float, 4> { 0.0f, 0.0f, 1.0f, 1.0f }) {
+        return;
+    }
+    const auto blend = ToMetalBlendState(desc.blend, desc.alpha_rule, 1);
+    if (! BlendReplacesDestination(blend)) return;
+    if (out.dynamic_mesh || ! position.provided || position.stride == 0) return;
+    if (position.format != "r32g32b32_sfloat" && position.format != "r32g32b32a32_sfloat") return;
+    if (const auto& matrix = reflection.vertex_position->matrix; ! matrix.empty()) {
+        const auto* block  = reflection.uniformBlock();
+        const auto* member = reflection.member(matrix);
+        if (block == nullptr || member == nullptr || member->element_count != 16 ||
+            member->array_count != 0 || member->size < 64 || member->offset + 64 > block->size) {
+            return;
+        }
+        proof.matrix_offset = static_cast<int32_t>(member->offset);
+    }
+
+    // The two triangles the draw issues, exactly as the encode loop draws them.
+    std::array<uint32_t, 6> indices {};
+    if (out.index_buffer != nil && out.index_count > 0) {
+        if (out.index_count != 6) return;
+        if (! out.draw_ranges.empty() &&
+            (out.draw_ranges.size() != 1 || out.draw_ranges[0].indexOffset != 0 ||
+             out.draw_ranges[0].indexCount != 6)) {
+            return;
+        }
+        if (out.index_buffer.length < 6 * out.index_element_size) return;
+        const auto* bytes = static_cast<const uint8_t*>(out.index_buffer.contents);
+        for (std::size_t k = 0; k < 6; ++k) {
+            if (out.index_type == MTLIndexTypeUInt16) {
+                uint16_t value = 0;
+                std::memcpy(&value, bytes + k * sizeof(uint16_t), sizeof(value));
+                indices[k] = value;
+            } else {
+                std::memcpy(&indices[k], bytes + k * sizeof(uint32_t), sizeof(uint32_t));
+            }
+        }
+    } else if (out.index_buffer == nil && out.vertex_count == 4) {
+        indices = { 0, 1, 2, 1, 2, 3 };
+    } else {
+        return;
+    }
+    std::vector<uint32_t> corners;
+    for (std::size_t k = 0; k < 6; ++k) {
+        auto found = std::find(corners.begin(), corners.end(), indices[k]);
+        if (found == corners.end()) {
+            if (corners.size() == 4) return;
+            corners.push_back(indices[k]);
+            found = corners.end() - 1;
+        }
+        proof.quad.triangles[k / 3][k % 3] = static_cast<uint8_t>(found - corners.begin());
+    }
+    if (corners.size() != 4 || position.buffer >= out.vertex_buffers.size()) return;
+    id<MTLBuffer> vertices = out.vertex_buffers[position.buffer];
+    if (vertices == nil) return;
+    const auto* bytes = static_cast<const uint8_t*>(vertices.contents);
+    for (std::size_t c = 0; c < 4; ++c) {
+        const std::size_t at = std::size_t(corners[c]) * position.stride + position.offset;
+        if (at + 3 * sizeof(float) > vertices.length) return;
+        std::memcpy(proof.quad.corners[c].data(), bytes + at, 3 * sizeof(float));
+    }
+    proof.blends    = blend.blending_enabled;
+    proof.candidate = true;
+}
+
+bool MetalRender::Impl::passOverwritesTarget(std::size_t index, id<MTLTexture> attachment,
+                                             const uint8_t* uniform_base)
+{
+    if (! OverwriteLoadElisionSwitch().load(std::memory_order_relaxed)) return false;
+    if (index >= prepared.size() || attachment == nil) return false;
+    auto&       pass  = prepared[index];
+    auto&       proof = pass.overwrite;
+    const auto& desc  = descriptions[index];
+    if (! proof.candidate || ! passDraws(index)) return false;
+    // One sample, no depth, the ordinary program, and not sampling the image it draws into.
+    if (desc.samples != 1 || attachment.sampleCount != 1) return false;
+    if (index < pass_depths.size() && pass_depths[index] != nil) return false;
+    if (index < pass_reads_own_target.size() && pass_reads_own_target[index] != 0) return false;
+    if (index < video_plane_active.size() && video_plane_active[index] != 0) return false;
+    if (proof.blends && ! HoldsOnlyFiniteValues(attachment.pixelFormat)) return false;
+    // The viewport the encode loop sets is the whole image.
+    const auto width  = static_cast<uint32_t>(attachment.width);
+    const auto height = static_cast<uint32_t>(attachment.height);
+    if (std::lround(desc.viewport[0] * desc.target_width) != 0 ||
+        std::lround(desc.viewport[1] * desc.target_height) != 0 ||
+        std::lround(desc.viewport[2] * desc.target_width) != static_cast<long>(width) ||
+        std::lround(desc.viewport[3] * desc.target_height) != static_cast<long>(height)) {
+        return false;
+    }
+    // This frame's matrix, as the GPU will read it: the uniforms were written before the loop.
+    std::array<float, 16> matrix { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+    if (proof.matrix_offset >= 0) {
+        if (uniform_base == nullptr || pass.uniform_size == 0) return false;
+        std::memcpy(matrix.data(), uniform_base + pass.uniform_offset + proof.matrix_offset, sizeof(matrix));
+    }
+    if (! proof.memo_valid || proof.memo_width != width || proof.memo_height != height ||
+        std::memcmp(proof.memo_matrix.data(), matrix.data(), sizeof(matrix)) != 0) {
+        proof.memo_covers = QuadCoversViewport(proof.quad, matrix, width, height);
+        proof.memo_matrix = matrix;
+        proof.memo_width  = width;
+        proof.memo_height = height;
+        proof.memo_valid  = true;
+    }
+    return proof.memo_covers;
 }
 
 bool MetalRender::Impl::passDraws(std::size_t index) const
@@ -3333,10 +4254,214 @@ bool MetalRender::Impl::passDraws(std::size_t index) const
     const auto& pass = prepared[index];
     if (!descriptions[index].enabled || pass.kind != MetalPassKind::CustomShader || pass.pipeline == nil) return false;
     if (pass.unproduced_input) return false;
+    if (index < noop_draws.size() && noop_draws[index] != 0) return false;
     const auto& desc = descriptions[index];
     return desc.visibility_node == nullptr || desc.visibility_node->EffectiveVisible() ||
            (desc.visibility_node->MustProduce() && ! desc.target_key.empty() &&
             desc.target_key != wallpaper::SpecTex_Default);
+}
+
+void MetalRender::Impl::prepareNoopProof(const ScenePassDescription& desc, PreparedPass& out) const
+{
+    auto& proof = out.noop;
+    proof       = {};
+    // Nothing but the colour may reach the target: no depth written, one sample, no resolve of
+    // the scene's depth that the render pass would otherwise carry out.
+    if (desc.kind != MetalPassKind::CustomShader || desc.depth_only || desc.depth_write ||
+        desc.samples != 1 || desc.scene_depth_attachment) {
+        return;
+    }
+    if (! BlendKeepsDestinationAtZeroAlpha(ToMetalBlendState(desc.blend, desc.alpha_rule, 1))) return;
+    const auto& reflection = out.reflection;
+    // The members are looked up in the one block the passes bind.
+    if (reflection.blocks.size() > 1) return;
+    const auto* block = reflection.uniformBlock();
+    for (std::size_t channel = 0; channel < 4; ++channel) {
+        const auto& factors = reflection.fragment_colour[channel];
+        if (! factors.has_value() || factors->empty()) return;
+        for (const auto& factor : *factors) {
+            if (factor.member.empty()) {
+                proof.channels[channel].push_back({ .offset = -1, .constant = factor.constant });
+                continue;
+            }
+            const auto* member = reflection.member(factor.member);
+            if (block == nullptr || member == nullptr || member->array_count != 0 ||
+                factor.component >= member->element_count ||
+                uint64_t(member->offset) + 4u * (uint64_t(factor.component) + 1u) > block->size) {
+                proof = {};
+                return;
+            }
+            proof.channels[channel].push_back(
+                { .offset = static_cast<int32_t>(member->offset + 4u * factor.component) });
+        }
+    }
+    proof.candidate = true;
+}
+
+bool MetalRender::Impl::passLeavesTargetAsIs(std::size_t index, const uint8_t* uniform_base) const
+{
+    const auto& pass  = prepared[index];
+    const auto& proof = pass.noop;
+    if (! proof.candidate || ! passDraws(index)) return false;
+    // The variant program reads its own uniforms.
+    if (index < video_plane_active.size() && video_plane_active[index] != 0) return false;
+    id<MTLTexture> target = index < pass_targets.size() ? pass_targets[index] : nil;
+    if (target == nil || target.sampleCount != 1 || ! BlendKeepsTexelsExactly(target.pixelFormat)) return false;
+    // The bytes the GPU reads for this draw: written before the plan, never after it.
+    const uint8_t* uniforms = uniform_base != nullptr ? uniform_base + pass.uniform_offset : nullptr;
+    bool zero_alpha = false;
+    for (std::size_t channel = 0; channel < 4; ++channel) {
+        // Finite factors whose magnitudes multiply to well within a float's range: the product
+        // is finite in whatever order the shader multiplies, and zero when a factor is.
+        double bound = 1.0;
+        for (const auto& factor : proof.channels[channel]) {
+            float value = factor.constant;
+            if (factor.offset >= 0) {
+                if (uniforms == nullptr || uint32_t(factor.offset) + sizeof(float) > pass.uniform_size) return false;
+                std::memcpy(&value, uniforms + factor.offset, sizeof(value));
+            }
+            if (! std::isfinite(value)) return false;
+            bound *= std::max(1.0, std::fabs(double(value)));
+            if (channel == 3 && value == 0.0f) zero_alpha = true;
+        }
+        if (! (bound < 1e30)) return false;
+    }
+    return zero_alpha;
+}
+
+void MetalRender::Impl::markNoopDraws(const uint8_t* uniform_base)
+{
+    if (noop_candidates.empty() || ! NoopDrawSkipSwitch().load(std::memory_order_relaxed)) return;
+    for (const auto index : noop_candidates) {
+        if (index < noop_draws.size() && passLeavesTargetAsIs(index, uniform_base)) noop_draws[index] = 1;
+    }
+}
+
+void MetalRender::Impl::planHiddenWork(const Scene& scene)
+{
+    hidden_clear_at.assign(descriptions.size(), -1);
+    hidden_clears.clear();
+    hidden_copy_at.assign(descriptions.size(), -1);
+    hidden_copies.clear();
+    if (! HiddenLayerWorkSwitch().load(std::memory_order_relaxed)) return;
+    // A sorted scene orders its passes anew as it runs; it keeps its clears.
+    if (! sorted_draws.empty()) return;
+    // Names whose image another name may hold, trade or pin, that a copy writes whole whatever
+    // is visible, that carry depth or samples, or that anything outside the pass list reads:
+    // left alone.
+    std::unordered_set<std::string> excluded { scene_output_key };
+    excluded.insert(pinned_target_keys.begin(), pinned_target_keys.end());
+    for (const auto& [alias, key] : target_aliases) {
+        excluded.insert(alias);
+        excluded.insert(key);
+    }
+    for (const auto& swap : feedback_swaps) {
+        if (! swap.valid) continue;
+        excluded.insert(swap.source_key);
+        excluded.insert(swap.copy_key);
+    }
+    for (const auto& group : pooled_trades) {
+        excluded.insert(group.source_key);
+        for (const auto& copy : group.copies) excluded.insert(copy.key);
+    }
+    for (const auto* table : { &ms_targets, &depth_targets, &ms_depth_targets }) {
+        for (const auto& [key, texture] : *table) {
+            (void)texture;
+            excluded.insert(key);
+        }
+    }
+    for (const auto& desc : descriptions) {
+        if (desc.enabled && desc.kind == MetalPassKind::Copy) excluded.insert(desc.target_key);
+    }
+    const auto considered = [&](std::size_t i) {
+        const auto& desc = descriptions[i];
+        if (excluded.contains(desc.target_key)) return false;
+        if (desc.samples != 1 || desc.generate_mipmaps || desc.scene_depth_attachment) return false;
+        if (i < pass_depths.size() && pass_depths[i] != nil) return false;
+        id<MTLTexture> target = i < pass_targets.size() ? pass_targets[i] : nil;
+        return target != nil && target.mipmapLevelCount == 1 && target.sampleCount == 1;
+    };
+    const auto produced = [this](std::size_t j) { return j >= prepared.size() || ! prepared[j].unproduced_input; };
+    auto plan = PlanUnreadClears(descriptions, execution_order, considered, produced);
+    for (std::size_t i = 0; i < plan.size(); ++i) {
+        if (! plan[i].has_value()) continue;
+        hidden_clear_at[i] = static_cast<int32_t>(hidden_clears.size());
+        hidden_clears.push_back({ std::move(*plan[i]) });
+    }
+
+    // A copy made as a copy: not removed by the copy plan, not traded after its source's last
+    // reader, not one of a pooled set. Its destination is no other trade's name, not pinned,
+    // aliased, multisampled or mip-mapped, not the scene output, and not a name a new graph
+    // takes over with its pixels (a layer composite, a layer link read before it is filled).
+    const auto copy_considered = [&](std::size_t i) {
+        const auto& desc = descriptions[i];
+        if (i < copy_elision.size() && copy_elision[i] != render::CopyElision::None) return false;
+        if (i < feedback_swaps.size() && feedback_swaps[i].valid && feedback_swaps[i].deferred) return false;
+        if (desc.generate_mipmaps) return false;
+        const auto& key = desc.target_key;
+        if (key == scene_output_key || pinned_target_keys.contains(key) || target_aliases.contains(key) ||
+            std::any_of(target_aliases.begin(), target_aliases.end(), [&key](const auto& a) { return a.second == key; }) ||
+            ms_targets.contains(key) || depth_targets.contains(key) ||
+            std::string_view(key).starts_with(WE_IMAGE_LAYER_COMPOSITE_PREFIX)) {
+            return false;
+        }
+        if (const auto* target = scene.FindRenderTarget(key); target == nullptr || target->carriesPreviousFrame) return false;
+        for (std::size_t k = 0; k < feedback_swaps.size(); ++k) {
+            const auto& swap = feedback_swaps[k];
+            if (swap.valid && k != i && (swap.source_key == key || swap.copy_key == key)) return false;
+        }
+        // A pooled copy's own name is its own: one left out takes no image from the set and
+        // gives none back (`pooled_skipped`).
+        for (const auto& group : pooled_trades) {
+            if (group.source_key == key) return false;
+            for (const auto& copy : group.copies)
+                if (copy.key == key && copy.index != i) return false;
+        }
+        id<MTLTexture> target = i < pass_targets.size() ? pass_targets[i] : nil;
+        return target != nil && target.mipmapLevelCount == 1 && target.sampleCount == 1;
+    };
+    auto copies = PlanUnreadCopies(descriptions, execution_order, copy_considered);
+    for (std::size_t i = 0; i < copies.size(); ++i) {
+        if (! copies[i].has_value()) continue;
+        hidden_copy_at[i] = static_cast<int32_t>(hidden_copies.size());
+        hidden_copies.push_back({ std::move(*copies[i]) });
+    }
+}
+
+bool MetalRender::Impl::hiddenClearUnread(std::size_t index) const
+{
+    if (index >= hidden_clear_at.size() || hidden_clear_at[index] < 0) return false;
+    for (const auto reader : hidden_clears[static_cast<std::size_t>(hidden_clear_at[index])].readers) {
+        if (reader < static_skip.size() && static_skip[reader] != 0) continue;
+        if (passDraws(reader)) return false;
+    }
+    return true;
+}
+
+bool MetalRender::Impl::hiddenCopyUnread(std::size_t index) const
+{
+    if (index >= hidden_copy_at.size() || hidden_copy_at[index] < 0) return false;
+    for (const auto reader : hidden_copies[static_cast<std::size_t>(hidden_copy_at[index])].readers) {
+        if (reader < static_skip.size() && static_skip[reader] != 0) continue;
+        if (passDraws(reader)) return false;
+    }
+    return true;
+}
+
+void MetalRender::Impl::settleHiddenClears(id<MTLCommandBuffer> command)
+{
+    if (hidden_stale.empty()) return;
+    for (const auto& [texture, color] : hidden_stale) {
+        if (command == nil || texture == nil) continue;
+        MTLRenderPassDescriptor* descriptor = [MTLRenderPassDescriptor renderPassDescriptor];
+        AttachForClear(descriptor, texture, color);
+        id<MTLRenderCommandEncoder> encoder = [command renderCommandEncoderWithDescriptor:descriptor];
+        if (encoder == nil) continue;
+        if (GpuLabelsEnabled()) encoder.label = GpuLabel("settle left-out clear");
+        [encoder endEncoding];
+    }
+    hidden_stale.clear();
+    hidden_stale_at_frame_start.clear();
 }
 
 bool MetalRender::Impl::ensureSceneCopyPipeline(MTLPixelFormat format)
@@ -3490,7 +4615,8 @@ void MetalRender::Impl::planPooledTrades(Scene& scene)
     // Every traded copy, grouped by the source it copies.
     std::map<std::string, std::vector<std::size_t>> by_source;
     for (std::size_t i = 0; i < feedback_swaps.size(); ++i) {
-        if (feedback_swaps[i].valid) by_source[feedback_swaps[i].source_key].push_back(i);
+        if (feedback_swaps[i].valid && ! feedback_swaps[i].deferred)
+            by_source[feedback_swaps[i].source_key].push_back(i);
     }
     const auto reads = [](const ScenePassDescription& desc, const std::string& key) {
         if (desc.kind == MetalPassKind::Copy) return desc.source_key == key;
@@ -3565,7 +4691,8 @@ void MetalRender::Impl::planPooledTrades(Scene& scene)
 void MetalRender::Impl::refreshTradeOrder()
 {
     for (auto& swap : feedback_swaps)
-        if (swap.valid) swap.prefix = descriptions[swap.reader].load_action == MetalLoadAction::Load;
+        if (swap.valid && ! swap.deferred)
+            swap.prefix = descriptions[swap.reader].load_action == MetalLoadAction::Load;
     for (auto& releases : pooled_release_at) releases.clear();
     for (std::size_t g = 0; g < pooled_trades.size(); ++g) {
         const auto& group = pooled_trades[g];
@@ -3729,6 +4856,261 @@ void MetalRender::Impl::tradeFeedbackTextures(std::size_t index)
     for (const auto k : swap.copy_passes) pass_targets[k] = copy->second;
     if (swap.source_key == scene_output_key) scene_output_target = source->second;
     if (swap.copy_key == scene_output_key) scene_output_target = copy->second;
+    // A pooled source's set of images follows its name: the image it gave up
+    // leaves the set and the one it took joins it, so the next frame's free
+    // images are never one another name holds.
+    for (auto& group : pooled_trades) {
+        if (group.source_key != swap.source_key && group.source_key != swap.copy_key) continue;
+        for (auto& image : group.images) {
+            if (image == source->second) image = copy->second;
+            else if (image == copy->second) image = source->second;
+        }
+    }
+}
+
+/// A copy the feedback trades cannot take, because passes after it read the source before
+/// anything writes it again: a motion blur's history copy (accumulate into one buffer, copy it
+/// to the history, combine from the buffer) or the bloom and colour-option results copied back
+/// into the scene's image. Leaving the copy out and trading the two names' textures after the
+/// source's last reader gives every later reader of either name the pixels it reads now: the
+/// copy's name holds the source's image, untouched since the copy, and the source's name a
+/// stale image that its next writer replaces before anything reads it.
+///
+/// Planned only where that holds in every frame. Both textures private to their one name, of
+/// one shape, format and usage, one sample and one mip level, neither a depth image nor pinned
+/// by the reuse table; the source single-sampled and in no pooled trade, the copy's name at most
+/// a pooled trade's source (whose image set then follows the trade); a sorted scene not at all,
+/// because its order changes from frame to frame. Between the copy and the trade nothing
+/// touches the copy's name and no other copy reads the source. The source's next writer is a
+/// draw or clear of it alone that the reuse table never skips. Later in the frame, it renders
+/// in the frame the trade is made, or the copy is made as a copy; one that loads opens with the
+/// copy as a traded feedback reader does, and nothing writes the copy's name before it.
+/// Otherwise it is the next frame's first pass on the source, and the source is not the scene's
+/// output, which the composition reads after the frame. Unless that pass always clears, it may
+/// leave the source as it is (a hidden layer, a load nothing proves it overwrites): the source
+/// is then copied back from the copy's name before it, which only this copy writes and no other
+/// trade moves.
+void MetalRender::Impl::planCopyTrades(Scene& scene)
+{
+    pending_copy_trades.clear();
+    copy_restores.clear();
+    if (! CopyTradesSwitch().load(std::memory_order_relaxed) || ! render::SceneOptimizationEnabled()) return;
+    if (! sorted_draws.empty() || feedback_swaps.size() != descriptions.size()) return;
+
+    std::unordered_map<const void*, uint32_t> names_per_texture;
+    for (const auto& [key, texture] : targets) {
+        (void)key;
+        if (texture != nil) ++names_per_texture[(__bridge const void*)texture];
+    }
+    std::unordered_set<const void*> depth_images;
+    for (const auto* table : { &depth_targets, &ms_depth_targets }) {
+        for (const auto& [key, texture] : *table) {
+            (void)key;
+            if (texture != nil) depth_images.insert((__bridge const void*)texture);
+        }
+    }
+    const auto exclusive = [&](const std::string& key) -> id<MTLTexture> {
+        const auto found = targets.find(key);
+        if (found == targets.end() || found->second == nil) return nil;
+        const auto* image = (__bridge const void*)found->second;
+        return names_per_texture[image] == 1 && ! depth_images.contains(image) ? found->second : nil;
+    };
+    // A pooled source may take the copy's place (its image set follows the trade), not the
+    // source's; a pooled copy's image changes every frame.
+    std::unordered_set<std::string> pooled, pooled_sources;
+    for (const auto& group : pooled_trades) {
+        pooled_sources.insert(group.source_key);
+        for (const auto& copy : group.copies) pooled.insert(copy.key);
+    }
+    const auto reads = [](const ScenePassDescription& desc, const std::string& key) {
+        if (desc.kind == MetalPassKind::Copy) return desc.source_key == key;
+        return std::find(desc.texture_keys.begin(), desc.texture_keys.end(), key) !=
+               desc.texture_keys.end();
+    };
+    // A pass that replaces every texel of its target in every frame without reading it.
+    const auto always_clears = [this](std::size_t k) {
+        const auto& desc = descriptions[k];
+        if (! desc.enabled || desc.conditional_scene_clear || desc.depth_only || desc.samples > 1 ||
+            desc.load_action != MetalLoadAction::Clear) {
+            return false;
+        }
+        if (desc.kind == MetalPassKind::Clear) return true;
+        return desc.kind == MetalPassKind::CustomShader && (k >= prepared.size() || ! prepared[k].unproduced_input);
+    };
+    const auto output = scene.ResolveRenderTargetName(SpecTex_Default);
+
+    for (std::size_t i = 0; i < descriptions.size(); ++i) {
+        const auto& copy = descriptions[i];
+        if (copy.kind != MetalPassKind::Copy || ! copy.enabled || copy.generate_mipmaps ||
+            copy.source_key.empty() || copy.source_key == copy.target_key || feedback_swaps[i].valid) {
+            continue;
+        }
+        if (i < copy_elision.size() && copy_elision[i] != render::CopyElision::None) continue;
+        const auto& source_key = copy.source_key;
+        const auto& copy_key   = copy.target_key;
+        if (pooled.contains(source_key) || pooled_sources.contains(source_key) || pooled.contains(copy_key) ||
+            pinned_target_keys.contains(source_key) ||
+            pinned_target_keys.contains(copy_key) || target_samples.contains(source_key) ||
+            static_cache.PassSampled(i)) {
+            continue;
+        }
+        id<MTLTexture> source      = exclusive(source_key);
+        id<MTLTexture> destination = exclusive(copy_key);
+        if (source == nil || destination == nil) continue;
+        if (source.width != destination.width || source.height != destination.height ||
+            source.pixelFormat != destination.pixelFormat || source.usage != destination.usage ||
+            source.storageMode != destination.storageMode || source.textureType != MTLTextureType2D ||
+            destination.textureType != MTLTextureType2D || source.mipmapLevelCount != 1 ||
+            destination.mipmapLevelCount != 1) {
+            continue;
+        }
+        // A layer's composite is handed to a rebuilt graph whatever it carries.
+        if (std::string_view(source_key).starts_with(WE_IMAGE_LAYER_COMPOSITE_PREFIX)) continue;
+
+        // The source's readers after the copy, up to its next writer, in the order the passes run.
+        std::size_t trade_after  = rankOf(i);
+        std::size_t writer       = descriptions.size();
+        bool        copy_touched = false;
+        bool        copy_written = false;
+        bool        refused      = false;
+        for (std::size_t position = rankOf(i) + 1; position < descriptions.size() && ! refused; ++position) {
+            const auto  j              = passAt(position);
+            const auto& next           = descriptions[j];
+            const bool  writes_source  = next.target_key == source_key;
+            const bool  reads_source   = reads(next, source_key);
+            const bool  touches_copy   = next.target_key == copy_key || reads(next, copy_key);
+            if (! next.enabled && (writes_source || reads_source || touches_copy)) {
+                refused = true;
+            } else if (writes_source) {
+                refused = reads_source;
+                writer  = j;
+                break;
+            } else if (reads_source) {
+                refused     = next.kind == MetalPassKind::Copy || copy_touched || touches_copy;
+                trade_after = position;
+            }
+            if (touches_copy) {
+                copy_touched = true;
+                copy_written = copy_written || next.target_key == copy_key;
+            }
+        }
+        if (refused) continue;
+
+        FeedbackSwap swap;
+        // The source's next writer: a draw or clear of it alone, which the reuse table never skips.
+        const auto writes_alone = [&](std::size_t k) {
+            const auto& draw = descriptions[k];
+            return draw.enabled && ! draw.conditional_scene_clear && ! draw.depth_only && draw.samples <= 1 &&
+                   (draw.kind == MetalPassKind::CustomShader || draw.kind == MetalPassKind::Clear) &&
+                   ! static_cache.PassSampled(k);
+        };
+        if (writer < descriptions.size()) {
+            if (! writes_alone(writer)) continue;
+            const auto& draw = descriptions[writer];
+            swap.prefix = draw.load_action == MetalLoadAction::Load;
+            if (swap.prefix && (draw.kind != MetalPassKind::CustomShader || copy_written ||
+                                (writer < pass_reads_own_target.size() && pass_reads_own_target[writer] != 0) ||
+                                ! ensureSceneCopyPipeline(destination.pixelFormat))) {
+                continue;
+            }
+        } else {
+            if (source_key == output) continue;
+            std::size_t first = i;
+            for (std::size_t position = 0; position < rankOf(i); ++position) {
+                const auto k = passAt(position);
+                if (descriptions[k].target_key == source_key || reads(descriptions[k], source_key)) {
+                    first = k;
+                    break;
+                }
+            }
+            if (first == i || descriptions[first].target_key != source_key ||
+                reads(descriptions[first], source_key) || ! writes_alone(first)) {
+                continue;
+            }
+            writer               = first;
+            swap.reader_in_frame = false;
+            swap.restores        = ! always_clears(first);
+        }
+        for (std::size_t k = 0; k < descriptions.size(); ++k) {
+            if (descriptions[k].target_key == source_key) swap.source_passes.push_back(k);
+            if (descriptions[k].target_key == copy_key) swap.copy_passes.push_back(k);
+        }
+        // The opening copy is built for a colour attachment alone.
+        if (swap.prefix && std::any_of(swap.source_passes.begin(), swap.source_passes.end(), [this](std::size_t k) {
+                return k < pass_depths.size() && pass_depths[k] != nil;
+            })) {
+            continue;
+        }
+        // A restore reads the copy's name: nothing but this copy may write it.
+        if (swap.restores && swap.copy_passes != std::vector<std::size_t> { i }) continue;
+        swap.valid        = true;
+        swap.deferred     = true;
+        swap.reader       = writer;
+        swap.trade_after  = trade_after;
+        swap.source_key   = source_key;
+        swap.copy_key     = copy_key;
+        feedback_swaps[i] = std::move(swap);
+    }
+
+    // Nor may any other trade move the image a restore reads, or the one an opening copy takes
+    // from the copy's name.
+    for (std::size_t i = 0; i < feedback_swaps.size(); ++i) {
+        auto& swap = feedback_swaps[i];
+        if (! swap.valid || ! swap.deferred || ! (swap.restores || swap.prefix)) continue;
+        for (std::size_t k = 0; k < feedback_swaps.size() && swap.valid; ++k) {
+            const auto& other = feedback_swaps[k];
+            if (k != i && other.valid && (other.source_key == swap.copy_key || other.copy_key == swap.copy_key)) {
+                swap = FeedbackSwap {};
+            }
+        }
+        if (swap.valid && swap.restores) copy_restores.emplace_back(rankOf(swap.reader), i);
+    }
+    std::sort(copy_restores.begin(), copy_restores.end());
+}
+
+bool MetalRender::Impl::copyTradeWriterReplaces(std::size_t index, const uint8_t* uniform_base)
+{
+    const auto  writer = feedback_swaps[index].reader;
+    const auto& desc   = descriptions[writer];
+    if (writer < static_skip.size() && static_skip[writer] != 0) return false;
+    if (passClears(writer)) return true;
+    if (! passDraws(writer)) return false;
+    // A writer that does not load still leaves whatever it does not cover, so only a proven
+    // full overwrite replaces the source; otherwise the source is restored first, as the copy
+    // would have left it.
+    const auto source = targets.find(feedback_swaps[index].source_key);
+    return (desc.load_action == MetalLoadAction::Load || desc.load_action == MetalLoadAction::DontCare) &&
+           source != targets.end() && passOverwritesTarget(writer, source->second, uniform_base);
+}
+
+void MetalRender::Impl::settleCopyTrades(id<MTLCommandBuffer> command)
+{
+    for (auto& swap : feedback_swaps) {
+        if (! swap.valid || ! swap.stale) continue;
+        swap.stale        = false;
+        const auto source = targets.find(swap.source_key);
+        const auto copy   = targets.find(swap.copy_key);
+        if (command == nil || source == targets.end() || copy == targets.end()) continue;
+        id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
+        [blit copyFromTexture:copy->second
+                  sourceSlice:0
+                  sourceLevel:0
+                    toTexture:source->second
+             destinationSlice:0
+             destinationLevel:0
+                   sliceCount:1
+                   levelCount:1];
+        [blit endEncoding];
+    }
+}
+
+bool MetalRender::Impl::copyTradeWriterRenders(std::size_t index) const
+{
+    const auto& swap = feedback_swaps[index];
+    // The next frame's first pass on the source clears it whatever happens to be visible.
+    if (! swap.reader_in_frame) return true;
+    if (swap.reader < static_skip.size() && static_skip[swap.reader] != 0) return false;
+    return passDraws(swap.reader) || passClears(swap.reader);
 }
 
 id<MTLDepthStencilState> MetalRender::Impl::depthStencilFor(bool test, bool write,
@@ -3768,6 +5150,7 @@ bool MetalRender::Impl::clearTargetsOnce(const Scene& scene)
         id<MTLRenderCommandEncoder> encoder =
             [command renderCommandEncoderWithDescriptor:descriptor];
         if (encoder == nil) return fail("a render target could not be cleared");
+        if (GpuLabelsEnabled()) encoder.label = GpuLabel("clear new target " + name);
         [encoder endEncoding];
     }
     [command commit];
@@ -4035,6 +5418,7 @@ bool MetalRender::Impl::prepareDraw(Scene& scene, std::size_t index, PreparedPas
         layout_id = layout_id * 1099511628211ULL + vertex.OneSizeOf();
     }
 
+    PositionAttribute position_attribute;
     for (const auto& input : out.reflection.inputs) {
         const auto format = ToMetalVertexFormat(input.format);
         if (format == MTLVertexFormatInvalid) {
@@ -4059,6 +5443,16 @@ bool MetalRender::Impl::prepareDraw(Scene& scene, std::size_t index, PreparedPas
         // zero they index the bone array with a position's bit pattern.
         if (! provided && (input.name == WE_IN_BLENDINDICES || input.name == WE_IN_BLENDWEIGHTS)) {
             return fail("a puppet shader is bound to a mesh without bone weights");
+        }
+        if (out.reflection.vertex_position.has_value() &&
+            input.name == out.reflection.vertex_position->input) {
+            position_attribute = PositionAttribute {
+                .provided = provided,
+                .buffer   = source,
+                .offset   = offset,
+                .stride   = submesh.GetVertexArray(source).OneSizeOf(),
+                .format   = input.format,
+            };
         }
         vertex_descriptor.attributes[input.location].format      = format;
         vertex_descriptor.attributes[input.location].offset      = offset;
@@ -4207,6 +5601,8 @@ bool MetalRender::Impl::prepareDraw(Scene& scene, std::size_t index, PreparedPas
     // mutates it afterwards.
     out.vertex_descriptor = vertex_descriptor;
     out.vertex_layout_id  = layout_id;
+    prepareOverwriteProof(desc, out, position_attribute);
+    prepareNoopProof(desc, out);
 
     // ---- uniform initial state
     auto* updater = scene.shaderValueUpdater.get();
@@ -4554,6 +5950,14 @@ bool MetalRender::Impl::uploadDynamicMesh(PreparedPass& pass, const ScenePassDes
         uploaded_generation[slot] == generation && generation != 0) {
         return true;
     }
+    // Only what the draw reads and the slot does not hold yet is copied: an indexed draw reads
+    // the vertices its writer says it filled this frame, not the array's high-water mark, and
+    // index bytes this slot already holds of the same content stay. Particles rewrite their
+    // vertices from the first one every frame and only ever extend their index pattern.
+    const bool delta = DynamicUploadDeltaSwitch().load(std::memory_order_relaxed);
+    auto& index_content = pass.shared_geometry
+        ? pass.shared_geometry->index_content : pass.dynamic_index_content;
+    if (index_content.size() < kFramesInFlight) index_content.resize(kFramesInFlight);
 
     for (std::size_t i = 0; i < submesh.VertexCount(); ++i) {
         const auto& vertex = submesh.GetVertexArray(i);
@@ -4586,9 +5990,11 @@ bool MetalRender::Impl::uploadDynamicMesh(PreparedPass& pass, const ScenePassDes
         }
         if (vertex.DataSizeOf() == 0) continue;
         if (pass.dynamic_vertex_rings[i].empty()) continue;
-        std::memcpy(pass.dynamic_vertex_rings[i][slot].contents, vertex.Data(),
-                    vertex.DataSizeOf());
-        if (mesh->SharesGeometryUpdates()) model_data_upload_bytes += vertex.DataSizeOf();
+        const std::size_t vertex_bytes = delta && indexed ? vertex.DrawnSizeOf() : vertex.DataSizeOf();
+        if (vertex_bytes == 0) continue;
+        std::memcpy(pass.dynamic_vertex_rings[i][slot].contents, vertex.Data(), vertex_bytes);
+        dynamic_vertex_upload_bytes += vertex_bytes;
+        if (mesh->SharesGeometryUpdates()) model_data_upload_bytes += vertex_bytes;
     }
 
     if (indexed && !pass.dynamic_index_ring.empty()) {
@@ -4606,13 +6012,28 @@ bool MetalRender::Impl::uploadDynamicMesh(PreparedPass& pass, const ScenePassDes
                 if (buffer == nil) return set_error("an index buffer could not be allocated");
             }
             pass.dynamic_index_capacity = capacity;
+            std::fill(index_content.begin(), index_content.end(), IndexSlotContent {});
         }
         if (pass.index_count > 0 && index_bytes == 0) {
             return set_error("a dynamic mesh's index byte capacity overflowed");
         }
         if (index_bytes > 0) {
-            std::memcpy(pass.dynamic_index_ring[slot].contents, live_indices.Data(), index_bytes);
-            if (mesh->SharesGeometryUpdates()) model_data_upload_bytes += index_bytes;
+            auto&          held     = index_content[slot];
+            const uint64_t revision = live_indices.ContentRevision();
+            const bool     same     = delta && held.revision == revision;
+            const std::size_t from  = same ? std::min(held.bytes, index_bytes) : 0;
+            if (index_bytes > from) {
+                std::memcpy(static_cast<uint8_t*>(pass.dynamic_index_ring[slot].contents) + from,
+                            reinterpret_cast<const uint8_t*>(live_indices.Data()) + from,
+                            index_bytes - from);
+                dynamic_index_upload_bytes += index_bytes - from;
+                if (mesh->SharesGeometryUpdates()) model_data_upload_bytes += index_bytes - from;
+            }
+            // Bytes past what any write reached are still zero and may be written later under
+            // the same revision, so they are not counted as held.
+            held.revision = revision;
+            held.bytes    = std::min(std::max(same ? held.bytes : std::size_t { 0 }, index_bytes),
+                                     static_cast<std::size_t>(live_indices.WrittenBytes()));
         }
     }
     if (slot < uploaded_generation.size()) {
@@ -5012,6 +6433,10 @@ bool MetalRender::Impl::applySceneOptimizationSetting(Scene& scene, id<MTLComman
     // The whole plan, not just the flag: the copy plan decides which targets
     // exist at all, so turning the setting back on with only `enabled = true`
     // would leave elided copies unexecuted and aliased images unallocated.
+    // A stale copy-trade source gets its image back first, ahead of this frame, and an image a
+    // left-out clear left as it was gets that clear.
+    settleCopyTrades(command);
+    settleHiddenClears(command);
     releasePooledTrades();
     releaseSceneOptimization();
     planCopyElision(scene);
@@ -5050,6 +6475,7 @@ bool MetalRender::Impl::applySceneOptimizationSetting(Scene& scene, id<MTLComman
         id<MTLRenderCommandEncoder> encoder =
             [command renderCommandEncoderWithDescriptor:descriptor];
         if (encoder == nil) return fail("a reallocated render target could not be cleared");
+        if (GpuLabelsEnabled()) encoder.label = [@"clear new target " stringByAppendingString:texture.label ?: @""];
         [encoder endEncoding];
     }
 
@@ -5061,6 +6487,7 @@ bool MetalRender::Impl::applySceneOptimizationSetting(Scene& scene, id<MTLComman
     compileStaticCache(scene);
     planFeedbackSwaps();
     planPooledTrades(scene);
+    planCopyTrades(scene);
     refreshPassTargets(scene);
     optimization_applied = enabled;
     return true;
@@ -5079,6 +6506,9 @@ void MetalRender::Impl::compileStaticCache(Scene& scene)
         static_pinned_bytes = 0;
     }
     optimization_compiled = false;
+    video_reuse = VideoReuseSwitch().load(std::memory_order_relaxed);
+    const bool audio_reuse = AudioReuseSwitch().load(std::memory_order_relaxed);
+    audio_sampled.assign(descriptions.size(), uint8_t { 0 });
     if (! render::SceneOptimizationEnabled() && execution_order.empty()) return;
 
     const auto* updater = scene.shaderValueUpdater.get();
@@ -5125,8 +6555,16 @@ void MetalRender::Impl::compileStaticCache(Scene& scene)
                     : frame_varying_uniform::kAll;
             if ((varying & (frame_varying_uniform::kTime | frame_varying_uniform::kDayTime)) != 0)
                 reasons |= render::DynamicReason::TimeUniform;
-            if ((varying & frame_varying_uniform::kAudio) != 0)
-                reasons |= render::DynamicReason::AudioUniform;
+            if ((varying & frame_varying_uniform::kAudio) != 0) {
+                // The spectrum this frame's uniforms carry is folded into the
+                // sample instead (`frameSample`), so the pass is redrawn exactly
+                // when a band it reads changed. The scene clock does not depend
+                // on this: `computeDemandReasons` still reports the audio.
+                if (audio_reuse && updater != nullptr)
+                    audio_sampled[i] = 1;
+                else
+                    reasons |= render::DynamicReason::AudioUniform;
+            }
             if ((varying & (frame_varying_uniform::kPointer | frame_varying_uniform::kParallax)) !=
                 0)
                 reasons |= render::DynamicReason::PointerUniform;
@@ -5134,7 +6572,12 @@ void MetalRender::Impl::compileStaticCache(Scene& scene)
                 reasons |= render::DynamicReason::BoneUniform;
             for (const auto& key : desc.texture_keys) {
                 if (key.empty()) continue;
-                if (video.owns(key)) reasons |= render::DynamicReason::VideoInput;
+                // A video's frame is folded into the pass's per-frame sample
+                // instead (`frameSample`), so the pass is redrawn exactly when
+                // it would sample another frame. The scene clock does not
+                // depend on this: a playing video keeps it running through
+                // `ShaderUpdateDemandReasons`.
+                if (! video_reuse && video.owns(key)) reasons |= render::DynamicReason::VideoInput;
                 if (runtime_images != nullptr && runtime_images->IsRuntimeImage(key))
                     reasons |= render::DynamicReason::RuntimeImage;
             }
@@ -5179,6 +6622,22 @@ void MetalRender::Impl::compileStaticCache(Scene& scene)
     static_cache.Compile(descs);
     if (!execution_order.empty()) static_cache.SetExecutionOrder(execution_order);
     static_samples.assign(descriptions.size(), render::StaticPassSample {});
+
+    // What each sample folds besides the pass's own camera, decided from the uniforms its
+    // program reads. A reflection pass draws through a camera that is swapped in for it.
+    transform_inputs.assign(descriptions.size(), DrawTransformInputs {});
+    if (LayerLocalSignaturesSwitch().load(std::memory_order_relaxed) && updater != nullptr) {
+        for (std::size_t i = 0; i < descriptions.size() && i < prepared.size(); ++i) {
+            const auto& desc = descriptions[i];
+            if (desc.kind != MetalPassKind::CustomShader || desc.node == nullptr ||
+                desc.reflection_pass)
+                continue;
+            const auto& reflection = prepared[i].reflection;
+            transform_inputs[i] = updater->TransformInputs(
+                desc.node, desc.material_slot, desc.camera_override,
+                [&reflection](std::string_view name) { return reflection.readsMember(name); });
+        }
+    }
 
     pinned_target_keys.clear();
     std::unordered_map<const void*, uint32_t> keys_per_image;
@@ -5243,18 +6702,34 @@ render::StaticPassSample MetalRender::Impl::frameSample(Scene& scene, std::size_
     if (desc.uses_scene_clear_color) {
         hash = render::StaticHashBytes(hash, desc.clear_color.data(), sizeof(float) * desc.clear_color.size());
     }
+    // What of the scene's moving state this pass's uniforms are derived from. The variant that
+    // samples a video's planes is another program, whose reads were never asked: everything.
+    static const DrawTransformInputs kEveryInput {};
+    const bool planes_drawn = index < video_plane_active.size() && video_plane_active[index] != 0;
+    const DrawTransformInputs& inputs =
+        index < transform_inputs.size() && ! planes_drawn ? transform_inputs[index] : kEveryInput;
     if (desc.node != nullptr) {
-        // Idempotent, and the transform has to be current before it is
-        // compared: a parent moved by a script updates lazily.
-        desc.node->UpdateTrans();
-        const auto model = desc.node->ModelTrans();
-        hash = render::StaticHashBytes(hash, model.data(), sizeof(double) * 16);
-        // Where the node is drawn, when that is not where its world matrix puts it: a
-        // layer a screen anchor shifts, or a final card drawn through an override that
-        // carries the shift.
-        if (desc.node->HasRenderTransformOverride() || ! desc.node->DrawOffset().isZero()) {
-            const auto drawn = desc.node->RenderTrans();
-            hash = render::StaticHashBytes(hash, drawn.data(), sizeof(double) * 16);
+        if (inputs.node_transform) {
+            // Idempotent, and the transform has to be current before it is
+            // compared: a parent moved by a script updates lazily.
+            desc.node->UpdateTrans();
+            const auto model = desc.node->ModelTrans();
+            hash = render::StaticHashBytes(hash, model.data(), sizeof(double) * 16);
+            // Where the node is drawn, when that is not where its world matrix puts it: a
+            // layer a screen anchor shifts, or a final card drawn through an override that
+            // carries the shift.
+            if (desc.node->HasRenderTransformOverride() || ! desc.node->DrawOffset().isZero()) {
+                const auto drawn = desc.node->RenderTrans();
+                hash = render::StaticHashBytes(hash, drawn.data(), sizeof(double) * 16);
+            }
+        }
+        // An effect pass reading its layer's matrices reads the layer where it is drawn.
+        if (inputs.owner != nullptr && inputs.owner != desc.node) {
+            inputs.owner->UpdateTrans();
+            const auto layer = inputs.owner->ModelTrans();
+            hash = render::StaticHashBytes(hash, layer.data(), sizeof(double) * 16);
+            const linalg::Vector3f offset = inputs.owner->DrawOffset();
+            hash = render::StaticHashBytes(hash, offset.data(), sizeof(float) * 3);
         }
         if (auto* mesh = desc.node->Mesh(); mesh != nullptr) {
             hash = render::StaticHashMix(hash, mesh->DirtyGeneration());
@@ -5274,10 +6749,26 @@ render::StaticPassSample MetalRender::Impl::frameSample(Scene& scene, std::size_
             if (static_cache.HasDelayedInputs())
                 hash = render::StaticHashMix(hash,
                     updater->PointerStateHash(desc.node, desc.material_slot, desc.camera_override));
+            if (index < audio_sampled.size() && audio_sampled[index] != 0) {
+                // The bands its uniforms were given this frame. A spectrum the
+                // updater cannot vouch for is a new one every frame.
+                const auto audio = updater->AudioStateHash(desc.node, desc.material_slot);
+                hash = render::StaticHashMix(hash, audio.has_value() ? 1u : 2u);
+                hash = render::StaticHashMix(hash, audio.value_or(audio_unknown_serial));
+            }
         }
     }
 
-    hash = render::FoldPassCameras(hash, scene, desc.camera_override, desc.node);
+    hash = render::FoldPassCameras(hash, scene, desc.camera_override, desc.node,
+                                   [this](const SceneCamera& camera) {
+                                       for (const auto& [known, digest] : camera_digests) {
+                                           if (known == &camera) return digest;
+                                       }
+                                       const auto digest = render::CameraSampleDigest(camera);
+                                       camera_digests.emplace_back(&camera, digest);
+                                       return digest;
+                                   },
+                                   inputs.active_camera);
     if (cookie_sources_ready && desc.light_cookie_slots != 0) {
         // Direct alias readers need this even when their program reads no light uniform.
         hash = render::StaticHashMix(hash, reinterpret_cast<uintptr_t>((__bridge void*)light_cookie_texture));
@@ -5306,6 +6797,26 @@ render::StaticPassSample MetalRender::Impl::frameSample(Scene& scene, std::size_
             hash = render::StaticHashBytes(hash, key.data(), key.size());
             hash = render::StaticHashMix(hash, ring->second.version);
             hash = render::StaticHashMix(hash, coverShown(desc, slot) ? 1u : 0u);
+        }
+    }
+
+    // Which import of each video the pass samples, and whether it samples it
+    // through its plane variant. Everything it reads of a video frame -- the
+    // image or the planes, their colour constants and display transform, the
+    // frame's size -- belongs to one import, so a frame shown again (a 30 fps
+    // clip on a 60 Hz clock, a paused one) samples the same input, and every
+    // import, a re-import for a changed demand included, is a new one.
+    if (video_reuse && ! video.empty()) {
+        bool samples_video = false;
+        for (const auto& key : desc.texture_keys) {
+            if (key.empty() || ! video.owns(key)) continue;
+            samples_video = true;
+            hash = render::StaticHashBytes(hash, key.data(), key.size());
+            hash = render::StaticHashMix(hash, video.importSerial(key));
+        }
+        if (samples_video) {
+            const bool planes = index < video_plane_active.size() && video_plane_active[index] != 0;
+            hash = render::StaticHashMix(hash, planes ? 1u : 0u);
         }
     }
 
@@ -5363,6 +6874,8 @@ bool MetalRender::Impl::planStaticSkips(Scene& scene)
     if (static_samples.size() != descriptions.size()) {
         static_samples.assign(descriptions.size(), render::StaticPassSample {});
     }
+    camera_digests.clear();
+    ++audio_unknown_serial;
     // Only the writers of a cacheable target fold into a signature; the rest
     // execute whatever their sample would say.
     // Keep the implicit depth producer in the existing signature traversal.
@@ -5417,6 +6930,11 @@ bool MetalRender::Impl::compile(Scene& scene, rg::RenderGraph& graph)
         scene.imageParser->SetTextureSurfaceSize(cap_width, cap_height);
     }
 
+    // Which screen-sized targets the graph names decides the grid an SDR scene's window
+    // keeps; known from the graph before anything is sized, so the window is planned once.
+    raster_window_alignment =
+        scene.hdr ? 0u : render::ScreenBoundWindowAlignment(scene, GraphRenderTargets(scene, graph));
+    sdr_window_enabled = SdrRasterWindowEnabled();
     resolveTargetSizes(scene);
     if (scene.hdr && scene.runtime && scene.runtime->RefreshSceneGeneralPostProcesses()) {
         // Bloom's effective level count is a property of this physical raster.
@@ -5547,6 +7065,7 @@ bool MetalRender::Impl::compile(Scene& scene, rg::RenderGraph& graph)
     refreshPassTargets(scene);
     planFeedbackSwaps();
     planPooledTrades(scene);
+    planCopyTrades(scene);
     refreshPassTargets(scene);
     optimization_applied = render::SceneOptimizationEnabled();
     graph_ready = true;
@@ -5844,12 +7363,24 @@ bool MetalRender::Impl::resizeTargets(Scene& scene)
     feedback_swaps.clear();
     frame_swaps.clear();
     opening_copies.clear();
+    pending_copy_trades.clear();
+    copy_restores.clear();
+    stale_at_frame_start.clear();
     pooled_trades.clear();
     pooled_copy_at.clear();
     pooled_release_at.clear();
     pooled_snapshot.clear();
 
+    const bool was_windowed = raster_window.Framed();
     resolveTargetSizes(scene);
+    // An SDR window that was or is drawn changes the raster that screen-space inputs
+    // describe. Nothing else a resize answers changes the raster.
+    if (scene.shaderValueUpdater != nullptr && (was_windowed || raster_window.Framed())) {
+        scene.shaderValueUpdater->SetScreenSize(static_cast<int32_t>(raster_width),
+                                                static_cast<int32_t>(raster_height));
+        scene.shaderValueUpdater->SetTexelSize(1.0f / static_cast<float>(raster_width),
+                                               1.0f / static_cast<float>(raster_height));
+    }
     // A changed HDR chain needs the caller's normal graph-rebuild path rather
     // than reusing descriptions whose level nodes were just retired.
     if (scene.hdr && scene.runtime && scene.runtime->RefreshSceneGeneralPostProcesses()) return false;
@@ -5890,6 +7421,7 @@ bool MetalRender::Impl::resizeTargets(Scene& scene)
     refreshPassTargets(scene);
     planFeedbackSwaps();
     planPooledTrades(scene);
+    planCopyTrades(scene);
     refreshPassTargets(scene);
 
     // Every image the frame will touch starts from a defined state, as a compile leaves
@@ -5926,19 +7458,115 @@ bool MetalRender::Impl::usesDisplayFraming(const Scene& scene) const
            scaling_mode != WallpaperScalingMode::FIT_BLURRED;
 }
 
+bool MetalRender::Impl::sdrRasterWindowApplies(const Scene& scene) const
+{
+    // Fit with the blurred backdrop samples the whole raster for its bands. A zoom below 1
+    // shows more of the canvas with every step, so it keeps the whole raster rather than
+    // sizing the targets again on each one. MetalFX would upscale the window on another grid
+    // than the whole raster's, and its filter reads across the window's edge: an upscaled
+    // scene keeps the whole raster too.
+    return sdr_window_enabled && ! scene.hdr && ! scene.display_sized &&
+           scene.resolution == SceneResolution::Display &&
+           scaling_mode != WallpaperScalingMode::FIT_BLURRED && scaling_factor >= 1.0 &&
+           ! (MetalUpscalingEnabled() && render::ResolveSceneRenderScale(scene) < 1.0) &&
+           output_width > 0 && output_height > 0;
+}
+
+std::pair<render::RasterAxisPlacement, render::RasterAxisPlacement>
+MetalRender::Impl::coverPlacement(const Scene& scene, double zoom) const
+{
+    const double scale_factor = NormalizeScaleFactor(display_scale_factor);
+    const auto   source =
+        render::ResolveSceneSourceExtent(scene, { std::max(1u, output_width), std::max(1u, output_height) });
+    const auto logical = [scale_factor](uint32_t pixels) {
+        return std::max(1u, static_cast<uint32_t>(
+                                std::lround(static_cast<double>(pixels) / scale_factor)));
+    };
+    const auto layout = ComputeWallpaperScalingLayout(
+        scaling_mode, source.width, source.height, logical(output_width), logical(output_height),
+        scale_factor, zoom, framing.pan_x, framing.pan_y);
+    double x = layout.viewport_px.x;
+    // A flipped composition reads the raster right to left: what it shows of it is what an
+    // unflipped one shows with the viewport mirrored about the output.
+    if (horizontal_flip)
+        x = static_cast<double>(output_width) - layout.viewport_px.x - layout.viewport_px.width;
+    return {
+        render::RasterAxisPlacement { .origin = x,
+                                      .extent = static_cast<double>(layout.viewport_px.width),
+                                      .output = output_width },
+        render::RasterAxisPlacement { .origin = static_cast<double>(layout.viewport_px.y),
+                                      .extent = static_cast<double>(layout.viewport_px.height),
+                                      .output = output_height },
+    };
+}
+
+render::SceneRasterWindow MetalRender::Impl::planRasterWindow(
+    const Scene& scene, const Extent2D& fallback, const render::SceneRasterSurface& surface) const
+{
+    if (! sdrRasterWindowApplies(scene) || raster_window_alignment == 0) return {};
+    bool capped = false;
+    const Extent2D cover = render::ResolveSceneCoverRaster(scene, fallback, surface, &capped);
+    // A capped raster is not drawn at the pitch the composition lays it at.
+    if (capped) return {};
+    // Sized for a zoom of 1, which every larger zoom shows a part of, so the zoom slider
+    // moves the window instead of resizing the targets. Off the centre, or once moved, it
+    // leaves room for any position.
+    const bool headroom = raster_window_headroom || framing.pan_x != 0.5 || framing.pan_y != 0.5;
+    const auto [x, y] = coverPlacement(scene, 1.0);
+    auto window = render::PlanSceneRasterWindow(cover, x, y, raster_window_alignment, headroom);
+    if (! window.Framed()) return {};
+    // Then put where the current zoom and position read it.
+    const auto [zoomed_x, zoomed_y] = coverPlacement(scene, scaling_factor);
+    if (! render::PlaceSceneRasterWindow(window, zoomed_x, zoomed_y, raster_window_alignment))
+        return {};
+    return window;
+}
+
 void MetalRender::Impl::refreshRasterFraming(Scene& scene)
 {
     if (output_width == 0 || output_height == 0) return;
-    auto layout = scalingLayout(scene, output_width, output_height);
-    if (horizontal_flip)
-        layout.viewport_px.x = static_cast<int32_t>(output_width) -
-                               layout.viewport_px.x - layout.viewport_px.width;
-    const double width = output_width, height = output_height;
-    const std::array<double,4> clip = scene.display_framed ? std::array<double,4>{
-        layout.viewport_px.width / width, layout.viewport_px.height / height,
-        (2.0 * layout.viewport_px.x + layout.viewport_px.width) / width - 1.0,
-        1.0 - (2.0 * layout.viewport_px.y + layout.viewport_px.height) / height,
-    } : std::array<double,4>{1.0,1.0,0.0,0.0};
+    std::array<double, 4> clip { 1.0, 1.0, 0.0, 0.0 };
+    if (! scene.hdr && graph_ready) {
+        // An SDR scene's window follows the layout while it still holds what the composition
+        // reads; otherwise, or when the layout would frame an unframed scene, the targets are
+        // sized again before the next draw. Until then the window stays where it was drawn.
+        raster_window_applies = sdrRasterWindowApplies(scene);
+        if (raster_window.Framed()) {
+            auto       moved = raster_window;
+            const auto [x, y] = coverPlacement(scene, scaling_factor);
+            if (sdrRasterWindowApplies(scene) &&
+                render::PlaceSceneRasterWindow(moved, x, y, raster_window_alignment)) {
+                raster_window = moved;
+            } else {
+                raster_window_headroom =
+                    raster_window_headroom || framing.pan_x != 0.5 || framing.pan_y != 0.5;
+                raster_window_stale = true;
+            }
+        } else if (sdrRasterWindowApplies(scene) && raster_window_alignment != 0) {
+            const Extent2D fallback { std::max<uint32_t>(1, output_width),
+                                      std::max<uint32_t>(1, output_height) };
+            if (planRasterWindow(scene, fallback,
+                                 render::SceneRasterSurface {
+                                     .display_scale_factor = NormalizeScaleFactor(display_scale_factor),
+                                     .max_dimension        = MaxTextureDimension(device) })
+                    .Framed())
+                raster_window_stale = true;
+        }
+    }
+    if (scene.display_framed && raster_window.Framed()) {
+        clip = render::SceneRasterWindowClip(raster_window);
+    } else if (scene.display_framed) {
+        auto layout = scalingLayout(scene, output_width, output_height);
+        if (horizontal_flip)
+            layout.viewport_px.x = static_cast<int32_t>(output_width) -
+                                   layout.viewport_px.x - layout.viewport_px.width;
+        const double width = output_width, height = output_height;
+        clip = {
+            layout.viewport_px.width / width, layout.viewport_px.height / height,
+            (2.0 * layout.viewport_px.x + layout.viewport_px.width) / width - 1.0,
+            1.0 - (2.0 * layout.viewport_px.y + layout.viewport_px.height) / height,
+        };
+    }
     if (scene.display_clip != clip || (scene.display_framed && scene.display_clip_generation == 0)) {
         scene.display_clip = clip;
         ++scene.display_clip_generation;
@@ -6030,6 +7658,10 @@ void MetalRender::destroy()
         pImpl->queue  = nil;
         pImpl->device = nil;
         pImpl->inited = false;
+        // The drained frames may still report their presentation later; the
+        // counters they would count into can be destroyed once this returns.
+        pImpl->present_feedback->Detach();
+        pImpl->present_feedback_armed = false;
     }
 }
 
@@ -6122,6 +7754,10 @@ void MetalRender::SetDisplayId(uint32_t identity) {
     pImpl->display_id=identity;
     if (pImpl->display_output) pImpl->display_output->SetDisplayId(identity);
 }
+void MetalRender::SetPresentHold(std::chrono::nanoseconds hold) {
+    if (pImpl) pImpl->present_hold = hold > std::chrono::nanoseconds::zero()
+                                         ? std::chrono::duration<double>(hold).count() : 0.0;
+}
 void MetalRender::RefreshDisplayOutput(Scene& scene) {
     if (pImpl && pImpl->inited) pImpl->refreshDisplayOutput(scene);
 }
@@ -6177,7 +7813,8 @@ bool MetalRender::SetWallpaperScalingMode(WallpaperScalingMode mode)
     pImpl->present_gate.Invalidate();
     if (pImpl->graph_ready && pImpl->framing_scene != nullptr) {
         auto& scene = *pImpl->framing_scene;
-        if (scene.display_framed != pImpl->usesDisplayFraming(scene)) return true;
+        // HDR framing is built into the graph; an SDR window is sized again by the next draw.
+        if (scene.hdr && scene.display_framed != pImpl->usesDisplayFraming(scene)) return true;
         pImpl->refreshRasterFraming(scene);
     }
     return false;
@@ -6236,6 +7873,9 @@ uint32_t MetalRender::ShaderUpdateDemandReasons() const
 
 void MetalRender::SetCounters(RendererCounters* counters)
 {
+    // A report still in flight must not reach the counters being replaced.
+    pImpl->present_feedback->Detach();
+    pImpl->present_feedback_armed = false;
     pImpl->counters = counters;
     pImpl->video.setCounters(counters);
 }
@@ -6250,7 +7890,8 @@ WallpaperCursorMapping MetalRender::CursorMapping(const Scene& scene) const
     auto layout = pImpl->scalingLayout(scene, pImpl->output_width, pImpl->output_height);
     // The host mirrors the input about the window before mapping it. Match
     // the reflected pre-raster placement, so a pan is not mirrored twice.
-    if (scene.display_framed && pImpl->horizontal_flip)
+    // An SDR window composes exactly as the whole raster does, so only HDR framing moves it.
+    if (scene.display_framed && ! pImpl->raster_window.Framed() && pImpl->horizontal_flip)
         layout.viewport_px.x = static_cast<int32_t>(pImpl->output_width) -
                                layout.viewport_px.x - layout.viewport_px.width;
     return ComputeWallpaperCursorMapping(
@@ -6265,6 +7906,18 @@ bool MetalRender::drawFrame(Scene& scene, bool* presented)
 {
     if (presented != nullptr) *presented = false;
     if (! pImpl->inited || ! pImpl->graph_ready || pImpl->layer == nil) return false;
+    // SDR display framing turned on or off, or MetalFX taking or leaving the upscale, since
+    // the window was planned: plan it again, which marks it stale if the targets change.
+    pImpl->sdr_window_enabled = SdrRasterWindowEnabled();
+    if (! scene.hdr && pImpl->sdrRasterWindowApplies(scene) != pImpl->raster_window_applies)
+        pImpl->refreshRasterFraming(scene);
+    // A layout the SDR window no longer holds (or would now frame): the targets are sized
+    // for it before anything is drawn, in place, as for a text card that grew. A resize that
+    // fails is tried again on the next draw rather than left half done.
+    if (pImpl->raster_window_stale && ! pImpl->resizeTargets(scene)) {
+        pImpl->raster_window_stale = true;
+        return false;
+    }
     UpdateSceneReflection(scene);
     // The host calls FrameBegin before scripts tick. Shadow cameras must see the
     // resulting transforms in this draw, before the static-cache keys are read.
@@ -6294,6 +7947,23 @@ bool MetalRender::drawFrame(Scene& scene, bool* presented)
         if (command == nil) {
             dispatch_semaphore_signal(impl.inflight);
             return impl.fail("a Metal command buffer could not be created");
+        }
+        const bool gpu_labels   = GpuLabelsEnabled();
+        const bool split_passes = GpuLabelsSplitPasses();
+        const auto pass_label = [&impl](std::size_t index) -> const std::string& {
+            static const std::string none;
+            return index < impl.pass_labels.size() ? impl.pass_labels[index] : none;
+        };
+        if (gpu_labels) {
+            // The scene's own image and the surface it is composed onto.
+            const CGSize   surface = impl.layer.drawableSize;
+            id<MTLTexture> output  = impl.scene_output_target;
+            command.label = GpuLabel(
+                "scene frame " +
+                (output != nil ? std::to_string(output.width) + "x" + std::to_string(output.height)
+                               : std::string("?")) +
+                " on " + std::to_string(static_cast<uint32_t>(surface.width)) + "x" +
+                std::to_string(static_cast<uint32_t>(surface.height)));
         }
 
         // At the frame boundary, before anything else in this buffer: the copy
@@ -6328,6 +7998,7 @@ bool MetalRender::drawFrame(Scene& scene, bool* presented)
                 dispatch_semaphore_signal(impl.inflight);
                 return impl.fail("a render target could not be cleared");
             }
+            if (gpu_labels) encoder.label = [@"clear new target " stringByAppendingString:texture.label ?: @""];
             [encoder endEncoding];
         }
 
@@ -6356,7 +8027,7 @@ bool MetalRender::drawFrame(Scene& scene, bool* presented)
         // them. A failure here is a failed frame, not a black one drawn as if
         // it had succeeded.
         std::string video_error;
-        if (! impl.video.beginFrame(scene, command, &video_error)) {
+        if (! impl.video.beginFrame(scene, command, &video_error, &impl.video_imported)) {
             dispatch_semaphore_signal(impl.inflight);
             return impl.fail(std::move(video_error));
         }
@@ -6367,6 +8038,9 @@ bool MetalRender::drawFrame(Scene& scene, bool* presented)
         id<MTLBuffer> uniforms = impl.uniform_rings[impl.frame_slot];
         auto*         uniform_base = static_cast<uint8_t*>(uniforms.contents);
 
+        // Every visible draw writes its uniforms; which of them then leave their target as it
+        // is follows from what they wrote (`markNoopDraws`, below).
+        std::fill(impl.noop_draws.begin(), impl.noop_draws.end(), uint8_t { 0 });
         // `FrameBegin` is the host's, once per frame before it draws: it steps the parallax cursor's smoothing
         // by the frame time and places puppet attachments. Calling it here as
         // well stepped the smoothing twice per frame, so the parallax on this
@@ -6405,6 +8079,9 @@ bool MetalRender::drawFrame(Scene& scene, bool* presented)
             dispatch_semaphore_signal(impl.inflight);
             return impl.fail(std::exchange(impl.uniform_error, {}));
         }
+        // From here on `passDraws` leaves out a draw whose uniforms make it write nothing: the
+        // geometry upload, the reuse plan's readers, the trades and the encoder all ask it.
+        impl.markNoopDraws(uniform_base);
 
         // After the uniform pass, never before it: the sprite clock and the
         // node transforms advance in there, and a sample taken first would
@@ -6422,17 +8099,39 @@ bool MetalRender::drawFrame(Scene& scene, bool* presented)
         // would reuse a target the GPU never wrote.
         impl.frame_swaps.clear();
         impl.opening_copies.clear();
+        impl.pending_copy_trades.clear();
+        impl.stale_at_frame_start.clear();
+        for (const auto& [position, index] : impl.copy_restores) {
+            (void)position;
+            if (impl.feedback_swaps[index].stale) impl.stale_at_frame_start.push_back(index);
+        }
+        // The images left-out clears left as they were, as the frame finds them; the clears this
+        // buffer opened with have given theirs a colour of their own.
+        impl.hidden_stale_at_frame_start = impl.hidden_stale;
+        for (const auto& [texture, color] : impl.pending_target_clears) {
+            (void)color;
+            impl.forgetHiddenStale(texture);
+        }
         impl.beginPooledTrades();
+        impl.pooled_skipped.clear();
         const auto abandon_frame = [&impl, &scene](std::string message) {
             // Its command buffer never runs, so every texture still holds what
             // it held when the frame began, and every name has to point back at
-            // it.
+            // it. A copy trade still waiting for its position has moved nothing,
+            // and a source restored in it is as stale as it was.
             for (auto swap = impl.frame_swaps.rbegin(); swap != impl.frame_swaps.rend(); ++swap) {
                 impl.tradeFeedbackTextures(*swap);
             }
             impl.abandonPooledTrades(scene);
             impl.frame_swaps.clear();
             impl.opening_copies.clear();
+            impl.pending_copy_trades.clear();
+            for (const auto& [position, index] : impl.copy_restores) {
+                (void)position;
+                impl.feedback_swaps[index].stale = false;
+            }
+            for (const auto index : impl.stale_at_frame_start) impl.feedback_swaps[index].stale = true;
+            impl.hidden_stale = impl.hidden_stale_at_frame_start;
             impl.static_cache.InvalidateAll();
             dispatch_semaphore_signal(impl.inflight);
             return impl.fail(std::move(message));
@@ -6458,9 +8157,11 @@ bool MetalRender::drawFrame(Scene& scene, bool* presented)
 
         // Encodes the smaller levels of a mip-mapped target, once its last
         // writer before a reader has finished with level 0.
-        const auto generate_mipmaps = [&command, &impl](id<MTLTexture> texture) {
+        const auto generate_mipmaps = [&command, &impl, gpu_labels, &pass_label](id<MTLTexture> texture,
+                                                                                std::size_t index) {
             if (texture == nil || texture.mipmapLevelCount <= 1) return;
             id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
+            if (gpu_labels) blit.label = GpuLabel("mipmaps after " + pass_label(index));
             [blit generateMipmapsForTexture:texture];
             [blit endEncoding];
             ++impl.frame_encodes.blit_passes;
@@ -6492,27 +8193,129 @@ bool MetalRender::drawFrame(Scene& scene, bool* presented)
             MetalCullMode               cull_mode { kSceneCullMode };
             /// A new encoder starts with no depth bias.
             std::array<float, 2>        depth_bias {};
+            /// The execution position of the last pass encoded into it.
+            std::size_t                 last_position { 0 };
+            /// Store actions left open (`MTLStoreActionUnknown`) until the render pass ends,
+            /// when it is known whether anything reads the depth or the samples afterwards.
+            bool                        depth_store_open { false };
+            bool                        depth_resolves { false };
+            bool                        multisample_store_open { false };
+            /// With GPU labels on: the label of the pass that opened it and the passes that
+            /// joined it, set once as the render pass ends.
+            std::string                 label;
+            std::vector<std::size_t>    joined;
         };
         OpenRenderPass open;
-        const auto close_pass = [&open]() {
-            if (open.encoder != nil) [open.encoder endEncoding];
+        const auto close_pass = [&open, &impl, gpu_labels]() {
+            if (open.encoder != nil) {
+                if (gpu_labels) {
+                    open.encoder.label = GpuLabel(
+                        open.joined.empty() ? open.label
+                                            : GpuJoinedLabel(open.label, open.joined, impl.pass_short_labels));
+                }
+                if (open.depth_store_open) {
+                    const bool keep = impl.depthNeededAfter(open.depth, open.last_position);
+                    [open.encoder setDepthStoreAction:open.depth_resolves
+                        ? (keep ? MTLStoreActionStoreAndMultisampleResolve : MTLStoreActionMultisampleResolve)
+                        : (keep ? MTLStoreActionStore : MTLStoreActionDontCare)];
+                    if (keep) ++impl.frame_encodes.stored_depth_attachments;
+                }
+                if (open.multisample_store_open) {
+                    const bool keep = impl.multisampleNeededAfter(open.target, open.last_position);
+                    [open.encoder setColorStoreAction:keep ? MTLStoreActionStoreAndMultisampleResolve
+                                                           : MTLStoreActionMultisampleResolve
+                                              atIndex:0];
+                    if (keep) ++impl.frame_encodes.stored_multisample_attachments;
+                }
+                [open.encoder endEncoding];
+            }
             open = OpenRenderPass {};
         };
         // Depth attachments already cleared this frame; a later render pass
         // that uses one again loads it.
         std::vector<id<MTLTexture>> depth_cleared;
 
+        // A copy trade's two names exchange textures once the source's last reader has been
+        // encoded. A render pass still open on either image would otherwise carry on under the
+        // other name; and the source's next writer, if it loads, opens with the copy unless it
+        // writes every texel.
+        const auto trade_copy = [&impl, &open, &close_pass, uniform_base](std::size_t index) {
+            auto&      swap   = impl.feedback_swaps[index];
+            const auto source = impl.targets.find(swap.source_key);
+            const auto copy   = impl.targets.find(swap.copy_key);
+            if (source == impl.targets.end() || copy == impl.targets.end()) return;
+            for (id<MTLTexture> image : { source->second, copy->second }) {
+                if (open.encoder != nil && (open.target == image || open.resolved == image)) close_pass();
+            }
+            impl.tradeFeedbackTextures(index);
+            impl.frame_swaps.push_back(index);
+            swap.stale = swap.restores;
+            if (swap.reader_in_frame && swap.prefix &&
+                ! impl.passOverwritesTarget(swap.reader, source->second, uniform_base)) {
+                impl.opening_copies.emplace_back(source->second, copy->second);
+            }
+        };
+        const auto trade_copies_before = [&impl, &trade_copy](std::size_t position) {
+            for (auto pending = impl.pending_copy_trades.begin(); pending != impl.pending_copy_trades.end();) {
+                if (impl.feedback_swaps[*pending].trade_after >= position) {
+                    ++pending;
+                    continue;
+                }
+                trade_copy(*pending);
+                pending = impl.pending_copy_trades.erase(pending);
+            }
+        };
+
+        // A stale copy-trade source whose first pass this frame would not replace all of it is
+        // copied back from the copy's name first, which holds what the source held when the
+        // names traded: nothing has written that name since.
+        std::size_t next_restore = 0;
+        const auto restore_sources_at = [&](std::size_t position) {
+            for (; next_restore < impl.copy_restores.size() && impl.copy_restores[next_restore].first <= position;
+                 ++next_restore) {
+                const auto index = impl.copy_restores[next_restore].second;
+                auto&      swap  = impl.feedback_swaps[index];
+                if (impl.copy_restores[next_restore].first != position || ! swap.stale) continue;
+                swap.stale = false;
+                if (impl.copyTradeWriterReplaces(index, uniform_base)) continue;
+                const auto source = impl.targets.find(swap.source_key);
+                const auto copy   = impl.targets.find(swap.copy_key);
+                if (source == impl.targets.end() || copy == impl.targets.end()) continue;
+                close_pass();
+                id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
+                [blit copyFromTexture:copy->second
+                          sourceSlice:0
+                          sourceLevel:0
+                            toTexture:source->second
+                     destinationSlice:0
+                     destinationLevel:0
+                           sliceCount:1
+                           levelCount:1];
+                [blit endEncoding];
+                ++impl.frame_encodes.blit_passes;
+                impl.frame_encodes.copied_bytes += ImageLevelBytes(source->second);
+            }
+        };
+
         impl.frame_encodes = {};
         for (std::size_t position = 0; position < impl.prepared.size(); ++position) {
             const std::size_t i = impl.execution_order.empty() ? position : impl.execution_order[position];
             auto&       pass = impl.prepared[i];
             const auto& desc = impl.descriptions[i];
+            if (! impl.pending_copy_trades.empty()) trade_copies_before(position);
+            if (! impl.copy_restores.empty()) restore_sources_at(position);
             if (!desc.enabled) continue;
             // A pooled copy whose last reader has been encoded gives its image
             // back. Any later use of it is a copy step, which ends the open
             // render pass first, and the GPU runs this command buffer in order.
             if (position < impl.pooled_release_at.size()) {
                 for (const auto& [g, k] : impl.pooled_release_at[position]) {
+                    // A copy left out this frame took no image to give back.
+                    if (! impl.pooled_skipped.empty() &&
+                        std::find(impl.pooled_skipped.begin(), impl.pooled_skipped.end(), std::pair { g, k }) !=
+                            impl.pooled_skipped.end()) {
+                        continue;
+                    }
                     auto& group = impl.pooled_trades[static_cast<std::size_t>(g)];
                     group.free.push_back(*group.copies[static_cast<std::size_t>(k)].slot);
                 }
@@ -6536,6 +8339,24 @@ bool MetalRender::drawFrame(Scene& scene, bool* presented)
                 }
                 const auto source = impl.targets.find(desc.source_key);
                 if (source == impl.targets.end()) continue;
+                // A copy for draws none of which draws this frame: what it would leave is read
+                // by nothing before the next frame's copy replaces it.
+                if (impl.hiddenCopyUnread(i)) {
+                    if (i < impl.pooled_copy_at.size() && impl.pooled_copy_at[i].first >= 0)
+                        impl.pooled_skipped.push_back(impl.pooled_copy_at[i]);
+                    ++impl.frame_encodes.skipped_copies;
+                    continue;
+                }
+                // A copy trade whose source's next writer replaces it this frame (or the next
+                // frame's first pass on it does) runs nothing here; the names trade after the
+                // source's last reader. Otherwise the copy is made below.
+                if (i < impl.feedback_swaps.size() && impl.feedback_swaps[i].valid &&
+                    impl.feedback_swaps[i].deferred && impl.copyTradeWriterRenders(i)) {
+                    ++impl.frame_encodes.traded_copies;
+                    if (impl.feedback_swaps[i].trade_after <= position) trade_copy(i);
+                    else impl.pending_copy_trades.push_back(i);
+                    continue;
+                }
                 close_pass();
                 if (i < impl.pooled_copy_at.size() && impl.pooled_copy_at[i].first >= 0) {
                     auto& group =
@@ -6552,17 +8373,23 @@ bool MetalRender::drawFrame(Scene& scene, bool* presented)
                         // reader fills first when it loads.
                         *copy.slot         = image;
                         *group.source_slot = next;
+                        ++impl.frame_encodes.traded_copies;
                         for (const auto k : group.source_passes) impl.pass_targets[k] = next;
                         if (group.source_key == impl.scene_output_key) {
                             impl.scene_output_target = next;
                         }
-                        if (impl.feedback_swaps[i].prefix) impl.opening_copies.emplace_back(next, image);
+                        // A reader that writes every texel needs none of the image first.
+                        if (impl.feedback_swaps[i].prefix &&
+                            ! impl.passOverwritesTarget(impl.feedback_swaps[i].reader, next, uniform_base)) {
+                            impl.opening_copies.emplace_back(next, image);
+                        }
                     } else {
                         // Nothing redraws the source before it is read again,
                         // so the copy is made into a free image.
                         *copy.slot          = next;
                         impl.pass_targets[i] = next;
                         id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
+                        if (gpu_labels) blit.label = GpuLabel("pooled " + pass_label(i));
                         [blit copyFromTexture:image
                                   sourceSlice:0
                                   sourceLevel:0
@@ -6573,25 +8400,32 @@ bool MetalRender::drawFrame(Scene& scene, bool* presented)
                                    levelCount:1];
                         [blit endEncoding];
                         ++impl.frame_encodes.blit_passes;
+                        impl.frame_encodes.copied_bytes += ImageLevelBytes(next);
                     }
                     continue;
                 }
                 if (i < impl.feedback_swaps.size() && impl.feedback_swaps[i].valid &&
-                    impl.feedbackReaderRenders(i)) {
+                    ! impl.feedback_swaps[i].deferred && impl.feedbackReaderRenders(i)) {
                     // The copy's name takes the image as it stands; the source's
                     // name takes the texture the copy would have been made in,
                     // which the reader fills first.
                     id<MTLTexture> image = source->second;
                     impl.tradeFeedbackTextures(i);
                     impl.frame_swaps.push_back(i);
-                    if (impl.feedback_swaps[i].prefix) impl.opening_copies.emplace_back(target, image);
+                    ++impl.frame_encodes.traded_copies;
+                    if (impl.feedback_swaps[i].prefix &&
+                        ! impl.passOverwritesTarget(impl.feedback_swaps[i].reader, target, uniform_base)) {
+                        impl.opening_copies.emplace_back(target, image);
+                    }
                     continue;
                 }
                 const bool identical = source->second.width == target.width &&
                                        source->second.height == target.height &&
                                        source->second.pixelFormat == target.pixelFormat;
+                impl.forgetHiddenStale(target);
                 if (identical) {
                     id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
+                    if (gpu_labels) blit.label = GpuLabel(pass_label(i));
                     [blit copyFromTexture:source->second
                               sourceSlice:0
                               sourceLevel:0
@@ -6602,8 +8436,11 @@ bool MetalRender::drawFrame(Scene& scene, bool* presented)
                                levelCount:1];
                     [blit endEncoding];
                     ++impl.frame_encodes.blit_passes;
-                } else if (impl.encodeScaledCopy(command, source->second, target)) {
+                    impl.frame_encodes.copied_bytes += ImageLevelBytes(target);
+                } else if (impl.encodeScaledCopy(command, source->second, target,
+                                                 gpu_labels ? GpuLabel("scaled " + pass_label(i)) : nil)) {
                     ++impl.frame_encodes.render_passes;
+                    impl.frame_encodes.copied_bytes += ImageLevelBytes(target);
                     if (target == impl.scene_output_target) {
                         ++impl.frame_encodes.scene_output_passes;
                     }
@@ -6612,7 +8449,7 @@ bool MetalRender::drawFrame(Scene& scene, bool* presented)
                     // previous frame while the graph says it was refreshed.
                     return abandon_frame("an effect image could not be resampled");
                 }
-                if (desc.generate_mipmaps) generate_mipmaps(target);
+                if (desc.generate_mipmaps) generate_mipmaps(target, i);
                 continue;
             }
 
@@ -6622,11 +8459,22 @@ bool MetalRender::drawFrame(Scene& scene, bool* presented)
             // and the target keeps what the passes before it left there.
             const bool draws  = impl.passDraws(i);
             const bool clears = impl.passClears(i);
+            if (i < impl.noop_draws.size() && impl.noop_draws[i] != 0) ++impl.frame_encodes.noop_draws;
             if (! draws && ! clears) {
                 if (desc.generate_mipmaps) {
                     close_pass();
-                    generate_mipmaps(target);
+                    generate_mipmaps(target, i);
                 }
+                continue;
+            }
+            // A clear only passes that draw nothing this frame would read: the image keeps what
+            // it holds, which nothing reads before a pass clears it again, and is given the
+            // clear's colour should it be carried into another plan first.
+            if (! draws && clears && impl.hiddenClearUnread(i)) {
+                const auto& c = desc.clear_color;
+                impl.forgetHiddenStale(target);
+                impl.hidden_stale.emplace_back(target, MTLClearColorMake(c[0], c[1], c[2], c[3]));
+                ++impl.frame_encodes.skipped_clears;
                 continue;
             }
 
@@ -6639,11 +8487,12 @@ bool MetalRender::drawFrame(Scene& scene, bool* presented)
             id<MTLTexture> depth = i < impl.pass_depths.size() ? impl.pass_depths[i] : nil;
             const bool     joins =
                 open.encoder != nil && open.target == attachment && open.resolved == target && open.depth == depth &&
-                impl.pass_reads_own_target[i] == 0 &&
+                impl.pass_reads_own_target[i] == 0 && ! split_passes &&
                 (! clears ||
                  (! open.drew && open.began_with_clear && open.clear_color == desc.clear_color));
             if (! joins) {
                 close_pass();
+                impl.forgetHiddenStale(target);
                 // Every texel is written by the copy that opens it, so there is
                 // nothing to load.
                 id<MTLTexture> opening = nil;
@@ -6657,6 +8506,15 @@ bool MetalRender::drawFrame(Scene& scene, bool* presented)
                 // A feedback trade changes the resolve image, not the MS samples already
                 // held by this target. Loading those samples keeps their coverage intact.
                 const bool opens_with_copy = opening != nil && desc.samples == 1;
+                // A draw proven to write every texel of its target makes what the target held
+                // irrelevant: the render pass opens with a clear, which costs no memory traffic,
+                // instead of loading the whole image. Transparent black rather than "don't care",
+                // so even a wrong proof would draw the same picture every time. The pass's own
+                // load action stays what the graph decided, for everything else that reads it.
+                const bool overwrites = ! opens_with_copy && ! desc.depth_only &&
+                                        desc.load_action == MetalLoadAction::Load &&
+                                        impl.passOverwritesTarget(i, attachment, uniform_base);
+                const bool defer_stores = AttachmentStoreElisionSwitch().load(std::memory_order_relaxed);
                 MTLRenderPassDescriptor* descriptor = [MTLRenderPassDescriptor renderPassDescriptor];
                 if (desc.depth_only) {
                     // A shadow caster: its target is the depth attachment, no colour.
@@ -6667,15 +8525,32 @@ bool MetalRender::drawFrame(Scene& scene, bool* presented)
                 } else {
                     descriptor.colorAttachments[0].texture    = attachment;
                     descriptor.colorAttachments[0].loadAction =
-                        opens_with_copy ? MTLLoadActionDontCare : static_cast<MTLLoadAction>(desc.load_action);
-                    // Always stored: a later pass, the presentation blit or a poster
-                    // capture reads this target after the pass ends.
-                    descriptor.colorAttachments[0].storeAction = desc.samples > 1
-                        ? MTLStoreActionStoreAndMultisampleResolve : MTLStoreActionStore;
-                    if (desc.samples > 1) descriptor.colorAttachments[0].resolveTexture = target;
-                    descriptor.colorAttachments[0].clearColor  = MTLClearColorMake(
-                        desc.clear_color[0], desc.clear_color[1], desc.clear_color[2],
-                        desc.clear_color[3]);
+                        opens_with_copy ? MTLLoadActionDontCare
+                        : overwrites    ? MTLLoadActionClear
+                                        : static_cast<MTLLoadAction>(desc.load_action);
+                    // The resolved image is always stored: a later pass, the presentation blit
+                    // or a poster capture reads this target after the pass ends. The samples
+                    // of a multisampled one only while something reads them again, which is
+                    // known when the render pass ends.
+                    if (desc.samples > 1) {
+                        descriptor.colorAttachments[0].storeAction =
+                            defer_stores ? MTLStoreActionUnknown : MTLStoreActionStoreAndMultisampleResolve;
+                        descriptor.colorAttachments[0].resolveTexture = target;
+                        open.multisample_store_open = defer_stores;
+                        if (! defer_stores) ++impl.frame_encodes.stored_multisample_attachments;
+                    } else {
+                        descriptor.colorAttachments[0].storeAction = MTLStoreActionStore;
+                    }
+                    const auto& clear = overwrites ? std::array<float, 4> {} : desc.clear_color;
+                    descriptor.colorAttachments[0].clearColor =
+                        MTLClearColorMake(clear[0], clear[1], clear[2], clear[3]);
+                }
+                if (descriptor.colorAttachments[0].loadAction == MTLLoadActionLoad ||
+                    (desc.depth_only && descriptor.depthAttachment.loadAction == MTLLoadActionLoad)) {
+                    id<MTLTexture> loaded = desc.depth_only ? target : attachment;
+                    ++impl.frame_encodes.loaded_passes;
+                    impl.frame_encodes.loaded_bytes += uint64_t(loaded.width) * loaded.height *
+                                                       loaded.sampleCount * TexelBytes(loaded.pixelFormat);
                 }
                 if (depth != nil) {
                     const bool first = std::find(depth_cleared.begin(), depth_cleared.end(),
@@ -6684,17 +8559,36 @@ bool MetalRender::drawFrame(Scene& scene, bool* presented)
                     descriptor.depthAttachment.texture     = depth;
                     descriptor.depthAttachment.loadAction  =
                         first ? MTLLoadActionClear : MTLLoadActionLoad;
-                    descriptor.depthAttachment.storeAction = MTLStoreActionStore;
                     descriptor.depthAttachment.clearDepth  = 1.0;
-                    if (desc.samples > 1 && desc.target_key == std::string(SpecTex_Default) &&
-                        impl.targets.contains("_rt_volumetricsBack")) {
+                    const bool resolves = desc.samples > 1 && desc.target_key == std::string(SpecTex_Default) &&
+                                          impl.targets.contains("_rt_volumetricsBack");
+                    if (resolves) {
                         descriptor.depthAttachment.resolveTexture = impl.targets.at("_rt_volumetricsBack");
-                        descriptor.depthAttachment.storeAction = MTLStoreActionStoreAndMultisampleResolve;
                         descriptor.depthAttachment.depthResolveFilter = MTLMultisampleDepthResolveFilterMin;
                     }
+                    // Each frame's first render pass on a depth attachment clears it, so its
+                    // contents only matter to a later render pass of the same frame.
+                    descriptor.depthAttachment.storeAction = defer_stores ? MTLStoreActionUnknown
+                        : resolves ? MTLStoreActionStoreAndMultisampleResolve : MTLStoreActionStore;
+                    open.depth_store_open = defer_stores;
+                    open.depth_resolves   = resolves;
+                    if (! defer_stores) ++impl.frame_encodes.stored_depth_attachments;
                 }
                 open.encoder = [command renderCommandEncoderWithDescriptor:descriptor];
-                if (open.encoder == nil) return abandon_frame("a render pass could not be started");
+                if (open.encoder == nil) {
+                    open.depth_store_open = open.multisample_store_open = false;
+                    return abandon_frame("a render pass could not be started");
+                }
+                if (gpu_labels) {
+                    // How the render pass opens, which is what its memory traffic depends on.
+                    const auto load = desc.depth_only ? descriptor.depthAttachment.loadAction
+                                                      : descriptor.colorAttachments[0].loadAction;
+                    open.label = pass_label(i) +
+                                 (opens_with_copy               ? " {opening copy}"
+                                  : load == MTLLoadActionLoad  ? " {load}"
+                                  : load == MTLLoadActionClear ? " {clear}"
+                                                               : " {dontcare}");
+                }
                 open.target           = attachment;
                 open.resolved         = target;
                 open.depth            = depth;
@@ -6724,8 +8618,12 @@ bool MetalRender::drawFrame(Scene& scene, bool* presented)
                     open.pipeline = copy_pipeline;
                     open.viewport = { 0, 0, static_cast<uint32_t>(target.width),
                                       static_cast<uint32_t>(target.height) };
+                    ++impl.frame_encodes.opening_copies;
                 }
+            } else if (gpu_labels) {
+                open.joined.push_back(i);
             }
+            open.last_position = position;
 
             if (draws) {
                 id<MTLRenderCommandEncoder> encoder = open.encoder;
@@ -6930,9 +8828,11 @@ bool MetalRender::drawFrame(Scene& scene, bool* presented)
             }
             if (desc.generate_mipmaps) {
                 close_pass();
-                generate_mipmaps(target);
+                generate_mipmaps(target, i);
             }
         }
+        // A source whose last reader was the frame's last pass trades now.
+        trade_copies_before(impl.descriptions.size());
         close_pass();
         impl.last_frame_encodes = impl.frame_encodes;
 
@@ -6962,6 +8862,9 @@ bool MetalRender::drawFrame(Scene& scene, bool* presented)
         impl.present_key.Add(static_cast<uint64_t>(static_cast<uint32_t>(layout.scissor_px.width)));
         impl.present_key.Add(static_cast<uint64_t>(static_cast<uint32_t>(layout.scissor_px.height)));
         impl.present_key.Add(impl.horizontal_flip ? 1u : 0u);
+        // Where an SDR window sits in its cover raster, which places the picture.
+        impl.present_key.Add((static_cast<uint64_t>(impl.raster_window.x) << 32) |
+                             impl.raster_window.y);
         {
             // The bars' colour, in two words of the key.
             const auto bars = impl.BorderColorFor(scene);
@@ -6980,13 +8883,16 @@ bool MetalRender::drawFrame(Scene& scene, bool* presented)
         impl.present_key.Add(layout.backdrop ? static_cast<uint64_t>(static_cast<uint32_t>(layout.backdrop_px.height)) : 0u);
 
         // Every pass reused or drawing nothing, no feedback trade and no video
-        // to import: the scene output holds exactly the pixels the last
+        // frame imported: the scene output holds exactly the pixels the last
         // composition read. With identical composition inputs, composing and
-        // presenting again would put the same picture back.
+        // presenting again would put the same picture back. An import is never
+        // dropped with its buffer: it may have encoded a conversion the next
+        // frame's passes would then sample unwritten.
+        const bool video_still = impl.video_reuse ? ! impl.video_imported : impl.video.empty();
         const bool nothing_encoded = impl.frame_encodes.render_passes == 0 &&
                                      impl.frame_encodes.blit_passes == 0 &&
                                      impl.frame_swaps.empty() && impl.pooled_moves == 0 &&
-                                     impl.video.empty() && impl.pending_target_clears.empty();
+                                     video_still && impl.pending_target_clears.empty();
         if (render::SceneOptimizationEnabled() && nothing_encoded &&
             impl.present_gate.Matches(impl.present_key, {})) {
             // The buffer holds nothing and is dropped uncommitted, so the slot
@@ -7016,7 +8922,19 @@ bool MetalRender::drawFrame(Scene& scene, bool* presented)
             impl.frame_drawn = true;
             return true;
         }
-        impl.encodeComposition(command, drawable.texture, scene, true);
+#ifdef WESCENE_BUILD_TESTS
+        const bool composition_refused = std::exchange(impl.refuse_next_composition, false);
+#else
+        constexpr bool composition_refused = false;
+#endif
+        if (composition_refused || ! impl.encodeComposition(command, drawable.texture, scene, true)) {
+            // Nothing wrote the drawable. Presenting it would show what it held
+            // frames ago, or nothing at all when it is new, and recording the
+            // present would then keep that picture up as unchanged. The frame
+            // fails like any other encode failure: nothing is committed, and the
+            // host's failure and recovery path runs.
+            return abandon_frame("the frame could not be composed onto the surface");
+        }
 
         // The poster draws the same composition into a texture this process
         // owns. It costs nothing unless a request is pending, and it never
@@ -7034,7 +8952,38 @@ bool MetalRender::drawFrame(Scene& scene, bool* presented)
         [command addCompletedHandler:^(id<MTLCommandBuffer>) {
           dispatch_semaphore_signal(semaphore);
         }];
-        [command presentDrawable:drawable];
+        // While counting, the drawable reports when it was shown, or that it
+        // never was. Counting off, nothing is asked for: one relaxed load.
+        if (RendererCounters::Enabled() && impl.counters != nullptr && PresentFeedbackEnabled()) {
+            if (! impl.present_feedback_armed || impl.present_feedback_display != impl.display_id) {
+                impl.present_feedback->Restart(
+                    impl.counters,
+                    std::chrono::duration<double>(DisplayRefreshPeriod(impl.display_id)).count());
+                impl.present_feedback_armed   = true;
+                impl.present_feedback_display = impl.display_id;
+            }
+            std::shared_ptr<PresentFeedback> feedback = impl.present_feedback;
+            const uint64_t                   sequence = feedback->Sequence();
+            [drawable addPresentedHandler:^(id<MTLDrawable> shown) {
+              feedback->Record(shown.presentedTime, sequence);
+            }];
+        } else {
+            impl.present_feedback_armed = false;
+        }
+        // Held, the frame shows no sooner than the hold after the one on screen
+        // was shown: at the refresh the clock's cadence aims at rather than one
+        // early when this frame happened to be ready just before a refresh.
+        // Ready late, it still shows at the next refresh.
+        const double hold = PresentPacingSwitch().load(std::memory_order_relaxed) ? impl.present_hold : 0.0;
+        if (hold > 0.0) {
+            [command presentDrawable:drawable afterMinimumDuration:hold];
+        } else {
+            [command presentDrawable:drawable];
+        }
+#ifdef WESCENE_BUILD_TESTS
+        impl.last_present_hold = hold;
+        if (hold > 0.0) ++impl.held_presents;
+#endif
         [command commit];
         // Committed, so the clears of a resize have run ahead of everything else in it.
         impl.pending_target_clears.clear();
@@ -7068,6 +9017,8 @@ PosterServiceResult MetalRender::ServicePosterRequest(Scene& scene)
     // Composing the output image before the compiled graph has ever been drawn
     // would publish an empty picture as the wallpaper.
     if (! pImpl->frame_drawn) return PosterServiceResult::NoFrameYet;
+    // The window drawn last does not hold the layout the poster would be composed with.
+    if (pImpl->raster_window_stale) return PosterServiceResult::NoFrameYet;
 
     @autoreleasepool {
         auto& impl = *pImpl;
@@ -7210,10 +9161,58 @@ MetalRender::FrameEncodeCountsForTests MetalRender::LastFrameEncodeCountsForTest
 {
     if (pImpl == nullptr) return {};
     const auto& last = pImpl->last_frame_encodes;
-    return { last.render_passes, last.scene_output_passes, last.blit_passes };
+    return { last.render_passes,  last.scene_output_passes,      last.blit_passes,
+             last.loaded_passes, last.opening_copies,            last.stored_depth_attachments,
+             last.stored_multisample_attachments, last.loaded_bytes, last.copied_bytes,
+             last.traded_copies, last.noop_draws, last.skipped_clears, last.skipped_copies };
 }
 
 void MetalRender::SetTargetSharingForTests(bool enabled) { TargetSharingSwitch().store(enabled); }
+
+void MetalRender::SetOverwriteLoadElisionForTests(bool enabled)
+{
+    OverwriteLoadElisionSwitch().store(enabled);
+}
+
+void MetalRender::SetAttachmentStoreElisionForTests(bool enabled)
+{
+    AttachmentStoreElisionSwitch().store(enabled);
+}
+
+void MetalRender::SetGpuLabelsForTests(int mode)
+{
+    GpuLabelSwitch().store(mode == 0   ? GpuLabelMode::Off
+                           : mode == 2 ? GpuLabelMode::Split
+                                       : GpuLabelMode::On);
+}
+
+std::vector<std::string> MetalRender::GpuPassLabelsForTests() const
+{
+    return pImpl != nullptr ? pImpl->pass_labels : std::vector<std::string> {};
+}
+void MetalRender::SetCopyTradesForTests(bool enabled) { CopyTradesSwitch().store(enabled); }
+void MetalRender::SetSkipNoopDrawsForTests(bool enabled) { NoopDrawSkipSwitch().store(enabled); }
+void MetalRender::SetHiddenLayerWorkForTests(bool enabled) { HiddenLayerWorkSwitch().store(enabled); }
+void MetalRender::SetVideoReuseForTests(bool enabled) { VideoReuseSwitch().store(enabled); }
+bool MetalRender::SetLayerLocalSignaturesForTests(bool enabled)
+{
+    return LayerLocalSignaturesSwitch().exchange(enabled);
+}
+
+void MetalRender::SetAudioReuseForTests(bool enabled) { AudioReuseSwitch().store(enabled); }
+
+int MetalRender::SetSdrFramingOverrideForTests(int forced)
+{
+    return SdrDisplayFramingOverride().exchange(forced < 0 ? -1 : forced == 0 ? 0 : 1);
+}
+
+MetalRender::RasterWindowForTests MetalRender::RasterWindowStateForTests() const
+{
+    if (pImpl == nullptr) return {};
+    const auto& window = pImpl->raster_window;
+    return { window.cover.width, window.cover.height, window.x, window.y, window.size.width,
+             window.size.height, window.Framed(), pImpl->raster_window_stale };
+}
 
 uint64_t MetalRender::RenderTargetBytesForTests() const
 {
@@ -7260,6 +9259,15 @@ uint64_t MetalRender::ModelDataUploadBytesForTests() const {
     return pImpl ? pImpl->model_data_upload_bytes : 0;
 }
 
+MetalRender::DynamicUploadBytesForTests MetalRender::DynamicGeometryUploadBytesForTests() const {
+    if (! pImpl) return {};
+    return { .vertex = pImpl->dynamic_vertex_upload_bytes, .index = pImpl->dynamic_index_upload_bytes };
+}
+
+bool MetalRender::SetDynamicUploadDeltaForTests(bool enabled) {
+    return DynamicUploadDeltaSwitch().exchange(enabled);
+}
+
 std::vector<uint32_t> MetalRender::MultisampleCountsForTests() const
 {
     std::vector<uint32_t> counts;
@@ -7275,6 +9283,17 @@ std::vector<uint32_t> MetalRender::MultisampleCountsForTests() const
 uint64_t MetalRender::ProgramCompilesForTests() { return MetalProgramCache::shared().compileCount(); }
 
 uint64_t MetalRender::LightFeatureUpdatesForTests() const { return pImpl->light_feature_updates; }
+void MetalRender::RefuseNextCompositionForTests() { pImpl->refuse_next_composition = true; }
+
+std::chrono::nanoseconds MetalRender::LastPresentHoldForTests() const
+{
+    return std::chrono::round<std::chrono::nanoseconds>(
+        std::chrono::duration<double>(pImpl->last_present_hold));
+}
+
+uint64_t MetalRender::HeldPresentsForTests() const { return pImpl->held_presents; }
+
+bool MetalRender::SetPresentPacingForTests(bool enabled) { return PresentPacingSwitch().exchange(enabled); }
 
 const void* MetalRender::ImportedImageForTests(const std::string& key, std::size_t slot) const
 {
@@ -7286,6 +9305,11 @@ const void* MetalRender::ImportedImageForTests(const std::string& key, std::size
 uint64_t MetalRender::SharedImageBytesForTests() { return SharedImageCache::shared().liveBytes(); }
 std::size_t MetalRender::SharedImageEntriesForTests() { return SharedImageCache::shared().entries(); }
 uint64_t MetalRender::ImageUploadsForTests() { return SharedImageCache::shared().uploads(); }
+uint64_t MetalRender::ImagesOptimizedForTests() { return SharedImageCache::shared().optimized(); }
+void MetalRender::SetImageOptimizationForTests(bool enabled)
+{
+    SharedImageCache::setOptimizationForTests(enabled);
+}
 
 bool MetalRender::PipelineArchiveServesEverySeenPipelineForTests()
 {

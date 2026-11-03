@@ -18,6 +18,7 @@
 #endif
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cmath>
@@ -27,6 +28,7 @@
 #include <limits>
 #include <map>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -1087,7 +1089,8 @@ constexpr const char* kLibFnNames[kLibFnCount] = {
     X(layerFlag) X(setLayerFlag) X(cursorTarget) X(setCursorTarget) X(sortOrder) X(setSortOrder) \
     X(light) X(setLight) X(soundMember) X(setSoundMember) X(cameraTransforms) X(setCameraTransforms) \
     X(sceneGeneral) X(setSceneGeneral) X(hasParticles) X(particle) X(particleInstance) X(setParticleInstance) \
-    X(modelDataCreate) X(modelDataUpdate) X(modelDataDestroy) X(modelDataLayer) X(cursorData) X(materialConstant)
+    X(modelDataCreate) X(modelDataUpdate) X(modelDataDestroy) X(modelDataLayer) X(cursorData) X(materialConstant) \
+    X(waiting)
 
 enum NativeId : int
 {
@@ -1103,6 +1106,19 @@ constexpr const char* kNativeNames[] = {
 };
 
 thread_local ScriptStartupMetrics g_startup_metrics;
+thread_local ScriptCallCounts     g_call_counts;
+
+/// `WALLPAPER_MACHINE_SCRIPT_TICK_SKIP=0` makes every frame of a value program without
+/// `update` call into the script runtime, as before the skip, so a comparison measures the
+/// skip in one binary. A measurement switch only: both ways run the same script code. Read
+/// once, like the other A/B switches.
+std::atomic<bool>& IdleEvaluationSkipSwitch() {
+    static std::atomic<bool> enabled { [] {
+        const char* value = std::getenv("WALLPAPER_MACHINE_SCRIPT_TICK_SKIP");
+        return value == nullptr || std::string_view(value) != "0";
+    }() };
+    return enabled;
+}
 
 double MillisecondsSince(std::chrono::steady_clock::time_point start) {
     return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
@@ -1172,6 +1188,12 @@ struct ScriptEngineContext : std::enable_shared_from_this<ScriptEngineContext> {
     // How many call scopes are open on this context; the outermost one is the host's entry.
     int                                       call_depth { 0 };
     LibFn                                     active_call { kLibFnCount };
+    // What the library reports through `n.waiting`: the scene time at which its earliest live
+    // timer is due (infinite with none) and whether any audio buffer is registered. With no
+    // timer due and no buffer, the per-frame call of a value program without `update` would
+    // change nothing a script can see.
+    double                                    timer_due { std::numeric_limits<double>::infinity() };
+    bool                                      audio_buffers { false };
     struct LogRecord {
         int    logged { 0 };
         int    suppressed { 0 };
@@ -1208,6 +1230,12 @@ struct ScriptEngineContext : std::enable_shared_from_this<ScriptEngineContext> {
                   double budget_ms, JSValue* result = nullptr);
     // Runs the queued promise jobs; true when one of them was interrupted.
     bool     PumpJobs();
+    // Whether `evaluate` of a value program without `update`, called once `host` has been
+    // refreshed, would run nothing: no timer due at the host's scene time, no audio buffer to
+    // refresh and no promise job waiting for the call to drain it.
+    bool     EvaluationWouldBeIdle(const ScriptHostContext& host) const {
+        return ! audio_buffers && host.runtime_seconds < timer_due && ! JS_IsJobPending(rt);
+    }
     std::string TakeException(std::string* stack);
 
     JSValue  NewVector(int size, double x, double y, double z, double w);
@@ -1531,6 +1559,7 @@ bool ScriptEngineContext::Call(ScriptGuard* guard, const char* entry, LibFn fn,
             LibFn previous;
             ~RestoreCall() { current = previous; }
         } restore_call {active_call, previous_call};
+        ++g_call_counts.library_calls;
         answer = JS_Call(ctx, lib[fn], JS_UNDEFINED, argc, argv);
         if (! JS_IsException(answer) && PumpJobs()) {
             // The call itself finished, but a job it queued did not: the call counts as
@@ -1813,6 +1842,7 @@ bool ScriptEngineContext::EnsureReady() {
 }
 
 JSValue ScriptEngineContext::NativeCall(int id, int argc, JSValueConst* argv) {
+    ++g_call_counts.native_calls;
     SceneRuntimeContext* rt_ = runtime;
     const auto str = [&](int i) -> std::string {
         std::string out;
@@ -1857,6 +1887,12 @@ JSValue ScriptEngineContext::NativeCall(int id, int argc, JSValueConst* argv) {
 
     switch (id) {
     case kNative_error: ReportError(str(0), str(1), str(2)); return JS_UNDEFINED;
+    case kNative_waiting:
+        // A missing or unreadable time is "due now": the host then keeps calling.
+        timer_due     = has(0) ? num(0) : -std::numeric_limits<double>::infinity();
+        if (std::isnan(timer_due)) timer_due = -std::numeric_limits<double>::infinity();
+        audio_buffers = flag(1);
+        return JS_UNDEFINED;
     case kNative_resolve: {
         const auto name = str(0);
         return text(rt_ != nullptr ? rt_->ResolveScriptLayerName(name) : name);
@@ -2299,8 +2335,8 @@ JSValue ScriptEngineContext::NativeCall(int id, int argc, JSValueConst* argv) {
                                      : 0.0);
     case kNative_audio: {
         const auto size = static_cast<int>(num(0));
-        audio::AudioSpectrumSnapshot snapshot;
-        if (rt_ != nullptr) snapshot = rt_->CurrentAudioSpectrumSnapshot();
+        static const audio::AudioSpectrumSnapshot silence {};
+        const audio::AudioSpectrumSnapshot& snapshot = rt_ != nullptr ? rt_->CurrentAudioSpectrumSnapshot() : silence;
         const float* bands[3] = { snapshot.left64.data(), snapshot.right64.data(), snapshot.average64.data() };
         if (size == 16) {
             bands[0] = snapshot.left16.data(); bands[1] = snapshot.right16.data(); bands[2] = snapshot.average16.data();
@@ -2832,6 +2868,19 @@ DynamicValueUniquePtr PropertyScriptProgram::Evaluate(const ScriptHostContext& h
     CallScope scope(e, core.runtime, budget);
     e.RefreshHost(host_context);
     WriteParams(core);
+    // Without `update`, the library's `evaluate` only refreshes the registered audio buffers
+    // and runs the timers that are due, and the host drains the promise jobs after it. With
+    // none of them waiting the call changes nothing a script can see, so it is not made. The
+    // host values and the parameters above are still written: a handler, a timer set later or
+    // another program's closure reads them as the frame left them.
+    if (! m_capabilities.update && IdleEvaluationSkipSwitch().load(std::memory_order_relaxed) &&
+        e.EvaluationWouldBeIdle(host_context)) {
+        if (e.Overran(&core.guard, "update", budget)) return nullptr;
+        // As the call would have, had it completed.
+        core.guard.interrupts = 0;
+        ++g_call_counts.skipped_evaluations;
+        return nullptr;
+    }
     const bool degrees  = core.semantic == PropertyScriptValueSemantic::AnglesDegrees;
     JSValue    argument = e.ToJs(basis, degrees);
     if (e.Overran(&core.guard, "update", budget)) {
@@ -3031,6 +3080,12 @@ ScriptLimits ScriptEngine::Limits() const {
 void ScriptEngine::ResetStartupMetrics() { g_startup_metrics = ScriptStartupMetrics {}; }
 
 ScriptStartupMetrics ScriptEngine::GetStartupMetrics() { return g_startup_metrics; }
+
+void ScriptEngine::ResetCallCounts() { g_call_counts = ScriptCallCounts {}; }
+
+ScriptCallCounts ScriptEngine::GetCallCounts() { return g_call_counts; }
+
+bool ScriptEngine::SetIdleEvaluationSkipForTests(bool enabled) { return IdleEvaluationSkipSwitch().exchange(enabled); }
 
 DynamicValueUniquePtr ScriptEngine::Evaluate(const std::string&                          script_source,
                                              const std::map<std::string, DynamicValue*>& script_properties,

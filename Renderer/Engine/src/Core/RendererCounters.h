@@ -17,7 +17,7 @@ extern "C" {
  *
  * Two groups, deliberately separated, because they answer different questions:
  *
- *   - Surface-exclusive work (OWE_RC_TIMER_WAKEUPS .. OWE_RC_PRESENTS_SKIPPED_UNCHANGED)
+ *   - Surface-exclusive work (OWE_RC_TIMER_WAKEUPS .. OWE_RC_PRESENT_GAPS_3PLUS_VSYNC)
  *     must stop for a surface nobody can see.
  *   - Source work (OWE_RC_VIDEO_*) belongs to the decoded media, which may
  *     legitimately keep running while one of its consumers is hidden, as long
@@ -46,9 +46,9 @@ typedef enum owe_renderer_counter {
     OWE_RC_PRESENT_REQUESTS,
     /*
      * The submitted frame's fence signalled. This is GPU completion, not
-     * display presentation: this backend has no presentation-feedback source,
-     * so actually-displayed frames are reported as unavailable rather than
-     * approximated by the present request count.
+     * display presentation: what the display did with the frame is counted
+     * apart (OWE_RC_PRESENTED_FRAMES and after), never approximated by this or
+     * by the present request count.
      */
     OWE_RC_GPU_COMPLETIONS,
     /* Scene simulation time was advanced by a completed frame. */
@@ -60,6 +60,25 @@ typedef enum owe_renderer_counter {
      * dropped draws and from present requests so neither is misread.
      */
     OWE_RC_PRESENTS_SKIPPED_UNCHANGED,
+    /*
+     * What the display did with the frames this surface asked to present, from
+     * each drawable's own report of when it was shown. Counted only while
+     * counting is on, and arriving a refresh or two after the present request,
+     * so a window's requests and these differ by the frames still in flight.
+     * A dropped present was requested but never shown: replaced by a newer
+     * frame or discarded before any refresh showed it.
+     */
+    OWE_RC_PRESENTED_FRAMES,
+    OWE_RC_PRESENTS_DROPPED,
+    /*
+     * The time from one shown frame to the next, in display refreshes: one,
+     * two, or three and more. A still scene that presented nothing in between
+     * lands in the last. Not counted while the refresh period is unknown
+     * (OWE_RC_VSYNC_PERIOD_MICROS is 0 then).
+     */
+    OWE_RC_PRESENT_GAPS_1_VSYNC,
+    OWE_RC_PRESENT_GAPS_2_VSYNC,
+    OWE_RC_PRESENT_GAPS_3PLUS_VSYNC,
 
     /* --- surface state, stored rather than accumulated --- */
     /* Bitmask of owe_renderer_pause_reason. */
@@ -68,6 +87,8 @@ typedef enum owe_renderer_counter {
     OWE_RC_TICK_INTERVAL_MICROS,
     /* Content period the scene reported, 0 when it cannot say. */
     OWE_RC_CONTENT_PERIOD_MICROS,
+    /* Refresh period of the display the present gaps are measured in, 0 when unknown. */
+    OWE_RC_VSYNC_PERIOD_MICROS,
 
     /* --- consumer work: this surface's use of decoded frames --- */
     /* Updates that promoted a newly decoded frame. */

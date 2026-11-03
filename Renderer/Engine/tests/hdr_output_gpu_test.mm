@@ -4,7 +4,9 @@
 #include "Scene/SpecTexs.hpp"
 #include "Scene/SceneCamera.h"
 #include "Presentation/WallpaperScaling.hpp"
+#include "MetalRender/MetalDisplayFraming.hpp"
 #include "MetalRender/MetalRender.hpp"
+#include "MetalRender/MetalUpscaling.hpp"
 #include "../src/Scene/MetalRender/MetalDisplayOutput.hpp"
 
 #include <gtest/gtest.h>
@@ -12,7 +14,10 @@
 #include <cmath>
 #include <iostream>
 #include <map>
+#include <memory>
+#include <optional>
 #include <thread>
+#include <tuple>
 #import <Metal/Metal.h>
 #import <AppKit/AppKit.h>
 
@@ -159,9 +164,29 @@ void MakeFramingPattern(ScenePackage& package, bool hdr, int sampling_layer = 0)
                 "void main(){gl_FragColor=texSample2D(g_Texture0,v_TexCoord); }\n");
             model_options.shader="passthrough";
         }
+        if (sampling_layer == 4) {
+            // A compose layer's shader: its texture coordinates place the card in its own
+            // buffer, and the screen position it samples comes through the projection.
+            package.AddShader("composelayer",
+                "uniform mat4 g_ModelViewProjectionMatrix;\nattribute vec3 a_Position;\n"
+                "attribute vec2 a_TexCoord;\nvarying vec3 v_ScreenCoord;\n"
+                "void main(){v_ScreenCoord=mul(vec4(a_Position,1.0),g_ModelViewProjectionMatrix).xyw;\n"
+                "vec3 position=vec3(a_TexCoord,0.0);\n"
+                "#ifdef HLSL\nposition.y=1.0-position.y;v_ScreenCoord.y=-v_ScreenCoord.y;\n#endif\n"
+                "gl_Position=vec4(position.xy*2.0-1.0,0.0,1.0);}\n",
+                "uniform sampler2D g_Texture0;\nvarying vec3 v_ScreenCoord;\n"
+                "void main(){vec2 uv=v_ScreenCoord.xy/v_ScreenCoord.z*vec2(0.5,0.5)+0.5;\n"
+                "gl_FragColor=texSample2D(g_Texture0,uv);}\n");
+            model_options.shader="composelayer";
+        }
         const auto model=package.AddImageModel("screen","_rt_FullFrameBuffer",model_options);
-        package.PutJson(model,{{"material","materials/screen.json"},{"passthrough",true},
-            {"fullscreen",sampling_layer != 3},{"projectlayer",sampling_layer == 3}});
+        if (sampling_layer == 4) {
+            package.PutJson(model,{{"material","materials/screen.json"},{"passthrough",true},
+                {"autosize",true},{"projectlayer",true}});
+        } else {
+            package.PutJson(model,{{"material","materials/screen.json"},{"passthrough",true},
+                {"fullscreen",sampling_layer != 3},{"projectlayer",sampling_layer == 3}});
+        }
         ImageLayer screen;
         screen.id=2;screen.model=model;screen.origin={32,32,0};screen.size={64,64};
         if (sampling_layer == 3) { screen.origin={24,28,0};screen.size={40,32}; }
@@ -261,7 +286,9 @@ TEST(HdrOutputGpu, DisplayFramingPreservesFullscreenAndLocalScreenCopies) {
     MakeFramingPattern(reference_package,true);
     GpuScene reference(reference_package,options);
     ASSERT_TRUE(reference.ok()) << reference.error();
-    for (int kind : {1,2,3}) {
+    // 4: a compose layer over the whole canvas, which samples the screen through the framed
+    // projection; its card is not moved again by the framing.
+    for (int kind : {1,2,3,4}) {
         SCOPED_TRACE(kind);
         ScenePackage package;
         MakeFramingPattern(package,true,kind);
@@ -285,6 +312,277 @@ TEST(HdrOutputGpu, DisplayFramingPreservesFullscreenAndLocalScreenCopies) {
             EXPECT_EQ(copied.scene().runtime->PassthroughCardLayoutCount(),layouts);
         }
     }
+}
+
+// ---- SDR display framing (experimental, off by default): an SDR Display-resolution scene
+// draws only the window of its canvas-cover raster that the composition reads.
+// `GpuScene::Picture` composes through the poster path, the composition the drawable shares.
+
+/// Frames or never frames for the scope, whatever the setting and the environment say, and
+/// back.
+struct SdrWindowSwitch {
+    int previous;
+    explicit SdrWindowSwitch(bool on)
+        : previous(metal::MetalRender::SetSdrFramingOverrideForTests(on ? 1 : 0)) {}
+    ~SdrWindowSwitch() { metal::MetalRender::SetSdrFramingOverrideForTests(previous); }
+};
+
+/// The setting decides for the scope (no override), starting from `on`, and back.
+struct SdrFramingSetting {
+    int  previous_override {metal::MetalRender::SetSdrFramingOverrideForTests(-1)};
+    bool previous {metal::MetalSceneDisplayFramingEnabled()};
+    explicit SdrFramingSetting(bool on) { metal::SetMetalSceneDisplayFramingEnabled(on); }
+    ~SdrFramingSetting() {
+        metal::SetMetalSceneDisplayFramingEnabled(previous);
+        metal::MetalRender::SetSdrFramingOverrideForTests(previous_override);
+    }
+};
+
+/// Sets the process-wide MetalFX upscaling setting for the scope, and back.
+struct UpscalingSwitch {
+    bool previous {metal::MetalUpscalingEnabled()};
+    explicit UpscalingSwitch(bool on) { metal::SetMetalUpscalingEnabled(on); }
+    ~UpscalingSwitch() { metal::SetMetalUpscalingEnabled(previous); }
+};
+
+/// A `width` x `height` canvas of four flat quadrants with a small bright tile in each, so
+/// a misplaced or resampled window shows; bloom optional.
+void MakeWideCanvas(ScenePackage& package, uint32_t width, uint32_t height, bool bloom) {
+    HdrAssets(package);
+    auto image=we_test::Image::Quadrants(width,height,{200,40,20,255},{40,180,70,255},
+                                         {10,40,170,255},{160,120,30,255});
+    for (uint32_t y=0;y<height;y+=7) for (uint32_t x=(y*3)%11;x<width;x+=11) image.Set(x,y,{250,250,250,255});
+    ImageLayer tile;
+    tile.model=package.AddImageModel("tile",package.AddTexture("pattern",image),{.blending="normal"});
+    tile.origin={width*0.5f,height*0.5f,0};tile.size={float(width),float(height)};
+    SceneGeneral general;
+    general.canvas_width=width;general.canvas_height=height;
+    general.extra={{"hdr",false},{"bloom",bloom},{"bloomstrength",bloom?2.0:0.0}};
+    package.SetProject({{"schemecolor",ColorProperty("0.2 0.3 0.4")}});
+    package.SetScene(SceneJson(general,{ImageLayerJson(tile)}));
+}
+
+struct Framing {
+    WallpaperScalingMode mode {WallpaperScalingMode::FILL};
+    double zoom {1.0}, x {0.5}, y {0.5};
+    bool flip {false};
+};
+
+void Apply(GpuScene& scene, const Framing& framing) {
+    if (scene.renderer().SetWallpaperScalingMode(framing.mode)) ASSERT_TRUE(scene.Rebuild());
+    scene.renderer().SetWallpaperScalingFactor(framing.zoom);
+    scene.renderer().SetWallpaperFraming({framing.x,framing.y});
+    scene.renderer().SetWallpaperHorizontalFlip(framing.flip);
+}
+
+/// The same scene twice: drawn whole (switch off) and framed (switch on), each always under
+/// its own setting.
+struct WindowPair {
+    std::unique_ptr<GpuScene> whole_scene, framed_scene;
+    WindowPair(const ScenePackage& package, const GpuSceneOptions& options) {
+        {
+            SdrWindowSwitch off(false);
+            whole_scene=std::make_unique<GpuScene>(package,options);
+        }
+        SdrWindowSwitch on(true);
+        framed_scene=std::make_unique<GpuScene>(package,options);
+    }
+    GpuScene& whole() { return *whole_scene; }
+    GpuScene& framed() { return *framed_scene; }
+    std::pair<we_test::Image,we_test::Image> Run(const Framing& framing, int frames = 2) {
+        we_test::Image a, b;
+        {
+            SdrWindowSwitch off(false);
+            Apply(whole(),framing);
+            a=whole().Run(frames);
+        }
+        {
+            SdrWindowSwitch on(true);
+            Apply(framed(),framing);
+            b=framed().Run(frames);
+        }
+        return {a,b};
+    }
+};
+
+/// Pixels farther than `margin` from the left and right edges that differ by more than one.
+std::size_t InteriorDifferences(const we_test::Image& a, const we_test::Image& b, uint32_t margin) {
+    if (a.width!=b.width || a.height!=b.height) return std::size_t(-1);
+    std::size_t count=0;
+    for (uint32_t y=0;y<a.height;++y) for (uint32_t x=margin;x+margin<a.width;++x) {
+        const auto p=a.At(x,y), q=b.At(x,y);
+        for (std::size_t c=0;c<3;++c) if (std::abs(int(p[c])-int(q[c]))>1) { ++count; break; }
+    }
+    return count;
+}
+
+struct DisplayResolutionScope {
+    SceneResolution value {CurrentSceneResolution()};
+    DisplayResolutionScope() { SetSceneResolution(SceneResolution::Display); }
+    ~DisplayResolutionScope() { SetSceneResolution(value); }
+};
+
+TEST(SdrDisplayFraming, FillDrawsOnlyTheVisibleWindowAndComposesTheSamePicture) {
+    WE_SKIP_WITHOUT_METAL();
+    DisplayResolutionScope display;
+    for (const bool bloom : {false,true}) {
+        SCOPED_TRACE(bloom);
+        ScenePackage package;
+        MakeWideCanvas(package,96,48,bloom);
+        auto options=Options();options.width=64;options.height=48;
+        WindowPair pair(package,options);
+        ASSERT_TRUE(pair.whole().ok()) << pair.whole().error();
+        ASSERT_TRUE(pair.framed().ok()) << pair.framed().error();
+        const auto [whole,framed]=pair.Run({});
+        ASSERT_FALSE(whole.empty());ASSERT_FALSE(framed.empty());
+        // The canvas fills the output 96 wide and the composition shows its middle 64.
+        const auto state=pair.framed().renderer().RasterWindowStateForTests();
+        EXPECT_TRUE(state.framed);
+        EXPECT_EQ(state.cover_width,96u);
+        EXPECT_EQ(state.x,16u);
+        EXPECT_EQ(state.width,64u);
+        EXPECT_EQ(state.height,48u);
+        EXPECT_FALSE(pair.whole().renderer().RasterWindowStateForTests().framed);
+        EXPECT_LT(pair.framed().renderer().RenderTargetBytesForTests(),
+                  pair.whole().renderer().RenderTargetBytesForTests());
+        // Only bloom's reach across the window's edge may differ.
+        EXPECT_EQ(InteriorDifferences(whole,framed,bloom?12u:0u),0u);
+        if (!bloom) EXPECT_TRUE(ExpectSamePicture(framed,whole,1));
+    }
+}
+
+TEST(SdrDisplayFraming, AnOddCropOffsetComposesTheSamePicture) {
+    WE_SKIP_WITHOUT_METAL();
+    DisplayResolutionScope display;
+    ScenePackage package;
+    MakeWideCanvas(package,101,48,false);
+    auto options=Options();options.width=64;options.height=48;
+    WindowPair pair(package,options);
+    ASSERT_TRUE(pair.whole().ok() && pair.framed().ok());
+    const auto [whole,framed]=pair.Run({});
+    const auto state=pair.framed().renderer().RasterWindowStateForTests();
+    EXPECT_TRUE(state.framed);
+    // 37 pixels overhang: 19 on the left (rounded away from zero), 18 on the right.
+    EXPECT_EQ(state.x,19u);
+    EXPECT_EQ(state.width,64u);
+    EXPECT_TRUE(ExpectSamePicture(framed,whole,1));
+}
+
+TEST(SdrDisplayFraming, StretchFitAndBlurredFitDrawTheWholeRaster) {
+    WE_SKIP_WITHOUT_METAL();
+    DisplayResolutionScope display;
+    ScenePackage package;
+    MakeWideCanvas(package,96,48,false);
+    auto options=Options();options.width=64;options.height=48;
+    WindowPair pair(package,options);
+    ASSERT_TRUE(pair.whole().ok() && pair.framed().ok());
+    for (const auto mode : {WallpaperScalingMode::STRETCH,WallpaperScalingMode::FIT,
+                            WallpaperScalingMode::FIT_BLURRED,WallpaperScalingMode::NONE,
+                            WallpaperScalingMode::FILL}) {
+        SCOPED_TRACE(static_cast<int>(mode));
+        const auto [whole,framed]=pair.Run({.mode=mode});
+        const auto state=pair.framed().renderer().RasterWindowStateForTests();
+        // A mode that shows the whole canvas sizes the targets again before its first draw;
+        // original size, one point per canvas unit, crops this canvas as Fill does.
+        EXPECT_EQ(state.framed,mode==WallpaperScalingMode::FILL || mode==WallpaperScalingMode::NONE);
+        EXPECT_FALSE(state.stale);
+        EXPECT_TRUE(ExpectSamePicture(framed,whole,1));
+    }
+}
+
+TEST(SdrDisplayFraming, ZoomPanAndFlipMoveTheWindowAndSizeItAtMostOnce) {
+    WE_SKIP_WITHOUT_METAL();
+    DisplayResolutionScope display;
+    ScenePackage package;
+    MakeWideCanvas(package,128,48,false);
+    auto options=Options();options.width=64;options.height=48;
+    WindowPair pair(package,options);
+    ASSERT_TRUE(pair.whole().ok() && pair.framed().ok());
+    (void)pair.Run({});
+    const auto first=pair.framed().renderer().RasterWindowStateForTests();
+    ASSERT_TRUE(first.framed);
+    // A larger zoom shows part of what a zoom of 1 does: the window moves, never grows.
+    for (const double zoom : {1.3,2.0,1.0}) {
+        SCOPED_TRACE(zoom);
+        const auto [whole,framed]=pair.Run({.zoom=zoom});
+        EXPECT_EQ(pair.framed().renderer().RasterWindowStateForTests().width,first.width);
+        EXPECT_TRUE(ExpectSamePicture(framed,whole,1));
+    }
+    // A move off the centre sizes the window once, with room for any further move.
+    std::optional<uint32_t> moved_width;
+    for (const auto& framing : {Framing{.x=0.1},Framing{.x=0.9,.flip=true},Framing{.x=0.0},
+                                Framing{.zoom=1.4,.x=0.7,.y=0.2,.flip=true},Framing{.x=1.0}}) {
+        const auto [whole,framed]=pair.Run(framing);
+        const auto state=pair.framed().renderer().RasterWindowStateForTests();
+        EXPECT_TRUE(state.framed);
+        if (!moved_width) moved_width=state.width;
+        EXPECT_EQ(state.width,*moved_width);
+        EXPECT_TRUE(ExpectSamePicture(framed,whole,1));
+    }
+    EXPECT_LE(*moved_width,first.width+2);
+    // A zoom below 1 shows more of the canvas with every step: the whole raster is drawn.
+    const auto [whole,framed]=pair.Run({.zoom=0.8});
+    EXPECT_FALSE(pair.framed().renderer().RasterWindowStateForTests().framed);
+    EXPECT_TRUE(ExpectSamePicture(framed,whole,1));
+}
+
+TEST(SdrDisplayFraming, IsOffByDefaultAndARunningSceneTakesTheSettingAtItsNextFrame) {
+    WE_SKIP_WITHOUT_METAL();
+    DisplayResolutionScope display;
+    // Off unless the user turns it on: the whole cover raster is drawn, as before.
+    EXPECT_FALSE(metal::MetalSceneDisplayFramingEnabled());
+    ScenePackage package;
+    MakeWideCanvas(package,96,48,false);
+    auto options=Options();options.width=64;options.height=48;
+    SdrFramingSetting setting(false);
+    GpuScene scene(package,options);
+    ASSERT_TRUE(scene.ok()) << scene.error();
+    const auto before=scene.Run(2);
+    ASSERT_FALSE(before.empty());
+    EXPECT_FALSE(scene.renderer().RasterWindowStateForTests().framed);
+    const auto whole_bytes=scene.renderer().RenderTargetBytesForTests();
+    // Turned on while it runs: the next frame sizes the targets for the window, in place.
+    metal::SetMetalSceneDisplayFramingEnabled(true);
+    const auto framed=scene.Run(2);
+    const auto state=scene.renderer().RasterWindowStateForTests();
+    EXPECT_TRUE(state.framed);
+    EXPECT_FALSE(state.stale);
+    EXPECT_EQ(state.width,64u);
+    EXPECT_LT(scene.renderer().RenderTargetBytesForTests(),whole_bytes);
+    EXPECT_TRUE(ExpectSamePicture(framed,before,1));
+    // And off again: the whole raster, and the very picture it drew before.
+    metal::SetMetalSceneDisplayFramingEnabled(false);
+    const auto after=scene.Run(2);
+    EXPECT_FALSE(scene.renderer().RasterWindowStateForTests().framed);
+    EXPECT_EQ(scene.renderer().RenderTargetBytesForTests(),whole_bytes);
+    EXPECT_TRUE(ExpectSamePicture(after,before));
+}
+
+TEST(SdrDisplayFraming, MetalFxUpscalingKeepsTheWholeRaster) {
+    WE_SKIP_WITHOUT_METAL();
+    DisplayResolutionScope display;
+    ScenePackage package;
+    MakeWideCanvas(package,96,48,false);
+    auto options=Options();options.width=64;options.height=48;options.render_scale=0.75;
+    UpscalingSwitch upscaling(true);
+    WindowPair pair(package,options);
+    ASSERT_TRUE(pair.whole().ok() && pair.framed().ok());
+    // MetalFX would upscale the window on another grid than the whole raster's.
+    auto [whole,framed]=pair.Run({});
+    EXPECT_FALSE(pair.framed().renderer().RasterWindowStateForTests().framed);
+    EXPECT_TRUE(ExpectSamePicture(framed,whole));
+    // Without it the scene is framed at its next frame, and unframed again once it is back.
+    metal::SetMetalUpscalingEnabled(false);
+    std::tie(whole,framed)=pair.Run({});
+    EXPECT_TRUE(pair.framed().renderer().RasterWindowStateForTests().framed);
+    // Below render scale 1 the canvas's one-texel dots, point sampled, sit on sampling ties
+    // the shifted projection can break the other way: close to the whole raster's picture,
+    // not the same (the trade-off the setting states).
+    EXPECT_LE(InteriorDifferences(whole,framed,0),std::size_t(whole.width*whole.height/50));
+    metal::SetMetalUpscalingEnabled(true);
+    std::tie(whole,framed)=pair.Run({});
+    EXPECT_FALSE(pair.framed().renderer().RasterWindowStateForTests().framed);
+    EXPECT_TRUE(ExpectSamePicture(framed,whole));
 }
 
 TEST(HdrOutputGpu, HdrFadeIsEncodedOnceAndSdrFadeKeepsItsExistingValues) {
@@ -323,7 +621,9 @@ TEST(HdrOutputGpu, BloomToggleKeepsGrayAndConvertsBeforePresentationFiltering) {
         }
         const auto counts=scene.LastFramePasses();
         EXPECT_EQ(counts.render_passes,2u);
-        EXPECT_EQ(counts.blit_passes,1u);
+        // The sRGB conversion's result goes back into the scene's image: a copy, or with scene
+        // optimisation a trade of textures that copies nothing.
+        EXPECT_EQ(counts.blit_passes,optimize?0u:1u);
         const auto resident=scene.renderer().RenderTargetBytesForTests();
         ASSERT_TRUE(scene.Step(2));
         const auto steady=scene.LastFramePasses();

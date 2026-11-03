@@ -1177,6 +1177,14 @@ final class BridgeStore {
         apply(bundle)
     }
 
+    /// SDR display framing: a 2D scene at Display resolution whose canvas overhangs the display
+    /// draws only the part the display shows. Off by default and experimental. A preference:
+    /// running scenes take it at their next frame, and one it cannot frame draws as before.
+    func setSceneDisplayFramingEnabledAsync(_ enabled: Bool) async throws {
+        let bundle = try await bridge.setSceneDisplayFramingEnabled(enabled: enabled)
+        apply(bundle)
+    }
+
     /// How many pixels a 2D scene is rasterized with, `"display"` or `"canvas"`. A preference every
     /// running 2D scene follows live, by resizing its render targets in place: nothing is reparsed (on
     /// Native Metal the scene's own video layers are reopened, as for any render-scale change).
@@ -1500,7 +1508,8 @@ final class BridgeStore {
                 shaderCacheSizeBytes: 0,
                 logs: BridgeLogStatus(logsRoot: "", activeSession: "", activeFile: "", activeFileSizeBytes: 0)),
             videoBackends: [], sceneOptimizationEnabled: true, sceneOnDemandEnabled: false,
-            metalfxUpscalingEnabled: false, sceneVideoPlaneSamplingEnabled: false, sceneResolution: "display",
+            metalfxUpscalingEnabled: false, sceneVideoPlaneSamplingEnabled: false,
+            sceneDisplayFramingEnabled: false, sceneResolution: "display",
             sceneQuality: .wallpaperEngineDefault, sceneUpdateModes: [],
             sceneRenderers: [], userAssetsPath: "", renderScale: 1, preferredRenderScale: 1,
             frameRateCap: nil, batteryRenderScale: 0.75, batteryTargetFps: 30, onBatteryPower: false,

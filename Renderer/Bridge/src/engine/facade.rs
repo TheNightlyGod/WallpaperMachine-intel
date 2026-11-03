@@ -294,6 +294,20 @@ pub trait EngineFacade: Send + Sync + 'static {
         let _ = enabled;
         Ok(())
     }
+    /// Turns SDR display framing on or off inside native Metal scenes,
+    /// process-wide. Off by default.
+    ///
+    /// An SDR scene at Display resolution whose canvas overhangs the display
+    /// then draws only the part the display shows. A running scene takes the
+    /// change at its next frame.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the renderer rejects the call.
+    fn set_scene_display_framing_enabled(&self, enabled: bool) -> Result<(), EngineError> {
+        let _ = enabled;
+        Ok(())
+    }
     /// Brings a scene drawn below full resolution back to full size with
     /// MetalFX instead of a bilinear stretch, process-wide. Off by default.
     ///
@@ -629,6 +643,10 @@ impl EngineFacade for RealEngineFacade {
 
     fn set_scene_video_plane_sampling_enabled(&self, enabled: bool) -> Result<(), EngineError> {
         self.engine.set_scene_video_plane_sampling_enabled(enabled)
+    }
+
+    fn set_scene_display_framing_enabled(&self, enabled: bool) -> Result<(), EngineError> {
+        self.engine.set_scene_display_framing_enabled(enabled)
     }
 
     fn set_metalfx_upscaling_enabled(&self, enabled: bool) -> Result<(), EngineError> {
@@ -1276,6 +1294,7 @@ pub struct FakeEngineFacade {
     scene_optimization_calls: Observation<bool>,
     scene_on_demand_calls: Observation<bool>,
     scene_video_plane_sampling_calls: Observation<bool>,
+    scene_display_framing_calls: Observation<bool>,
     metalfx_upscaling_calls: Observation<bool>,
     scene_resolution_calls: Observation<SceneResolution>,
     scene_runtime_reports: Reading<Vec<SceneRuntimeReport>>,
@@ -1482,6 +1501,7 @@ impl Default for FakeEngineFacade {
             scene_optimization_calls: Observation::new(),
             scene_on_demand_calls: Observation::new(),
             scene_video_plane_sampling_calls: Observation::new(),
+            scene_display_framing_calls: Observation::new(),
             metalfx_upscaling_calls: Observation::new(),
             scene_resolution_calls: Observation::new(),
             scene_runtime_reports: Reading::new(Default::default()),
@@ -1889,6 +1909,12 @@ impl FakeEngineFacade {
     #[must_use]
     pub fn scene_video_plane_sampling_calls(&self) -> Vec<bool> {
         self.scene_video_plane_sampling_calls.snapshot()
+    }
+
+    /// Every SDR display framing change the bridge pushed, in order.
+    #[must_use]
+    pub fn scene_display_framing_calls(&self) -> Vec<bool> {
+        self.scene_display_framing_calls.snapshot()
     }
 
     /// Every MetalFX upscaling change the bridge pushed, in order.
@@ -2603,6 +2629,11 @@ impl EngineFacade for FakeEngineFacade {
 
     fn set_scene_video_plane_sampling_enabled(&self, enabled: bool) -> Result<(), EngineError> {
         self.scene_video_plane_sampling_calls.record(enabled);
+        Ok(())
+    }
+
+    fn set_scene_display_framing_enabled(&self, enabled: bool) -> Result<(), EngineError> {
+        self.scene_display_framing_calls.record(enabled);
         Ok(())
     }
 

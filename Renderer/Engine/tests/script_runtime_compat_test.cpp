@@ -4018,6 +4018,158 @@ function init() {
     EXPECT_EQ(runtime->scriptErrorCount(), 0u);
 }
 
+// A frame of a value program without `update` is left out while no timer is due and no audio
+// buffer is registered; the switch restores the call in every frame for a comparison.
+class IdleEvaluationSkip {
+public:
+    explicit IdleEvaluationSkip(bool enabled)
+        : m_previous(ScriptEngine::SetIdleEvaluationSkipForTests(enabled)) {}
+    ~IdleEvaluationSkip() { ScriptEngine::SetIdleEvaluationSkipForTests(m_previous); }
+    IdleEvaluationSkip(const IdleEvaluationSkip&)            = delete;
+    IdleEvaluationSkip& operator=(const IdleEvaluationSkip&) = delete;
+
+private:
+    bool m_previous;
+};
+
+TEST(ScriptIdleFrames, ProgramsWithoutUpdateCostNoCallAFrameWhileNothingWaits) {
+    constexpr int kPrograms = 5;
+    constexpr int kFrames   = 10;
+    ScriptCallCounts counts[2];
+    for (const bool skip : { true, false }) {
+        IdleEvaluationSkip setting(skip);
+        auto runtime = CreateSceneRuntimeContext(SceneRuntimeBootstrap {});
+        std::vector<std::shared_ptr<SceneNode>> nodes;
+        for (int index = 0; index < kPrograms; ++index) {
+            const std::string name = "layer" + std::to_string(index);
+            nodes.push_back(std::make_shared<SceneNode>());
+            runtime->RegisterNode(name, nodes.back().get());
+            runtime->RegisterNodeVisibility(name, nodes.back().get(), ResolveBoolSetting(*runtime, {
+                {"value", true}, {"script", "export function init() { thisLayer.visible = false; }"},
+            }, name));
+        }
+        runtime->Tick(1.0 / 60.0);
+        ScriptEngine::ResetCallCounts();
+        for (int frame = 0; frame < kFrames; ++frame) runtime->Tick(1.0 / 60.0);
+        counts[skip ? 0 : 1] = ScriptEngine::GetCallCounts();
+        for (const auto& node : nodes) EXPECT_FALSE(node->Visible()) << "init's write stands";
+        EXPECT_EQ(runtime->scriptErrorCount(), 0u);
+    }
+    EXPECT_EQ(counts[0].skipped_evaluations, uint64_t(kPrograms * kFrames));
+    EXPECT_EQ(counts[1].skipped_evaluations, 0u);
+    EXPECT_EQ(counts[1].library_calls - counts[0].library_calls, uint64_t(kPrograms * kFrames))
+        << "every left-out frame is one call less, and nothing else changes";
+    EXPECT_LE(counts[0].library_calls, uint64_t(kFrames)) << "at most the refresh of the host values";
+}
+
+TEST(ScriptIdleFrames, ATimerAnEarlierProgramSetsRunsInTheNextProgramsFrameOfTheSameTick) {
+    for (const bool skip : { true, false }) {
+        IdleEvaluationSkip setting(skip);
+        auto runtime = CreateSceneRuntimeContext(SceneRuntimeBootstrap {});
+        auto first   = std::make_shared<SceneNode>();
+        auto second  = std::make_shared<SceneNode>();
+        auto flag    = std::make_shared<SceneNode>();
+        flag->SetVisible(false);
+        runtime->RegisterNode("first", first.get());
+        runtime->RegisterNode("second", second.get());
+        runtime->RegisterNode("flag", flag.get());
+        runtime->RegisterNodeVisibility("first", first.get(), ResolveBoolSetting(*runtime, {
+            {"value", true}, {"script", R"JS(
+let frames = 0;
+export function update(value) {
+    if (++frames === 3) setTimeout(function () { thisScene.getLayer('flag').visible = true; }, 0);
+    return value;
+}
+)JS"},
+        }, "first"));
+        // After it in the scene's order and without `update`: its frame is the first call after
+        // the timer was set, so the timer runs there, before the tick ends.
+        runtime->RegisterNodeVisibility("second", second.get(), ResolveBoolSetting(*runtime, {
+            {"value", true}, {"script", "export function init() {}"},
+        }, "second"));
+        runtime->Tick(1.0 / 60.0);
+        runtime->Tick(1.0 / 60.0);
+        EXPECT_FALSE(flag->Visible());
+        runtime->Tick(1.0 / 60.0);
+        EXPECT_TRUE(flag->Visible()) << (skip ? "with" : "without") << " the skip";
+        EXPECT_EQ(runtime->scriptErrorCount(), 0u);
+    }
+}
+
+TEST(ScriptIdleFrames, ATimerSetInInitFiresOnTheSameFrameWithOrWithoutTheSkip) {
+    int fired_at[2] = { -1, -1 };
+    for (const bool skip : { true, false }) {
+        IdleEvaluationSkip setting(skip);
+        auto runtime = CreateSceneRuntimeContext(SceneRuntimeBootstrap {});
+        auto node    = std::make_shared<SceneNode>();
+        runtime->RegisterNode("timer", node.get());
+        runtime->RegisterNodeVisibility("timer", node.get(), ResolveBoolSetting(*runtime, {
+            {"value", true}, {"script", R"JS(
+export function init() {
+    thisLayer.visible = false;
+    setTimeout(function () { thisLayer.visible = true; }, 100);
+}
+)JS"},
+        }, "timer"));
+        ScriptEngine::ResetCallCounts();
+        int& fired = fired_at[skip ? 0 : 1];
+        for (int frame = 0; frame < 12 && fired < 0; ++frame) {
+            runtime->Tick(1.0 / 60.0);
+            if (node->Visible()) fired = frame;
+        }
+        if (skip) EXPECT_GT(ScriptEngine::GetCallCounts().skipped_evaluations, 0u);
+        EXPECT_EQ(runtime->scriptErrorCount(), 0u);
+    }
+    EXPECT_GE(fired_at[0], 0) << "the timer never fired";
+    EXPECT_EQ(fired_at[0], fired_at[1]);
+}
+
+TEST(ScriptIdleFrames, RegisteredAudioBuffersKeepEveryFrameOfAProgramWithoutUpdate) {
+    IdleEvaluationSkip setting(true);
+    auto runtime = CreateSceneRuntimeContext(SceneRuntimeBootstrap {});
+    auto node    = std::make_shared<SceneNode>();
+    runtime->RegisterNode("bars", node.get());
+    runtime->RegisterNodeVisibility("bars", node.get(), ResolveBoolSetting(*runtime, {
+        {"value", true}, {"script", R"JS(
+let audio;
+export function init() { audio = engine.registerAudioBuffers(engine.AUDIO_RESOLUTION_16); }
+)JS"},
+    }, "bars"));
+    runtime->Tick(1.0 / 60.0);
+    ScriptEngine::ResetCallCounts();
+    for (int frame = 0; frame < 5; ++frame) runtime->Tick(1.0 / 60.0);
+    EXPECT_EQ(ScriptEngine::GetCallCounts().skipped_evaluations, 0u)
+        << "each frame refreshes the buffers the script reads";
+    EXPECT_EQ(runtime->scriptErrorCount(), 0u);
+}
+
+TEST(ScriptIdleFrames, ALeftOutFrameStillGivesTheProgramItsParametersAgain) {
+    for (const bool skip : { true, false }) {
+        IdleEvaluationSkip setting(skip);
+        auto runtime = CreateSceneRuntimeContext(SceneRuntimeBootstrap {});
+        auto button  = std::make_shared<SceneNode>();
+        auto probe   = std::make_shared<SceneNode>();
+        runtime->RegisterNode("button", button.get());
+        runtime->RegisterNode("probe", probe.get());
+        runtime->RegisterNodeVisibility("button", button.get(), ResolveBoolSetting(*runtime, {
+            {"value", true},
+            {"scriptproperties", {{"speed", {{"value", 5.0}}}}},
+            {"script", R"JS(
+export var scriptProperties = createScriptProperties().addSlider({name: 'speed', value: 1}).finish();
+export function init() { scriptProperties.speed = 99; }
+export function cursorClick() { thisScene.getLayer('probe').origin = new Vec3(scriptProperties.speed, 0, 0); }
+)JS"},
+        }, "button"));
+        runtime->Tick(1.0 / 60.0);
+        runtime->Tick(1.0 / 60.0);
+        runtime->DispatchCursorClick();
+        EXPECT_FLOAT_EQ(probe->Translate().x(), 5.0f)
+            << "the frame wrote the parameter over what init left, " << (skip ? "with" : "without")
+            << " the skip";
+        EXPECT_EQ(runtime->scriptErrorCount(), 0u);
+    }
+}
+
 TEST(ScriptRuntimeCompat, UpdateExceptionAndBooleanObjectKeepLiveNativeWrites) {
     for (const auto& ending : { std::string("throw new Error('expected update failure');"),
                                std::string("return new Boolean(false);") }) {
@@ -7511,6 +7663,28 @@ export function update(value) { for (;;) {} }
     EXPECT_FALSE(program->Valid());
     // Three interrupted calls and one error naming the program.
     EXPECT_EQ(runtime->scriptErrorCount(), 4u);
+}
+
+TEST(ScriptHostLimits, AFrameBetweenInterruptedHandlersClearsTheirStrikesEvenWhenItIsLeftOut) {
+    for (const bool skip : { true, false }) {
+        IdleEvaluationSkip setting(skip);
+        Scene scene;
+        auto  runtime = MakeRuntimeWithScene(scene);
+        runtime->scriptEngine().SetLimits(QuickLimits());
+        auto program = runtime->scriptEngine().CreatePropertyScriptProgram(runtime.get(), R"JS(
+export function cursorClick() { for (;;) {} }
+)JS", "looper", {}, DynamicValue(1.0f), runtime->hostContext());
+        ASSERT_NE(program, nullptr);
+        ScriptHostContext host = runtime->hostContext();
+        // Four interrupted clicks, each followed by a frame that completes: never three in a row.
+        for (int round = 0; round < 4; ++round) {
+            program->DispatchCursorClick(host);
+            host.runtime_seconds += 1.0 / 60.0;
+            EXPECT_EQ(program->Evaluate(host, DynamicValue(1.0f)), nullptr);
+        }
+        EXPECT_TRUE(program->Valid()) << (skip ? "with" : "without") << " the skip";
+        EXPECT_EQ(runtime->scriptErrorCount(), 4u);
+    }
 }
 
 TEST(ScriptHostLimits, HugeAllocationAndASelfRearmingThrowingTimerAreErrorsNotHangs) {

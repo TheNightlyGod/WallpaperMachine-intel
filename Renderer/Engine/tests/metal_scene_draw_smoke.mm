@@ -13,7 +13,9 @@
 /// Creates only private GPU textures and an offscreen layer. No window, no
 /// desktop, no audio device, no screen capture.
 
+#include "support/command_buffer_gpu_time.hpp"
 #include "support/font_assets.hpp"
+#include "support/scene_quality_environment.hpp"
 #include "Runtime/RuntimeImageSource.hpp"
 #include "MetalRender/MetalBackendRouter.hpp"
 #include "MetalRender/MetalCapability.hpp"
@@ -32,6 +34,7 @@
 #include "Project/ProjectProperties.hpp"
 #include "Runtime/SceneRuntimeContext.hpp"
 #include "Runtime/VirtualAssetRegistry.hpp"
+#include "Scripting/ScriptEngine.hpp"
 #include "Scene/Scene.h"
 #include "Scene/SceneBackendSelection.hpp"
 #include "Scene/SceneUpdateDemand.hpp"
@@ -46,6 +49,7 @@
 #include "WPShaderValueUpdater.hpp"
 #include "RenderGraph/RenderGraph.hpp"
 #include "RenderCommon/ScenePass.hpp"
+#include "RenderCommon/SceneRaster.hpp"
 #include "RenderCommon/SceneToRenderGraph.hpp"
 #include "RenderCommon/StaticSubgraphCache.hpp"
 #include "Shader/SceneMetalVariants.hpp"
@@ -63,6 +67,7 @@
 
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
+#include <CommonCrypto/CommonDigest.h>
 
 
 #include <gtest/gtest.h>
@@ -88,6 +93,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -377,6 +383,13 @@ struct RebuildWatch
     /// one, `rebuilt_at` only the first) and render target resizes.
     int rebuilds { 0 };
     int resizes { 0 };
+    /// Draws whose final composition is wanted on their own, whatever the rest of the run
+    /// does: each draw `sample_at` says yes to is captured through the poster path, waited
+    /// for before the next draw begins, and handed to `sampled` with its index. A draw that
+    /// left the picture as it was has its poster served from that picture, as the host's
+    /// mailbox serves an idle wallpaper's.
+    std::function<bool(int)>                          sample_at;
+    std::function<void(int, const RendererPicture&)> sampled;
 };
 
 /// Draws `scene` with Native Metal on a layer no
@@ -398,7 +411,8 @@ RendererPicture DrawWithRenderer(Scene& scene, uint32_t width, uint32_t height,
                                  double display_scale_factor = 1.0,
                                  tests::SceneProbeControls* input = nullptr,
                                  RendererCounters* counters = nullptr,
-                                 RebuildWatch* watch = nullptr)
+                                 RebuildWatch* watch = nullptr,
+                                 WallpaperScalingMode scaling = WallpaperScalingMode::FILL)
 {
     RendererPicture picture;
     @autoreleasepool {
@@ -453,10 +467,11 @@ RendererPicture DrawWithRenderer(Scene& scene, uint32_t width, uint32_t height,
             return picture;
         }
         // As the host presents a wallpaper: the scaling layout crops the
-        // finished picture to the surface; the camera keeps the canvas's shape,
-        // since the host changes it only for an explicit fill mode, which the
-        // app never sends. Narrowing it too would crop twice.
-        render.SetWallpaperScalingMode(WallpaperScalingMode::FILL);
+        // finished picture to the surface (fill, unless the caller pushes another
+        // mode); the camera keeps the canvas's shape, since the host changes it
+        // only for an explicit fill mode, which the app never sends. Narrowing it
+        // too would crop twice.
+        render.SetWallpaperScalingMode(scaling);
         render.SetWallpaperScalingFactor(1.0);
         render.SetWallpaperFraming(WallpaperFraming {});
         render.SetWallpaperHorizontalFlip(false);
@@ -516,6 +531,8 @@ RendererPicture DrawWithRenderer(Scene& scene, uint32_t width, uint32_t height,
             }
             const bool looking = watch != nullptr && watch->shown && watch->accepted_at < 0 &&
                                  frame >= watch->look_from;
+            const bool sampling =
+                watch != nullptr && watch->sample_at && watch->sampled && watch->sample_at(frame);
             uint64_t   posters_before = 0;
             {
                 std::lock_guard lock(poster_mutex);
@@ -525,7 +542,7 @@ RendererPicture DrawWithRenderer(Scene& scene, uint32_t width, uint32_t height,
                 final_requested      = true;
                 final_posters_before = posters_before;
             }
-            if (frame == last_frame || looking) wanted = true;
+            if (frame == last_frame || looking || sampling) wanted = true;
             // The host does this after scripts: visibility and explicit particle
             // emission/clearing may have changed since the ordinary simulation.
             scene.paritileSys->RebuildVisibleMeshes();
@@ -550,8 +567,28 @@ RendererPicture DrawWithRenderer(Scene& scene, uint32_t width, uint32_t height,
                 }
                 if (! seen.rgb.empty() && watch->shown(seen)) watch->accepted_at = frame;
             }
+            if (sampling && picture.error.empty()) {
+                // A draw that encoded nothing new left the request pending: the host serves
+                // that from the picture already made, and so does this.
+                if (wanted.load()) (void)render.ServicePosterRequest(scene);
+                RendererPicture seen;
+                {
+                    std::unique_lock lock(poster_mutex);
+                    if (poster_arrived.wait_for(lock, std::chrono::seconds(30),
+                                                [&] { return posters > posters_before; })) {
+                        seen.rgb    = picture.rgb;
+                        seen.width  = picture.width;
+                        seen.height = picture.height;
+                    }
+                }
+                if (seen.rgb.empty()) {
+                    picture.error = "draw " + std::to_string(frame) + " delivered no picture";
+                } else {
+                    watch->sampled(frame, seen);
+                }
+            }
         }
-        if (final_requested && watch != nullptr && watch->shown) {
+        if (final_requested && watch != nullptr && (watch->shown || watch->sample_at)) {
             // Earlier posters filled the picture already: the last one is waited for, or the
             // run has no picture rather than an old one.
             std::unique_lock lock(poster_mutex);
@@ -7688,6 +7725,248 @@ TEST_F(MetalSceneDraw, AFrameThatWouldRepeatThePictureTakesNoDrawableAndPresents
     RendererCounters::SetEnabled(false);
 }
 
+TEST_F(MetalSceneDraw, AFrameThatCannotBeComposedIsNeitherPresentedNorRememberedAsShown)
+{
+    // A drawable nothing composed into holds whatever it held frames ago, or
+    // nothing when it is new. Presenting it shows that, and remembering the
+    // present as the picture on the layer would then keep it there: a still
+    // scene's next frames match the record and present nothing. The frame has
+    // to fail instead, with nothing presented and nothing remembered, so the
+    // frame after it draws the picture again.
+    const auto  project = WriteFixture(root_ / "project");
+    LoadedScene loaded;
+    std::string error;
+    ASSERT_TRUE(LoadScene(project, root_ / "cache", loaded, error)) << error;
+    ASSERT_FALSE(SelectSceneBackend(*loaded.scene).failed());
+
+    RendererCounters::SetEnabled(true);
+    RendererCounters counters;
+    @autoreleasepool {
+        CAMetalLayer* layer   = [CAMetalLayer layer];
+        layer.device          = MTLCreateSystemDefaultDevice();
+        layer.pixelFormat     = MTLPixelFormatBGRA8Unorm;
+        layer.drawableSize    = CGSizeMake(640, 360);
+
+        MetalRender         render;
+        MetalRenderInitInfo info {
+            .metal_layer          = (__bridge void*)layer,
+            .width                = 640,
+            .height               = 360,
+            .render_width         = 640,
+            .render_height        = 360,
+            .display_scale_factor = 1.0,
+        };
+        ASSERT_TRUE(render.init(info)) << render.lastError();
+        render.SetCounters(&counters);
+        auto graph = sceneToRenderGraph(*loaded.scene);
+        ASSERT_NE(graph, nullptr);
+        ASSERT_TRUE(render.compileRenderGraph(*loaded.scene, *graph)) << render.lastError();
+        render.UpdateCameraFillMode(*loaded.scene, FillMode::ASPECTFIT);
+
+        const auto requests = [&]() { return counters.Get(OWE_RC_PRESENT_REQUESTS); };
+        bool presented = false;
+        ASSERT_TRUE(render.drawFrame(*loaded.scene, &presented)) << render.lastError();
+        ASSERT_TRUE(presented);
+        ASSERT_TRUE(render.drawFrame(*loaded.scene, &presented)) << render.lastError();
+        ASSERT_FALSE(presented) << "the still scene's second frame repeats the first";
+        ASSERT_EQ(requests(), 1u);
+
+        // Something the composition reads changed, so this frame takes a
+        // drawable and composes; the composition fails.
+        render.InvalidatePresentedFrame();
+        render.RefuseNextCompositionForTests();
+        presented = true;
+        EXPECT_FALSE(render.drawFrame(*loaded.scene, &presented))
+            << "a frame that composed nothing reported success";
+        EXPECT_FALSE(presented) << "a drawable nothing was composed into was presented";
+        EXPECT_EQ(requests(), 1u) << "an uncomposed drawable was counted as a present request";
+        EXPECT_FALSE(render.lastError().empty()) << "the failure carries no reason";
+
+        // Nothing of the failed frame is remembered: the next one draws and
+        // presents the picture, and only the one after that repeats it.
+        EXPECT_TRUE(render.drawFrame(*loaded.scene, &presented)) << render.lastError();
+        EXPECT_TRUE(presented) << "the failed frame's present was remembered as the picture on the layer";
+        EXPECT_EQ(requests(), 2u);
+        EXPECT_TRUE(render.drawFrame(*loaded.scene, &presented)) << render.lastError();
+        EXPECT_FALSE(presented) << "the recovered picture is not recognised as unchanged";
+
+        render.destroy();
+    }
+    RendererCounters::SetEnabled(false);
+}
+
+TEST_F(MetalSceneDraw, APresentHoldsTheFrameOnlyWhilePacing)
+{
+    // The frame clock's hold reaches the present as a minimum time the frame
+    // on screen stays, and only while pacing is on; a zero hold is a plain
+    // present. A layer no window owns shows nothing, so when a held frame was
+    // shown cannot be seen here, only that the present asked for the hold, that
+    // held presents neither stall the next drawable nor lose their reports.
+    const auto  project = WriteFixture(root_ / "project");
+    LoadedScene loaded;
+    std::string error;
+    ASSERT_TRUE(LoadScene(project, root_ / "cache", loaded, error)) << error;
+    ASSERT_FALSE(SelectSceneBackend(*loaded.scene).failed());
+
+    const bool pacing = MetalRender::SetPresentPacingForTests(true);
+    RendererCounters counters;
+    RendererCounters::SetEnabled(true);
+    @autoreleasepool {
+        CAMetalLayer* layer   = [CAMetalLayer layer];
+        layer.device          = MTLCreateSystemDefaultDevice();
+        layer.pixelFormat     = MTLPixelFormatBGRA8Unorm;
+        layer.drawableSize    = CGSizeMake(640, 360);
+
+        MetalRender         render;
+        MetalRenderInitInfo info {
+            .metal_layer          = (__bridge void*)layer,
+            .width                = 640,
+            .height               = 360,
+            .render_width         = 640,
+            .render_height        = 360,
+            .display_scale_factor = 1.0,
+        };
+        ASSERT_TRUE(render.init(info)) << render.lastError();
+        render.SetCounters(&counters);
+        auto graph = sceneToRenderGraph(*loaded.scene);
+        ASSERT_NE(graph, nullptr);
+        ASSERT_TRUE(render.compileRenderGraph(*loaded.scene, *graph)) << render.lastError();
+        render.UpdateCameraFillMode(*loaded.scene, FillMode::ASPECTFIT);
+
+        const auto present = [&](int frames) {
+            for (int frame = 0; frame < frames; ++frame) {
+                render.InvalidatePresentedFrame();
+                bool presented = false;
+                ASSERT_TRUE(render.drawFrame(*loaded.scene, &presented)) << render.lastError();
+                ASSERT_TRUE(presented);
+            }
+        };
+
+        present(2);
+        EXPECT_EQ(render.HeldPresentsForTests(), 0u) << "no hold was set";
+        EXPECT_EQ(render.LastPresentHoldForTests(), std::chrono::nanoseconds::zero());
+
+        // 60 fps on a 120 Hz display.
+        const auto hold = std::chrono::nanoseconds(14'583'335);
+        render.SetPresentHold(hold);
+        const auto started = std::chrono::steady_clock::now();
+        present(8);
+        const auto took = std::chrono::steady_clock::now() - started;
+        EXPECT_EQ(render.HeldPresentsForTests(), 8u);
+        EXPECT_EQ(render.LastPresentHoldForTests(), hold);
+        // Eight held frames on a layer that shows none: a drawable a held frame
+        // kept would make each later frame wait a second for the next.
+        EXPECT_LT(took, std::chrono::seconds(2)) << "held presents stalled the drawable queue";
+
+        MetalRender::SetPresentPacingForTests(false);
+        present(2);
+        EXPECT_EQ(render.HeldPresentsForTests(), 8u) << "pacing off still held a present";
+        EXPECT_EQ(render.LastPresentHoldForTests(), std::chrono::nanoseconds::zero());
+        MetalRender::SetPresentPacingForTests(true);
+
+        render.SetPresentHold(std::chrono::nanoseconds::zero());
+        present(1);
+        EXPECT_EQ(render.HeldPresentsForTests(), 8u) << "a zero hold is a plain present";
+
+        // Every present still reports, held or not: here, as dropped.
+        const auto reports = [&]() {
+            return counters.Get(OWE_RC_PRESENTED_FRAMES) + counters.Get(OWE_RC_PRESENTS_DROPPED);
+        };
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (reports() < 13u && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        EXPECT_EQ(reports(), 13u);
+        EXPECT_EQ(counters.Get(OWE_RC_PRESENT_REQUESTS), 13u);
+
+        render.destroy();
+    }
+    RendererCounters::SetEnabled(false);
+    MetalRender::SetPresentPacingForTests(pacing);
+}
+
+TEST_F(MetalSceneDraw, EveryPresentedDrawableReportsWhetherItWasShownOnlyWhileCounting)
+{
+    // Each present asks its drawable to report back: shown, or dropped before
+    // any refresh showed it. A layer no window owns is never shown, so every
+    // report here is a drop, and every requested present reports exactly once.
+    // With counting off nothing is asked for, so frames presented then never
+    // report into a later window.
+    const auto  project = WriteFixture(root_ / "project");
+    LoadedScene loaded;
+    std::string error;
+    ASSERT_TRUE(LoadScene(project, root_ / "cache", loaded, error)) << error;
+    ASSERT_FALSE(SelectSceneBackend(*loaded.scene).failed());
+
+    RendererCounters counters;
+    @autoreleasepool {
+        CAMetalLayer* layer   = [CAMetalLayer layer];
+        layer.device          = MTLCreateSystemDefaultDevice();
+        layer.pixelFormat     = MTLPixelFormatBGRA8Unorm;
+        layer.drawableSize    = CGSizeMake(640, 360);
+
+        MetalRender         render;
+        MetalRenderInitInfo info {
+            .metal_layer          = (__bridge void*)layer,
+            .width                = 640,
+            .height               = 360,
+            .render_width         = 640,
+            .render_height        = 360,
+            .display_scale_factor = 1.0,
+        };
+        ASSERT_TRUE(render.init(info)) << render.lastError();
+        render.SetCounters(&counters);
+        auto graph = sceneToRenderGraph(*loaded.scene);
+        ASSERT_NE(graph, nullptr);
+        ASSERT_TRUE(render.compileRenderGraph(*loaded.scene, *graph)) << render.lastError();
+        render.UpdateCameraFillMode(*loaded.scene, FillMode::ASPECTFIT);
+
+        const auto present = [&](int frames) {
+            for (int frame = 0; frame < frames; ++frame) {
+                render.InvalidatePresentedFrame();
+                bool presented = false;
+                ASSERT_TRUE(render.drawFrame(*loaded.scene, &presented)) << render.lastError();
+                ASSERT_TRUE(presented);
+            }
+        };
+        const auto reports = [&]() {
+            return counters.Get(OWE_RC_PRESENTED_FRAMES) + counters.Get(OWE_RC_PRESENTS_DROPPED);
+        };
+        const auto settle = [&](uint64_t expected) {
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            while (reports() < expected && std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+            // Anything beyond the expected count would arrive by now as well.
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        };
+
+        ASSERT_FALSE(RendererCounters::Enabled());
+        present(4);
+        RendererCounters::SetEnabled(true);
+        // Longer than the reports of the frames below take to arrive.
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        EXPECT_EQ(reports(), 0u) << "a frame presented while counting was off reported into the window";
+
+        present(6);
+        EXPECT_EQ(counters.Get(OWE_RC_PRESENT_REQUESTS), 6u);
+        settle(6);
+        EXPECT_EQ(reports(), 6u) << "every requested present reports exactly once";
+        EXPECT_EQ(counters.Get(OWE_RC_PRESENTED_FRAMES), 0u) << "a layer no window owns showed a frame";
+        EXPECT_EQ(counters.Get(OWE_RC_PRESENTS_DROPPED), 6u);
+        // No display: its refresh is unknown, so no gap is guessed.
+        EXPECT_EQ(counters.Get(OWE_RC_VSYNC_PERIOD_MICROS), 0u);
+        EXPECT_EQ(counters.Get(OWE_RC_PRESENT_GAPS_1_VSYNC) + counters.Get(OWE_RC_PRESENT_GAPS_2_VSYNC) +
+                      counters.Get(OWE_RC_PRESENT_GAPS_3PLUS_VSYNC),
+                  0u);
+
+        render.destroy();
+    }
+    // Destroyed with reports possibly still on their way: none may reach the
+    // counters afterwards, and none does with counting off again either.
+    RendererCounters::SetEnabled(false);
+}
+
 TEST_F(MetalSceneDraw, APannedWallpaperIsComposedAtTheChosenPositionInTheDrawableAndThePoster)
 {
     // A 3:2 scene fitted into a square layer leaves bars above and below. The
@@ -8636,6 +8915,285 @@ TEST_F(MetalSceneDraw, AVideoLayerKeepsConvertingWhileTheSettingIsOff)
 namespace
 {
 
+/// What one renderer did on one tick of the video comparisons below.
+struct VideoTick
+{
+    bool                 presented { false };
+    uint64_t             executed { 0 };
+    uint64_t             skipped { 0 };
+    uint64_t             imports { 0 };
+    uint64_t             generation { 0 };
+    std::vector<uint8_t> pixels;
+};
+
+/// One video scene on an offscreen layer of its own, with counters of its own.
+struct CountedVideoScene
+{
+    LoadedScene                      loaded;
+    CAMetalLayer*                    layer { nil };
+    /// Ahead of the renderer, which reports into it until it is gone.
+    RendererCounters                 counters;
+    MetalRender                      render;
+    std::unique_ptr<rg::RenderGraph> graph;
+    /// The scene optimisation setting this scene is drawn under. The setting
+    /// is process-wide, so it is set around each of this scene's draws.
+    bool                             optimised { true };
+
+    bool Open(const std::filesystem::path& project, const std::filesystem::path& cache, bool planes,
+              std::string* error)
+    {
+        if (! LoadScene(project, cache, loaded, *error)) return false;
+        if (planes && ! SettleVariantTranslation(*loaded.scene, error)) return false;
+        if (SelectSceneBackend(*loaded.scene).failed()) {
+            *error = "the scene was not given to native Metal";
+            return false;
+        }
+        layer                 = [CAMetalLayer layer];
+        layer.device          = MTLCreateSystemDefaultDevice();
+        layer.pixelFormat     = MTLPixelFormatBGRA8Unorm;
+        layer.drawableSize    = CGSizeMake(kVideoWidth, kVideoHeight);
+        layer.framebufferOnly = NO;
+        if (! render.init(MetalRenderInitInfo {
+                .metal_layer = (__bridge void*)layer, .width = kVideoWidth, .height = kVideoHeight,
+                .render_width = kVideoWidth, .render_height = kVideoHeight,
+                .display_scale_factor = 1.0 })) {
+            *error = render.lastError();
+            return false;
+        }
+        render.SetCounters(&counters);
+        graph = sceneToRenderGraph(*loaded.scene);
+        if (graph == nullptr || ! render.compileRenderGraph(*loaded.scene, *graph)) {
+            *error = render.lastError();
+            return false;
+        }
+        render.UpdateCameraFillMode(*loaded.scene, FillMode::ASPECTFIT);
+        return true;
+    }
+
+    VideoTick Tick()
+    {
+        wallpaper::render::SetSceneOptimizationEnabled(optimised);
+        VideoTick tick;
+        const auto imports = counters.Get(OWE_RC_VIDEO_IMPORTS);
+        const auto before  = wallpaper::render::CurrentSceneOptimizationTotals();
+        EXPECT_TRUE(render.drawFrame(*loaded.scene, &tick.presented)) << render.lastError();
+        const auto after = wallpaper::render::CurrentSceneOptimizationTotals();
+        wallpaper::render::SetSceneOptimizationEnabled(true);
+        tick.executed   = after.executed_passes - before.executed_passes;
+        tick.skipped    = after.skipped_passes - before.skipped_passes;
+        tick.imports    = counters.Get(OWE_RC_VIDEO_IMPORTS) - imports;
+        tick.generation = counters.Get(OWE_RC_VIDEO_SELECTED_GENERATION);
+        tick.pixels     = ReadOutput(render, *loaded.scene);
+        return tick;
+    }
+
+    /// One tick of the scene's clock, in the wallpaper's order: the runtime's
+    /// clocks (a video's among them) before the draw, the frame time after.
+    void Advance()
+    {
+        if (loaded.scene->runtime != nullptr) loaded.scene->runtime->Tick(1.0 / 60.0);
+        loaded.scene->PassFrameTime(1.0 / 60.0);
+    }
+
+    bool DrawUntilPath(SceneVideoPath wanted)
+    {
+        wallpaper::render::SetSceneOptimizationEnabled(optimised);
+        const bool reached = DrawUntilVideoPath(render, *loaded.scene, wanted);
+        wallpaper::render::SetSceneOptimizationEnabled(true);
+        return reached;
+    }
+};
+
+/// A 30 fps clip on a 60 Hz scene clock, drawn by two renderers side by side:
+/// one with scene optimisation on, one with it off. The clip's frames each
+/// differ, and the scene has nothing else that moves.
+///
+/// On every tick that took no video frame, the optimised renderer must draw
+/// nothing and present nothing; on every tick that took one, it must draw and
+/// present. Every picture it holds must be byte for byte the one the other
+/// renderer drew for the same decoded frame.
+void ExpectVideoFramesShownAgainToBeReused(const std::filesystem::path& root, bool planes)
+{
+    const auto directory = root / (planes ? "video-reuse-planes" : "video-reuse-converted");
+    // Three seconds, so the two seconds drawn below never reach the loop.
+    const auto project = WriteVideoFixture(
+        directory, kVideoWidth, kVideoHeight, std::nullopt, [](const std::filesystem::path& media) {
+            return video::testing_media::WriteSyntheticVideo(media, 3, "metal-video-reuse");
+        });
+    if (project.empty()) GTEST_SKIP() << "no hardware H.264 encoder here, so no decodable media";
+
+    const CountersOn          counting;
+    const ScopedPlaneSampling sampling(planes);
+    @autoreleasepool {
+        CountedVideoScene optimised;
+        CountedVideoScene plain;
+        plain.optimised = false;
+        std::string error;
+        ASSERT_TRUE(optimised.Open(project, directory / "cache-optimised", planes, &error)) << error;
+        ASSERT_TRUE(plain.Open(project, directory / "cache-plain", planes, &error)) << error;
+
+        const auto wanted = planes ? SceneVideoPath::Nv12Direct : SceneVideoPath::Nv12Converted;
+        const bool reached = optimised.DrawUntilPath(wanted) && plain.DrawUntilPath(wanted);
+        if (! reached && optimised.render.VideoPath() == SceneVideoPath::Bgra) {
+            GTEST_SKIP() << "the decoder produced BGRA, so the NV12 paths were not exercised";
+        }
+        ASSERT_TRUE(reached) << "the scenes never settled on " << SceneVideoPathName(wanted) << ": "
+                             << SceneVideoPathName(optimised.render.VideoPath());
+
+        auto previous = optimised.Tick();
+        (void)plain.Tick();
+        const auto seeks =
+            optimised.counters.Get(OWE_RC_VIDEO_SEEKS) + plain.counters.Get(OWE_RC_VIDEO_SEEKS);
+        const auto presents_skipped = optimised.counters.Get(OWE_RC_PRESENTS_SKIPPED_UNCHANGED);
+
+        // The decoders run on their own threads; paced at the scene's rate,
+        // each has its next frame ready when the clock reaches it.
+        std::map<uint64_t, std::vector<uint8_t>>               drawn_plain;
+        std::vector<std::pair<uint64_t, std::vector<uint8_t>>> drawn_optimised;
+        uint64_t   reused  = 0;
+        uint64_t   redrawn = 0;
+        const auto start   = std::chrono::steady_clock::now();
+        for (int frame = 1; frame <= 120; ++frame) {
+            std::this_thread::sleep_until(start + std::chrono::microseconds(frame * 1000000 / 60));
+            optimised.Advance();
+            plain.Advance();
+            auto with    = optimised.Tick();
+            auto without = plain.Tick();
+            EXPECT_TRUE(without.presented)
+                << "frame " << frame << ": optimisation off skipped a present";
+            if (with.imports == 0) {
+                ++reused;
+                EXPECT_EQ(with.executed, 0u)
+                    << "frame " << frame << ": a video frame shown again was drawn again";
+                EXPECT_GT(with.skipped, 0u) << "frame " << frame;
+                EXPECT_FALSE(with.presented)
+                    << "frame " << frame << ": a frame that repeats the picture was presented";
+                EXPECT_EQ(with.generation, previous.generation) << "frame " << frame;
+                EXPECT_TRUE(with.pixels == previous.pixels)
+                    << "frame " << frame << ": reuse changed the picture";
+            } else {
+                ++redrawn;
+                EXPECT_GT(with.executed, 0u)
+                    << "frame " << frame << ": a new video frame was not drawn";
+                EXPECT_TRUE(with.presented)
+                    << "frame " << frame << ": a new video frame was not presented";
+            }
+            drawn_plain[without.generation] = std::move(without.pixels);
+            drawn_optimised.emplace_back(with.generation, with.pixels);
+            previous = std::move(with);
+        }
+        EXPECT_GT(reused, 0u) << "no tick repeated a frame of a 30 fps clip on a 60 Hz clock";
+        EXPECT_GT(redrawn, 0u) << "the clip never advanced";
+        EXPECT_EQ(optimised.counters.Get(OWE_RC_PRESENTS_SKIPPED_UNCHANGED) - presents_skipped,
+                  reused)
+            << "every tick that took no video frame repeats the picture and presents nothing";
+
+        // Generations count decoded frames, so the two decoders agree on what
+        // each one is until either seeks, which the pacing is there to avoid.
+        if (optimised.counters.Get(OWE_RC_VIDEO_SEEKS) + plain.counters.Get(OWE_RC_VIDEO_SEEKS) !=
+            seeks) {
+            GTEST_SKIP() << "a decoder fell behind and seeked, so its generations no longer name "
+                            "the same frames as the other's; reuse itself was checked";
+        }
+        std::size_t compared = 0;
+        for (const auto& [generation, pixels] : drawn_optimised) {
+            const auto found = drawn_plain.find(generation);
+            if (found == drawn_plain.end()) continue;
+            ++compared;
+            EXPECT_TRUE(pixels == found->second)
+                << "generation " << generation
+                << " differs from the picture drawn with scene optimisation off";
+        }
+        EXPECT_GT(compared, drawn_optimised.size() / 2)
+            << "too few frames were shown by both renderers to compare them";
+        std::cout << "[ VIDEO REUSE ] ticks=" << drawn_optimised.size() << " reused=" << reused
+                  << " redrawn=" << redrawn << " compared_with_optimisation_off=" << compared
+                  << std::endl;
+
+        optimised.render.destroy();
+        plain.render.destroy();
+    }
+}
+
+} // namespace
+
+TEST_F(MetalSceneDraw, AVideoFrameShownAgainIsReusedAndANewOneRedrawsOnTheConvertedPath)
+{
+    ExpectVideoFramesShownAgainToBeReused(root_, false);
+}
+
+TEST_F(MetalSceneDraw, AVideoFrameShownAgainIsReusedAndANewOneRedrawsOnTheDirectPlanePath)
+{
+    ExpectVideoFramesShownAgainToBeReused(root_, true);
+}
+
+TEST_F(MetalSceneDraw, APausedVideoSceneStopsDrawingOnlyWhileVideoReuseIsOn)
+{
+    // The negative half: with the switch off a pass that samples a video is
+    // redrawn and presented every frame, as before, even with nothing to show
+    // that it has not shown. On, the same paused scene settles at once.
+    const auto directory = root_ / "video-reuse-paused";
+    const auto project   = WriteVideoFixture(directory, kVideoWidth, kVideoHeight);
+    if (project.empty()) GTEST_SKIP() << "no hardware H.264 encoder here, so no decodable media";
+
+    const CountersOn          counting;
+    const ScopedPlaneSampling sampling(false);
+    for (const bool reuse : { false, true }) {
+        SCOPED_TRACE(reuse ? "video reuse on" : "video reuse off");
+        MetalRender::SetVideoReuseForTests(reuse);
+        @autoreleasepool {
+            CountedVideoScene scene;
+            std::string       error;
+            ASSERT_TRUE(scene.Open(project, directory / (reuse ? "cache-on" : "cache-off"), false,
+                                   &error))
+                << error;
+            // Paused, with the video's clock held: once the frames the
+            // decoder had due at the start are taken, none follows.
+            scene.render.SetVideoPlaybackPaused(true);
+            VideoTick held;
+            bool      settled = false;
+            for (int frame = 0; frame < 32 && ! settled; ++frame) {
+                held    = scene.Tick();
+                settled = frame > 0 && held.imports == 0;
+            }
+            ASSERT_TRUE(settled) << "the paused video kept taking frames";
+            for (int frame = 0; frame < 5; ++frame) {
+                scene.loaded.scene->PassFrameTime(1.0 / 60.0);
+                const auto tick = scene.Tick();
+                EXPECT_EQ(tick.imports, 0u) << "a paused video took a frame";
+                EXPECT_TRUE(tick.pixels == held.pixels);
+                if (reuse) {
+                    EXPECT_EQ(tick.executed, 0u) << "frame " << frame;
+                    EXPECT_FALSE(tick.presented) << "frame " << frame;
+                } else {
+                    EXPECT_GT(tick.executed, 0u) << "frame " << frame;
+                    EXPECT_EQ(tick.skipped, 0u) << "frame " << frame;
+                    EXPECT_TRUE(tick.presented) << "frame " << frame;
+                }
+            }
+            // Playing again, the next frame the clock reaches is drawn.
+            scene.render.SetVideoPlaybackPaused(false);
+            bool advanced = false;
+            for (int frame = 0; frame < 30 && ! advanced; ++frame) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(16));
+                scene.Advance();
+                const auto tick = scene.Tick();
+                if (tick.imports == 0) continue;
+                advanced = true;
+                EXPECT_GT(tick.executed, 0u);
+                EXPECT_TRUE(tick.presented);
+                EXPECT_FALSE(tick.pixels == held.pixels) << "the new frame did not reach the picture";
+            }
+            EXPECT_TRUE(advanced) << "the resumed video never took a frame";
+            scene.render.destroy();
+        }
+    }
+    MetalRender::SetVideoReuseForTests(true);
+}
+
+namespace
+{
+
 /// Draws one decoded frame twice -- once pre-converted, once sampled directly --
 /// and returns the per-channel differences.
 ///
@@ -9129,6 +9687,333 @@ void AdvanceSceneFrame(MetalRender& render, Scene& scene)
 }
 
 } // namespace
+
+// ---------------------------------------------------------------------------
+// Layer-local reuse samples: a moving layer or a shaking camera and a still chain
+
+namespace
+{
+
+constexpr const char* kStillCard =
+    "varying vec2 v_TexCoord;\n"
+    "void main() { gl_FragColor = vec4(v_TexCoord.x, v_TexCoord.y, 0.25, 1.0); }\n";
+constexpr const char* kStillEffect =
+    "uniform sampler2D g_Texture0;\nvarying vec2 v_TexCoord;\n"
+    "void main() { vec4 c = texSample2D(g_Texture0, v_TexCoord);\n"
+    "  gl_FragColor = vec4(c.g, c.r, c.b * 2.0, c.a); }\n";
+
+/// A layer under a group, drawn through two effects: its card (`card_fragment`) and the first
+/// effect (`first_fragment`) fill the layer's own buffers, the second effect puts the picture on
+/// the scene where the layer sits. With `shake` the scene camera shakes. With `framed` two plain
+/// cards are drawn straight into the scene's image, one before the layer and one after it.
+std::filesystem::path WriteStillChainFixture(const std::filesystem::path& root, bool shake,
+                                             const std::string& card_fragment,
+                                             const std::string& first_fragment, bool framed = false)
+{
+    const auto        project = WriteFixture(root);
+    const std::string vertex =
+        "uniform mat4 g_ModelViewProjectionMatrix;\n"
+        "attribute vec3 a_Position;\nattribute vec2 a_TexCoord;\nvarying vec2 v_TexCoord;\n"
+        "void main() { gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);\n"
+        "  v_TexCoord = a_TexCoord; }\n";
+    const auto material = [](std::string_view shader) {
+        return R"({"passes":[{"shader":")" + std::string(shader) +
+               R"(","textures":[null],"blending":"normal","cullmode":"nocull",)"
+               R"("depthtest":"disabled","depthwrite":"disabled"}]})";
+    };
+    const std::map<std::string, std::string> files {
+        { "shaders/metal_probe.frag", card_fragment },
+        { "effects/first/effect.json", R"({"name":"first","passes":[{"material":"materials/first.json"}]})" },
+        { "materials/first.json", material("chain_first") },
+        { "shaders/chain_first.vert", vertex },
+        { "shaders/chain_first.frag", first_fragment },
+        { "effects/second/effect.json", R"({"name":"second","passes":[{"material":"materials/second.json"}]})" },
+        { "materials/second.json", material("chain_second") },
+        { "shaders/chain_second.vert", vertex },
+        { "shaders/chain_second.frag",
+          "uniform sampler2D g_Texture0;\nvarying vec2 v_TexCoord;\n"
+          "void main() { gl_FragColor = texSample2D(g_Texture0, v_TexCoord); }\n" },
+    };
+    for (const auto& [name, contents] : files) {
+        const auto path = root / name;
+        std::filesystem::create_directories(path.parent_path());
+        std::ofstream(path) << contents;
+    }
+    auto layout = nlohmann::json::parse(std::ifstream(root / "layout.json"));
+    if (shake) {
+        layout["general"]["camerashake"]          = true;
+        layout["general"]["camerashakeamplitude"] = 4.0;
+        layout["general"]["camerashakespeed"]     = 3.0;
+        layout["general"]["camerashakeroughness"] = 1.0;
+    }
+    auto card       = layout["objects"][0];
+    card["parent"]  = 2;
+    card["origin"]  = { 0, 0, 0 };
+    card["effects"] = nlohmann::json::array({ { { "file", "effects/first/effect.json" }, { "visible", true } },
+                                              { { "file", "effects/second/effect.json" }, { "visible", true } } });
+    layout["objects"] = nlohmann::json::array(
+        { card, { { "id", 2 }, { "name", "group" }, { "origin", { 192, 128, 0 } } } });
+    if (framed) {
+        // The second card samples the first, plain card's composite, so the scene's objects are
+        // drawn in their own order, and the moving layer's own buffers fall between the two cards'
+        // draws into the scene image, as Wallpaper Engine orders them.
+        const std::map<std::string, std::string> link {
+            { "models/link.json", R"({"width":256,"height":192,"material":"materials/link.json"})" },
+            { "materials/link.json",
+              R"({"passes":[{"shader":"chain_second","blending":"translucent","cullmode":"nocull",)"
+              R"("depthtest":"disabled","depthwrite":"disabled","textures":["_rt_imageLayerComposite_3_a"]}]})" },
+        };
+        for (const auto& [name, contents] : link) std::ofstream(root / name) << contents;
+        const auto plain = [&layout](int id, std::string_view name, int x) {
+            auto object      = layout["objects"][0];
+            object["id"]     = id;
+            object["name"]   = name;
+            object["origin"] = { x, 128, 0 };
+            object["scale"]  = { 0.5, 0.5, 1 };
+            object.erase("parent");
+            object.erase("effects");
+            return object;
+        };
+        auto after            = plain(4, "after", 264);
+        after["image"]        = "models/link.json";
+        after["dependencies"] = { 3 };
+        layout["objects"].insert(layout["objects"].begin(), plain(3, "before", 120));
+        layout["objects"].push_back(after);
+    }
+    std::ofstream(root / "layout.json") << layout;
+    return project;
+}
+
+SceneNode* NodeNamed(SceneNode* node, std::string_view name)
+{
+    if (node == nullptr) return nullptr;
+    if (node->Name() == name) return node;
+    for (const auto& child : node->GetChildren()) {
+        if (auto* found = NodeNamed(child.get(), name)) return found;
+    }
+    return nullptr;
+}
+
+/// Every frame of one run of the still chain, how many passes each frame reused, and how many
+/// render passes it encoded into the scene's own image.
+struct ChainRun
+{
+    std::vector<std::vector<uint8_t>> frames;
+    std::vector<uint64_t>             reused;
+    std::vector<uint64_t>             scene_passes;
+};
+
+/// Draws `frames` production frames of `project` with scene optimisation `optimise` and
+/// layer-local samples `layer_local` (unset: as the renderer has them), moving the layer's group a
+/// little every frame when `move_group`. Both switches are put back as they were.
+ChainRun RunStillChain(const std::filesystem::path& project, const std::filesystem::path& cache,
+                       bool optimise, std::optional<bool> layer_local, bool move_group, int frames)
+{
+    ChainRun    run;
+    LoadedScene loaded;
+    std::string error;
+    EXPECT_TRUE(LoadScene(project, cache, loaded, error)) << error;
+    if (loaded.scene == nullptr) return run;
+    auto&      scene = *loaded.scene;
+    SceneNode* group = NodeNamed(scene.sceneGraph.get(), "group");
+    EXPECT_NE(group, nullptr);
+    if (group == nullptr) return run;
+    const bool optimised = wallpaper::render::SceneOptimizationEnabled();
+    wallpaper::render::SetSceneOptimizationEnabled(optimise);
+    // The setter answers what the switch was; the run then gets what it asks for, or that.
+    const bool layer_local_before = MetalRender::SetLayerLocalSignaturesForTests(false);
+    MetalRender::SetLayerLocalSignaturesForTests(layer_local.value_or(layer_local_before));
+    @autoreleasepool {
+        CAMetalLayer* layer   = [CAMetalLayer layer];
+        layer.device          = MTLCreateSystemDefaultDevice();
+        layer.pixelFormat     = MTLPixelFormatBGRA8Unorm;
+        layer.drawableSize    = CGSizeMake(384, 256);
+        layer.framebufferOnly = NO;
+        MetalRender render;
+        EXPECT_TRUE(render.init(MetalRenderInitInfo {
+            .metal_layer = (__bridge void*)layer, .width = 384, .height = 256,
+            .render_width = 384, .render_height = 256, .display_scale_factor = 1.0,
+        }));
+        const auto graph = sceneToRenderGraph(scene);
+        EXPECT_NE(graph, nullptr);
+        if (graph != nullptr && render.compileRenderGraph(scene, *graph)) {
+            for (int frame = 0; frame < frames; ++frame) {
+                if (move_group) {
+                    group->SetTranslate({ 192.0f + 5.0f * std::sin(0.9f * float(frame)),
+                                          128.0f + 0.5f * float(frame), 0.0f });
+                }
+                const auto before = wallpaper::render::CurrentSceneOptimizationTotals();
+                AdvanceSceneFrame(render, scene);
+                const auto after = wallpaper::render::CurrentSceneOptimizationTotals();
+                run.reused.push_back(after.skipped_passes - before.skipped_passes);
+                run.scene_passes.push_back(render.LastFrameEncodeCountsForTests().scene_output_passes);
+                run.frames.push_back(ReadOutput(render, scene));
+            }
+        } else {
+            ADD_FAILURE() << render.lastError();
+        }
+        render.destroy();
+    }
+    MetalRender::SetLayerLocalSignaturesForTests(layer_local_before);
+    wallpaper::render::SetSceneOptimizationEnabled(optimised);
+    return run;
+}
+
+/// The three runs of one fixture: reuse with layer-local samples, reuse without them, and every
+/// pass drawn every frame. Each frame of the first two must be the third's, byte for byte.
+struct ChainComparison
+{
+    ChainRun local, folded, drawn;
+};
+
+ChainComparison CompareStillChain(const std::filesystem::path& root, bool shake, bool move_group,
+                                  const std::string& card_fragment, const std::string& first_fragment)
+{
+    constexpr int frames  = 24;
+    const auto    project = WriteStillChainFixture(root, shake, card_fragment, first_fragment);
+    ChainComparison runs {
+        .local  = RunStillChain(project, root / "cache-local", true, true, move_group, frames),
+        .folded = RunStillChain(project, root / "cache-folded", true, false, move_group, frames),
+        .drawn  = RunStillChain(project, root / "cache-drawn", false, true, move_group, frames),
+    };
+    for (const auto* run : { &runs.local, &runs.folded, &runs.drawn }) {
+        EXPECT_EQ(run->frames.size(), std::size_t(frames));
+    }
+    if (runs.drawn.frames.size() != std::size_t(frames)) return runs;
+    for (int frame = 0; frame < frames; ++frame) {
+        SCOPED_TRACE("frame " + std::to_string(frame));
+        EXPECT_FALSE(runs.drawn.frames[frame].empty());
+        if (std::size_t(frame) < runs.local.frames.size())
+            EXPECT_TRUE(runs.local.frames[frame] == runs.drawn.frames[frame])
+                << "a reused pass held other pixels than drawing it again gives";
+        if (std::size_t(frame) < runs.folded.frames.size())
+            EXPECT_TRUE(runs.folded.frames[frame] == runs.drawn.frames[frame]);
+    }
+    // The fixture moves: the picture on the scene is not the same every frame.
+    EXPECT_NE(runs.drawn.frames.front(), runs.drawn.frames.back()) << "nothing moved";
+    return runs;
+}
+
+uint64_t ReusedAfterTheFirstFrame(const ChainRun& run)
+{
+    uint64_t reused = 0;
+    for (std::size_t i = 1; i < run.reused.size(); ++i) reused += run.reused[i];
+    return reused;
+}
+
+} // namespace
+
+TEST_F(MetalSceneDraw, AStillEffectChainIsReusedWhileTheCameraShakesOrItsLayerMoves)
+{
+    for (const auto [shake, move_group] : { std::pair { true, false }, std::pair { false, true },
+                                            std::pair { true, true } }) {
+        SCOPED_TRACE(std::string(shake ? "camera shake" : "") + (move_group ? " moving group" : ""));
+        const auto runs = CompareStillChain(
+            root_ / ("still-chain" + std::to_string(shake) + std::to_string(move_group)), shake, move_group,
+            kStillCard, kStillEffect);
+        if (HasFailure()) return;
+        // The card and the first effect read nothing that moves: from the second frame on both
+        // are reused every frame, while the second effect follows the layer onto the scene.
+        for (std::size_t frame = 1; frame < runs.local.reused.size(); ++frame) {
+            EXPECT_GE(runs.local.reused[frame], 2u) << "frame " << frame;
+        }
+        // Folding the layer's place and the camera into every sample reused nothing.
+        EXPECT_EQ(ReusedAfterTheFirstFrame(runs.folded), 0u);
+        EXPECT_EQ(ReusedAfterTheFirstFrame(runs.drawn), 0u);
+    }
+}
+
+TEST_F(MetalSceneDraw, AnEffectReadingWhereItsLayerIsIsRedrawnWhenTheCameraShakesOrTheLayerMoves)
+{
+    const std::string effect_mvp =
+        "uniform sampler2D g_Texture0;\nuniform mat4 g_EffectModelViewProjectionMatrix;\n"
+        "varying vec2 v_TexCoord;\n"
+        "void main() { vec4 c = texSample2D(g_Texture0, v_TexCoord);\n"
+        "  vec4 p = mul(vec4(0.25, 0.5, 0.0, 1.0), g_EffectModelViewProjectionMatrix);\n"
+        "  gl_FragColor = vec4(frac(p.x * 3.0), c.g, frac(p.y * 3.0), c.a); }\n";
+    const std::string effect_model =
+        "uniform sampler2D g_Texture0;\nuniform mat4 g_EffectModelMatrix;\nvarying vec2 v_TexCoord;\n"
+        "void main() { vec4 c = texSample2D(g_Texture0, v_TexCoord);\n"
+        "  vec4 p = mul(vec4(0.0, 0.0, 0.0, 1.0), g_EffectModelMatrix);\n"
+        "  gl_FragColor = vec4(frac(p.x / 7.0), c.g, frac(p.y / 5.0), c.a); }\n";
+    const std::string card_mvp =
+        "uniform mat4 g_EffectModelViewProjectionMatrix;\nvarying vec2 v_TexCoord;\n"
+        "void main() { vec4 p = mul(vec4(0.25, 0.5, 0.0, 1.0), g_EffectModelViewProjectionMatrix);\n"
+        "  gl_FragColor = vec4(v_TexCoord.x, frac(p.x * 3.0), frac(p.y * 3.0), 1.0); }\n";
+    struct Case
+    {
+        const char* name;
+        bool        shake;
+        bool        move_group;
+        std::string card;
+        std::string first;
+        /// Passes the layer-local samples still reuse every frame: the card, or nothing.
+        bool        card_still;
+    };
+    const std::vector<Case> cases {
+        { "effect matrix, shake", true, false, kStillCard, effect_mvp, true },
+        { "effect matrix, moving group", false, true, kStillCard, effect_mvp, true },
+        { "effect model, moving group", false, true, kStillCard, effect_model, true },
+        { "card reading the effect matrix, shake", true, false, card_mvp, kStillEffect, false },
+        { "card reading the effect matrix, moving group", false, true, card_mvp, kStillEffect, false },
+    };
+    // What the same chain reuses when nothing in it reads where the layer is, per motion.
+    std::map<std::pair<bool, bool>, uint64_t> still_reuse;
+    int                                       index = 0;
+    for (const auto& c : cases) {
+        SCOPED_TRACE(c.name);
+        const auto runs = CompareStillChain(root_ / ("moving-reader-" + std::to_string(index++)), c.shake,
+                                            c.move_group, c.card, c.first);
+        if (HasFailure()) return;
+        // The card, when it reads nothing that moves, is still reused...
+        for (std::size_t frame = 1; frame < runs.local.reused.size(); ++frame) {
+            if (c.card_still) EXPECT_GE(runs.local.reused[frame], 1u) << "frame " << frame;
+            else EXPECT_EQ(runs.local.reused[frame], 0u) << "frame " << frame;
+        }
+        // ...but the pass that reads where the layer is, and everything after it, is drawn again.
+        if (c.card_still) {
+            const auto key = std::pair { c.shake, c.move_group };
+            if (! still_reuse.contains(key)) {
+                const auto still = CompareStillChain(root_ / ("moving-reader-still-" + std::to_string(index)),
+                                                     c.shake, c.move_group, kStillCard, kStillEffect);
+                still_reuse[key] = ReusedAfterTheFirstFrame(still.local);
+            }
+            EXPECT_LT(ReusedAfterTheFirstFrame(runs.local), still_reuse[key]);
+        }
+    }
+}
+
+TEST_F(MetalSceneDraw, AMovingLayerBetweenTwoCardsIsReusedAndJoinsTheCardsRenderPasses)
+{
+    // The layer's own buffers sit between two draws into the scene's image. Drawing them closes
+    // the scene's render pass in between; the renderer as shipped reuses them while the layer
+    // moves, which lets the cards and the layer's last pass share one render pass. An Apple GPU
+    // can then blend a later draw one level apart in a texel (an M5 Pro did, in a few frames of
+    // a scene with bone-attached layers): accepted for the GPU time saved. This pins what the
+    // shipped renderer does, and that `WALLPAPER_MACHINE_LAYER_LOCAL_SIGNATURES=0` encodes the
+    // frame as drawing every pass does.
+    if (std::getenv("WALLPAPER_MACHINE_LAYER_LOCAL_SIGNATURES") != nullptr) {
+        GTEST_SKIP() << "WALLPAPER_MACHINE_LAYER_LOCAL_SIGNATURES chooses the reuse this checks";
+    }
+    constexpr int frames  = 12;
+    const auto    project = WriteStillChainFixture(root_ / "framed-chain", false, kStillCard, kStillEffect, true);
+    const auto    shipped = RunStillChain(project, root_ / "framed-shipped", true, std::nullopt, true, frames);
+    const auto    drawn   = RunStillChain(project, root_ / "framed-drawn", false, std::nullopt, true, frames);
+    const auto    off     = RunStillChain(project, root_ / "framed-off", true, false, true, frames);
+    for (const auto* run : { &shipped, &drawn, &off }) {
+        ASSERT_EQ(run->frames.size(), std::size_t(frames));
+        ASSERT_EQ(run->scene_passes.size(), std::size_t(frames));
+    }
+    for (int frame = 1; frame < frames; ++frame) {
+        SCOPED_TRACE("frame " + std::to_string(frame));
+        EXPECT_GE(shipped.reused[frame], 2u) << "the still chain of the moving layer was drawn again";
+        EXPECT_LT(shipped.scene_passes[frame], drawn.scene_passes[frame]);
+        // Switched off, the frame is encoded render pass for render pass as drawing every pass.
+        EXPECT_EQ(off.scene_passes[frame], drawn.scene_passes[frame]);
+        EXPECT_TRUE(off.frames[frame] == drawn.frames[frame]);
+    }
+    EXPECT_NE(drawn.frames.front(), drawn.frames.back()) << "nothing moved";
+}
 
 TEST_F(MetalSceneDraw, ATextLayerWhoseEffectsAreAllOffIsDrawnAsPlainText)
 {
@@ -15698,36 +16583,106 @@ uint16_t PackageVersionOf(const std::string& path)
                : SceneParseRequest::kUnknownPkgVersion;
 }
 
-/// Requested quality for a native local/compare probe. The parser and device
-/// still decide which pipeline and sample count can be drawn.
+/// Requested quality for a native local/compare probe, read as the energy test
+/// reads it. The parser and device still decide which pipeline and sample count
+/// can be drawn.
 SceneQuality QualityFromEnvironment()
 {
-    SceneQuality quality;
-    if (const char* text = std::getenv("WE_TEST_REFLECTION")) {
-        const std::string_view value(text);
-        if (value != "0" && value != "1")
-            throw std::runtime_error("WE_TEST_REFLECTION must be 0 or 1");
-        quality.reflection = value == "1";
+    return tests::SceneQualityFromEnvironment();
+}
+
+/// `WE_TEST_METAL_RENDER_SCALE` / `WE_TEST_COMPARE_RENDER_SCALE`: the render
+/// scale the host would push, clamped as the scene wallpaper clamps it. Unset is
+/// 1, the full raster.
+double RenderScaleFromEnvironment(const char* name)
+{
+    const char* text = std::getenv(name);
+    if (text == nullptr) return 1.0;
+    char*        end   = nullptr;
+    const double value = std::strtod(text, &end);
+    if (end == text || *end != '\0' || ! std::isfinite(value) || value <= 0.0) {
+        throw std::runtime_error(std::string(name) + " must be a number above 0");
     }
-    if (const char* text = std::getenv("WE_TEST_MSAA")) {
-        char* end = nullptr;
-        const long samples = std::strtol(text, &end, 10);
-        if (end == text || *end != '\0' ||
-            (samples != 0 && samples != 2 && samples != 4 && samples != 8)) {
-            throw std::runtime_error("WE_TEST_MSAA must be 0, 2, 4 or 8");
+    return std::clamp(value, render::kMinRenderScale, 1.0);
+}
+
+/// The draws the poster harness hashes: `WE_TEST_COMPARE_HASH_FRAMES`, a JSON
+/// array of draw indices, and `WE_TEST_COMPARE_HASH_EVERY=<k>`, every k-th draw
+/// counting from one (draws k-1, 2k-1, ...). Empty when neither is set.
+std::set<int> HashFramesFromEnvironment(int frame_count)
+{
+    std::set<int> frames;
+    if (const char* text = std::getenv("WE_TEST_COMPARE_HASH_FRAMES")) {
+        const auto parsed = nlohmann::json::parse(text, nullptr, false);
+        if (! parsed.is_array()) {
+            throw std::runtime_error("WE_TEST_COMPARE_HASH_FRAMES must be a JSON array of draws");
         }
-        quality.msaa = static_cast<int>(samples);
-    }
-    if (const char* text = std::getenv("WE_TEST_POSTPROCESSING")) {
-        char* end = nullptr;
-        const long level = std::strtol(text, &end, 10);
-        if (end == text || *end != '\0' ||
-            (level != 0 && level != 2 && level != 4 && level != 5)) {
-            throw std::runtime_error("WE_TEST_POSTPROCESSING must be 0, 2, 4 or 5");
+        for (const auto& value : parsed) {
+            if (! value.is_number_integer() || value.get<int>() < 0 ||
+                value.get<int>() >= frame_count) {
+                throw std::runtime_error("WE_TEST_COMPARE_HASH_FRAMES names a draw outside 0.." +
+                                         std::to_string(frame_count - 1));
+            }
+            frames.insert(value.get<int>());
         }
-        quality.post_processing = static_cast<int>(level);
     }
-    return quality;
+    if (const char* text = std::getenv("WE_TEST_COMPARE_HASH_EVERY")) {
+        char*      end   = nullptr;
+        const long every = std::strtol(text, &end, 10);
+        if (end == text || *end != '\0' || every < 1 || every > 3600) {
+            throw std::runtime_error("WE_TEST_COMPARE_HASH_EVERY must be 1..3600");
+        }
+        for (long frame = every - 1; frame < frame_count; frame += every) {
+            frames.insert(static_cast<int>(frame));
+        }
+    }
+    return frames;
+}
+
+/// `WE_TEST_COMPARE_SCALING` (or another variable): the scaling mode the host pushes,
+/// `fallback` when unset.
+WallpaperScalingMode CompareScalingFromEnvironment(
+    const char* variable = "WE_TEST_COMPARE_SCALING",
+    WallpaperScalingMode fallback = WallpaperScalingMode::FILL)
+{
+    const char* text = std::getenv(variable);
+    if (text == nullptr) return fallback;
+    const std::map<std::string_view, WallpaperScalingMode> modes {
+        { "none", WallpaperScalingMode::NONE },
+        { "stretch", WallpaperScalingMode::STRETCH },
+        { "fit", WallpaperScalingMode::FIT },
+        { "fill", WallpaperScalingMode::FILL },
+        { "fit_blurred", WallpaperScalingMode::FIT_BLURRED },
+    };
+    const auto found = modes.find(text);
+    if (found == modes.end()) {
+        throw std::runtime_error(std::string(variable) + " has no mode " + text);
+    }
+    return found->second;
+}
+
+/// SHA-256 of a picture's bytes, in lowercase hex.
+std::string Sha256Hex(const std::vector<uint8_t>& bytes)
+{
+    std::array<unsigned char, CC_SHA256_DIGEST_LENGTH> digest {};
+    CC_SHA256(bytes.data(), static_cast<CC_LONG>(bytes.size()), digest.data());
+    std::string hex;
+    hex.reserve(digest.size() * 2);
+    constexpr char kDigits[] = "0123456789abcdef";
+    for (const unsigned char byte : digest) {
+        hex.push_back(kDigits[byte >> 4]);
+        hex.push_back(kDigits[byte & 15]);
+    }
+    return hex;
+}
+
+void WritePpm(const std::filesystem::path& path, const RendererPicture& picture)
+{
+    std::filesystem::create_directories(path.parent_path());
+    std::ofstream image(path, std::ios::binary);
+    image << "P6\n" << picture.width << " " << picture.height << "\n255\n";
+    image.write(reinterpret_cast<const char*>(picture.rgb.data()),
+                std::streamsize(picture.rgb.size()));
 }
 
 /// Wallpaper Engine's per-wallpaper options for a local or compare run, from
@@ -15820,6 +16775,27 @@ double ThreadCpuMilliseconds()
     timespec now {};
     clock_gettime(CLOCK_THREAD_CPUTIME_ID, &now);
     return double(now.tv_sec) * 1000.0 + double(now.tv_nsec) / 1.0e6;
+}
+
+/// One frame's synthetic audio (`WE_TEST_AUDIO_HZ` at `hz`, or what `controls` plays instead):
+/// one analysis window submitted through the service the desktop tap feeds, waited for until
+/// its spectrum is published, so the frame drawn next reads it. False with `error` filled when
+/// the service refused it.
+bool SubmitProbeAudioFrame(tests::SceneProbeControls& controls, double hz, std::string* error)
+{
+    std::array<float, audio::kAudioResponseWindowFrames> pcm {};
+    for (std::size_t i = 0; i < pcm.size(); ++i) pcm[i] = controls.audioSample(i, hz);
+    const auto generation = audio::CurrentAudioSpectrumSnapshot().generation;
+    if (! audio::SubmitMonoAudioFrames(audio::kAudioResponseSampleRate, uint32_t(pcm.size()),
+                                       pcm.data(), error)) {
+        return false;
+    }
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (audio::CurrentAudioSpectrumSnapshot().generation <= generation &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return true;
 }
 } // namespace
 
@@ -15972,8 +16948,27 @@ TEST_F(MetalSceneDraw, LocalProjectsNamedByTheEnvironmentRunThroughTheNativeBack
             scale_factor = std::strtod(value, nullptr);
             ASSERT_TRUE(scale_factor >= 1.0 && scale_factor <= 4.0) << value;
         }
+        // The render scale the host pushes, set where the scene wallpaper sets it:
+        // before the graph is built, so targets are allocated at the size they keep.
+        loaded.scene->render_scale = RenderScaleFromEnvironment("WE_TEST_METAL_RENDER_SCALE");
+        // `WE_TEST_METAL_TIMING`: each draw's command buffers are timed on the GPU from
+        // their own start and end, and one `[ COST     ]` line reports them. The draws
+        // run back to back, so the GPU stays near its top clock: a work figure, not a
+        // paced energy one.
+        const bool timing = std::getenv("WE_TEST_METAL_TIMING") != nullptr &&
+                            std::string_view(std::getenv("WE_TEST_METAL_TIMING")) != "0";
         @autoreleasepool {
             id<MTLDevice> device       = MTLCreateSystemDefaultDevice();
+            if (timing) {
+                ASSERT_TRUE(tests::CountCommandBufferGpuTime(device))
+                    << "this GPU's command buffers could not be timed";
+                auto& gpu = tests::GpuTimeCounters();
+                gpu.tag   = -1;
+                ASSERT_TRUE(gpu.WaitForCompletion(std::chrono::seconds(10)));
+                std::scoped_lock lock(gpu.tagged_mutex);
+                gpu.tagged_ns.clear();
+                gpu.tagged_buffers.clear();
+            }
             CAMetalLayer* layer        = [CAMetalLayer layer];
             layer.device               = device;
             layer.pixelFormat          = MTLPixelFormatBGRA8Unorm;
@@ -15990,6 +16985,10 @@ TEST_F(MetalSceneDraw, LocalProjectsNamedByTheEnvironmentRunThroughTheNativeBack
                 .display_scale_factor = scale_factor,
             };
             ASSERT_TRUE(render.init(info)) << render.lastError();
+            // `WE_TEST_METAL_SCALING`: the scaling mode the host would push before the graph
+            // is built (`fill`, `fit`, ...); unset, the renderer's own default, original size.
+            render.SetWallpaperScalingMode(
+                CompareScalingFromEnvironment("WE_TEST_METAL_SCALING", WallpaperScalingMode::NONE));
             auto graph = sceneToRenderGraph(*loaded.scene);
             ASSERT_NE(graph, nullptr);
             // Layers that read a composite before the frame has made it: a nonzero count is a
@@ -16040,28 +17039,21 @@ TEST_F(MetalSceneDraw, LocalProjectsNamedByTheEnvironmentRunThroughTheNativeBack
             int                                     rebuilds    = 0;
             int                                     resizes     = 0;
             double                                  rebuild_ms  = 0.0;
+            MetalRender::DynamicUploadBytesForTests  uploads_before;
+            wallpaper::render::SceneOptimizationTotals passes_before;
             for (int frame = 0; frame < frame_count; ++frame) {
+                if (frame == 1) {
+                    ScriptEngine::ResetCallCounts();
+                    uploads_before = render.DynamicGeometryUploadBytesForTests();
+                    passes_before  = wallpaper::render::CurrentSceneOptimizationTotals();
+                }
                 if (audio_hz != nullptr) {
                     // Synthetic PCM only, analysed by the same service the
                     // desktop tap feeds.
-                    std::array<float, audio::kAudioResponseWindowFrames> pcm {};
-                    const double hz = std::strtod(audio_hz, nullptr);
-                    for (std::size_t i = 0; i < pcm.size(); ++i) {
-                        pcm[i] = controls.audioSample(i, hz);
-                    }
-                    const auto generation = audio::CurrentAudioSpectrumSnapshot().generation;
                     std::string audio_error;
-                    ASSERT_TRUE(audio::SubmitMonoAudioFrames(audio::kAudioResponseSampleRate,
-                                                             uint32_t(pcm.size()),
-                                                             pcm.data(),
-                                                             &audio_error))
+                    ASSERT_TRUE(SubmitProbeAudioFrame(controls, std::strtod(audio_hz, nullptr),
+                                                      &audio_error))
                         << audio_error;
-                    const auto deadline =
-                        std::chrono::steady_clock::now() + std::chrono::seconds(2);
-                    while (audio::CurrentAudioSpectrumSnapshot().generation <= generation &&
-                           std::chrono::steady_clock::now() < deadline) {
-                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                    }
                 }
                 if (controls.hasInput())
                     controls.input(*loaded.scene, frame, render.CursorMapping(*loaded.scene));
@@ -16086,15 +17078,27 @@ TEST_F(MetalSceneDraw, LocalProjectsNamedByTheEnvironmentRunThroughTheNativeBack
                 if (loaded.scene->shaderValueUpdater != nullptr) {
                     loaded.scene->shaderValueUpdater->FrameBegin();
                 }
+                if (timing) tests::GpuTimeCounters().tag = frame;
                 const double cpu_before = ThreadCpuMilliseconds();
-                ASSERT_TRUE(render.drawFrame(*loaded.scene))
-                    << "frame " << frame << ": " << render.lastError();
+                const bool   drew       = render.drawFrame(*loaded.scene);
                 const double cpu_after = ThreadCpuMilliseconds();
+                if (timing) tests::GpuTimeCounters().tag = -1;
+                ASSERT_TRUE(drew) << "frame " << frame << ": " << render.lastError();
                 if (frame > 0) {
                     const auto counts = render.LastFrameEncodeCountsForTests();
                     encodes.render_passes += counts.render_passes;
                     encodes.scene_output_passes += counts.scene_output_passes;
                     encodes.blit_passes += counts.blit_passes;
+                    encodes.loaded_passes += counts.loaded_passes;
+                    encodes.loaded_bytes += counts.loaded_bytes;
+                    encodes.opening_copies += counts.opening_copies;
+                    encodes.stored_depth_attachments += counts.stored_depth_attachments;
+                    encodes.stored_multisample_attachments += counts.stored_multisample_attachments;
+                    encodes.copied_bytes += counts.copied_bytes;
+                    encodes.traded_copies += counts.traded_copies;
+                    encodes.noop_draws += counts.noop_draws;
+                    encodes.skipped_clears += counts.skipped_clears;
+                    encodes.skipped_copies += counts.skipped_copies;
                     draw_cpu_ms += cpu_after - cpu_before;
                     ++measured;
                 }
@@ -16110,14 +17114,48 @@ TEST_F(MetalSceneDraw, LocalProjectsNamedByTheEnvironmentRunThroughTheNativeBack
             std::cout << "[ LOCAL    ] " << paths.scene_id << ": Native Metal, " << frame_count << " frames drawn, "
                       << DifferingBytes(first, last) << " bytes differ between the first and the last"
                       << std::endl;
-            char encode_line[256];
+            char encode_line[576];
             std::snprintf(encode_line, sizeof(encode_line),
-                          "%.1f render passes/frame (%.1f on the scene output), %.1f blits/frame, "
+                          "%.1f render passes/frame (%.1f on the scene output, %.1f loading their target "
+                          "(%.1f MB), %.1f opening with a copy; %.1f storing depth, %.1f storing samples), "
+                          "%.1f blits/frame, %.1f MB copied/frame, %.1f copies traded/frame, "
+                          "%.1f draws left out as no-ops/frame, %.1f unread clears and %.1f unread copies "
+                          "left out/frame, "
                           "%.2f ms CPU per drawFrame",
                           double(encodes.render_passes) / measured,
                           double(encodes.scene_output_passes) / measured,
-                          double(encodes.blit_passes) / measured, draw_cpu_ms / measured);
+                          double(encodes.loaded_passes) / measured,
+                          double(encodes.loaded_bytes) / measured / 1e6,
+                          double(encodes.opening_copies) / measured,
+                          double(encodes.stored_depth_attachments) / measured,
+                          double(encodes.stored_multisample_attachments) / measured,
+                          double(encodes.blit_passes) / measured,
+                          double(encodes.copied_bytes) / measured / 1e6,
+                          double(encodes.traded_copies) / measured,
+                          double(encodes.noop_draws) / measured,
+                          double(encodes.skipped_clears) / measured,
+                          double(encodes.skipped_copies) / measured, draw_cpu_ms / measured);
             std::cout << "[ LOCAL    ] " << paths.scene_id << ": " << encode_line << std::endl;
+            // Work on the scene thread that is the same in every run of the same scene and
+            // clock: crossings into the scripts, and rewritten geometry copied for the GPU.
+            {
+                const auto calls   = ScriptEngine::GetCallCounts();
+                const auto uploads = render.DynamicGeometryUploadBytesForTests();
+                const auto passes  = wallpaper::render::CurrentSceneOptimizationTotals();
+                char work_line[416];
+                std::snprintf(work_line, sizeof(work_line),
+                              "%.1f script calls/frame, %.1f calls from scripts/frame, %.1f idle "
+                              "program frames left out/frame; %.0f vertex + %.0f index bytes of "
+                              "rewritten geometry copied/frame; %.1f passes drawn + %.1f reused/frame",
+                              double(calls.library_calls) / measured,
+                              double(calls.native_calls) / measured,
+                              double(calls.skipped_evaluations) / measured,
+                              double(uploads.vertex - uploads_before.vertex) / measured,
+                              double(uploads.index - uploads_before.index) / measured,
+                              double(passes.executed_passes - passes_before.executed_passes) / measured,
+                              double(passes.skipped_passes - passes_before.skipped_passes) / measured);
+                std::cout << "[ LOCAL    ] " << paths.scene_id << ": " << work_line << std::endl;
+            }
             // How often the host would have built the render graph again, and which kind of
             // change asked for it: a scene that rebuilds every few draws repeats its texture
             // decodes and uploads each time.
@@ -16149,6 +17187,58 @@ TEST_F(MetalSceneDraw, LocalProjectsNamedByTheEnvironmentRunThroughTheNativeBack
             std::cout << "[ LOCAL    ] " << paths.scene_id
                       << ": render target bytes=" << render.RenderTargetBytesForTests()
                       << " device allocated bytes=" << device.currentAllocatedSize << std::endl;
+            if (timing) {
+                // Every draw after the first, which compiles and uploads; a draw's GPU time
+                // is the sum over the command buffers committed while it ran, and a draw
+                // that committed none (nothing changed) cost the GPU nothing.
+                auto& gpu = tests::GpuTimeCounters();
+                ASSERT_TRUE(gpu.WaitForCompletion(std::chrono::seconds(10)))
+                    << "the GPU did not finish the draws";
+                std::vector<double> gpu_ms;
+                uint64_t            buffers = 0;
+                {
+                    std::scoped_lock lock(gpu.tagged_mutex);
+                    for (std::size_t frame = 1; frame < std::size_t(frame_count); ++frame) {
+                        const bool seen = frame < gpu.tagged_ns.size();
+                        gpu_ms.push_back(seen ? double(gpu.tagged_ns[frame]) / 1e6 : 0.0);
+                        buffers += seen ? gpu.tagged_buffers[frame] : 0;
+                    }
+                }
+                double total = 0.0;
+                for (const double value : gpu_ms) total += value;
+                std::sort(gpu_ms.begin(), gpu_ms.end());
+                const auto quantile = [&](double p) {
+                    const auto rank = std::size_t(std::ceil(p * double(gpu_ms.size())));
+                    return gpu_ms[std::min(gpu_ms.size() - 1, rank == 0 ? 0 : rank - 1)];
+                };
+                std::printf("[ COST     ] %s {\"surface\":\"%ux%u@%g\",\"render_scale\":%g,"
+                            "\"resolution\":\"%s\",\"draws\":%zu,\"gpu_ms_p50\":%.4f,"
+                            "\"gpu_ms_p95\":%.4f,\"gpu_ms_mean\":%.4f,\"cpu_ms_mean\":%.4f,"
+                            "\"command_buffers_per_draw\":%.3f,\"render_passes_per_draw\":%.3f,"
+                            "\"scene_output_passes_per_draw\":%.3f,\"blits_per_draw\":%.3f,"
+                            "\"copied_bytes_per_draw\":%.0f,\"traded_copies_per_draw\":%.3f,"
+                            "\"noop_draws_per_draw\":%.3f,\"skipped_clears_per_draw\":%.3f,"
+                            "\"skipped_copies_per_draw\":%.3f,"
+                            "\"render_target_bytes\":%llu,\"device_allocated_bytes\":%llu}\n",
+                            paths.scene_id.c_str(), surface_width, surface_height, scale_factor,
+                            loaded.scene->render_scale,
+                            loaded.scene->resolution == SceneResolution::Display ? "display"
+                                                                                 : "canvas",
+                            gpu_ms.size(), quantile(0.5), quantile(0.95),
+                            total / double(gpu_ms.size()), draw_cpu_ms / measured,
+                            double(buffers) / double(gpu_ms.size()),
+                            double(encodes.render_passes) / measured,
+                            double(encodes.scene_output_passes) / measured,
+                            double(encodes.blit_passes) / measured,
+                            double(encodes.copied_bytes) / measured,
+                            double(encodes.traded_copies) / measured,
+                            double(encodes.noop_draws) / measured,
+                            double(encodes.skipped_clears) / measured,
+                            double(encodes.skipped_copies) / measured,
+                            (unsigned long long)render.RenderTargetBytesForTests(),
+                            (unsigned long long)device.currentAllocatedSize);
+                std::fflush(stdout);
+            }
 
             capture("metal-" + label + ".ppm");
 
@@ -16261,7 +17351,13 @@ TEST_F(MetalSceneDraw, LocalProjectsDrawAPosterPicture)
     // `WE_TEST_COMPARE_REBUILD_AT=<k>` builds the graph again before draw `k`
     // whether or not the scene asked: the picture is then what a rebuild leaves
     // behind, whenever it comes, and the draw it came before is printed so a run
-    // that did not rebuild can be drawn to the same time.
+    // that did not rebuild can be drawn to the same time. `WE_TEST_COMPARE_COUNTERS`
+    // (set, not `0`) turns the renderer counters on for the run, the way a
+    // diagnostics window does, so the picture is drawn through the counted
+    // paths, and prints the present counts. `WE_TEST_AUDIO_HZ` (with
+    // `WE_TEST_AUDIO_AMPLITUDE`, `WE_TEST_AUDIO_NOISE` and `WE_TEST_AUDIO_FILE`)
+    // turns audio response on and submits one window of synthetic sound before
+    // every draw, as the local-project run does; unset, the scene hears nothing.
     const char* listed = std::getenv("WE_TEST_COMPARE_PROJECTS");
     const auto  assets = LocalSceneAssetsRoot();
     if (listed == nullptr || *listed == '\0' || assets.empty() ||
@@ -16310,6 +17406,25 @@ TEST_F(MetalSceneDraw, LocalProjectsDrawAPosterPicture)
         scale_factor = std::strtod(value, nullptr);
         ASSERT_TRUE(scale_factor >= 1.0 && scale_factor <= 4.0);
     }
+    // The render scale the host pushes (`WE_TEST_COMPARE_RENDER_SCALE`), the scaling
+    // mode (`WE_TEST_COMPARE_SCALING`), and the draws whose final composition is
+    // hashed (`WE_TEST_COMPARE_HASH_FRAMES`, `WE_TEST_COMPARE_HASH_EVERY`): each
+    // prints `[ HASH     ] <scene> <W>x<H> frame=<n> sha256=<hex>`, the last draw
+    // too, and is written as `<scene>-frame-<n>.ppm` only under `WE_TEST_OUTPUT`.
+    const double               render_scale = RenderScaleFromEnvironment("WE_TEST_COMPARE_RENDER_SCALE");
+    const WallpaperScalingMode scaling      = CompareScalingFromEnvironment();
+    const std::set<int>        hash_frames  = HashFramesFromEnvironment(frame_count);
+    const bool                 hashing      = std::getenv("WE_TEST_COMPARE_HASH_FRAMES") != nullptr ||
+                                std::getenv("WE_TEST_COMPARE_HASH_EVERY") != nullptr;
+    const bool counted = [] {
+        const char* value = std::getenv("WE_TEST_COMPARE_COUNTERS");
+        return value != nullptr && std::string_view(value) != "0";
+    }();
+    struct CountersOff
+    {
+        ~CountersOff() { RendererCounters::SetEnabled(false); }
+    } counters_off;
+    if (counted) RendererCounters::SetEnabled(true);
 
     std::vector<std::string> projects;
     for (std::string_view rest = listed; ! rest.empty();) {
@@ -16371,6 +17486,9 @@ TEST_F(MetalSceneDraw, LocalProjectsDrawAPosterPicture)
 
             auto& scene = *loaded.scene;
             scene.resolution = resolution;
+            // What the scene wallpaper sets before it compiles: targets are
+            // allocated once, at the size they keep.
+            scene.render_scale = render_scale;
             if (scene.runtime != nullptr) {
                 for (int tick = 0; tick < warmup; ++tick) {
                     scene.runtime->Tick(1.0 / 60.0);
@@ -16382,8 +17500,17 @@ TEST_F(MetalSceneDraw, LocalProjectsDrawAPosterPicture)
             }
 
             tests::SceneProbeControls input;
+            const char* audio_hz = std::getenv("WE_TEST_AUDIO_HZ");
+            if (audio_hz != nullptr && scene.runtime != nullptr) {
+                scene.runtime->SetAudioResponseEnabled(true);
+            }
+            std::string audio_error;
             const auto start = std::chrono::steady_clock::now();
             const auto pace  = [&](int frame) {
+                if (audio_hz != nullptr && audio_error.empty() &&
+                    ! SubmitProbeAudioFrame(input, std::strtod(audio_hz, nullptr), &audio_error)) {
+                    ADD_FAILURE() << "synthetic audio was refused: " << audio_error;
+                }
                 if (! realtime) return;
                 std::this_thread::sleep_until(
                     start + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
@@ -16393,8 +17520,49 @@ TEST_F(MetalSceneDraw, LocalProjectsDrawAPosterPicture)
             watch.stop_after = stop_after_rebuild;
             watch.from       = rebuild_from;
             watch.force_at   = rebuild_at;
+            if (hashing) {
+                watch.sample_at = [&](int frame) { return hash_frames.contains(frame); };
+                watch.sampled   = [&](int frame, const RendererPicture& seen) {
+                    std::printf("[ HASH     ] %s %ux%u frame=%d sha256=%s\n", scene_id.c_str(),
+                                seen.width, seen.height, frame, Sha256Hex(seen.rgb).c_str());
+                    if (output != nullptr && *output != '\0') {
+                        WritePpm(std::filesystem::path(output) /
+                                     (scene_id + "-frame-" + std::to_string(frame) + ".ppm"),
+                                 seen);
+                    }
+                };
+            }
+            const uint64_t uploads_before   = MetalRender::ImageUploadsForTests();
+            const uint64_t optimized_before = MetalRender::ImagesOptimizedForTests();
+            RendererCounters counters;
             auto picture = DrawWithRenderer(scene, width, height, frame_count, frame_step,
-                                            pace, scale_factor, &input, nullptr, &watch);
+                                            pace, scale_factor, &input,
+                                            counted ? &counters : nullptr, &watch, scaling);
+            if (hashing && picture.error.empty() && ! picture.rgb.empty() &&
+                ! hash_frames.contains(watch.last_draw)) {
+                std::printf("[ HASH     ] %s %ux%u frame=%d sha256=%s\n", scene_id.c_str(),
+                            picture.width, picture.height, watch.last_draw,
+                            Sha256Hex(picture.rgb).c_str());
+            }
+            // What loading the pictures cost the GPU besides the draws: one blit for each
+            // picture rearranged for sampling (`WALLPAPER_MACHINE_OPTIMIZE_IMAGES`).
+            std::printf("[ COMPARE  ] %s: %llu picture upload(s), %llu optimized for sampling\n",
+                        scene_id.c_str(),
+                        static_cast<unsigned long long>(MetalRender::ImageUploadsForTests() - uploads_before),
+                        static_cast<unsigned long long>(MetalRender::ImagesOptimizedForTests() -
+                                                        optimized_before));
+            std::fflush(stdout);
+            if (counted) {
+                // Reports still on their way when the renderer closed are not
+                // counted, so the reported total can trail the requests.
+                std::printf("[ COUNTERS ] %s: present_requests=%llu presents_skipped_unchanged=%llu "
+                            "presents_reported=%llu\n",
+                            scene_id.c_str(),
+                            (unsigned long long)counters.Get(OWE_RC_PRESENT_REQUESTS),
+                            (unsigned long long)counters.Get(OWE_RC_PRESENTS_SKIPPED_UNCHANGED),
+                            (unsigned long long)(counters.Get(OWE_RC_PRESENTED_FRAMES) +
+                                                 counters.Get(OWE_RC_PRESENTS_DROPPED)));
+            }
             if (stop_after_rebuild >= 0) {
                 const std::string rebuilt =
                     watch.rebuilt_at < 0
@@ -16412,12 +17580,7 @@ TEST_F(MetalSceneDraw, LocalProjectsDrawAPosterPicture)
         }
         if (drawn.rgb.empty()) continue;
         if (output != nullptr && *output != '\0') {
-            std::filesystem::create_directories(output);
-            std::ofstream image(std::filesystem::path(output) / (scene_id + ".ppm"),
-                                std::ios::binary);
-            image << "P6\n" << drawn.width << " " << drawn.height << "\n255\n";
-            image.write(reinterpret_cast<const char*>(drawn.rgb.data()),
-                        std::streamsize(drawn.rgb.size()));
+            WritePpm(std::filesystem::path(output) / (scene_id + ".ppm"), drawn);
         }
     }
 }
@@ -18252,5 +19415,1418 @@ void main() {
         const auto pixel=PixelAt(picture,64+128*index,128);
         EXPECT_LE(pixel[0],2);EXPECT_LE(pixel[2],2);
         EXPECT_NEAR(pixel[1],index==2?0:255,2)<<index;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Render passes that need not load or store what no draw reads
+
+namespace
+{
+
+/// Restores both attachment switches, whatever a test set them to.
+struct RestoreAttachmentSwitches
+{
+    ~RestoreAttachmentSwitches()
+    {
+        MetalRender::SetOverwriteLoadElisionForTests(true);
+        MetalRender::SetAttachmentStoreElisionForTests(true);
+    }
+};
+
+/// Every frame's scene output of one run and its last frame's encode counts.
+struct AttachmentRun
+{
+    std::vector<std::vector<uint8_t>>      frames;
+    MetalRender::FrameEncodeCountsForTests counts;
+};
+
+/// Draws `frames` production frames of `project` with the two switches as given, on a fresh
+/// parse and renderer, so two runs differ only by the switches.
+AttachmentRun DrawWithAttachmentSwitches(const std::filesystem::path& project, const std::filesystem::path& cache,
+                                         bool elide_loads, bool elide_stores, int frames,
+                                         const std::function<void(Scene&)>& adjust = {})
+{
+    MetalRender::SetOverwriteLoadElisionForTests(elide_loads);
+    MetalRender::SetAttachmentStoreElisionForTests(elide_stores);
+    AttachmentRun run;
+    LoadedScene   loaded;
+    std::string   error;
+    std::filesystem::remove_all(cache);
+    EXPECT_TRUE(LoadScene(project, cache, loaded, error)) << error;
+    if (loaded.scene == nullptr) return run;
+    if (adjust) adjust(*loaded.scene);
+    @autoreleasepool {
+        CAMetalLayer* layer   = [CAMetalLayer layer];
+        layer.device          = MTLCreateSystemDefaultDevice();
+        layer.pixelFormat     = MTLPixelFormatBGRA8Unorm;
+        layer.drawableSize    = CGSizeMake(384, 256);
+        layer.framebufferOnly = NO;
+        MetalRender render;
+        EXPECT_TRUE(render.init(MetalRenderInitInfo {
+            .metal_layer = (__bridge void*)layer, .width = 384, .height = 256,
+            .render_width = 384, .render_height = 256, .display_scale_factor = 1.0 }))
+            << render.lastError();
+        auto graph = sceneToRenderGraph(*loaded.scene);
+        if (graph == nullptr || ! render.compileRenderGraph(*loaded.scene, *graph)) {
+            ADD_FAILURE() << render.lastError();
+            return run;
+        }
+        render.UpdateCameraFillMode(*loaded.scene, FillMode::ASPECTFIT);
+        for (int frame = 0; frame < frames; ++frame) {
+            AdvanceSceneFrame(render, *loaded.scene);
+            run.frames.push_back(ReadOutput(render, *loaded.scene));
+        }
+        run.counts = render.LastFrameEncodeCountsForTests();
+        render.destroy();
+    }
+    return run;
+}
+
+/// Draws a fixture with one switch off and then on, and checks that every frame is the same.
+void ExpectSameFramesEitherWay(const std::filesystem::path& project, const std::filesystem::path& root,
+                               bool stores, AttachmentRun& off, AttachmentRun& on,
+                               const std::function<void(Scene&)>& adjust = {})
+{
+    constexpr int kFrames = 3;
+    off = DrawWithAttachmentSwitches(project, root / "cache-off", stores, ! stores, kFrames, adjust);
+    on  = DrawWithAttachmentSwitches(project, root / "cache-on", true, true, kFrames, adjust);
+    ASSERT_EQ(off.frames.size(), std::size_t(kFrames));
+    ASSERT_EQ(on.frames.size(), std::size_t(kFrames));
+    for (int frame = 0; frame < kFrames; ++frame) {
+        ASSERT_FALSE(off.frames[frame].empty());
+        EXPECT_EQ(on.frames[frame], off.frames[frame]) << "frame " << frame << " changed with the elision";
+    }
+    EXPECT_NE(off.frames.front(), off.frames.back()) << "the scene did not animate";
+}
+
+/// One effect of a chain: how its vertex shader places the card, a statement its fragment
+/// shader runs before writing, and the keys of its material's pass after the shader.
+struct ChainEffect
+{
+    std::string position { "gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);" };
+    std::string before_write;
+    std::string material_keys { R"("blending":"normal","cullmode":"nocull")" };
+};
+
+/// The fixture's card through a chain of one-pass effects, each of which changes every channel
+/// of what it reads by the scene time, so each frame redraws the chain and a texel a pass
+/// leaves alone shows another colour than one it writes.
+std::filesystem::path WriteEffectChainFixture(const std::filesystem::path& root,
+                                              const std::vector<ChainEffect>& chain)
+{
+    const auto project = WriteFixture(root);
+    auto       layout  = nlohmann::json::parse(std::ifstream(root / "layout.json"));
+    layout["general"]["bloom"] = false;
+    auto effects = nlohmann::json::array();
+    std::filesystem::create_directories(root / "effects");
+    for (std::size_t k = 0; k < chain.size(); ++k) {
+        const auto name = "fx" + std::to_string(k);
+        std::ofstream(root / ("effects/" + name + ".json"))
+            << R"({"name":")" << name << R"(","passes":[{"material":"materials/)" << name << R"(.json"}]})";
+        std::ofstream(root / ("materials/" + name + ".json"))
+            << R"({"passes":[{"shader":")" << name << R"(","textures":[null],)" << chain[k].material_keys
+            << R"(,"depthtest":"disabled","depthwrite":"disabled"}]})";
+        std::ofstream(root / ("shaders/" + name + ".vert"))
+            << "uniform mat4 g_ModelViewProjectionMatrix;\nattribute vec3 a_Position;\nattribute vec2 a_TexCoord;\n"
+               "varying vec2 v_TexCoord;\nvoid main() {\n  "
+            << chain[k].position << "\n  v_TexCoord = a_TexCoord;\n}\n";
+        std::ofstream(root / ("shaders/" + name + ".frag"))
+            << "uniform sampler2D g_Texture0;\nuniform float g_Time;\nvarying vec2 v_TexCoord;\nvoid main() {\n"
+               "  vec4 c = texSample2D(g_Texture0, v_TexCoord);\n  "
+            << chain[k].before_write << "\n  gl_FragColor = vec4(frac(c.g + 0.13 * " << (k + 1)
+            << ".0 + g_Time), frac(c.b + 0.07), frac(c.r + 0.29), 1.0);\n}\n";
+        effects.push_back({ { "file", "effects/" + name + ".json" }, { "visible", true } });
+    }
+    layout["objects"][0]["effects"] = effects;
+    std::ofstream(root / "layout.json") << layout;
+    return project;
+}
+
+void WriteFiles(const std::filesystem::path& root, const std::map<std::string, std::string>& files)
+{
+    for (const auto& [file, contents] : files) {
+        std::filesystem::create_directories((root / file).parent_path());
+        std::ofstream(root / file) << contents;
+    }
+}
+
+constexpr const char* kTimedCopyVertex =
+    "uniform mat4 g_ModelViewProjectionMatrix;\nattribute vec3 a_Position;\nattribute vec2 a_TexCoord;\n"
+    "varying vec2 v_TexCoord;\nvoid main(){ gl_Position=mul(vec4(a_Position,1.0),g_ModelViewProjectionMatrix);"
+    " v_TexCoord=a_TexCoord; }\n";
+
+std::string TimedFragment(const std::string& colour)
+{
+    return "uniform sampler2D g_Texture0;\nuniform float g_Time;\nvarying vec2 v_TexCoord;\n"
+           "void main(){ vec4 c=texSample2D(g_Texture0,v_TexCoord); gl_FragColor=" + colour + "; }\n";
+}
+
+} // namespace
+
+TEST_F(MetalSceneDraw, AnEffectChainThatOverwritesItsBuffersOpensThemWithAClearAndDrawsTheSamePicture)
+{
+    // The card drawn into one buffer, then four effects that alternate between two: the second
+    // and third write a buffer that already holds this frame's picture, so the graph asks to
+    // load it. Each draws the whole card unmoved (through the matrix, as given, through a copy
+    // of the input) and never discards, so nothing loaded can show: the loads become clears.
+    RestoreAttachmentSwitches restore;
+    const auto root    = root_ / "overwrite-chain";
+    const auto project = WriteEffectChainFixture(root, {
+        ChainEffect {},
+        ChainEffect { .position = "gl_Position = vec4(a_Position, 1.0);" },
+        ChainEffect { .position = "vec3 position = a_Position;\n  gl_Position = mul(vec4(position, 1.0), g_ModelViewProjectionMatrix);" },
+        ChainEffect {},
+    });
+    AttachmentRun off, on;
+    ExpectSameFramesEitherWay(project, root, false, off, on);
+    EXPECT_GE(off.counts.loaded_passes, 2u) << "the chain's later buffer writes were expected to load";
+    EXPECT_EQ(on.counts.loaded_passes + 2u, off.counts.loaded_passes)
+        << "the two overwriting effect passes still load their buffers";
+    EXPECT_LT(on.counts.loaded_bytes, off.counts.loaded_bytes);
+    EXPECT_EQ(on.counts.render_passes, off.counts.render_passes) << "the elision changed how passes share render passes";
+}
+
+TEST_F(MetalSceneDraw, AnEffectPassThatMayLeaveTexelsAloneKeepsLoadingItsBuffer)
+{
+    // The second effect of the chain cannot be proven to write every texel, or to write every
+    // channel of one as its fragment says: it keeps its load, and the texels and channels it
+    // leaves keep what the buffer held. The third effect still clears.
+    RestoreAttachmentSwitches restore;
+    const std::vector<std::pair<std::string, ChainEffect>> cases {
+        { "scaled", ChainEffect { .position = "gl_Position = mul(vec4(a_Position * 0.5, 1.0), g_ModelViewProjectionMatrix);" } },
+        { "moved", ChainEffect { .position = "vec3 position = a_Position;\n  position.x += 0.25;\n  gl_Position = vec4(position, 1.0);" } },
+        { "discards", ChainEffect { .before_write = "if (v_TexCoord.x < 0.3) discard;" } },
+        { "clips", ChainEffect { .before_write = "clip(v_TexCoord.y - 0.4);" } },
+        { "culls", ChainEffect { .material_keys = R"("blending":"normal","cullmode":"normal")" } },
+        { "keeps-alpha", ChainEffect { .material_keys = R"("blending":"normal","cullmode":"nocull","alphawriting":"disabled")" } },
+    };
+    for (const auto& [name, second] : cases) {
+        SCOPED_TRACE(name);
+        const auto root    = root_ / ("overwrite-negative-" + name);
+        const auto project = WriteEffectChainFixture(root, { ChainEffect {}, second, ChainEffect {}, ChainEffect {} });
+        AttachmentRun off, on;
+        ExpectSameFramesEitherWay(project, root, false, off, on);
+        EXPECT_GE(off.counts.loaded_passes, 2u);
+        EXPECT_EQ(on.counts.loaded_passes + 1u, off.counts.loaded_passes) << "only the third effect may skip its load";
+    }
+}
+
+TEST_F(MetalSceneDraw, ABlendedOverwriteOfAFloatBufferKeepsItsLoad)
+{
+    // An effect writes its own buffer, reads it into another, and writes it again, so the
+    // second write starts a render pass that loads it. `normal` blending multiplies what the buffer held by
+    // zero, which cancels it only when it is finite: an 8-bit buffer is cleared instead, a
+    // half-float one (which can hold an infinity) keeps its load.
+    RestoreAttachmentSwitches restore;
+    std::map<std::string, uint32_t> cleared;
+    for (const std::string format : { "rgba8888", "rgba16161616f" }) {
+        SCOPED_TRACE(format);
+        const auto root    = root_ / ("overwrite-format-" + format);
+        const auto project = WriteFixture(root);
+        const auto pass    = [](const std::string& shader) {
+            return R"({"passes":[{"shader":")" + shader +
+                   R"(","textures":[null],"blending":"normal","cullmode":"nocull","depthtest":"disabled","depthwrite":"disabled"}]})";
+        };
+        WriteFiles(root, {
+            { "effects/twice.json",
+              R"({"name":"twice","fbos":[{"name":"_rt_Twice","fit":64,"format":")" + format +
+                  R"("},{"name":"_rt_Between","fit":64,"format":"rgba8888"}],"passes":[)"
+                  R"({"material":"materials/twice_a.json","target":"_rt_Twice"},)"
+                  R"({"material":"materials/twice_b.json","target":"_rt_Between","bind":[{"name":"_rt_Twice","index":0}]},)"
+                  R"({"material":"materials/twice_c.json","target":"_rt_Twice","bind":[{"name":"_rt_Between","index":0}]},)"
+                  R"({"material":"materials/twice_show.json","bind":[{"name":"_rt_Twice","index":0}]}]})" },
+            { "materials/twice_a.json", pass("twice_a") },
+            { "materials/twice_b.json", pass("twice_b") },
+            { "materials/twice_c.json", pass("twice_c") },
+            { "materials/twice_show.json", pass("twice_show") },
+            { "shaders/twice_a.vert", kTimedCopyVertex },
+            { "shaders/twice_b.vert", kTimedCopyVertex },
+            { "shaders/twice_c.vert", kTimedCopyVertex },
+            { "shaders/twice_show.vert", kTimedCopyVertex },
+            { "shaders/twice_a.frag", TimedFragment("vec4(c.g, c.r, frac(g_Time), 1.0)") },
+            { "shaders/twice_b.frag", TimedFragment("vec4(frac(c.b + g_Time), c.g, c.r, 1.0)") },
+            { "shaders/twice_c.frag", TimedFragment("vec4(c.r, frac(c.g + 0.5), c.b, 1.0)") },
+            { "shaders/twice_show.frag", TimedFragment("vec4(c.rgb, 1.0)") },
+        });
+        auto layout = nlohmann::json::parse(std::ifstream(root / "layout.json"));
+        layout["general"]["bloom"] = false;
+        layout["objects"][0]["effects"] = { { { "file", "effects/twice.json" }, { "visible", true } } };
+        std::ofstream(root / "layout.json") << layout;
+        AttachmentRun off, on;
+        ExpectSameFramesEitherWay(project, root, false, off, on);
+        EXPECT_GE(off.counts.loaded_passes, 1u);
+        ASSERT_GE(off.counts.loaded_passes, on.counts.loaded_passes);
+        cleared[format] = off.counts.loaded_passes - on.counts.loaded_passes;
+    }
+    EXPECT_EQ(cleared["rgba8888"], cleared["rgba16161616f"] + 1u)
+        << "the second write of the 8-bit buffer, and only that, was expected to clear instead of load";
+}
+
+TEST_F(MetalSceneDraw, ATradedReaderThatOverwritesTheSceneNeedsNoOpeningCopy)
+{
+    // A layer as large as the canvas reads the scene beneath it and writes every texel of it,
+    // alpha included. Its copy of the scene trades textures with the scene (scene optimisation
+    // on), so its render pass opened with a copy of the image; it needs neither that nor a load.
+    RestoreAttachmentSwitches restore;
+    const auto root    = root_ / "overwrite-feedback";
+    const auto project = WriteFixture(root);
+    WriteFiles(root, {
+        { "models/cover.json", R"({"width":384,"height":256,"material":"materials/cover.json"})" },
+        { "materials/cover.json",
+          R"({"passes":[{"shader":"cover","blending":"normal","alphawriting":"enabled","cullmode":"nocull",)"
+          R"("depthtest":"disabled","depthwrite":"disabled","textures":["_rt_FullFrameBuffer"]}]})" },
+        { "shaders/cover.vert", kTimedCopyVertex },
+        { "shaders/cover.frag", TimedFragment("vec4(1.0 - c.r, frac(c.g + g_Time), 1.0 - c.b, 1.0)") },
+    });
+    auto layout = nlohmann::json::parse(std::ifstream(root / "layout.json"));
+    layout["general"]["bloom"] = false;
+    layout["objects"].push_back({ { "id", 2 }, { "name", "cover" }, { "image", "models/cover.json" },
+                                  { "origin", { 192, 128, 0 } }, { "scale", { 1, 1, 1 } },
+                                  { "angles", { 0, 0, 0 } }, { "visible", true } });
+    std::ofstream(root / "layout.json") << layout;
+    AttachmentRun off, on;
+    ExpectSameFramesEitherWay(project, root, false, off, on);
+    EXPECT_EQ(off.counts.blit_passes, 0u) << "the copy was expected to trade textures, not blit";
+    EXPECT_EQ(off.counts.opening_copies, 1u);
+    EXPECT_EQ(on.counts.opening_copies, 0u) << "the overwriting reader still opened with a copy";
+}
+
+TEST_F(MetalSceneDraw, AttachmentsNothingReadsAgainAreLeftUnstoredAndDrawTheSamePicture)
+{
+    // Depth: two depth-tested models with a card drawn between them, so the second model's
+    // render pass loads the depth the first left; only that first render pass stores it.
+    // Multisampled colour: lenses that read the scene split its render passes; every one but
+    // the last keeps its samples for the next, the last (whose samples the next frame clears)
+    // only resolves. Every frame must be the same with the stores elided or not.
+    RestoreAttachmentSwitches restore;
+    {
+        SCOPED_TRACE("depth");
+        const auto root    = root_ / "store-depth";
+        const auto project = WriteSpotShadowFixture(root, false);
+        auto material = nlohmann::json::parse(std::ifstream(root / "materials/caster.json"));
+        material["passes"][0]["depthtest"]  = "enabled";
+        material["passes"][0]["depthwrite"] = "enabled";
+        std::ofstream(root / "materials/caster.json") << material;
+        std::ofstream(root / "shaders/caster.frag")
+            << "uniform float g_Time;\nvoid main() { gl_FragColor = vec4(0.5, frac(g_Time), 0.0, 1.0); }\n";
+        auto layout = nlohmann::json::parse(std::ifstream(root / "layout.json"));
+        auto first  = layout["objects"][1];
+        auto second = first;
+        first["origin"]  = { 160, 128, 150 };
+        second["id"]     = 4;
+        second["name"]   = "far caster";
+        second["origin"] = { 176, 128, 100 };
+        // The card between the two models has no depth, so the second starts a render pass.
+        layout["objects"] = nlohmann::json::array({ first, layout["objects"][0], second, layout["objects"][2] });
+        std::ofstream(root / "layout.json") << layout;
+        AttachmentRun off, on;
+        ExpectSameFramesEitherWay(project, root, true, off, on);
+        EXPECT_EQ(off.counts.stored_depth_attachments, 2u);
+        EXPECT_EQ(on.counts.stored_depth_attachments, 1u)
+            << "the first model's depth is read by the second and must be stored; the second's is read by nothing";
+        EXPECT_EQ(on.counts.render_passes, off.counts.render_passes);
+    }
+    id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+    if (device == nil || ! [device supportsTextureSampleCount:4]) GTEST_SKIP() << "4x MSAA unavailable";
+    {
+        SCOPED_TRACE("multisampled colour");
+        const auto root    = root_ / "store-msaa";
+        const auto project = WriteFeedbackFixture(root);
+        auto layout = nlohmann::json::parse(std::ifstream(root / "layout.json"));
+        layout["general"]["bloom"] = false;
+        std::ofstream(root / "layout.json") << layout;
+        std::ofstream(root / "shaders/feedback_lens.frag")
+            << TimedFragment("vec4(1.0 - c.r, frac(c.g + g_Time), 1.0 - c.b, 1.0)");
+        const auto multisample = [](Scene& scene) {
+            scene.renderTargets[std::string(SpecTex_Default)].sample_count = 4;
+        };
+        AttachmentRun off, on;
+        ExpectSameFramesEitherWay(project, root, true, off, on, multisample);
+        ASSERT_GE(off.counts.stored_multisample_attachments, 2u) << "the lenses were expected to split the scene's render passes";
+        EXPECT_EQ(off.counts.stored_multisample_attachments, off.counts.scene_output_passes);
+        EXPECT_EQ(on.counts.stored_multisample_attachments + 1u, off.counts.stored_multisample_attachments)
+            << "only the scene's last render pass may leave its samples unstored";
+    }
+}
+
+TEST_F(MetalSceneDraw, ParticleGeometryCopiesOnlyWhatTheFrameDrawsAndTheSlotLacks)
+{
+    // A burst of sprites that die over a few frames: the mesh's high-water mark stays at the
+    // burst while fewer and then no quads are drawn, and the index pattern stops growing.
+    const auto directory = root_ / "particle-upload-delta";
+    const auto project   = WriteParticleKindFixture(directory, R"([{"name":"sprite"}])", 32);
+    auto particle = nlohmann::json::parse(std::ifstream(directory / "particles/kind.json"));
+    particle["emitter"] = nlohmann::json::array({
+        {{"name", "boxrandom"}, {"id", 1}, {"rate", 0}, {"instantaneous", 24},
+         {"distancemin", {-120, -80, 0}}, {"distancemax", {120, 80, 0}},
+         {"speedmin", 0}, {"speedmax", 0}}});
+    particle["initializer"] = nlohmann::json::array({
+        {{"name", "lifetimerandom"}, {"min", 0.05}, {"max", 0.3}},
+        {{"name", "sizerandom"}, {"min", 12}, {"max", 12}},
+        {{"name", "colorrandom"}, {"min", {255, 255, 255}}, {"max", {255, 255, 255}}}});
+    std::ofstream(directory / "particles/kind.json") << particle;
+
+    constexpr int kFrames = 24;
+    struct Run
+    {
+        std::vector<std::vector<uint8_t>> pictures;
+        std::vector<uint64_t>             vertex, index;              // copied in each frame
+        std::vector<uint64_t>             drawn, filled, index_bytes; // what the mesh held
+    };
+    const auto run = [&](bool delta, const char* cache) {
+        const bool previous = MetalRender::SetDynamicUploadDeltaForTests(delta);
+        Run         out;
+        LoadedScene loaded;
+        std::string error;
+        Random::seed(1);
+        EXPECT_TRUE(LoadScene(project, directory / cache, loaded, error)) << error;
+        if (loaded.scene == nullptr) return out;
+        @autoreleasepool {
+            CAMetalLayer* layer   = [CAMetalLayer layer];
+            layer.device          = MTLCreateSystemDefaultDevice();
+            layer.pixelFormat     = MTLPixelFormatBGRA8Unorm;
+            layer.drawableSize    = CGSizeMake(384, 256);
+            layer.framebufferOnly = NO;
+            MetalRender         render;
+            MetalRenderInitInfo info {
+                .metal_layer          = (__bridge void*)layer,
+                .width                = 384,
+                .height               = 256,
+                .render_width         = 384,
+                .render_height        = 256,
+                .display_scale_factor = 1.0,
+            };
+            EXPECT_TRUE(render.init(info)) << render.lastError();
+            auto graph = sceneToRenderGraph(*loaded.scene);
+            EXPECT_NE(graph, nullptr);
+            EXPECT_TRUE(graph != nullptr && render.compileRenderGraph(*loaded.scene, *graph))
+                << render.lastError();
+            SceneMesh* mesh = nullptr;
+            ForEachPerFrameMesh(*loaded.scene,
+                                [&mesh](const std::string&, SceneMesh& found) { mesh = &found; });
+            EXPECT_NE(mesh, nullptr);
+            for (int frame = 0; frame < kFrames && mesh != nullptr; ++frame) {
+                loaded.scene->targetFps = 60;
+                loaded.scene->paritileSys->Emitt();
+                if (loaded.scene->runtime != nullptr) loaded.scene->runtime->Tick(1.0 / 60.0);
+                const auto& vertices = mesh->GetVertexArray(0);
+                out.drawn.push_back(vertices.DrawnSizeOf());
+                out.filled.push_back(vertices.DataSizeOf());
+                out.index_bytes.push_back(mesh->GetIndexArray(0).DrawIndexBytes());
+                const auto before = render.DynamicGeometryUploadBytesForTests();
+                EXPECT_TRUE(render.drawFrame(*loaded.scene)) << render.lastError();
+                const auto after = render.DynamicGeometryUploadBytesForTests();
+                out.vertex.push_back(after.vertex - before.vertex);
+                out.index.push_back(after.index - before.index);
+                out.pictures.push_back(ReadOutput(render, *loaded.scene));
+                loaded.scene->PassFrameTime(1.0 / 60.0);
+            }
+            render.destroy();
+        }
+        MetalRender::SetDynamicUploadDeltaForTests(previous);
+        return out;
+    };
+    const Run on  = run(true, "cache-on");
+    const Run off = run(false, "cache-off");
+    ASSERT_EQ(on.vertex.size(), std::size_t(kFrames));
+    ASSERT_EQ(off.vertex.size(), std::size_t(kFrames));
+
+    bool fewer_than_peak = false, none_left = false;
+    for (int frame = 0; frame < kFrames; ++frame) {
+        SCOPED_TRACE(frame);
+        EXPECT_EQ(on.pictures[frame], off.pictures[frame]) << "the copies differ in what is drawn";
+        EXPECT_EQ(on.drawn[frame], off.drawn[frame]);
+        // Off: the high-water mark of the vertices and every drawn index, every frame.
+        EXPECT_EQ(off.vertex[frame], off.filled[frame]);
+        EXPECT_EQ(off.index[frame], off.index_bytes[frame]);
+        // On: only the vertices this frame wrote.
+        EXPECT_EQ(on.vertex[frame], on.drawn[frame]);
+        fewer_than_peak = fewer_than_peak || (on.drawn[frame] > 0 && on.drawn[frame] < on.filled[frame]);
+        none_left       = none_left || (on.drawn[frame] == 0 && on.filled[frame] > 0);
+        // Each frame slot takes the burst's pattern once; a pattern that only shrinks after
+        // that is never copied again.
+        if (frame >= 4) EXPECT_EQ(on.index[frame], 0u);
+    }
+    EXPECT_GT(on.index[0], 0u) << "the first frame copies the pattern it draws";
+    EXPECT_TRUE(fewer_than_peak) << "the burst never thinned out; the fixture tests nothing";
+    EXPECT_TRUE(none_left) << "the burst never died out; the fixture tests nothing";
+}
+
+// ---------------------------------------------------------------------------
+// GPU labels for Metal System Trace
+
+namespace
+{
+
+/// The labels Metal sees on every command buffer committed and every render and blit encoder
+/// ended while recording: `endEncoding` and `commit` of the device's classes are wrapped for
+/// the life of this object and restored afterwards.
+class GpuLabelRecorder
+{
+public:
+    explicit GpuLabelRecorder(id<MTLDevice> device)
+    {
+        @autoreleasepool {
+            id<MTLCommandQueue>   queue      = [device newCommandQueue];
+            id<MTLCommandBuffer>  command    = [queue commandBuffer];
+            MTLTextureDescriptor* descriptor =
+                [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                                                   width:4
+                                                                  height:4
+                                                               mipmapped:NO];
+            descriptor.usage       = MTLTextureUsageRenderTarget;
+            descriptor.storageMode = MTLStorageModePrivate;
+            MTLRenderPassDescriptor* pass        = [MTLRenderPassDescriptor renderPassDescriptor];
+            pass.colorAttachments[0].texture     = [device newTextureWithDescriptor:descriptor];
+            pass.colorAttachments[0].loadAction  = MTLLoadActionDontCare;
+            pass.colorAttachments[0].storeAction = MTLStoreActionDontCare;
+            id<MTLRenderCommandEncoder> render = [command renderCommandEncoderWithDescriptor:pass];
+            Wrap([render class], @selector(endEncoding), reinterpret_cast<IMP>(&Ended));
+            [render endEncoding];
+            id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
+            Wrap([blit class], @selector(endEncoding), reinterpret_cast<IMP>(&Ended));
+            [blit endEncoding];
+            Wrap([command class], @selector(commit), reinterpret_cast<IMP>(&Committed));
+        }
+    }
+    ~GpuLabelRecorder()
+    {
+        State().recording = false;
+        for (const auto& [method, original] : State().originals) method_setImplementation(method, original);
+        State().originals.clear();
+    }
+    GpuLabelRecorder(const GpuLabelRecorder&)            = delete;
+    GpuLabelRecorder& operator=(const GpuLabelRecorder&) = delete;
+
+    /// Starts recording from nothing.
+    void Start()
+    {
+        std::scoped_lock lock(State().mutex);
+        State().encoders.clear();
+        State().command_buffers.clear();
+        State().recording = true;
+    }
+    void Stop() { State().recording = false; }
+    std::vector<std::string> Encoders() const
+    {
+        std::scoped_lock lock(State().mutex);
+        return State().encoders;
+    }
+    std::vector<std::string> CommandBuffers() const
+    {
+        std::scoped_lock lock(State().mutex);
+        return State().command_buffers;
+    }
+
+private:
+    struct Shared
+    {
+        std::mutex               mutex;
+        std::atomic<bool>        recording { false };
+        std::map<Method, IMP>    originals;
+        std::vector<std::string> encoders;
+        std::vector<std::string> command_buffers;
+    };
+    static Shared& State()
+    {
+        static Shared state;
+        return state;
+    }
+    static std::string Text(NSString* label) { return label != nil ? std::string(label.UTF8String) : std::string(); }
+    static IMP Original(id self, SEL command)
+    {
+        return State().originals.at(class_getInstanceMethod(object_getClass(self), command));
+    }
+    static void Ended(id self, SEL command)
+    {
+        if (State().recording) {
+            std::scoped_lock lock(State().mutex);
+            State().encoders.push_back(Text([(id<MTLCommandEncoder>)self label]));
+        }
+        reinterpret_cast<void (*)(id, SEL)>(Original(self, command))(self, command);
+    }
+    static void Committed(id self, SEL command)
+    {
+        if (State().recording) {
+            std::scoped_lock lock(State().mutex);
+            State().command_buffers.push_back(Text([(id<MTLCommandBuffer>)self label]));
+        }
+        reinterpret_cast<void (*)(id, SEL)>(Original(self, command))(self, command);
+    }
+    static void Wrap(Class cls, SEL selector, IMP replacement)
+    {
+        Method method = class_getInstanceMethod(cls, selector);
+        if (method == nullptr || State().originals.contains(method)) return;
+        State().originals.emplace(method, method_setImplementation(method, replacement));
+    }
+};
+
+/// Restores the GPU labels to off, whatever a test set them to.
+struct RestoreGpuLabels
+{
+    ~RestoreGpuLabels() { MetalRender::SetGpuLabelsForTests(0); }
+};
+
+/// What one run with the labels in `mode` drew and labelled: the first frame's scene output,
+/// its encode counts, the pass labels and what Metal saw labelled while that frame was drawn.
+struct LabelledRun
+{
+    std::vector<uint8_t>                   picture;
+    MetalRender::FrameEncodeCountsForTests counts;
+    std::vector<std::string>               pass_labels;
+    std::vector<std::string>               encoders;
+    std::vector<std::string>               command_buffers;
+};
+
+LabelledRun DrawWithGpuLabels(const std::filesystem::path& project, const std::filesystem::path& cache, int mode)
+{
+    MetalRender::SetGpuLabelsForTests(mode);
+    LabelledRun run;
+    LoadedScene loaded;
+    std::string error;
+    std::filesystem::remove_all(cache);
+    EXPECT_TRUE(LoadScene(project, cache, loaded, error)) << error;
+    if (loaded.scene == nullptr) return run;
+    @autoreleasepool {
+        id<MTLDevice>    device = MTLCreateSystemDefaultDevice();
+        GpuLabelRecorder recorder(device);
+        CAMetalLayer*    layer  = [CAMetalLayer layer];
+        layer.device            = device;
+        layer.pixelFormat       = MTLPixelFormatBGRA8Unorm;
+        layer.drawableSize      = CGSizeMake(384, 256);
+        layer.framebufferOnly   = NO;
+        MetalRender render;
+        EXPECT_TRUE(render.init(MetalRenderInitInfo {
+            .metal_layer = (__bridge void*)layer, .width = 384, .height = 256,
+            .render_width = 384, .render_height = 256, .display_scale_factor = 1.0 }))
+            << render.lastError();
+        auto graph = sceneToRenderGraph(*loaded.scene);
+        if (graph == nullptr || ! render.compileRenderGraph(*loaded.scene, *graph)) {
+            ADD_FAILURE() << render.lastError();
+            return run;
+        }
+        // The first frame, which draws every pass: a later one may reuse what did not change.
+        recorder.Start();
+        AdvanceSceneFrame(render, *loaded.scene);
+        recorder.Stop();
+        run.picture         = ReadOutput(render, *loaded.scene);
+        run.counts          = render.LastFrameEncodeCountsForTests();
+        run.pass_labels     = render.GpuPassLabelsForTests();
+        run.encoders        = recorder.Encoders();
+        run.command_buffers = recorder.CommandBuffers();
+        render.destroy();
+    }
+    return run;
+}
+
+bool AnyContains(const std::vector<std::string>& labels, std::string_view text)
+{
+    return std::any_of(labels.begin(), labels.end(),
+                       [text](const std::string& label) { return label.find(text) != std::string::npos; });
+}
+
+} // namespace
+
+TEST_F(MetalSceneDraw, GpuLabelsNameEachPassItsTargetAndItsLayerOnlyWhenAskedFor)
+{
+    // The card through two effects: the card and the effects into the chain's buffers, the
+    // chain's last pass onto the scene, and the composition onto the surface.
+    RestoreGpuLabels restore;
+    const auto root    = root_ / "gpu-labels";
+    const auto project = WriteEffectChainFixture(root, { ChainEffect {}, ChainEffect {} });
+
+    const auto on = DrawWithGpuLabels(project, root / "cache-on", 1);
+    ASSERT_FALSE(on.picture.empty());
+    ASSERT_FALSE(on.pass_labels.empty());
+    ASSERT_EQ(on.command_buffers.size(), 1u) << "one frame commits one command buffer";
+    EXPECT_EQ(on.command_buffers.front().rfind("scene frame 384x256 on 384x256", 0), 0u)
+        << on.command_buffers.front();
+    // Every encoder of the frame says what it runs.
+    ASSERT_FALSE(on.encoders.empty());
+    for (const auto& label : on.encoders) EXPECT_FALSE(label.empty()) << "an encoder of the frame has no label";
+    EXPECT_TRUE(AnyContains(on.encoders, "fx0 -> _rt_effect_pingpong_")) << "the first effect's pass is not named";
+    EXPECT_TRUE(AnyContains(on.encoders, "fx1 -> " + std::string(SpecTex_Default) + " 384x256 rgba8 [tile #1]"))
+        << "the chain's last pass, onto the scene, is not named";
+    for (const auto& label : on.encoders) {
+        if (label.rfind("fx0 -> ", 0) != 0) continue;
+        EXPECT_NE(label.find(" rgba8 [tile #1] {"), std::string::npos) << label;
+    }
+    EXPECT_TRUE(AnyContains(on.encoders, "composition 384x256 -> 384x256 bgra8"));
+
+    // Off: Metal sees no label at all, and no label was ever built.
+    const auto off = DrawWithGpuLabels(project, root / "cache-off", 0);
+    ASSERT_FALSE(off.encoders.empty());
+    for (const auto& label : off.encoders) EXPECT_TRUE(label.empty()) << label;
+    for (const auto& label : off.command_buffers) EXPECT_TRUE(label.empty()) << label;
+    EXPECT_TRUE(off.pass_labels.empty());
+    EXPECT_EQ(off.picture, on.picture) << "the labels changed the picture";
+    EXPECT_EQ(off.counts.render_passes, on.counts.render_passes);
+}
+
+TEST_F(MetalSceneDraw, GpuLabelsSplitTheDrawsThatShareARenderPassWithoutChangingThePicture)
+{
+    // Twelve cards with long names, all drawn straight onto the scene: one render pass, whose
+    // label names the first card in full and counts the rest within the length Instruments
+    // keeps. `split` gives each its own render pass, and its own label.
+    RestoreGpuLabels restore;
+    const auto root    = root_ / "gpu-labels-split";
+    const auto project = WriteFixture(root);
+    auto       layout  = nlohmann::json::parse(std::ifstream(root / "layout.json"));
+    layout["objects"]  = nlohmann::json::array();
+    constexpr int kCards = 12;
+    for (int index = 0; index < kCards; ++index) {
+        layout["objects"].push_back({ { "id", index + 1 },
+                                      { "name", "a card whose name is long enough to matter " + std::to_string(index) },
+                                      { "image", "models/tile.json" },
+                                      { "origin", { 60 + 24 * index, 128, 0 } },
+                                      { "scale", { 0.2, 0.2, 1 } },
+                                      { "angles", { 0, 0, 0 } },
+                                      { "visible", true } });
+    }
+    // A name outside ASCII, which Instruments would not record.
+    layout["objects"][1]["name"] = "\xE7\xBD\xAE\xE4\xBA\x8E/before";
+    std::ofstream(root / "layout.json") << layout;
+
+    const auto joined = DrawWithGpuLabels(project, root / "cache-joined", 1);
+    const auto split  = DrawWithGpuLabels(project, root / "cache-split", 2);
+    ASSERT_FALSE(joined.picture.empty());
+    EXPECT_EQ(split.picture, joined.picture) << "splitting the render pass changed the picture";
+    EXPECT_EQ(split.counts.render_passes, joined.counts.render_passes + kCards - 1);
+
+    const std::string scene_prefix = "metal_probe -> " + std::string(SpecTex_Default);
+    const auto shared = std::find_if(joined.encoders.begin(), joined.encoders.end(), [&](const std::string& label) {
+        return label.rfind("[12 passes] " + scene_prefix, 0) == 0;
+    });
+    ASSERT_NE(shared, joined.encoders.end()) << "no label counts the twelve draws of one render pass";
+    EXPECT_NE(shared->find("[a card whose name is long enough to matter 0 #1]"), std::string::npos) << *shared;
+    EXPECT_NE(shared->find(" more"), std::string::npos) << "the label was not cut: " << *shared;
+    EXPECT_LE(shared->size(), 270u) << *shared;
+    for (const auto& label : joined.encoders) {
+        for (const unsigned char c : label) EXPECT_LT(c, 0x80) << label;
+    }
+
+    int own = 0;
+    for (const auto& label : split.encoders) {
+        if (label.rfind(scene_prefix, 0) == 0) ++own;
+        EXPECT_EQ(label.find("passes]"), std::string::npos) << label;
+    }
+    EXPECT_EQ(own, kCards) << "each card should have a render pass of its own";
+    EXPECT_TRUE(AnyContains(split.encoders, "[?/before #2]")) << "the name outside ASCII was not replaced";
+}
+
+namespace
+{
+
+struct RestoreCopyTrades
+{
+    ~RestoreCopyTrades() { MetalRender::SetCopyTradesForTests(true); }
+};
+
+/// Every frame's scene output of one run and each frame's encode counts.
+struct CopyTradeRun
+{
+    std::vector<std::vector<uint8_t>>                   frames;
+    std::vector<MetalRender::FrameEncodeCountsForTests> counts;
+};
+
+/// Draws `frames` production frames of `project` with copy trades on or off, on a fresh parse and
+/// renderer, so two runs differ only by the switch. `before(frame, scene)` runs ahead of each
+/// frame; when it answers false that frame's composition is refused, so the frame is abandoned
+/// after every pass of it has been encoded.
+CopyTradeRun DrawWithCopyTrades(const std::filesystem::path& project, const std::filesystem::path& cache,
+                                bool trades, int frames, const WeUserOptions& options = {},
+                                const std::function<void(Scene&)>&      adjust = {},
+                                const std::function<bool(int, Scene&)>& before = {})
+{
+    MetalRender::SetCopyTradesForTests(trades);
+    CopyTradeRun run;
+    LoadedScene  loaded;
+    std::string  error;
+    std::filesystem::remove_all(cache);
+    EXPECT_TRUE(LoadScene(project, cache, loaded, error, options)) << error;
+    if (loaded.scene == nullptr) return run;
+    if (adjust) adjust(*loaded.scene);
+    @autoreleasepool {
+        CAMetalLayer* layer   = [CAMetalLayer layer];
+        layer.device          = MTLCreateSystemDefaultDevice();
+        layer.pixelFormat     = MTLPixelFormatBGRA8Unorm;
+        layer.drawableSize    = CGSizeMake(384, 256);
+        layer.framebufferOnly = NO;
+        MetalRender render;
+        EXPECT_TRUE(render.init(MetalRenderInitInfo {
+            .metal_layer = (__bridge void*)layer, .width = 384, .height = 256,
+            .render_width = 384, .render_height = 256, .display_scale_factor = 1.0 }))
+            << render.lastError();
+        auto graph = sceneToRenderGraph(*loaded.scene);
+        if (graph == nullptr || ! render.compileRenderGraph(*loaded.scene, *graph)) {
+            ADD_FAILURE() << render.lastError();
+            return run;
+        }
+        render.UpdateCameraFillMode(*loaded.scene, FillMode::ASPECTFIT);
+        for (int frame = 0; frame < frames; ++frame) {
+            auto& scene = *loaded.scene;
+            if (before && ! before(frame, scene)) {
+                if (scene.runtime != nullptr) scene.runtime->Tick(1.0 / 60.0);
+                if (scene.shaderValueUpdater != nullptr) scene.shaderValueUpdater->FrameBegin();
+                render.RefuseNextCompositionForTests();
+                EXPECT_FALSE(render.drawFrame(scene)) << "frame " << frame << " was expected to be abandoned";
+                scene.PassFrameTime(1.0 / 60.0);
+            } else {
+                AdvanceSceneFrame(render, scene);
+            }
+            EXPECT_FALSE(scene.runtime != nullptr && scene.runtime->ConsumeSceneGraphMutationFlag())
+                << "frame " << frame << " asked for a new graph";
+            run.frames.push_back(ReadOutput(render, scene));
+            run.counts.push_back(render.LastFrameEncodeCountsForTests());
+        }
+        render.destroy();
+    }
+    return run;
+}
+
+/// Both runs drew every frame alike.
+void ExpectSameFrames(const CopyTradeRun& off, const CopyTradeRun& on, std::size_t frames)
+{
+    ASSERT_EQ(off.frames.size(), frames);
+    ASSERT_EQ(on.frames.size(), frames);
+    for (std::size_t frame = 0; frame < frames; ++frame) {
+        ASSERT_FALSE(off.frames[frame].empty());
+        EXPECT_EQ(on.frames[frame], off.frames[frame]) << "frame " << frame << " changed with the copy trades";
+    }
+    EXPECT_NE(off.frames.front(), off.frames.back()) << "the scene did not animate";
+}
+
+/// A motion blur of the shape Wallpaper Engine's has (an original stand-in): accumulate the
+/// layer's picture with its history into `_rt_FullCompoBuffer2`, copy that to the history
+/// `_rt_FullCompoBuffer1` (the effect's own), and draw the layer from `_rt_FullCompoBuffer2`.
+/// Every frame moves each channel of the picture, so the history shows in every frame after the
+/// first. `before_write` runs in the accumulation before it writes.
+void WriteHistoryEffect(const std::filesystem::path& root, const std::string& name,
+                        const std::string& before_write = {})
+{
+    WriteFiles(root, {
+        { "effects/" + name + ".json",
+          R"({"name":")" + name + R"(","passes":[)"
+          R"({"material":"materials/)" + name + R"(_accumulate.json","target":"_rt_FullCompoBuffer2",)"
+          R"("bind":[{"name":"previous","index":0},{"name":"_rt_FullCompoBuffer1","index":1}]},)"
+          R"({"command":"copy","target":"_rt_FullCompoBuffer1","source":"_rt_FullCompoBuffer2"},)"
+          R"({"material":"materials/)" + name + R"(_combine.json","bind":[{"name":"_rt_FullCompoBuffer2","index":0}]}],)"
+          R"("fbos":[{"name":"_rt_FullCompoBuffer1","scale":1,"format":"rgba_backbuffer","unique":true},)"
+          R"({"name":"_rt_FullCompoBuffer2","scale":1,"format":"rgba_backbuffer"}]})" },
+        { "materials/" + name + "_accumulate.json",
+          R"({"passes":[{"shader":")" + name +
+              R"(_accumulate","blending":"normal","cullmode":"nocull","depthtest":"disabled","depthwrite":"disabled","textures":[null,null]}]})" },
+        { "materials/" + name + "_combine.json",
+          R"({"passes":[{"shader":")" + name + R"(_combine","blending":"normal","cullmode":"nocull",)"
+          R"("depthtest":"disabled","depthwrite":"disabled","textures":[null]}]})" },
+        { "shaders/" + name + "_accumulate.vert",
+          "attribute vec3 a_Position;\nattribute vec2 a_TexCoord;\nvarying vec2 v_TexCoord;\n"
+          "void main(){ gl_Position=vec4(a_Position,1.0); v_TexCoord=a_TexCoord; }\n" },
+        { "shaders/" + name + "_accumulate.frag",
+          "uniform sampler2D g_Texture0;\nuniform sampler2D g_Texture1;\nuniform float g_Time;\n"
+          "varying vec2 v_TexCoord;\nvoid main(){ vec4 albedo=texSample2D(g_Texture0,v_TexCoord);"
+          " albedo.rgb=frac(albedo.rgb+g_Time*vec3(3.7,5.3,7.1)); " + before_write +
+          " gl_FragColor=mix(texSample2D(g_Texture1,v_TexCoord),albedo,0.5); }\n" },
+        { "shaders/" + name + "_combine.vert", kTimedCopyVertex },
+        { "shaders/" + name + "_combine.frag", TimedFragment("c") },
+    });
+}
+
+/// One card of the fixture's size per entry of `effects`, side by side, each through the effect
+/// named there, so the cards share the effects' `_rt_FullCompoBuffer2`.
+std::filesystem::path WriteHistoryFixture(const std::filesystem::path& root, const std::vector<std::string>& effects)
+{
+    const auto project = WriteFixture(root);
+    WriteHistoryEffect(root, "history");
+    WriteHistoryEffect(root, "history_partial", "if (v_TexCoord.x < 0.25) discard;");
+    auto layout = nlohmann::json::parse(std::ifstream(root / "layout.json"));
+    layout["general"]["bloom"] = false;
+    auto objects = nlohmann::json::array();
+    for (std::size_t k = 0; k < effects.size(); ++k) {
+        auto card       = layout["objects"][0];
+        card["id"]      = int(k + 1);
+        card["name"]    = "card" + std::to_string(k);
+        card["origin"]  = { 96 + 96 * int(k), 128, 0 };
+        card["effects"] = { { { "file", "effects/" + effects[k] + ".json" }, { "visible", true } } };
+        objects.push_back(card);
+    }
+    layout["objects"] = objects;
+    std::ofstream(root / "layout.json") << layout;
+    return project;
+}
+
+} // namespace
+
+TEST_F(MetalSceneDraw, AHistoryCopyIsTradedAndDrawsTheSamePicture)
+{
+    // A motion blur copies its accumulation into its history every frame, then draws the layer
+    // from the accumulation. With the copy trades on, the copy is left out and the two buffers
+    // trade textures after the draw that reads the accumulation: the history then holds this
+    // frame's accumulation and the accumulation a stale image, which the next accumulation
+    // replaces. Cards of one size share the accumulation, so the next one to replace it is the
+    // next card's, later in the frame (which loads it: proven to write every texel, or opened
+    // with the copy when it may leave some alone), or the first card's in the next frame.
+    RestoreCopyTrades restore;
+    struct Case
+    {
+        std::string              name;
+        std::vector<std::string> effects;
+        uint32_t                 opening_copies;
+    };
+    for (const auto& item : { Case { "one card", { "history" }, 0 },
+                              Case { "two cards sharing a buffer", { "history", "history" }, 0 },
+                              Case { "a second accumulation that leaves texels", { "history", "history_partial" }, 1 },
+                              Case { "three cards", { "history", "history", "history" }, 0 } }) {
+        SCOPED_TRACE(item.name);
+        const auto root    = root_ / ("history-" + std::to_string(item.effects.size()) + "-" + item.effects.back());
+        const auto project = WriteHistoryFixture(root, item.effects);
+        constexpr int kFrames = 6;
+        const auto off = DrawWithCopyTrades(project, root / "cache-off", false, kFrames);
+        const auto on  = DrawWithCopyTrades(project, root / "cache-on", true, kFrames);
+        ExpectSameFrames(off, on, kFrames);
+        const auto copies = uint32_t(item.effects.size());
+        for (int frame = 1; frame < kFrames; ++frame) {
+            SCOPED_TRACE(frame);
+            EXPECT_EQ(off.counts[frame].blit_passes, copies) << "the fixture no longer copies its history";
+            EXPECT_GT(off.counts[frame].copied_bytes, 0u);
+            EXPECT_EQ(on.counts[frame].blit_passes, 0u) << "a history copy was still made";
+            EXPECT_EQ(on.counts[frame].copied_bytes, 0u);
+            EXPECT_EQ(on.counts[frame].traded_copies, off.counts[frame].traded_copies + copies);
+            EXPECT_EQ(on.counts[frame].opening_copies, off.counts[frame].opening_copies + item.opening_copies);
+            EXPECT_EQ(on.counts[frame].render_passes, off.counts[frame].render_passes);
+        }
+    }
+}
+
+TEST_F(MetalSceneDraw, AHiddenOrAbandonedHistoryKeepsItsPictureAcrossCopyTrades)
+{
+    // The first card's accumulation is left stale by its trade until the next frame's first
+    // accumulation replaces it. While that card is hidden nothing does: the accumulation gets
+    // its picture back from the history before anything reads it, so the history is the one it
+    // had when the card comes back. A frame abandoned after its trades were made moves the names
+    // back, and the frame after it draws what it would have.
+    RestoreCopyTrades restore;
+    const auto root    = root_ / "history-hidden";
+    const auto project = WriteHistoryFixture(root, { "history", "history" });
+    constexpr int kFrames = 12;
+    const auto before = [](int frame, Scene& scene) {
+        if (frame == 3) EXPECT_TRUE(scene.runtime->SetNodeVisible("card0", false));
+        if (frame == 6) EXPECT_TRUE(scene.runtime->SetNodeVisible("card0", true));
+        return frame != 5 && frame != 9;
+    };
+    const auto off = DrawWithCopyTrades(project, root / "cache-off", false, kFrames, {}, {}, before);
+    const auto on  = DrawWithCopyTrades(project, root / "cache-on", true, kFrames, {}, {}, before);
+    ExpectSameFrames(off, on, kFrames);
+    for (const int frame : { 3, 4 }) {
+        SCOPED_TRACE(frame);
+        // The hidden card's copy and the shown card's: one restore of the shared accumulation
+        // takes their place, before the shown card's accumulation, which then loads it.
+        EXPECT_EQ(off.counts[frame].blit_passes, 2u);
+        EXPECT_EQ(on.counts[frame].blit_passes, 1u) << "the stale accumulation was not restored";
+    }
+    for (const int frame : { 7, 8, 10, 11 }) {
+        SCOPED_TRACE(frame);
+        EXPECT_EQ(on.counts[frame].blit_passes, 0u);
+        EXPECT_EQ(on.counts[frame].traded_copies, off.counts[frame].traded_copies + 2u);
+    }
+}
+
+TEST_F(MetalSceneDraw, AHistoryCopyWhoseImageIsReadBeforeItsSourceIsDoneStaysACopy)
+{
+    // The layer's draw reads the history as well as the accumulation after the copy: deferring
+    // the copy to after that draw would show it the history from before the copy. It stays a
+    // copy, and the picture is the same either way.
+    RestoreCopyTrades restore;
+    const auto root    = root_ / "history-read-early";
+    const auto project = WriteHistoryFixture(root, { "history" });
+    auto effect = nlohmann::json::parse(std::ifstream(root / "effects/history.json"));
+    effect["passes"][2]["bind"].push_back({ { "name", "_rt_FullCompoBuffer1" }, { "index", 1 } });
+    std::ofstream(root / "effects/history.json") << effect;
+    auto material = nlohmann::json::parse(std::ifstream(root / "materials/history_combine.json"));
+    material["passes"][0]["textures"] = { nullptr, nullptr };
+    std::ofstream(root / "materials/history_combine.json") << material;
+    std::ofstream(root / "shaders/history_combine.frag")
+        << "uniform sampler2D g_Texture0;\nuniform sampler2D g_Texture1;\nvarying vec2 v_TexCoord;\n"
+           "void main(){ gl_FragColor=vec4(texSample2D(g_Texture0,v_TexCoord).rg,"
+           "texSample2D(g_Texture1,v_TexCoord).b,1.0); }\n";
+    constexpr int kFrames = 4;
+    const auto off = DrawWithCopyTrades(project, root / "cache-off", false, kFrames);
+    const auto on  = DrawWithCopyTrades(project, root / "cache-on", true, kFrames);
+    ExpectSameFrames(off, on, kFrames);
+    EXPECT_EQ(off.counts.back().blit_passes, 1u);
+    EXPECT_EQ(on.counts.back().blit_passes, 1u) << "a copy whose destination is read before the trade was traded";
+    EXPECT_EQ(on.counts.back().traded_copies, off.counts.back().traded_copies);
+}
+
+TEST_F(MetalSceneDraw, APostProcessResultCopiedIntoTheSceneTradesTexturesAndDrawsTheSamePicture)
+{
+    // Bloom's combine and the colour options each draw into a buffer of the scene's size and
+    // copy it back into the scene's image. Nothing reads the buffer after the copy, and its next
+    // writer, the next frame's combine, clears it, so the two names trade textures instead. Also
+    // with the scene not cleared between frames (it starts from what the copy left), with layers
+    // that copy the scene to read it (the scene's image is then a pooled trade's source), and
+    // multisampled.
+    RestoreCopyTrades restore;
+    WeUserOptions colour;
+    colour.color_enabled = true;
+    colour.brightness    = 60.0f;
+    struct Case
+    {
+        std::string name;
+        bool        bloom { true };
+        bool        hdr { false };
+        bool        clear { true };
+        bool        lenses { false };
+        bool        colour { false };
+        uint32_t    samples { 1 };
+        uint32_t    copies { 1 };
+    };
+    std::vector<Case> cases {
+        { .name = "bloom" },
+        { .name = "bloom, not cleared", .clear = false },
+        { .name = "bloom and colour options", .colour = true, .copies = 2 },
+        { .name = "colour options", .bloom = false, .colour = true },
+        { .name = "hdr bloom", .hdr = true },
+        { .name = "bloom over lenses", .lenses = true },
+    };
+    id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+    if (device != nil && [device supportsTextureSampleCount:4])
+        cases.push_back({ .name = "bloom, multisampled", .samples = 4 });
+    for (std::size_t index = 0; index < cases.size(); ++index) {
+        const auto& item = cases[index];
+        SCOPED_TRACE(item.name);
+        const auto root    = root_ / ("post-trade-" + std::to_string(index));
+        const auto project = item.lenses ? WriteFeedbackFixture(root) : WriteFixture(root);
+        WriteBloomStandIns(root);
+        std::ofstream(root / "shaders/ccsimple_standin.vert") << kStandInVertexShader;
+        std::ofstream(root / "shaders/ccsimple_standin.frag") << kCcsimpleStandIn;
+        WriteStandInMaterial(root, "materials/util/ccsimple.json", "ccsimple_standin", { "_rt_FullFrameBuffer" });
+        std::ofstream(root / "shaders/metal_probe.frag")
+            << "uniform float g_Time;\nvarying vec2 v_TexCoord;\n"
+               "void main(){ gl_FragColor=vec4(v_TexCoord.x,frac(g_Time*3.1),0.75,0.5); }\n";
+        auto layout = nlohmann::json::parse(std::ifstream(root / "layout.json"));
+        layout["general"]["bloom"]          = item.bloom;
+        layout["general"]["hdr"]            = item.hdr;
+        layout["general"]["bloomstrength"]  = 1.0;
+        layout["general"]["bloomthreshold"] = 0.25;
+        layout["general"]["clearenabled"]   = item.clear;
+        std::ofstream(root / "layout.json") << layout;
+        const auto adjust = [&item](Scene& scene) {
+            if (item.samples > 1) scene.renderTargets[std::string(SpecTex_Default)].sample_count = item.samples;
+        };
+        constexpr int kFrames = 5;
+        const auto options = item.colour ? colour : WeUserOptions {};
+        const auto off = DrawWithCopyTrades(project, root / "cache-off", false, kFrames, options, adjust);
+        const auto on  = DrawWithCopyTrades(project, root / "cache-on", true, kFrames, options, adjust);
+        ExpectSameFrames(off, on, kFrames);
+        for (int frame = 1; frame < kFrames; ++frame) {
+            SCOPED_TRACE(frame);
+            EXPECT_EQ(off.counts[frame].blit_passes, item.copies) << "the fixture no longer copies its result back";
+            EXPECT_EQ(on.counts[frame].blit_passes, 0u) << "a result was still copied into the scene";
+            EXPECT_EQ(on.counts[frame].copied_bytes, 0u);
+            EXPECT_EQ(on.counts[frame].traded_copies, off.counts[frame].traded_copies + item.copies);
+        }
+        if (item.lenses) EXPECT_GE(off.counts.back().traded_copies, 2u) << "the lenses' copies were expected to trade";
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Work nothing visible can see: a draw that leaves its target as it is, and a clear only hidden
+// passes would read
+
+namespace
+{
+
+/// Restores both switches and target sharing, whatever a test set them to.
+struct RestoreInvisibleWorkSwitches
+{
+    ~RestoreInvisibleWorkSwitches()
+    {
+        MetalRender::SetSkipNoopDrawsForTests(true);
+        MetalRender::SetHiddenLayerWorkForTests(true);
+        MetalRender::SetTargetSharingForTests(true);
+    }
+};
+
+struct InvisibleWorkRun
+{
+    std::vector<std::vector<uint8_t>>                   frames;
+    std::vector<MetalRender::FrameEncodeCountsForTests> counts;
+    /// The targets whose names contain the inspected text, read right after the forced graph
+    /// rebuild, before any frame draws into the new graph.
+    std::map<std::string, std::vector<uint8_t>>         held;
+};
+
+/// Draws `frames` frames of `project` with the switches as given, on a fresh parse and renderer,
+/// the way the wallpaper's own draw runs them: the tick, a new graph if the tick asked for one,
+/// then the frame. With `rebuild_at` >= 0 the graph is built again before that frame whatever the
+/// scene asked, as the host does for any change of it, and the targets whose names contain
+/// `inspect` are read back right after. `refuse` frames have their composition refused, so they
+/// are abandoned.
+InvisibleWorkRun DrawWithInvisibleWorkSwitches(const std::filesystem::path& project, const std::filesystem::path& cache,
+                                               bool skip_noop, bool hidden_work, int frames, int rebuild_at = -1,
+                                               const std::string& inspect = {}, const std::set<int>& refuse = {})
+{
+    MetalRender::SetSkipNoopDrawsForTests(skip_noop);
+    MetalRender::SetHiddenLayerWorkForTests(hidden_work);
+    InvisibleWorkRun run;
+    LoadedScene      loaded;
+    std::string      error;
+    std::filesystem::remove_all(cache);
+    EXPECT_TRUE(LoadScene(project, cache, loaded, error)) << error;
+    if (loaded.scene == nullptr) return run;
+    @autoreleasepool {
+        CAMetalLayer* layer   = [CAMetalLayer layer];
+        layer.device          = MTLCreateSystemDefaultDevice();
+        layer.pixelFormat     = MTLPixelFormatBGRA8Unorm;
+        layer.drawableSize    = CGSizeMake(384, 256);
+        layer.framebufferOnly = NO;
+        MetalRender render;
+        EXPECT_TRUE(render.init(MetalRenderInitInfo {
+            .metal_layer = (__bridge void*)layer, .width = 384, .height = 256,
+            .render_width = 384, .render_height = 256, .display_scale_factor = 1.0 }))
+            << render.lastError();
+        auto& scene = *loaded.scene;
+        auto  graph = sceneToRenderGraph(scene);
+        if (graph == nullptr || ! render.compileRenderGraph(scene, *graph)) {
+            ADD_FAILURE() << render.lastError();
+            return run;
+        }
+        render.UpdateCameraFillMode(scene, FillMode::ASPECTFIT);
+        for (int frame = 0; frame < frames; ++frame) {
+            if (scene.runtime != nullptr) {
+                scene.runtime->Tick(1.0 / 60.0);
+                scene.runtime->PumpTextLayerCache();
+                std::string change_error;
+                (void)tests::ApplyRuntimeSceneChanges(render, scene, graph, false, &change_error);
+                EXPECT_TRUE(change_error.empty()) << change_error;
+            }
+            if (frame == rebuild_at) {
+                EXPECT_TRUE(render.clearLastRenderGraphForRebuild());
+                graph = sceneToRenderGraph(scene);
+                EXPECT_TRUE(graph != nullptr && render.compileRenderGraph(scene, *graph)) << render.lastError();
+                render.UpdateCameraFillMode(scene, FillMode::ASPECTFIT);
+                for (const auto& [name, target] : scene.renderTargets) {
+                    (void)target;
+                    if (inspect.empty() || name.find(inspect) == std::string::npos) continue;
+                    std::vector<uint8_t> pixels;
+                    uint32_t             width = 0, height = 0;
+                    if (render.ReadRenderTargetForTests(name, pixels, width, height)) run.held[name] = pixels;
+                }
+            }
+            if (scene.shaderValueUpdater != nullptr) scene.shaderValueUpdater->FrameBegin();
+            if (refuse.contains(frame)) {
+                render.RefuseNextCompositionForTests();
+                EXPECT_FALSE(render.drawFrame(scene)) << "frame " << frame << " was expected to be abandoned";
+            } else {
+                EXPECT_TRUE(render.drawFrame(scene)) << render.lastError();
+            }
+            scene.PassFrameTime(1.0 / 60.0);
+            run.frames.push_back(ReadOutput(render, scene));
+            run.counts.push_back(render.LastFrameEncodeCountsForTests());
+        }
+        render.destroy();
+    }
+    return run;
+}
+
+void ExpectSameFrames(const InvisibleWorkRun& off, const InvisibleWorkRun& on, std::size_t frames)
+{
+    ASSERT_EQ(off.frames.size(), frames);
+    ASSERT_EQ(on.frames.size(), frames);
+    for (std::size_t frame = 0; frame < frames; ++frame) {
+        ASSERT_FALSE(off.frames[frame].empty());
+        EXPECT_EQ(on.frames[frame], off.frames[frame]) << "frame " << frame << " changed with the work left out";
+    }
+}
+
+/// The fixture's card under a screen-filling layer of the solid layer's shape: `fragment` writes
+/// its colour from `g_Color` and `g_Alpha` (Wallpaper Engine's `flat.frag` is
+/// `vec4(g_Color, g_Alpha)`), blended as `blending`, coloured `color`, its alpha following
+/// `alpha_script` (an `update` that returns it), so the layer fades out and back in.
+std::filesystem::path WriteFadeFixture(const std::filesystem::path& root, const std::string& fragment,
+                                       const std::string& blending, const std::string& color,
+                                       const std::string& alpha_script)
+{
+    const auto project = WriteFixture(root);
+    WriteFiles(root, {
+        { "models/screen.json", R"({"width":384,"height":256,"material":"materials/screen.json"})" },
+        { "materials/screen.json",
+          R"({"passes":[{"shader":"fade","blending":")" + blending +
+              R"(","cullmode":"nocull","depthtest":"disabled","depthwrite":"disabled"}]})" },
+        { "shaders/fade.vert",
+          "uniform mat4 g_ModelViewProjectionMatrix;\nattribute vec3 a_Position;\nattribute vec2 a_TexCoord;\n"
+          "varying vec2 v_TexCoord;\nvoid main() {\n"
+          "  gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);\n  v_TexCoord = a_TexCoord;\n}\n" },
+        { "shaders/fade.frag",
+          "uniform float g_Alpha;\nuniform vec3 g_Color;\nvarying vec2 v_TexCoord;\nvoid main() {\n  gl_FragColor = " +
+              fragment + ";\n}\n" },
+    });
+    // The card behind moves with the scene time, so each frame is drawn afresh.
+    std::ofstream(root / "shaders/metal_probe.frag")
+        << "uniform float g_Time;\nvarying vec2 v_TexCoord;\n"
+           "void main() { gl_FragColor = vec4(v_TexCoord.x, frac(v_TexCoord.y + g_Time), 0.25, 1.0); }\n";
+    auto layout = nlohmann::json::parse(std::ifstream(root / "layout.json"));
+    layout["general"]["bloom"] = false;
+    layout["objects"].push_back({ { "id", 2 }, { "name", "black screen" }, { "image", "models/screen.json" },
+                                  { "origin", { 192, 128, 0 } }, { "scale", { 1, 1, 1 } }, { "angles", { 0, 0, 0 } },
+                                  { "color", color }, { "visible", true },
+                                  { "alpha", { { "value", 1.0 }, { "script", alpha_script } } } });
+    std::ofstream(root / "layout.json") << layout;
+    return project;
+}
+
+/// Alpha 1 for frames 0 and 1, `faded` for frames 2 and 3, 1 again from frame 4 on (the tick
+/// before frame k leaves `engine.runtime` at (k + 1) / 60 s).
+std::string FadeScript(const std::string& faded)
+{
+    return "export function update(value) { return engine.runtime > 0.04 && engine.runtime < 0.075 ? " + faded +
+           " : 1.0; }";
+}
+
+} // namespace
+
+TEST_F(MetalSceneDraw, ALayerFadedOutToNothingIsLeftOutAndEveryFrameStaysTheSame)
+{
+    // A black screen that fades out after an intro is Wallpaper Engine's common fade pattern;
+    // at alpha 0 its source-over blend leaves every texel as it was, so the draw is left out,
+    // and it is drawn again the frame its alpha is no longer 0. Additive blending keeps the
+    // texel at alpha 0 as well.
+    RestoreInvisibleWorkSwitches restore;
+    constexpr int kFrames = 6;
+    for (const std::string blending : { "translucent", "additive" }) {
+        SCOPED_TRACE(blending);
+        const auto root    = root_ / ("fade-" + blending);
+        const auto project = WriteFadeFixture(root, "vec4(g_Color, g_Alpha)", blending, "0.2 0.4 0.6", FadeScript("0.0"));
+        const auto off = DrawWithInvisibleWorkSwitches(project, root / "cache-off", false, true, kFrames);
+        const auto on  = DrawWithInvisibleWorkSwitches(project, root / "cache-on", true, true, kFrames);
+        ExpectSameFrames(off, on, kFrames);
+        ASSERT_EQ(on.counts.size(), std::size_t(kFrames));
+        EXPECT_NE(off.frames[1], off.frames[2]) << "the faded frame looks like the covered one";
+        for (int frame = 0; frame < kFrames; ++frame) {
+            SCOPED_TRACE(frame);
+            const bool faded = frame == 2 || frame == 3;
+            EXPECT_EQ(on.counts[frame].noop_draws, faded ? 1u : 0u);
+            EXPECT_EQ(off.counts[frame].noop_draws, 0u);
+        }
+    }
+}
+
+TEST_F(MetalSceneDraw, ADrawThatIsNotProvenToLeaveItsTargetAsItIsIsDrawn)
+{
+    // Each variant would at best leave the picture as it is; none is proven to, so every one is
+    // drawn, and the frames are the same either way. A colour of 1e60 is infinite in a float,
+    // and infinity times an alpha of 0 is not 0.
+    RestoreInvisibleWorkSwitches restore;
+    constexpr int kFrames = 4;
+    struct Variant
+    {
+        std::string name, fragment, blending, color, faded;
+    };
+    const Variant variants[] = {
+        { "half alpha", "vec4(g_Color, g_Alpha)", "translucent", "0.2 0.4 0.6", "0.5" },
+        { "replacing blend", "vec4(g_Color, g_Alpha)", "normal", "0.2 0.4 0.6", "0.0" },
+        { "multiplying blend", "vec4(g_Color, g_Alpha)", "multiply", "0.2 0.4 0.6", "0.0" },
+        { "colour from a varying", "vec4(g_Color * v_TexCoord.x, g_Alpha)", "translucent", "0.2 0.4 0.6", "0.0" },
+        { "alpha from a varying", "vec4(g_Color, g_Alpha * v_TexCoord.y)", "translucent", "0.2 0.4 0.6", "0.0" },
+        { "infinite colour", "vec4(g_Color * 1e30 * 1e30, g_Alpha)", "translucent", "1 1 1", "0.0" },
+    };
+    for (std::size_t k = 0; k < std::size(variants); ++k) {
+        const auto& variant = variants[k];
+        SCOPED_TRACE(variant.name);
+        const auto root    = root_ / ("unproven-fade-" + std::to_string(k));
+        const auto project = WriteFadeFixture(root, variant.fragment, variant.blending, variant.color,
+                                              FadeScript(variant.faded));
+        const auto off = DrawWithInvisibleWorkSwitches(project, root / "cache-off", false, true, kFrames);
+        const auto on  = DrawWithInvisibleWorkSwitches(project, root / "cache-on", true, true, kFrames);
+        ExpectSameFrames(off, on, kFrames);
+        for (const auto& counts : on.counts) EXPECT_EQ(counts.noop_draws, 0u);
+    }
+}
+
+namespace
+{
+
+/// The fixture's card and, beside it, a panel through a chain of two effects that move with the
+/// scene time, whose visibility a script decides: shown for frames 0 and 1, hidden for frames 2
+/// to 5, shown again from frame 6 (the tick before frame k leaves `engine.runtime` at
+/// (k + 1) / 60 s). A layer whose visibility a script writes stays in the graph, so while it is
+/// hidden its chain's clears are all that runs of it.
+std::filesystem::path WriteHiddenChainFixture(const std::filesystem::path& root)
+{
+    const auto project = WriteEffectChainFixture(root, { ChainEffect {}, ChainEffect {} });
+    auto layout = nlohmann::json::parse(std::ifstream(root / "layout.json"));
+    auto panel  = layout["objects"][0];
+    panel["id"]      = 2;
+    panel["name"]    = "panel";
+    panel["origin"]  = { 288, 128, 0 };
+    panel["scale"]   = { 0.5, 0.5, 1 };
+    panel["visible"] = { { "value", true },
+                         { "script", "export function update(value) { return !(engine.runtime > 0.04 && "
+                                     "engine.runtime < 0.11); }" } };
+    layout["objects"][0].erase("effects");
+    layout["objects"][0]["origin"] = { 96, 128, 0 };
+    layout["objects"][0]["scale"]  = { 0.5, 0.5, 1 };
+    layout["objects"].push_back(panel);
+    std::ofstream(root / "layout.json") << layout;
+    return project;
+}
+
+} // namespace
+
+TEST_F(MetalSceneDraw, AHiddenLayersClearsAreLeftOutAndItsPictureComesBackAsItWas)
+{
+    // While the panel is hidden nothing that draws reads its effect buffers before they are
+    // cleared again, so their clears are left out, with the render passes they opened. The
+    // frames are the same either way, the first one shown again included, and a frame
+    // abandoned while it is hidden leaves nothing behind either.
+    RestoreInvisibleWorkSwitches restore;
+    constexpr int kFrames = 8;
+    for (const bool sharing : { true, false }) {
+        SCOPED_TRACE(sharing ? "targets shared" : "targets of their own");
+        MetalRender::SetTargetSharingForTests(sharing);
+        const auto root    = root_ / (std::string("hidden-chain-") + (sharing ? "shared" : "own"));
+        const auto project = WriteHiddenChainFixture(root);
+        const auto off = DrawWithInvisibleWorkSwitches(project, root / "cache-off", true, false, kFrames, -1, {}, { 4 });
+        const auto on  = DrawWithInvisibleWorkSwitches(project, root / "cache-on", true, true, kFrames, -1, {}, { 4 });
+        ExpectSameFrames(off, on, kFrames);
+        EXPECT_NE(off.frames[1], off.frames[2]) << "hiding the panel changed nothing";
+        for (int frame = 0; frame < kFrames; ++frame) {
+            SCOPED_TRACE(frame);
+            const bool hidden = frame >= 2 && frame <= 5;
+            EXPECT_EQ(off.counts[frame].skipped_clears, 0u);
+            if (frame == 4) continue;
+            if (hidden) {
+                // The effect's buffer at least; the card's own is pinned for reuse, and one the
+                // reuse table holds keeps its clear.
+                EXPECT_GE(on.counts[frame].skipped_clears, 1u) << "the hidden chain's clears still ran";
+                EXPECT_EQ(on.counts[frame].render_passes + on.counts[frame].skipped_clears,
+                          off.counts[frame].render_passes)
+                    << "a left-out clear did not take its render pass with it";
+            } else {
+                EXPECT_EQ(on.counts[frame].skipped_clears, 0u);
+                EXPECT_EQ(on.counts[frame].render_passes, off.counts[frame].render_passes);
+            }
+        }
+    }
+}
+
+namespace
+{
+
+/// A small solid layer another layer samples: the viewer covers the canvas with the source's
+/// composite. The source fades out to nothing from frame 2 on; the viewer is shown for frames 0
+/// and 1, hidden for frames 2 to 5 and shown again from frame 6. While both are hidden the
+/// source's composite is cleared for nobody: the source draws nothing into it and the viewer
+/// draws nothing out of it.
+std::filesystem::path WriteFadedSourceFixture(const std::filesystem::path& root)
+{
+    // Its alpha follows the scene time as well, so the reuse table cannot keep its composite.
+    const auto project = WriteFadeFixture(root, "vec4(g_Color, g_Alpha * (g_Time * 30.0))", "translucent", "0.2 0.4 0.6",
+                                          "export function update(value) { return engine.runtime > 0.04 ? 0.0 : 1.0; }");
+    std::ofstream(root / "shaders/fade.frag")
+        << "uniform float g_Alpha;\nuniform float g_Time;\nuniform vec3 g_Color;\nvoid main() {\n"
+           "  gl_FragColor = vec4(g_Color, g_Alpha * (g_Time * 30.0));\n}\n";
+    WriteFiles(root, {
+        { "models/viewer.json", R"({"width":384,"height":256,"material":"materials/viewer.json"})" },
+        { "materials/viewer.json",
+          R"({"passes":[{"shader":"viewer","blending":"translucent","cullmode":"nocull","depthtest":"disabled",)"
+          R"("depthwrite":"disabled","textures":["_rt_imageLayerComposite_2_a"]}]})" },
+        { "shaders/viewer.vert",
+          "uniform mat4 g_ModelViewProjectionMatrix;\nattribute vec3 a_Position;\nattribute vec2 a_TexCoord;\n"
+          "varying vec2 v_TexCoord;\nvoid main() {\n"
+          "  gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);\n  v_TexCoord = a_TexCoord;\n}\n" },
+        { "shaders/viewer.frag",
+          "uniform sampler2D g_Texture0;\nvarying vec2 v_TexCoord;\n"
+          "void main() { gl_FragColor = vec4(texSample2D(g_Texture0, v_TexCoord).rgb, 1.0); }\n" },
+    });
+    auto layout = nlohmann::json::parse(std::ifstream(root / "layout.json"));
+    layout["objects"][1]["scale"] = { 0.25, 0.25, 1 };
+    layout["objects"].push_back(
+        { { "id", 3 }, { "name", "viewer" }, { "image", "models/viewer.json" }, { "origin", { 192, 128, 0 } },
+          { "scale", { 1, 1, 1 } }, { "angles", { 0, 0, 0 } }, { "dependencies", { 2 } },
+          { "visible", { { "value", true },
+                         { "script", "export function update(value) { return !(engine.runtime > 0.04 && "
+                                     "engine.runtime < 0.11); }" } } } });
+    std::ofstream(root / "layout.json") << layout;
+    return project;
+}
+
+} // namespace
+
+TEST_F(MetalSceneDraw, AClearALayerShownAgainReadsRunsAndANewGraphGetsWhatTheClearsLeft)
+{
+    // While the viewer is hidden the source's composite is cleared for nobody, and the clear is
+    // left out; the frame the viewer is shown again, it reads the composite, so the clear runs
+    // again and the viewer shows what it would have. A graph built again while both are hidden
+    // takes over the composite as it is: the left-out clear's colour is put into it first, so
+    // the new graph starts from what the run that kept the clears holds.
+    RestoreInvisibleWorkSwitches restore;
+    MetalRender::SetTargetSharingForTests(false);
+    constexpr int kFrames = 8;
+    for (const int rebuild_at : { -1, 4 }) {
+        SCOPED_TRACE(rebuild_at < 0 ? "one graph" : "graph built again while hidden");
+        const auto root    = root_ / ("faded-source-" + std::to_string(rebuild_at + 1));
+        const auto project = WriteFadedSourceFixture(root);
+        const auto off = DrawWithInvisibleWorkSwitches(project, root / "cache-off", true, false, kFrames, rebuild_at,
+                                                       "_rt_imageLayerComposite_");
+        const auto on  = DrawWithInvisibleWorkSwitches(project, root / "cache-on", true, true, kFrames, rebuild_at,
+                                                       "_rt_imageLayerComposite_");
+        ExpectSameFrames(off, on, kFrames);
+        EXPECT_NE(off.frames[1], off.frames[2]) << "hiding the viewer changed nothing";
+        EXPECT_NE(off.frames[1], off.frames[6]) << "the viewer shown again shows the faded source as it was";
+        ASSERT_EQ(on.counts.size(), std::size_t(kFrames));
+        for (const int frame : { 2, 3, 5 }) {
+            EXPECT_GE(on.counts[frame].skipped_clears, 1u) << "frame " << frame << ": no clear was left out";
+            EXPECT_GE(on.counts[frame].noop_draws, 1u) << "frame " << frame;
+        }
+        for (const int frame : { 6, 7 }) EXPECT_EQ(on.counts[frame].skipped_clears, 0u) << "frame " << frame;
+        if (rebuild_at < 0) continue;
+        ASSERT_FALSE(off.held.empty()) << "the fixture has no composite to carry over";
+        EXPECT_EQ(on.held, off.held) << "a composite carried into the new graph kept what a left-out clear left";
+    }
+}
+
+TEST_F(MetalSceneDraw, ACopyOfTheSceneForAHiddenLensIsLeftOutUntilTheLensIsShownAgain)
+{
+    // A lens reads the scene beneath it through a copy the graph makes for it alone. While a
+    // script hides the lens nothing reads that copy, so it is not made; the frame the lens is
+    // shown again its copy is made first, and every frame looks the same either way. With a
+    // second lens shown all along, the two copies share their images, and the one left out takes
+    // none from the set nor gives one back.
+    RestoreInvisibleWorkSwitches restore;
+    constexpr int kFrames = 8;
+    for (const bool both : { false, true }) {
+        SCOPED_TRACE(both ? "a second lens shown" : "one lens");
+        const auto root    = root_ / (std::string("hidden-lens-") + (both ? "two" : "one"));
+        const auto project = WriteFeedbackFixture(root);
+        std::ofstream(root / "shaders/metal_probe.frag")
+            << "uniform float g_Time;\nvarying vec2 v_TexCoord;\n"
+               "void main() { gl_FragColor = vec4(v_TexCoord.x, frac(v_TexCoord.y + g_Time), 0.25, 1.0); }\n";
+        auto layout = nlohmann::json::parse(std::ifstream(root / "layout.json"));
+        if (! both) layout["objects"].erase(2);
+        layout["objects"][1]["visible"] = {
+            { "value", true },
+            { "script", "export function update(value) { return !(engine.runtime > 0.04 && engine.runtime < 0.11); }" }
+        };
+        std::ofstream(root / "layout.json") << layout;
+        const auto off = DrawWithInvisibleWorkSwitches(project, root / "cache-off", true, false, kFrames, -1, {}, { 4 });
+        const auto on  = DrawWithInvisibleWorkSwitches(project, root / "cache-on", true, true, kFrames, -1, {}, { 4 });
+        ExpectSameFrames(off, on, kFrames);
+        EXPECT_NE(off.frames[1], off.frames[2]) << "hiding the lens changed nothing";
+        ASSERT_EQ(on.counts.size(), std::size_t(kFrames));
+        for (int frame = 0; frame < kFrames; ++frame) {
+            SCOPED_TRACE(frame);
+            const bool hidden = frame >= 2 && frame <= 5;
+            EXPECT_EQ(off.counts[frame].skipped_copies, 0u);
+            if (frame == 4) continue;
+            EXPECT_EQ(on.counts[frame].skipped_copies, hidden ? 1u : 0u);
+            if (hidden) {
+                EXPECT_GT(off.counts[frame].blit_passes + off.counts[frame].traded_copies,
+                          on.counts[frame].blit_passes + on.counts[frame].traded_copies)
+                    << "the hidden lens's copy was still made";
+            }
+        }
     }
 }

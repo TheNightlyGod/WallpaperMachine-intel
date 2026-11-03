@@ -612,14 +612,13 @@ final class WallpaperSurface: LockScreenSurfaceLifecycle {
   /// window happens to stay open.
   private var authorityRequest: WallpaperPresentationAuthority.Request {
     // Native desktop holds a frame once it has settled; the ordinary desktop renderer remains live.
-    let locked =
-      (CGSessionCopyCurrentDictionary() as? [String: Any])?["CGSSessionScreenIsLocked"] as? Bool
-      ?? false
+    let session = WallpaperPresentationAuthority.SessionState.current()
     return WallpaperPresentationAuthority.Request(
       role: preview ? .preview : .lockScreen,
       userPaused: scene.paused,
       displaysAsleep: WallpaperController.shared.displayPower.displaysAsleep(for: displayID),
-      sessionLocked: locked,
+      sessionLocked: session.locked,
+      sessionOnConsole: session.onConsole,
       presentationMode: presentation,
       hostActivity: activity == "suspended" ? .suspended : .active,
       presentedFor: presentingSince.map { ContinuousClock.now - $0 },
@@ -654,7 +653,7 @@ final class WallpaperSurface: LockScreenSurfaceLifecycle {
       if shouldPause, video != nil { refreshVideoFrame() }
       counters.record(shouldPause ? .presentationSuspended : .presentationAuthorized, for: surfaceKey)
       WallpaperRuntime.log(
-        "Playback display=\(scene.displayID) mode=\(presentation) activity=\(activity) locked=\(request.sessionLocked) paused=\(shouldPause) reasons=\(reasons.rawValue)"
+        "Playback display=\(scene.displayID) mode=\(presentation) activity=\(activity) locked=\(request.sessionLocked) console=\(request.sessionOnConsole) paused=\(shouldPause) reasons=\(reasons.rawValue)"
       )
     } catch { WallpaperRuntime.log(error.localizedDescription) }
   }

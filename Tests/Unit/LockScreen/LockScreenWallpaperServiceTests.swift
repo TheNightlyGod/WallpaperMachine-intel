@@ -949,6 +949,49 @@ final class LockScreenWallpaperServiceTests: XCTestCase {
     XCTAssertNil(service.errorMessage)
   }
 
+  /// Asking whether the Mac is locked or dark is a window-server round trip. The monitor's
+  /// ticks that find every committed display still named do not ask it; only a tick where a
+  /// display left does.
+  @MainActor
+  func testSteadyMonitorTicksDoNotAskWhetherTheDisplaysAreAway() async throws {
+    var record = scene()
+    record.displayId = 1
+    var records = [record]
+    var sceneReads = 0
+    var awayChecks = 0
+    let service = LockScreenWallpaperService(prepareExtension: {}, notifyConfigurationChanged: {}, scenes: {
+      sceneReads += 1
+      return records
+    },
+      selection: LockScreenWallpaperSelection(storeURL: store, journalURL: journal, reload: {}),
+      exchange: exchange, defaults: defaults, scheduleMonitor: scheduleMonitor,
+      displayUUID: { [1: "one"][$0] },
+      displaysAreAway: {
+        awayChecks += 1
+        return true
+      })
+    let responder = readinessResponder()
+    defer { responder.cancel() }
+    try service.start()
+    service.setEnabled(true)
+    await waitFor("lock screen ready") { service.isEnabled && !service.isBusy }
+    let timer = try XCTUnwrap(timers.last)
+
+    for _ in 0..<5 {
+      let reads = sceneReads
+      timer.fire()
+      await waitFor("a steady tick") { sceneReads > reads && !service.isBusy }
+    }
+    XCTAssertEqual(awayChecks, 0, "every display is still named, so nothing is asked")
+
+    records = []
+    let reads = sceneReads
+    timer.fire()
+    await waitFor("a tick with no displays") { sceneReads > reads && !service.isBusy }
+    XCTAssertEqual(awayChecks, 1, "a display left: is the Mac locked or dark?")
+    XCTAssertTrue(service.isEnabled, "it is, so the committed lock screen stays")
+  }
+
   /// WallpaperAgent between its restart and relaunch fails one attempt; the committed selection
   /// stays on the lock screen and the next monitor tick publishes again.
   @MainActor

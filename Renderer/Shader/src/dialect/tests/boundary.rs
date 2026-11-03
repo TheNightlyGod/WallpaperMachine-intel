@@ -227,6 +227,8 @@ fn converted_output_is_pinned_per_pipeline_revision() {
         (6, "40f2dbbad70e204ef9588f929b360067f132b1964e51fc9e20bd0d0a0d587a3a"),
         (7, "40f2dbbad70e204ef9588f929b360067f132b1964e51fc9e20bd0d0a0d587a3a"),
         (8, "40f2dbbad70e204ef9588f929b360067f132b1964e51fc9e20bd0d0a0d587a3a"),
+        (9, "40f2dbbad70e204ef9588f929b360067f132b1964e51fc9e20bd0d0a0d587a3a"),
+        (10, "40f2dbbad70e204ef9588f929b360067f132b1964e51fc9e20bd0d0a0d587a3a"),
     ];
     let row = PINNED.iter().find(|(r, _)| *r == PIPELINE_REVISION);
     match row {

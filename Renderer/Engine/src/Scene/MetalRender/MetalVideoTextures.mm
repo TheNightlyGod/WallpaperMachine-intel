@@ -202,6 +202,9 @@ struct VideoSourceEntry {
     std::shared_ptr<FrameBundle>               current;
     id<MTLTexture>                             texture { nil };
     std::uint64_t                              imported_generation { 0 };
+    /// `State::imports` as it stood after the import that produced `current`:
+    /// unique to that import, so it can stand for everything the import made.
+    std::uint64_t                              import_serial { 0 };
     bool                                       has_import { false };
     /// Destination-slot shape, which is the conversion's, not the frame's.
     std::uint32_t                              width { 0 };
@@ -712,12 +715,22 @@ bool MetalVideoTextures::frameSize(const std::string& key, std::uint32_t* width,
     return true;
 }
 
-bool MetalVideoTextures::beginFrame(Scene& scene, id<MTLCommandBuffer> command, std::string* error)
+std::uint64_t MetalVideoTextures::importSerial(const std::string& key) const
+{
+    const auto iterator = m_state->sources.find(key);
+    if (iterator == m_state->sources.end() || ! iterator->second.has_import) return 0;
+    return iterator->second.import_serial;
+}
+
+bool MetalVideoTextures::beginFrame(Scene& scene, id<MTLCommandBuffer> command, std::string* error,
+                                    bool* imported)
 {
     auto& state = *m_state;
+    if (imported != nullptr) *imported = false;
     if (state.sources.empty()) return true;
     if (command == nil) return SetError(error, "video textures need a command buffer to import into");
 
+    const std::uint64_t imports_before = state.imports;
     auto pending = std::make_shared<PendingFrames>();
     id<MTLComputeCommandEncoder> encoder = nil;
     const auto convert = [&](VideoSourceEntry& entry, const std::shared_ptr<FrameBundle>& bundle,
@@ -943,6 +956,7 @@ bool MetalVideoTextures::beginFrame(Scene& scene, id<MTLCommandBuffer> command, 
             }
             entry.texture             = bundle->sampled;
             entry.imported_generation = frame.generation;
+            entry.import_serial       = state.imports;
             entry.has_import          = true;
             entry.frame_width         = frame.displayWidth();
             entry.frame_height        = frame.displayHeight();
@@ -958,6 +972,9 @@ bool MetalVideoTextures::beginFrame(Scene& scene, id<MTLCommandBuffer> command, 
     }();
 
     if (encoder != nil) [encoder endEncoding];
+    // Also after a failure: a frame that imported part of its videos did take
+    // frames, whether or not it goes on to be drawn.
+    if (imported != nullptr) *imported = state.imports != imports_before;
     if (! pending->bundles.empty()) {
         // The handler owns the frames, not the renderer: it may run after
         // `release()` or after this object is gone, on a thread Metal chose.

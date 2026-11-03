@@ -58,7 +58,7 @@ use crate::{
             SetMetalFxUpscalingEnabled, SetRenderScale,
             SetRendererCountersEnabled, SetScalingFactor, SetScalingMode,
             SetSceneOnDemandEnabled, SetSceneOptimizationEnabled, SetSceneQuality,
-            SetSceneResolution, SetSceneVideoPlaneSamplingEnabled,
+            SetSceneDisplayFramingEnabled, SetSceneResolution, SetSceneVideoPlaneSamplingEnabled,
             SetTargetFps, SetVerboseLogging, SetVolume, SetWebAudioSubscribed,
             Shutdown,
         },
@@ -1652,6 +1652,12 @@ impl<E: EngineFacade + Clone> Message<Bootstrap> for BridgeActor<E> {
         {
             self.state.errors.push(error.to_string());
         }
+        if let Err(error) = self
+            .engine
+            .set_scene_display_framing_enabled(experimental.scene_display_framing)
+        {
+            self.state.errors.push(error.to_string());
+        }
         if let Err(error) = self.engine.set_metalfx_upscaling_enabled(
             self.state.app_config.quality.metalfx_upscaling_enabled,
         ) {
@@ -2591,6 +2597,30 @@ impl<E: EngineFacade + Clone> Message<SetSceneVideoPlaneSamplingEnabled> for Bri
     }
 }
 
+impl<E: EngineFacade + Clone> Message<SetSceneDisplayFramingEnabled> for BridgeActor<E> {
+    type Reply = messages::SetSceneDisplayFramingEnabledReply;
+
+    async fn handle(
+        &mut self,
+        msg: SetSceneDisplayFramingEnabled,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.state.app_config.experimental.scene_display_framing = msg.enabled;
+        if let Some(store) = &self.config_store {
+            store.save_app_config(&self.state.app_config)?;
+        }
+        // How much of a scene's layout is drawn, not what a scene is: a
+        // running scene picks the change up at its next frame by sizing its
+        // render targets again in place, so nothing here rebuilds, reparses
+        // or reopens anything.
+        self.engine
+            .set_scene_display_framing_enabled(msg.enabled)
+            .map_err(|error| BridgeError::engine(error.to_string()))?;
+        self.invalidate_operations();
+        Ok(self.all_snapshots())
+    }
+}
+
 impl<E: EngineFacade + Clone> Message<SetMetalFxUpscalingEnabled> for BridgeActor<E> {
     type Reply = messages::SetMetalFxUpscalingEnabledReply;
 
@@ -3005,13 +3035,22 @@ impl<E: EngineFacade + Clone> Message<RendererCounters> for BridgeActor<E> {
                 RendererSharedCounterKind::AudioAcceptedFrames,
             ),
             audio_active_consumers: self.audio_consumer_count(),
-            // The renderer presents through a CAMetalLayer and exposes no presentation
-            // feedback here. Present requests are reported as requests; the
-            // frames the compositor actually showed are not observable, and are
-            // never approximated by the request count.
-            presentation_feedback_available: false,
+            // Each presented drawable reports when the display showed it, or
+            // that it never did; the surfaces carry those counts. Present
+            // requests stay requests and are never relabelled as shown frames.
+            // `WALLPAPER_MACHINE_PRESENT_FEEDBACK=0` asks for no reports, and
+            // then zero shown frames must not read as a measurement.
+            presentation_feedback_available: present_feedback_requested(
+                std::env::var("WALLPAPER_MACHINE_PRESENT_FEEDBACK").ok().as_deref(),
+            ),
         })
     }
+}
+
+/// Whether presents ask their drawables for reports: the renderer reads the same
+/// switch (`PresentFeedbackEnabled` in MetalRender.mm), on unless it is `0`.
+pub(crate) fn present_feedback_requested(switch: Option<&str>) -> bool {
+    switch != Some("0")
 }
 
 /// Maps one renderer surface's counters onto the reported row. Named fields
@@ -3046,8 +3085,14 @@ fn renderer_surface_row(counters: &RendererSurfaceCounters) -> BridgeRendererSur
         gpu_completions: counters.value(K::GpuCompletions),
         simulation_ticks: counters.value(K::SimulationTicks),
         presents_skipped_unchanged: counters.value(K::PresentsSkippedUnchanged),
+        presented_frames: counters.value(K::PresentedFrames),
+        presents_dropped: counters.value(K::PresentsDropped),
+        present_gaps_1_vsync: counters.value(K::PresentGaps1Vsync),
+        present_gaps_2_vsync: counters.value(K::PresentGaps2Vsync),
+        present_gaps_3plus_vsync: counters.value(K::PresentGaps3PlusVsync),
         tick_interval_micros: counters.value(K::TickIntervalMicros),
         content_period_micros: counters.value(K::ContentPeriodMicros),
+        vsync_period_micros: counters.value(K::VsyncPeriodMicros),
         video_decode_outputs: counters.value(K::VideoDecodeOutputs),
         video_seeks: counters.value(K::VideoSeeks),
         video_frames_selected: counters.value(K::VideoFramesSelected),

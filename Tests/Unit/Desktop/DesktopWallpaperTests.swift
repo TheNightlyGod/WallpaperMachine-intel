@@ -1320,6 +1320,182 @@ final class DesktopWallpaperTests: XCTestCase {
         try await waitUntil { rig.total == 6 && rig.posterFiles.count == settled.count + 3 }
     }
 
+    /// A playlist turning back to a wallpaper, or a switch back, used to take its poster three
+    /// times again: three readbacks and encodes, and three new files macOS keeps for good. With
+    /// the same look it gets its last settled poster back, the same file, and nothing is asked.
+    @MainActor
+    func testAWallpaperThatComesBackWithTheSameLookGetsItsSettledPosterBack() async throws {
+        let rig = try PosterRig(root: root, settleDelays: [.milliseconds(20), .milliseconds(50)], answers: true)
+        defer { rig.finish() }
+        rig.workspace.pictures = [one: original("one")]
+        let store = DesktopSettledPosterStore(folder: root.appendingPathComponent("Settled"))
+        var wallpaper = "a"
+        rig.sync.settledPosters = store
+        rig.sync.posterLook = { DesktopPosterLook(display: $0.display, wallpaperID: wallpaper, inputs: [:]) }
+
+        // Refreshes stay 500 ms apart, so none waits behind the last while its settle captures run.
+        rig.sync.refresh()
+        try await waitUntil { rig.total == 3 && rig.posterFiles.count == 3 }
+        try await Task.sleep(for: .milliseconds(600))
+        let settledA = try XCTUnwrap(rig.workspace.pictures[one]?.url)
+        XCTAssertGreaterThan(store.writes, 0, "a settled poster is kept for the wallpaper's return")
+
+        wallpaper = "b"
+        rig.sync.refresh()
+        try await waitUntil { rig.total == 6 && rig.posterFiles.count == 6 }
+        try await Task.sleep(for: .milliseconds(600))
+        let files = rig.posterFiles
+
+        wallpaper = "a"
+        rig.sync.refresh()
+        try await waitUntil { rig.workspace.pictures[one]?.url == settledA }
+        try await Task.sleep(for: .milliseconds(600))
+        XCTAssertEqual(rig.total, 6, "nothing was asked for, now or as it settles")
+        XCTAssertEqual(rig.posterFiles, files, "the desktop got the file it had, no new one")
+        XCTAssertEqual(store.reuses, 1)
+
+        // A renderer's first frame arrives unasked, often an intro: the settled poster stays.
+        rig.draw()
+        rig.sync.presentationResumed()
+        rig.spaceChanged()
+        try await Task.sleep(for: .milliseconds(600))
+        XCTAssertEqual(rig.workspace.pictures[one]?.url, settledA)
+        XCTAssertEqual(rig.total, 6)
+        XCTAssertEqual(rig.posterFiles, files)
+    }
+
+    /// A new wallpaper on one display retakes every poster; a display whose look did not change
+    /// gets its own settled poster back and is not asked again.
+    @MainActor
+    func testAnotherDisplaysChangeLeavesASettledDisplayUnasked() async throws {
+        let rig = try PosterRig(root: root, displays: 2, settleDelays: [.milliseconds(20)], answers: true)
+        defer { rig.finish() }
+        rig.workspace.pictures = [one: original("one"), external: original("external")]
+        let store = DesktopSettledPosterStore(folder: root.appendingPathComponent("Settled"))
+        var first = "a"
+        rig.sync.settledPosters = store
+        rig.sync.posterLook = { surface in
+            DesktopPosterLook(display: surface.display, wallpaperID: surface.display == "1" ? first : "c", inputs: [:])
+        }
+        rig.sync.refresh()
+        try await waitUntil { rig.requests == [2, 2] }
+        try await Task.sleep(for: .milliseconds(600))
+        let externalPoster = try XCTUnwrap(rig.workspace.pictures[external]?.url)
+
+        first = "b"
+        rig.sync.refresh()
+        try await waitUntil { rig.requests[0] == 4 }
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(rig.requests, [4, 2], "only the display that changed is asked")
+        XCTAssertEqual(rig.workspace.pictures[external]?.url, externalPoster)
+    }
+
+    /// Whatever the look leaves the same is reused; a changed look, or one that cannot be told,
+    /// is taken again as before. Each display and wallpaper keeps only its newest settled poster.
+    @MainActor
+    func testAChangedOrUnknownLookIsTakenAgain() async throws {
+        let rig = try PosterRig(root: root, settleDelays: [.milliseconds(20)], answers: true)
+        defer { rig.finish() }
+        rig.workspace.pictures = [one: original("one")]
+        let store = DesktopSettledPosterStore(folder: root.appendingPathComponent("Settled"))
+        var revision = 0
+        var known = true
+        rig.sync.settledPosters = store
+        rig.sync.posterLook = { surface in
+            known ? DesktopPosterLook(display: surface.display, wallpaperID: "a", inputs: ["revision": String(revision)]) : nil
+        }
+        func refreshed(asking count: Int) async throws {
+            // 500 ms apart, so no refresh waits behind the last while its settle captures run.
+            try await Task.sleep(for: .milliseconds(600))
+            let before = rig.total
+            rig.sync.refresh()
+            try await waitUntil { rig.total == before + count }
+            try await Task.sleep(for: .milliseconds(150))
+            XCTAssertEqual(rig.total, before + count)
+        }
+
+        try await refreshed(asking: 2)
+        revision = 1
+        try await refreshed(asking: 2)
+        revision = 0
+        try await refreshed(asking: 2)
+        known = false
+        try await refreshed(asking: 2)
+        known = true
+        try await refreshed(asking: 0)
+    }
+
+    /// A frame asked for under one look that arrives after the look changed (an apply landing
+    /// between the request and the frame) may show either, so it is kept under neither.
+    @MainActor
+    func testAFrameWhoseLookChangedOnTheWayIsNotKept() async throws {
+        let rig = try PosterRig(root: root, periodicInterval: .milliseconds(30))
+        defer { rig.finish() }
+        rig.workspace.pictures = [one: original("one")]
+        let store = DesktopSettledPosterStore(folder: root.appendingPathComponent("Settled"))
+        var revision = 0
+        let look = { (surface: DesktopPosterSurface) in
+            DesktopPosterLook(display: surface.display, wallpaperID: "a", inputs: ["revision": String(revision)])
+        }
+        rig.sync.settledPosters = store
+        rig.sync.posterLook = look
+        rig.sync.refresh()
+        try await postFrame(Data([1]), on: rig)
+        XCTAssertEqual(store.writes, 1)
+
+        let asked = rig.total
+        rig.sync.refreshesPeriodically = true
+        try await waitUntil { rig.total > asked }
+        rig.sync.refreshesPeriodically = false
+        revision = 1
+        try await postFrame(Data([2]), on: rig)
+        XCTAssertEqual(store.writes, 1, "asked under revision 0, arrived under revision 1")
+        let current = DesktopPosterLook(display: "1", wallpaperID: "a", inputs: ["revision": "1"])
+        XCTAssertNil(store.poster(for: current))
+    }
+
+    /// The periodic setting asks for a fresh poster on purpose, so it replaces a poster given
+    /// back, and the fresh one is what a later return gets.
+    @MainActor
+    func testAPeriodicCaptureReplacesAPosterGivenBack() async throws {
+        let rig = try PosterRig(root: root, answers: true, periodicInterval: .milliseconds(40))
+        defer { rig.finish() }
+        rig.workspace.pictures = [one: original("one")]
+        let store = DesktopSettledPosterStore(folder: root.appendingPathComponent("Settled"))
+        rig.sync.settledPosters = store
+        rig.sync.posterLook = { DesktopPosterLook(display: $0.display, wallpaperID: "a", inputs: [:]) }
+        rig.sync.refresh()
+        try await waitUntil { rig.total == 1 && rig.posterFiles.count == 1 }
+        try await Task.sleep(for: .milliseconds(600))
+        rig.sync.refresh()
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(rig.total, 1, "given back")
+        let writes = store.writes
+
+        rig.sync.refreshesPeriodically = true
+        try await waitUntil { rig.total >= 2 && rig.posterFiles.count >= 2 }
+        rig.sync.refreshesPeriodically = false
+        try await waitUntil { store.writes > writes }
+    }
+
+    /// A poster scoped to one desktop must confirm its context, so it is neither kept nor given back.
+    @MainActor
+    func testAPosterScopedToADesktopIsNeverGivenBack() async throws {
+        let rig = try PosterRig(root: root, scope: { _ in .desktop(id: "one", context: "") })
+        defer { rig.finish() }
+        rig.workspace.pictures = [one: original("one")]
+        let store = DesktopSettledPosterStore(folder: root.appendingPathComponent("Settled"))
+        rig.sync.settledPosters = store
+        rig.sync.posterLook = { DesktopPosterLook(display: $0.display, wallpaperID: "a", inputs: [:]) }
+        rig.sync.refresh()
+        try await postFrame(Data([1]), on: rig)
+        try await Task.sleep(for: .milliseconds(600))
+        rig.sync.refresh()
+        try await waitUntil { rig.total == 2 }
+        XCTAssertEqual(store.writes, 0)
+        XCTAssertEqual(store.reuses, 0)
+    }
+
     @MainActor
     func testASettledPosterStaysThroughSpaceChangesAndWakesHoweverOld() async throws {
         let rig = try PosterRig(root: root)

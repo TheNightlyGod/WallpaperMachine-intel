@@ -43,6 +43,7 @@ final class PanelEnergyRestartTests: PanelTestCase {
     case .sceneOptimization: try await controller.setSceneOptimization(false)
     case .sceneOnDemand: try await controller.setSceneOnDemand(true)
     case .sceneVideoPlaneSampling: try await controller.setSceneVideoPlaneSampling(true)
+    case .sceneDisplayFraming: try await controller.setSceneDisplayFraming(true)
     case .sceneResolution: try await controller.setSceneResolution(.canvas)
     case .sceneMSAA: try await controller.setSceneMSAA(.x4)
     case .sceneShadows: try await controller.setSceneShadows(.ultra)
@@ -56,7 +57,7 @@ final class PanelEnergyRestartTests: PanelTestCase {
   }
 
   func testEveryRenderingSettingRestartsTheComparisonExactlyOnce() async throws {
-    XCTAssertEqual(RenderingSetting.allCases.count, 19)
+    XCTAssertEqual(RenderingSetting.allCases.count, 20)
     try await withRecordingPanel { panel, _ in
       let (controller, restarts) = makeCounting(panel)
       defer { controller.energyUsage.setActive(false) }

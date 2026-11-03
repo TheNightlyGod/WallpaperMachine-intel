@@ -310,12 +310,55 @@ async fn a_request_to_present_is_never_reported_as_a_displayed_frame() {
     );
 
     let report = bridge.renderer_counters().await.unwrap();
-    assert!(
-        !report.presentation_feedback_available,
-        "this backend cannot observe which frames the compositor displayed"
+    let row = &report.surfaces[0];
+    assert_eq!(row.present_requests, 300);
+    assert_eq!(row.gpu_completions, 300);
+    assert_eq!(
+        (row.presented_frames, row.presents_dropped),
+        (0, 0),
+        "only the display's own reports count as shown or dropped frames"
     );
-    assert_eq!(report.surfaces[0].present_requests, 300);
-    assert_eq!(report.surfaces[0].gpu_completions, 300);
+}
+
+#[tokio::test]
+async fn what_the_display_reported_is_carried_per_surface() {
+    use RendererCounterKind as K;
+    let engine = FakeEngineFacade::default();
+    let bridge = two_display_bridge(&engine).await;
+    bridge.set_renderer_counters_enabled(true).await.unwrap();
+
+    engine.set_renderer_counters(
+        vec![
+            surface(7, 1, 1, "/library/a/project.json", false, &[
+                (K::PresentRequests, 120),
+                (K::PresentedFrames, 117),
+                (K::PresentsDropped, 2),
+                (K::PresentGaps1Vsync, 3),
+                (K::PresentGaps2Vsync, 110),
+                (K::PresentGaps3PlusVsync, 3),
+                (K::VsyncPeriodMicros, 8_333),
+            ]),
+            surface(9, 2, 1, "/library/b/project.json", false, &[(K::PresentedFrames, 5)]),
+        ],
+        vec![],
+    );
+
+    let report = bridge.renderer_counters().await.unwrap();
+    assert!(report.presentation_feedback_available);
+    let first = &report.surfaces[0];
+    assert_eq!(
+        (first.presented_frames, first.presents_dropped),
+        (117, 2),
+        "shown and dropped frames are read from their own counters"
+    );
+    assert_eq!(
+        (first.present_gaps_1_vsync, first.present_gaps_2_vsync, first.present_gaps_3plus_vsync),
+        (3, 110, 3)
+    );
+    assert_eq!(first.vsync_period_micros, 8_333);
+    assert_eq!(first.present_requests, 120, "requests stay requests");
+    let second = &report.surfaces[1];
+    assert_eq!((second.presented_frames, second.vsync_period_micros), (5, 0));
 }
 
 #[tokio::test]
@@ -380,4 +423,12 @@ async fn a_renderer_built_against_a_shorter_counter_list_reads_as_zero_not_as_an
     assert_eq!(report.surfaces[0].video_imports, 0);
     assert_eq!(report.audio_analysis_deliveries, 7);
     assert_eq!(report.audio_accepted_frames, 0);
+}
+
+#[test]
+fn the_report_says_feedback_is_off_when_presents_ask_for_none() {
+    use crate::actor::present_feedback_requested;
+    assert!(present_feedback_requested(None));
+    assert!(present_feedback_requested(Some("1")));
+    assert!(!present_feedback_requested(Some("0")), "zero shown frames must not read as measured");
 }

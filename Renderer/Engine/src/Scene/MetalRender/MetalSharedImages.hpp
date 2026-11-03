@@ -28,6 +28,9 @@ struct SharedImageRequest
     uint32_t           block_bytes { 0 };
     /// Slices of a volume texture; 1 for a plain picture.
     uint32_t           depth { 1 };
+    /// The queue the renderer draws on. A new upload is rearranged for sampling on it, ahead of
+    /// the frames that sample it; nil leaves the picture as the CPU wrote it.
+    id<MTLCommandQueue> queue { nil };
 };
 
 /// The imported pictures every renderer in the process shares.
@@ -43,6 +46,10 @@ struct SharedImageRequest
 /// A held texture is trusted only after its pixels, read back in bounded bands, compare equal
 /// to the bytes the importing display just parsed: a name and a layout can be shared by a
 /// file that changed, or by another wallpaper's file of the same name.
+///
+/// A new upload of a plain (not block-compressed) 2D picture is rearranged for the GPU
+/// (`optimizeContentsForGPUAccess`) once, on the request's queue, unless
+/// `WALLPAPER_MACHINE_OPTIMIZE_IMAGES=0`; a read-back waits for that to finish first.
 class SharedImageCache
 {
 public:
@@ -69,6 +76,10 @@ public:
     [[nodiscard]] uint64_t uploads();
     /// Levels of held textures read back to compare with an import since the process started.
     [[nodiscard]] uint64_t levelsReadBack();
+    /// Uploads rearranged for sampling since the process started.
+    [[nodiscard]] uint64_t optimized();
+    /// Overrides `WALLPAPER_MACHINE_OPTIMIZE_IMAGES` for uploads from now on; process-wide.
+    static void setOptimizationForTests(bool enabled);
 #endif
 
 private:

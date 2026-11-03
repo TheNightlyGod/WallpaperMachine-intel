@@ -94,6 +94,7 @@ extension PanelController {
       sceneOptimization: settings.sceneOptimizationEnabled,
       sceneOnDemand: settings.sceneOnDemandEnabled,
       sceneVideoPlaneSampling: settings.sceneVideoPlaneSamplingEnabled,
+      sceneDisplayFraming: settings.sceneDisplayFramingEnabled,
       sceneUpdates: settings.sceneUpdateModes.map(SceneUpdateReport.init),
       sceneRenderers: settings.sceneRenderers.map(SceneRendererReport.init))
   }

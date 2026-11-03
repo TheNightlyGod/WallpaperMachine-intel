@@ -22,6 +22,7 @@ extension PanelController {
     static let sceneOptimization = true
     static let sceneOnDemand = false
     static let sceneVideoPlaneSampling = false
+    static let sceneDisplayFraming = false
     static let verboseLogging = false
   }
 
@@ -135,6 +136,9 @@ extension PanelController {
       await attempt {
         try await store.setSceneVideoPlaneSamplingEnabledAsync(D.sceneVideoPlaneSampling)
       }
+    }
+    if current().sceneDisplayFramingEnabled != D.sceneDisplayFraming {
+      await attempt { try await store.setSceneDisplayFramingEnabledAsync(D.sceneDisplayFraming) }
     }
     if current().verboseLogging != D.verboseLogging {
       await attempt { try await store.setVerboseLoggingAsync(enabled: D.verboseLogging) }

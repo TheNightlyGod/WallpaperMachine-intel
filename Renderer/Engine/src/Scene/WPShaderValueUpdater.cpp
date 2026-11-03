@@ -283,9 +283,46 @@ uint64_t HashFloats(uint64_t hash, const float* values, std::size_t count) {
     return hash;
 }
 
+bool ReadsAudioSpectrum(const WPUniformInfo& info) {
+    return info.has_AudioSpectrum16Left || info.has_AudioSpectrum16Right ||
+           info.has_AudioSpectrum32Left || info.has_AudioSpectrum32Right ||
+           info.has_AudioSpectrum64Left || info.has_AudioSpectrum64Right;
+}
+
+/// Each spectrum array the material binds, with the bands of `snapshot` it carries, in one
+/// fixed order. The uniform write and the reuse hash both go through here, so what a pass is
+/// redrawn for is exactly what its uniforms hold.
+template <typename Op>
+void ForEachBoundSpectrum(const WPUniformInfo& info, const audio::AudioSpectrumSnapshot& snapshot,
+                          Op&& op) {
+    if (info.has_AudioSpectrum16Left) op(G_AUDIO16_LEFT, std::span<const float>(snapshot.left16));
+    if (info.has_AudioSpectrum16Right) op(G_AUDIO16_RIGHT, std::span<const float>(snapshot.right16));
+    if (info.has_AudioSpectrum32Left) op(G_AUDIO32_LEFT, std::span<const float>(snapshot.left32));
+    if (info.has_AudioSpectrum32Right) op(G_AUDIO32_RIGHT, std::span<const float>(snapshot.right32));
+    if (info.has_AudioSpectrum64Left) op(G_AUDIO64_LEFT, std::span<const float>(snapshot.left64));
+    if (info.has_AudioSpectrum64Right) op(G_AUDIO64_RIGHT, std::span<const float>(snapshot.right64));
+}
+
+/// Folds the bands two at a time: each 64-bit word goes into the state through the SplitMix64
+/// finalizer, a bijection, so two runs that differ in one word always end differently. 64 bands
+/// cost 32 steps, where `HashFloats` takes 256.
+uint64_t HashBands(uint64_t hash, std::span<const float> bands) {
+    for (std::size_t at = 0; at < bands.size(); at += 2) {
+        uint64_t word = 0;
+        std::memcpy(&word, bands.data() + at, std::min<std::size_t>(2, bands.size() - at) * sizeof(float));
+        uint64_t x = hash ^ word;
+        x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
+        x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
+        hash = x ^ (x >> 31);
+    }
+    return hash;
+}
+
 } // namespace
 
 void WPShaderValueUpdater::FrameBegin() {
+    // Every audio read of this frame (passes, particle operators, scripts) sees one spectrum.
+    if (m_scene != nullptr && m_scene->runtime != nullptr) m_scene->runtime->BeginAudioFrame();
     // The runtime supplies the layer world before stepping its puppet. Advancing
     // it here would consume this frame with the previous world and make merely
     // adding a visual child change its parent's simulation. Texture channels are
@@ -420,11 +457,7 @@ uint32_t WPShaderValueUpdater::FrameVaryingUniforms(SceneNode* node, uint32_t ma
     // A puppet's animation moves its bones and weighs its texture channels alike.
     if (info->has_BONES || info->has_BONESALPHA || info->has_MORPH || info->has_BLENDMAP)
         bits |= frame_varying_uniform::kBones;
-    if (info->has_AudioSpectrum16Left || info->has_AudioSpectrum16Right ||
-        info->has_AudioSpectrum32Left || info->has_AudioSpectrum32Right ||
-        info->has_AudioSpectrum64Left || info->has_AudioSpectrum64Right) {
-        bits |= frame_varying_uniform::kAudio;
-    }
+    if (ReadsAudioSpectrum(*info)) bits |= frame_varying_uniform::kAudio;
     // Parallax that moves the draw through its model matrix, which no uniform reveals.
     const std::string& camera_name = camera_override.empty() ? node->Camera() : camera_override;
     const SceneMaterial* material =
@@ -576,9 +609,10 @@ void WPShaderValueUpdater::InitUniforms(SceneNode* pNode, const ExistsUniformOp&
     InitUniforms(pNode, 0, existsOp);
 }
 
-void WPShaderValueUpdater::InitUniforms(SceneNode* node, uint32_t material_slot,
-                                        const ExistsUniformOp& exists) {
-    if (node == nullptr || ! exists) return;
+/// Which of the uniforms this updater writes a program has, as `exists` answers for each name.
+/// One table for the declared members (`InitUniforms`) and the read ones (`TransformInputs`), so
+/// the two cannot name a uniform differently.
+static WPUniformInfo UniformInfoOf(const ExistsUniformOp& exists) {
     WPUniformInfo info;
     for (std::size_t i=0;i<info.has_render_var.size();++i)
         info.has_render_var[i]=exists(kRenderVariables[i]);
@@ -644,13 +678,80 @@ void WPShaderValueUpdater::InitUniforms(SceneNode* node, uint32_t material_slot,
         info.texs[slot].has_mipmap     = exists(WE_GLTEX_MIPMAPINFO_NAMES[slot]);
         info.texs[slot].has_texel      = exists(WE_GLTEX_TEXEL_NAMES[slot]);
     }
-    const bool reads_audio = info.has_AudioSpectrum16Left || info.has_AudioSpectrum16Right ||
-                             info.has_AudioSpectrum32Left || info.has_AudioSpectrum32Right ||
-                             info.has_AudioSpectrum64Left || info.has_AudioSpectrum64Right;
-    if (reads_audio && m_scene != nullptr && m_scene->runtime != nullptr) {
+    return info;
+}
+
+void WPShaderValueUpdater::InitUniforms(SceneNode* node, uint32_t material_slot,
+                                        const ExistsUniformOp& exists) {
+    if (node == nullptr || ! exists) return;
+    const WPUniformInfo info = UniformInfoOf(exists);
+    if (ReadsAudioSpectrum(info) && m_scene != nullptr && m_scene->runtime != nullptr) {
         m_scene->runtime->MarkSceneRequiresAudioResponse();
     }
     m_nodeUniformInfoMap[node][material_slot] = info;
+}
+
+// Every uniform `UpdateUniforms` derives from a node's world transform, another node's or the
+// scene's active camera, for a draw that is neither a compose layer's first pass nor drawn
+// through a scene-space camera (those keep everything):
+//
+// - the model matrices (`g_ModelMatrix`, its inverse, `g_ModelViewProjectionMatrix`, its inverse,
+//   the normal and Alt matrices): the identity through a layer-local camera, the node's own
+//   transform through the effect camera;
+// - the effect matrices (`g_LayerModelMatrix`, `g_EffectModelMatrix`,
+//   `g_EffectModelViewProjectionMatrix` and `g_EffectTextureProjectionMatrix` with their
+//   inverses): the effect's layer (or the node) and the active camera;
+// - the eye and view axes, which fall back to the active camera; particle orientation, which
+//   carries the node; the lights, whose packing sorts along the active camera; a volumetric
+//   light's matrices; bones, morphs and texture channels, which a puppet poses in its layer's
+//   world; and the cursor and parallax values: none of these is proven, so they keep everything.
+//
+// The view-projection matrices are the draw camera's, which a sample always folds. Parallax moves
+// no draw through a layer-local or effect camera (`ParallaxMovesDraw`).
+//
+// A uniform `UpdateUniforms` comes to derive from a transform or a camera must be added here, to
+// what a sample folds or to the unproven list, in the same change: the drift test
+// (`ShaderUpdaterSignatures.EveryWrittenUniformThatMovesIsOneTheSampleFolds`) moves only parents,
+// nodes and the camera, not lights, puppets, particles or volumetrics.
+DrawTransformInputs WPShaderValueUpdater::TransformInputs(SceneNode* node, uint32_t material_slot,
+                                                          const std::string& camera_override,
+                                                          const ExistsUniformOp& reads) const {
+    const DrawTransformInputs all {};
+    if (m_scene == nullptr || node == nullptr || ! reads) return all;
+    const SceneMaterial* material =
+        node->Mesh() != nullptr ? node->Mesh()->MaterialForSlot(material_slot) : nullptr;
+    if (material == nullptr || SamplesScreenBackground(*material)) return all;
+    const std::string& camera_name = camera_override.empty() ? node->Camera() : camera_override;
+    const SceneCamera* camera      = CameraNamed(camera_name);
+    if (camera == nullptr) return all;
+    const bool layer_local = camera->IsLayerLocal();
+    if (! layer_local && camera_name != "effect") return all;
+    const WPShaderValueData* data = FindNodeData(node, material_slot);
+    if (data != nullptr && data->volumetric_light != nullptr) return all;
+
+    const WPUniformInfo info = UniformInfoOf(reads);
+    const bool unproven =
+        info.has_EYE || info.has_VIEWFORWARD || info.has_VIEWUP || info.has_VIEWRIGHT ||
+        info.has_ORIENTATIONUP || info.has_ORIENTATIONRIGHT || info.has_ORIENTATIONFORWARD ||
+        info.has_LP || info.has_LCP || info.has_LCR || info.has_LIGHTS_V1 ||
+        info.has_SHADOW_FEATURES || info.has_BONES || info.has_BONESALPHA || info.has_MORPH ||
+        info.has_BLENDMAP || info.has_POINTERPOSITION || info.has_POINTERPOSITIONLAST ||
+        info.has_POINTERSTATE || info.has_PARALLAXPOSITION;
+    if (unproven) return all;
+
+    DrawTransformInputs inputs { .node_transform = false, .active_camera = false, .owner = nullptr };
+    const bool model = info.has_M || info.has_AM || info.has_ANM || info.has_MI || info.has_MVP ||
+                       info.has_MVPI || info.has_NORMALMODEL;
+    if (model && ! layer_local) inputs.node_transform = true;
+    const bool effect = info.has_layer_model || info.has_effect_model || info.has_effect_mvp ||
+                        info.has_effect_mvpi || info.has_ETVP || info.has_ETVPI;
+    if (effect) {
+        SceneNode* owner = data != nullptr && data->effect_owner != nullptr ? data->effect_owner : node;
+        if (owner == node) inputs.node_transform = true;
+        else inputs.owner = owner;
+        inputs.active_camera = true;
+    }
+    return inputs;
 }
 
 void WPShaderValueUpdater::UpdateUniforms(SceneNode* pNode, sprite_map_t& sprites,
@@ -1030,23 +1131,37 @@ void WPShaderValueUpdater::UpdateUniforms(SceneNode* node, uint32_t material_slo
     }
 
     // ---- audio spectrum, one value per vec4 element
-    if (info->has_AudioSpectrum16Left || info->has_AudioSpectrum16Right ||
-        info->has_AudioSpectrum32Left || info->has_AudioSpectrum32Right ||
-        info->has_AudioSpectrum64Left || info->has_AudioSpectrum64Right) {
-        audio::AudioSpectrumSnapshot snapshot;
-        if (m_scene->runtime != nullptr) snapshot = m_scene->runtime->CurrentAudioSpectrumSnapshot();
-        const auto put = [&](std::string_view name, const auto& bands) {
+    if (ReadsAudioSpectrum(*info)) {
+        static const audio::AudioSpectrumSnapshot silence {};
+        const audio::AudioSpectrumSnapshot& snapshot =
+            m_scene->runtime != nullptr ? m_scene->runtime->CurrentAudioSpectrumSnapshot() : silence;
+        ForEachBoundSpectrum(*info, snapshot, [&](std::string_view name, std::span<const float> bands) {
             m_audioPack.assign(bands.size() * 4, 0.0f);
             for (std::size_t i = 0; i < bands.size(); ++i) m_audioPack[i * 4] = bands[i];
             write(name, ShaderValue(m_audioPack.data(), m_audioPack.size()));
-        };
-        if (info->has_AudioSpectrum16Left) put(G_AUDIO16_LEFT, snapshot.left16);
-        if (info->has_AudioSpectrum16Right) put(G_AUDIO16_RIGHT, snapshot.right16);
-        if (info->has_AudioSpectrum32Left) put(G_AUDIO32_LEFT, snapshot.left32);
-        if (info->has_AudioSpectrum32Right) put(G_AUDIO32_RIGHT, snapshot.right32);
-        if (info->has_AudioSpectrum64Left) put(G_AUDIO64_LEFT, snapshot.left64);
-        if (info->has_AudioSpectrum64Right) put(G_AUDIO64_RIGHT, snapshot.right64);
+        });
     }
+}
+
+std::optional<uint64_t> WPShaderValueUpdater::AudioStateHash(SceneNode* node,
+                                                             uint32_t material_slot) const {
+    if (m_scene == nullptr || node == nullptr) return std::nullopt;
+    const WPUniformInfo* info = FindUniformInfo(node, material_slot);
+    // No record is no evidence that it reads no audio.
+    if (info == nullptr) return std::nullopt;
+    if (! ReadsAudioSpectrum(*info)) return 0;
+    const auto* runtime = m_scene->runtime.get();
+    // Before the host's first frame every read takes the newest analysis, so this one need
+    // not be the one the uniforms were given.
+    if (runtime != nullptr && ! runtime->AudioSpectrumHeldPerFrame()) return std::nullopt;
+    static const audio::AudioSpectrumSnapshot silence {};
+    const audio::AudioSpectrumSnapshot& snapshot =
+        runtime != nullptr ? runtime->CurrentAudioSpectrumSnapshot() : silence;
+    uint64_t hash = 0xcbf29ce484222325ULL;
+    ForEachBoundSpectrum(*info, snapshot, [&hash](std::string_view, std::span<const float> bands) {
+        hash = HashBands(hash, bands);
+    });
+    return hash;
 }
 
 void WPShaderValueUpdater::UpdateSprites(SceneNode* node, sprite_map_t& sprites,

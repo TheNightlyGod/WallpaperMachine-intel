@@ -988,7 +988,22 @@ public:
     const std::map<std::string, int>& RenderTargetResizeReasonsForTests() const {
         return m_render_target_resize_reasons;
     }
-    audio::AudioSpectrumSnapshot CurrentAudioSpectrumSnapshot() const;
+    /// The audio spectrum this frame reads: shader uniforms, particle operators and scripts
+    /// alike, as Wallpaper Engine gives a frame one spectrum. The first read after
+    /// `BeginAudioFrame` takes the newest analysis (silence while audio response is not
+    /// active) and every later read until the next `BeginAudioFrame` returns that same one,
+    /// even when the analysis publishes a newer spectrum in between. Before the first frame (a
+    /// scene being loaded) every read takes the newest. The reference stays valid until the
+    /// next such read; on the render thread, like everything that reads it.
+    const audio::AudioSpectrumSnapshot& CurrentAudioSpectrumSnapshot() const;
+    /// Starts a frame for `CurrentAudioSpectrumSnapshot`: called once a frame, before anything
+    /// in that frame reads the spectrum. Takes nothing itself, so a frame that reads no audio
+    /// costs nothing.
+    void BeginAudioFrame();
+    /// Whether every read of `CurrentAudioSpectrumSnapshot` returns one spectrum until the next
+    /// `BeginAudioFrame`: true from the first `BeginAudioFrame` on. Before it, two reads can
+    /// return two analyses, so what one read saw says nothing about another.
+    bool AudioSpectrumHeldPerFrame() const { return m_audio_frames_begun; }
     /// Runs `destroy()` in every script that started, once, while everything
     /// the scripts could reach still exists. `Scene` calls it first thing in its
     /// destructor, before any of its members die: the runtime is declared above
@@ -1439,6 +1454,11 @@ private:
     /// goes false -> true for one runtime: a replaced scene gets a new runtime.
     std::atomic<bool> m_scene_requires_audio_response { false };
     std::atomic<bool> m_audio_response_enabled { false };
+    /// The spectrum of the frame in progress (`CurrentAudioSpectrumSnapshot`), whether it has
+    /// been taken yet, and whether frames have begun at all.
+    mutable audio::AudioSpectrumSnapshot m_frame_audio_spectrum {};
+    mutable bool                         m_frame_audio_spectrum_taken { false };
+    bool                                 m_audio_frames_begun { false };
     /// Called once, on whichever thread first marks the scene as reading
     /// audio. Guarded so installing it and marking cannot both miss.
     std::mutex            m_audio_requirement_mutex;

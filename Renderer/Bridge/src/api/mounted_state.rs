@@ -309,6 +309,7 @@ fn m01_initialization_preserves_complete_config_and_unscanned_selection() {
     app.quality.battery.render_scale = 0.41;
     app.quality.battery.target_fps = 23;
     app.experimental.scene_video_plane_sampling = true;
+    app.experimental.scene_display_framing = true;
     app.diagnostics.verbose_logging = true;
     let mut settings = MonitorSettingsCfg::default();
     settings.selector = selector(51);

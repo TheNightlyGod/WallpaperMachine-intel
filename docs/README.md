@@ -51,7 +51,7 @@ live under `testing/`.
 | [testing/scene-regressions.md](testing/scene-regressions.md) | Regressions that must stay covered in what a scene looks like and does: cameras, scripts, layers, alpha, text, puppets, shaders |
 | [testing/runtime-regressions.md](testing/runtime-regressions.md) | Regressions that must stay covered at runtime: native Metal, video, continuous playback, frame pacing, audio, host and display, startup |
 | [testing/manual-smoke.md](testing/manual-smoke.md) | Manual release smoke checklist |
-| [testing/power-benchmark.md](testing/power-benchmark.md) | Configuration manifest, per-process CPU/GPU, whole-machine and package-power measurement, runtime counters, condition matrix and comparison rules for power claims |
+| [testing/power-benchmark.md](testing/power-benchmark.md) | Configuration manifest, per-process CPU/GPU, whole-machine and package-power measurement, the headless A/B driver (`scripts/perf_bench.py`), runtime counters, condition matrix and comparison rules for power claims |
 | [testing/verification-log.md](testing/verification-log.md) | Dated verification history, ten newest entries |
 | [testing/archive/](testing/archive/) | Retired verification-log entries, one file per month, written by `scripts/log_verification.py`; historical only |
 | [testing/wallpaper-corpus.md](testing/wallpaper-corpus.md) | Local regression corpus checklist |

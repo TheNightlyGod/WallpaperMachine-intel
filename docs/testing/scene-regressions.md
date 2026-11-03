@@ -80,7 +80,9 @@ Playback, backend, host and startup areas are in
     (`LayerCompositeCameraKey`) that ignores placement, view and parallax, compose
     cameras are not layer-local (children draw through them at their place inside
     the layer), and the static-result cache folds each pass's camera and the
-    active camera into its sample (`FoldPassCameras` in `RenderCommon/SceneRaster.hpp`).
+    active camera into its sample (`FoldPassCameras` in `RenderCommon/SceneRaster.hpp`);
+    the active camera is left out only for a pass whose read uniforms are proven not
+    to depend on it (see **Layer-local reuse samples**).
 - **Camera-object zoom in 2D scenes** — `CanvasShots.ZoomTightensTheOrthographicFrustumWithoutChangingTheAuthoredExtent`
   and `ZoomOutsideTheUsableRange.FramesTheWholeCanvas` in
   `scene_schema_part02_test`, `MouseInput.HitTestingFollowsACameraObjectZoomAcrossAResize`
@@ -2730,12 +2732,32 @@ texture entrances are not decoded-image or native-rendering evidence.
   checks cursor mapping and authored-camera stability, and verifies that a
   FitBlur round trip restores the target bytes.
   `.DisplayFramingPreservesFullscreenAndLocalScreenCopies` keeps camera and
-  clip-space fullscreen effects and local pass-through copies aligned through
-  live layout changes; repeated frames do not relayout their cards.
+  clip-space fullscreen effects, local pass-through copies and a compose layer over
+  the whole canvas (which samples through the framed projection, so its card is not
+  moved again) aligned through live layout changes; repeated frames do not relayout
+  their cards.
   `ShaderUpdaterMatrices.DisplayFramingKeepsComposeSamplingAndItsInverseTogether`,
   `.LocalGeometryStaysLocalWhileEffectScreenCoordinatesAreFramed` and
   `.ExplicitShadowProjectionKeepsItsOwnViewport` cover scene/local sampling,
   inverse matrices, camera movement, layout-generation invalidation and shadow views.
+- **SDR display framing** (experimental, off by default) — `RasterWindow.*` in
+  `render_scale_test` plans the window of the canvas-cover raster an SDR
+  Display-resolution scene draws with the switch on: the bilinear pairs the composition
+  reads (3972→2979 texels at render scale 0.75 keeps texels 193–2785), cuts on the grid
+  of screen-sized targets drawn at a fraction of the raster (none for a cover that is
+  not a multiple of it), an odd crop offset, headroom for a pan, zooms above 1 inside
+  the zoom-1 window, Fit and Stretch unframed, the flipped footprint and the target
+  sizes the window gives. `SdrDisplayFraming.*` in `metal_scene_draw_smoke` composes
+  the framed scene through the poster path against the same scene drawn whole
+  (`SetSdrFramingOverrideForTests` forces either): Fill with and without bloom (only
+  bloom's reach across the window's edge differs), an odd crop offset, Stretch, Fit,
+  Fit with blurred backdrop and original size sizing the targets again before their
+  first draw, and zoom, pan and flip moving the window, sizing it at most once.
+  `.IsOffByDefaultAndARunningSceneTakesTheSettingAtItsNextFrame` keeps the setting off
+  until it is turned on, frames a running scene at its next frame, and turned off again
+  draws the whole raster and the very picture it drew before;
+  `.MetalFxUpscalingKeepsTheWholeRaster` leaves a scene MetalFX upscales unframed and
+  frames or unframes it at its next frame as upscaling goes and comes.
 - **HDR output color and display capability** — `HdrOutputGpu` covers linear HDR
   camera fade (sRGB 160/116/83) alongside unchanged SDR fade (89/45/22), runtime
   bloom toggles, and a black/white edge whose linear quarter sample encodes to 137.
@@ -2825,7 +2847,54 @@ texture entrances are not decoded-image or native-rendering evidence.
   image another target still draws into is never pinned, because that key's prepared
   passes still draw into the image every frame; pinning it lets a skipped layer read
   another layer's picture from the second frame on, which the pooled/isolated
-  comparison in `check_renderer.py` shows as a divergence.
+  comparison in `check_renderer.py` shows as a divergence. The sample hash decides
+  nothing of its own: `StaticSampleHash.ReuseDecisionsAreThoseOfComparingEveryInputExactly`
+  plans random graphs under random edits (a bit, a value, two values swapped, a change
+  undone) against an oracle that compares the inputs themselves, and the other
+  `StaticSampleHash.*` cases pin that every byte, the order of values and the split
+  between two runs count.
+- **Scene video reuse** — `MetalSceneDraw.AVideoFrameShownAgainIsReusedAndANewOneRedraws*`
+  and `.APausedVideoSceneStopsDrawingOnlyWhileVideoReuseIsOn`. A pass that samples a
+  video is reused only while the import its frame came from is the one it drew: every
+  import, a re-import for a changed demand and a directly sampled plane frame included,
+  redraws it, and a frame that imported a video frame always presents.
+- **Audio-spectrum reuse** — `StaticReuseInputs.*` in `metal_scene_draw_smoke` and
+  `ShaderUpdaterAudio.TheAudioStateHashFollowsExactlyTheArraysTheMaterialBinds` in
+  `shader_updater_behavior_test`. An audio visualizer under an effect that rewrites its
+  chain's first buffer every frame is reused exactly on the frames whose spectrum, in
+  every array it binds, equals the frame before's (silence repeated, a repeated
+  spectrum, a change only in an array it does not bind) and redrawn on every other,
+  each picture byte-equal to scene optimisation off; with
+  `WALLPAPER_MACHINE_AUDIO_REUSE=0` it is redrawn every frame. An audio pass that samples
+  the changing buffer, directly, in the combo variant that reads it or through an array
+  element, is never reused; the variant whose combo compiles the read out is. The hash
+  answers "unknown" before the host's first frame and for an updater that does not track
+  audio, which redraws the pass.
+- **Layer-local reuse samples** — `MetalSceneDraw.AStillEffectChainIsReusedWhileTheCameraShakesOrItsLayerMoves`
+  and `.AnEffectReadingWhereItsLayerIsIsRedrawnWhenTheCameraShakesOrTheLayerMoves` in
+  `metal_scene_draw_smoke`, `ShaderUpdaterSignatures.*` in `shader_updater_behavior_test`,
+  `MetalReflection.AMemberIsUnreadOnlyWhenTheCompilerSaysWhatIsRead` in
+  `metal_backend_test` and `reflect::reads::tests` (Rust). A pass drawn through a
+  layer-local or the effect camera folds the node's world transform, its effect's layer
+  and the active camera only when a uniform its program reads (the compiler's
+  `read_uniforms`, not its declarations) is derived from them, so a still chain under
+  a shaking camera or a moving parent is reused frame after frame and holds the pixels
+  drawing it gives, while an effect or a card that reads
+  `g_EffectModelViewProjectionMatrix` or `g_EffectModelMatrix` is drawn again.
+  `ShaderUpdaterSignatures.EveryWrittenUniformThatMovesIsOneTheSampleFolds` is the
+  guard against drift: it moves the parent, the pass node and the camera under every
+  uniform `UpdateUniforms` writes and fails for any value that changed without
+  `TransformInputs` folding what moved. Compose layers, scene-space draws, reflection
+  passes, plane-sampling video variants and readers of the eye, view axes, particle
+  orientation, lights, puppets and the cursor keep the whole sample.
+  `MetalSceneDraw.AMovingLayerBetweenTwoCardsIsReusedAndJoinsTheCardsRenderPasses` pins
+  the one known cost: in a scene drawn in object order (a card reads another's picture)
+  the moving layer's buffers sit between two draws into the scene's image, and leaving
+  them out joins those draws into one render pass, which on 3808922316 at 3456x2234@2
+  left one texel of a few frames one level apart on an M5 Pro (accepted for the saving).
+  The test checks that the shipped renderer reuses the chain and joins the render passes,
+  and that `WALLPAPER_MACHINE_LAYER_LOCAL_SIGNATURES=0` encodes the frame render pass for
+  render pass, byte for byte, as drawing every pass does.
 - **Sprite-sheet stepping and reuse** — `MetalSceneDraw.ASpriteSheetAdvancesOnItsOwnClockAndRedrawsOnlyWhenTheFrameChanges`.
   A sheet between frame changes may be reused, but its clock must keep running or
   the animation never reaches the next frame. `sprite_animation_test` checks

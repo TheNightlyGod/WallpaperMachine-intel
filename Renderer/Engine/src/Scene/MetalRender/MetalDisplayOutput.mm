@@ -48,6 +48,17 @@ MetalDisplayCharacteristics ReadDisplay(uint32_t display_id) {
 }
 } // namespace
 
+std::chrono::nanoseconds DisplayRefreshPeriod(uint32_t display_id) {
+    if (display_id == 0) return {};
+    CGDisplayModeRef mode = CGDisplayCopyDisplayMode(display_id);
+    if (mode == nullptr) return {};
+    const double hertz = CGDisplayModeGetRefreshRate(mode);
+    CGDisplayModeRelease(mode);
+    // A panel with no fixed rate reports zero.
+    if (!std::isfinite(hertz) || hertz < 1.0) return {};
+    return std::chrono::nanoseconds(static_cast<int64_t>(std::ceil(1e9 / hertz)));
+}
+
 struct MetalDisplayOutput::State : std::enable_shared_from_this<State> {
     __weak CAMetalLayer* layer;
     WMSceneDisplayLease* lease {nil};

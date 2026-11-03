@@ -139,14 +139,101 @@ device.
   abandoned frame undoes its trades. On a real scene,
   `WALLPAPER_MACHINE_FEEDBACK_COPIES=1` makes the copies again, and the harness
   PPM must match either way.
+  `.AHistoryCopyIsTradedAndDrawsTheSamePicture`: a motion-blur-shaped effect
+  (accumulate into `_rt_FullCompoBuffer2`, copy it to the history, draw from the
+  accumulation) on one, two and three same-size cards sharing the accumulation, drawn
+  with `MetalRender::SetCopyTradesForTests` off and on: six byte-identical frames, no
+  blit and no copied byte when on, one trade per copy; a second accumulation that
+  discards texels opens with the copy. `.AHiddenOrAbandonedHistoryKeepsItsPictureAcrossCopyTrades`:
+  the first card hidden for three frames (its stale accumulation is restored from the
+  history, one blit instead of two) and two abandoned frames (refused compositions)
+  must match the copies frame for frame; dropping the restore or the abandoned frame's
+  undo changes every frame after it. `.AHistoryCopyWhoseImageIsReadBeforeItsSourceIsDoneStaysACopy`:
+  a draw reading the history before the trade keeps the blit.
+  `.APostProcessResultCopiedIntoTheSceneTradesTexturesAndDrawsTheSamePicture`: bloom,
+  bloom with `clearenabled: false`, bloom and colour options (two copies), colour
+  options alone, HDR bloom, bloom over lenses (the scene's image a pooled trade's
+  source, whose image set follows the trade) and 4x MSAA: same frames, no blits.
+  The copy trade's source must be single-sampled, in no pooled trade and not a layer
+  composite, the copy's name at most a pooled source; nothing may touch the copy's
+  name between the copy and the trade, and the source's next writer is a draw or
+  clear of it alone that the reuse table never skips, rendering that frame when it
+  is later in the frame. On a real scene, `WALLPAPER_MACHINE_COPY_TRADES=0` makes the
+  copies again and `WE_TEST_METAL_PROJECTS` prints blits, MB copied and copies traded
+  per frame; the poster hashes must match either way.
   `.InterleavedFeedbackCopiesPreserveEachReadersImage`: `copy A→Ac`, unrelated B
   work, `copy B→Bc`, then B's reader before A's reader; both target images match
   the blit path over four frames with both blits removed. Opening copies are
   retained separately by destination texture, not in one overwritable pending
   slot, and graph release and abandoned frames clear that state.
+- **Overwriting render passes skip their load** — `MetalSceneDraw.AnEffectChainThatOverwritesItsBuffersOpensThemWithAClearAndDrawsTheSamePicture`:
+  a card through four effects (the position through the matrix, as given, and
+  through a copy of the input) is drawn with `MetalRender::SetOverwriteLoadElisionForTests`
+  off and on; every frame must be byte-identical and the second and third effects,
+  which write a buffer already drawn this frame, must stop loading it (two fewer
+  loading render passes, the same number of render passes).
+  `.AnEffectPassThatMayLeaveTexelsAloneKeepsLoadingItsBuffer` gives the second effect a
+  scaled or moved card, a `discard`, a `clip`, back-face culling or
+  `alphawriting: disabled`: it keeps its load and the frames match; clearing every
+  loading pass without the proof changes the frames of the first four.
+  `.ABlendedOverwriteOfAFloatBufferKeepsItsLoad`: `One`/`Zero` blending over a
+  half-float buffer keeps its load (zero times an infinity it may hold is not zero),
+  over an 8-bit one it clears. `.ATradedReaderThatOverwritesTheSceneNeedsNoOpeningCopy`:
+  a canvas-sized layer with `alphawriting: enabled` reading `_rt_FullFrameBuffer`
+  needs no opening copy. The shader compiler's facts are pinned in
+  `Renderer/Shader/src/reflect/coverage/tests.rs` (spin's copy, gaussian's `#if`
+  kernels, skew/transform/foliagesway `MODE` 1 moving the corners), the geometry in
+  `MetalOverwrite.*` (`metal_backend_test`). On a real scene, `WE_TEST_METAL_PROJECTS`
+  prints render passes loading their target per frame, and
+  `WALLPAPER_MACHINE_OVERWRITE_LOAD_ELISION=0` must give the same poster PPM.
+- **Depth and multisampled stores** — `MetalSceneDraw.AttachmentsNothingReadsAgainAreLeftUnstoredAndDrawTheSamePicture`:
+  two depth-tested models with a card between them store depth only from the first
+  model's render pass, which the second loads; with 4x MSAA, lenses that split the
+  scene's render passes keep their samples for the next one and only the last render
+  pass leaves them unstored. Frames match `MetalRender::SetAttachmentStoreElisionForTests(false)`.
+  A depth image something samples (the volumetrics depth) is always stored, a hidden
+  or reused later user counts as a user, and samples the next frame may load (its
+  first pass on them does not clear) are kept.
+- **Work nothing visible can see** — `MetalSceneDraw.ALayerFadedOutToNothingIsLeftOutAndEveryFrameStaysTheSame`:
+  a screen-filling `vec4(g_Color, g_Alpha)` layer (the solid layer's shape) over a
+  moving card fades 1, 0, 1 by script, source over and additive: the two frames at
+  alpha 0 leave the draw out, the others draw it, and six frames match
+  `MetalRender::SetSkipNoopDrawsForTests(false)`.
+  `.ADrawThatIsNotProvenToLeaveItsTargetAsItIsIsDrawn`: alpha 0.5, a `normal` or
+  `multiply` blend, a colour or alpha from a varying and a colour of 1e60 are all
+  drawn, frames identical; letting a replacing blend through changes the frames, and
+  dropping the product bound leaves out the infinite colour.
+  `.AHiddenLayersClearsAreLeftOutAndItsPictureComesBackAsItWas`: a panel through two
+  effects hidden by script for four frames (one of them abandoned), targets shared and
+  apart: each left-out clear takes its render pass with it and every frame matches
+  `MetalRender::SetHiddenLayerWorkForTests(false)`, the panel's first frame back included.
+  `.AClearALayerShownAgainReadsRunsAndANewGraphGetsWhatTheClearsLeft`: a faded solid
+  layer another layer samples, with the sampler hidden: its composite's clear is left
+  out until the sampler is shown again, and a graph built again while both are hidden
+  takes the composite over cleared (`clearLastRenderGraphForRebuild`); dropping the
+  reader check or the settle changes the frames or the carried composite.
+  `.ACopyOfTheSceneForAHiddenLensIsLeftOutUntilTheLensIsShownAgain`: the copy a hidden
+  lens reads is not made, alone and pooled with a second, shown lens. The plans are
+  pinned in `MetalHiddenClears.*` (readers up to the next clear, the next frame's
+  readers ahead of it, copies, conditional and dropped clears) and the blends in
+  `MetalNoopDraw.*` (`metal_backend_test`); the shader's colour fact in
+  `Renderer/Shader/src/reflect/coverage/tests.rs`. On a real scene,
+  `WE_TEST_METAL_PROJECTS` prints both per frame and the switches must give the same
+  poster hashes.
 - **Per-frame geometry upload** — `MetalSceneDraw.GeometryRebuiltEveryFrameIsUploadedAndDrawnFromItsOwnSlot`,
   across more frames than there are in-flight slots. Zero live particles must
   draw nothing rather than fail.
+  `MetalSceneDraw.ParticleGeometryCopiesOnlyWhatTheFrameDrawsAndTheSlotLacks`: a burst
+  that thins out and dies copies only the vertices each frame wrote (the mesh's
+  `DrawnSizeOf`, not its high-water mark) and copies its index pattern into each frame
+  slot once, with every picture byte-identical to
+  `MetalRender::SetDynamicUploadDeltaForTests(false)`, which copies the high-water mark
+  and every drawn index each frame. `SceneIndexArray.AppendingKeepsTheContentRevisionAndRewritingRenewsIt`
+  and `SceneVertexArray.TheDrawnSizeHoldsUntilTheNextWrite` (`scene_mesh_tests`) hold the
+  two facts the skip relies on: an index write over earlier bytes (a text relayout, a
+  model's `applyData`) renews the revision, so the slot is copied whole, and any vertex
+  write forgets the drawn size, so a writer other than the particle generator copies
+  everything it filled.
 - **Skinning** — `MetalSceneDraw.APuppetIsSkinnedByItsOwnShaderFromThePoseTheRuntimeProduces`:
   a 64-byte reflected bone stride, the skinned quad translating by the distance
   its bone did with its width unchanged (what rules out a transposed matrix), the
@@ -428,6 +515,12 @@ device.
   the one second of slack fixed, a seek on its way was asked for again each second, and the
   600 frame clip did not land at 5 s in six seconds (six requests) and took three requests and
   3.2 to 3.7 s from 9.9 s on.
+  `VideoSourceClockSlowSeek.AClockSentBackKeepsThePictureShownUntilTheSeekDelivers` sends a clock
+  at 3 s back to the start of a decoder that takes 600 ms to deliver after a seek, then draws
+  every few milliseconds: no draw may take 100 ms, the picture at 3 s stays on offer until the
+  seek delivers, the start replaces it then, with one request and no pass counted. Before the
+  fix the clock going back emptied the display and the next draw waited out the whole seek
+  (600 ms here, two seconds at most).
 - **Consumption decided before import** — `MetalVideoTexture.PlanesOnlyDemandEncodesNoConversion`,
   `.MixedDemandConvertsOnceAndStillPublishesThePlanes` and
   `.ADemandChangeReImportsTheSameGenerationInsteadOfWaiting`: a frame every
@@ -468,6 +561,18 @@ device.
   uniforms borrow an owning packing buffer synchronously and read a fresh spectrum
   on every call; particle mouse inverses are skipped only when all current
   controlpoint link flags are off.
+- **Script frames that would change nothing** — `ScriptIdleFrames.*` and
+  `ScriptHostLimits.AFrameBetweenInterruptedHandlersClearsTheirStrikesEvenWhenItIsLeftOut`
+  (`script_runtime_compat_test`, each case run with `ScriptEngine::SetIdleEvaluationSkipForTests`
+  on and off). A property script without `update` makes no call into the script runtime
+  on a tick where no timer is due and no audio buffer is registered (five such scripts
+  over ten ticks are fifty calls fewer and nothing else). A timer set in `init`, or set for
+  now by an earlier script's `update`, fires at the same point of the same tick; registered
+  audio buffers keep every call; the left-out frame still writes the script's parameters
+  over what `init` left and clears an interrupted handler's strikes, as the completed call
+  did. The library tells the host the earliest due time of its live timers
+  (`n.waiting`) whenever it may have moved earlier and after every pass that ran or
+  dropped one; the host checks it before each script, never once per tick.
 - **A destroyed layer's script state** — `ScriptLayerRelease.*` in `scenescript_behavior_test`
   (no device). A script makes a layer and one below it, registers an animation-ended callback
   on each and keeps a weak reference to each callback and each layer object; the test gives the
@@ -537,6 +642,17 @@ device.
     loop seam or a seek are discarded; and repeated, rewound or non-finite
     timestamps are not counted as evidence at all. Rational rates keep their
     exact period (`24000/1001`, not `1/24`).
+- **Presents held to an even number of refreshes** — `PresentPacingTest.*` in
+  `timer_tests` pins the hold a present asks for (whole refreshes of the ceiling's
+  period less a quarter refresh, never more refreshes than the period covers, zero
+  at or above the display's rate or with no known rate), that the frame clock
+  publishes it for its ceiling rather than its content-paced cadence, and, in a model
+  of fixed-rate and ProMotion panels, that held frames near a refresh boundary are
+  shown two refreshes apart where plain presents alternate one and three.
+  `MetalSceneDraw.APresentHoldsTheFrameOnlyWhilePacing` checks that the present asks
+  for the hold only while `WALLPAPER_MACHINE_VSYNC_PACING` is on and that held
+  presents neither stall the next drawable nor lose their reports. When the display
+  showed them is not observable headlessly.
 - **Pointer-driven clock wakes** — `FrameTimerTest.ABurstOfWakeOnceAtTheCeilingDoesNotAddCallbacks`
   and `.AnIdleBurstOfWakeOnceProducesOneCallback` in `timer_tests`. Two hundred
   `WakeOnce` calls in one second at 30 fps stay inside about one callback per
@@ -554,9 +670,12 @@ device.
   `video_frames_selected`, `video_frames_reused` and `video_frames_skipped`: a gap
   between two displayed generations is exactly the number of decoded frames that
   never reached the screen, which is how a pacing regression is falsified while
-  the picture still moves. `present_requests` counts requests; this backend has
-  no presentation-feedback source, so the frames a compositor actually displayed
-  are reported as unavailable and never approximated by the request count.
+  the picture still moves. `present_requests` counts requests; what the display
+  did with them comes from each drawable's own report (`presented_frames`,
+  `presents_dropped`, the present gaps), never from the request count:
+  `PresentFeedbackTest.*` in `timer_tests` pins the arithmetic and
+  `MetalSceneDraw.EveryPresentedDrawableReportsWhetherItWasShownOnlyWhileCounting`
+  that every present reports exactly once while counting and none does otherwise.
 - **A scene with nothing left to do** — `MetalSceneDraw.AStaticTextSceneRunsOutOfWorkToDo`,
   `.AStaticTextLayerUnderAnEffectChainAlsoRunsOutOfWork` and
   `.TextBoundToAUserPropertyIsEventDrivenRatherThanContinuous`: a static caption
@@ -622,9 +741,11 @@ device.
   that a rejected registration hands the callback back to be dropped exactly once and that
   a panicking callback does not unwind into C++. In the renderer,
   `UnchangedPresent.ADrawFailureAfterTheFirstFrameIsReportedOnceAndASurfaceRebuildHealsIt`
-  and `...BeforeTheFirstFrameIsCountedButNotReported`. The engine's reaction to a report
-  on a live scene needs a real window and is not covered by an automated test, and no
-  genuine presentation failure is produced anywhere.
+  and `...BeforeTheFirstFrameIsCountedButNotReported`; a frame whose composition
+  fails is such a failure, presenting nothing and leaving nothing recorded as shown
+  (`MetalSceneDraw.AFrameThatCannotBeComposedIsNeitherPresentedNorRememberedAsShown`).
+  The engine's reaction to a report on a live scene needs a real window and is not
+  covered by an automated test, and no genuine presentation failure is produced anywhere.
 
 ## Audio
 
@@ -803,15 +924,26 @@ engine to redo, and when.
 - **The lock state is not asked per evaluation** — `WallpaperPresentationPolicyTests.testTheLockStateIsAskedOnlyWhenItCanHaveChanged`,
   `.testASessionLockedBeforeStartIsSuspendedFromTheStart`,
   `.testWakingDisplaysAskForTheLockStateAgain`,
-  `.testSwitchingUsersAsksForTheLockStateAgain` and
-  `.testAMissedUnlockClearsAtTheNextEvaluation`, plus
+  `.testSwitchingUsersAsksForTheLockStateAgain`,
+  `.testAMissedUnlockClearsAtTheNextEvaluation` and
+  `.testAMissedReturnToTheConsoleClearsAtTheNextEvaluation`, plus
   `.testUnlockIsReportedOnceWhenTheLockClears` and
   `.testAMissedUnlockIsStillReportedAtTheNextEvaluation` for the edge the playlists
   answer. Every snapshot the engine applies
   runs the presentation policy, and `CGSessionCopyCurrentDictionary` is a
   synchronous window-server round trip. It is asked again only at start, on a lock
   or unlock, on display wake, on a user switch and while the session counts as
-  locked, so a missed unlock still clears at the next evaluation.
+  locked or switched away, so a missed unlock or return still clears at the next
+  evaluation.
+- **A switched-away session does not render for nobody** —
+  `WallpaperPresentationPolicyTests.testASessionSwitchedAwayWithoutALockSuspendsUntilItIsBack`,
+  `.testASessionOffTheConsoleAtStartIsSuspendedFromTheStart` and
+  `WallpaperPresentationAuthorityTests.testASessionSwitchedAwayHasNobodyWatchingItsLockScreenSurfaces`.
+  The renderer runs its own frame clock, so nothing else stops a wallpaper whose
+  session fast user switching moved off the screens without a lock: the policy
+  suspends presentation and the extension's lock-screen surfaces have no consumer
+  until the session is on the console again. Not exercised live: it needs a second
+  account.
 - **No folder probe per panel snapshot** — `WorkshopDownloadIntentTests.testSceneAssetsAreFoundAgainOnlyOnRefresh`.
   Resolving `ClientPaths.assetsURL` probes up to four folders, which is a large
   share of building the page snapshot while a property slider is dragged. The

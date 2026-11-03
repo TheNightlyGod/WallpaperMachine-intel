@@ -539,4 +539,8 @@ void WPParticleRawGener::GenGLData(std::span<const std::unique_ptr<ParticleInsta
     if (target.strip != 0) ExtendStripIndices(indices, target.quads, target.strip);
     else ExtendIndices(indices, target.quads);
     indices.SetDrawIndexCount(static_cast<std::size_t>(draw));
+    // The indices drawn name only the vertices written above, from the first one on; what
+    // lies past them is an earlier frame's and no draw reads it.
+    const uint64_t per_record = target.strip != 0 ? target.strip : 4u;
+    vertices.SetDrawnSize(static_cast<std::size_t>(target.quads * per_record * target.floats));
 }

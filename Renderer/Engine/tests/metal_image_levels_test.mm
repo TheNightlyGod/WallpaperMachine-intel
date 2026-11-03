@@ -198,3 +198,98 @@ TEST_F(MetalImageLevels, ASecondDisplayNeverReadsALevelBackPastItsExtent)
     EXPECT_EQ(SharedImageCache::shared().import(same, upload_honest), kept);
     EXPECT_EQ(SharedImageCache::shared().uploads(), before);
 }
+
+namespace
+{
+// Leaves the picture-optimization switch on whatever a test does to it.
+struct OptimizationOnAtExit {
+    ~OptimizationOnAtExit() { SharedImageCache::setOptimizationForTests(true); }
+};
+
+// Waits for the work queued on `queue`, so the pictures a test made die with it: a command
+// buffer holds what it works on until it has run, and the tests after this one count the
+// pictures alive in the process.
+void Drain(id<MTLCommandQueue> queue)
+{
+    id<MTLCommandBuffer> fence = [queue commandBuffer];
+    [fence commit];
+    [fence waitUntilCompleted];
+}
+} // namespace
+
+TEST_F(MetalImageLevels, ANewUploadIsOptimizedForSamplingOnceAndStillComparesEqual)
+{
+    // The CPU writes a picture in its own layout, which the GPU reads uncompressed. A new upload
+    // is rearranged for sampling once, on the renderer's queue; the bytes stay what was written,
+    // so a second display comparing its own bytes with them still finds the picture.
+    OptimizationOnAtExit restore;
+    SharedImageCache::setOptimizationForTests(true);
+    id<MTLCommandQueue> queue = [device newCommandQueue];
+    const Image::Slot   slot  = SlotOf(Level(64, 64, 9), Level(32, 32, 10));
+    SharedImageRequest  request;
+    request.device          = device;
+    request.name            = "metal-image-levels/optimized";
+    request.format          = MTLPixelFormatRGBA8Unorm;
+    request.slot            = &slot;
+    request.bytes_per_pixel = 4;
+    request.queue           = queue;
+    const auto upload = [&] { return MakeImageTexture(device, MTLPixelFormatRGBA8Unorm, slot, 4, 0); };
+
+    const uint64_t optimized = SharedImageCache::shared().optimized();
+    id<MTLTexture> first     = SharedImageCache::shared().import(request, upload);
+    ASSERT_NE(first, nil);
+    EXPECT_EQ(SharedImageCache::shared().optimized(), optimized + 1) << "the new upload was left as written";
+
+    const uint64_t uploads = SharedImageCache::shared().uploads();
+    EXPECT_EQ(SharedImageCache::shared().import(request, upload), first)
+        << "the optimized picture no longer compared equal to the same bytes";
+    EXPECT_EQ(SharedImageCache::shared().uploads(), uploads);
+    EXPECT_EQ(SharedImageCache::shared().optimized(), optimized + 1) << "a shared picture was optimized again";
+    EXPECT_TRUE(AllEqual(Pixels(first, 0), 9));
+    EXPECT_TRUE(AllEqual(Pixels(first, 1), 10));
+    Drain(queue);
+}
+
+TEST_F(MetalImageLevels, OnlyAPlainPictureUploadedWithAQueueAndTheSwitchOnIsOptimized)
+{
+    OptimizationOnAtExit restore;
+    SharedImageCache::setOptimizationForTests(true);
+    id<MTLCommandQueue> queue = [device newCommandQueue];
+    const auto import = [&](const std::string& name, MTLPixelFormat format, const Image::Slot& slot,
+                            uint32_t bytes_per_pixel, uint32_t block_bytes, id<MTLCommandQueue> on) {
+        SharedImageRequest request;
+        request.device          = device;
+        request.name            = name;
+        request.format          = format;
+        request.slot            = &slot;
+        request.bytes_per_pixel = bytes_per_pixel;
+        request.block_bytes     = block_bytes;
+        request.queue           = on;
+        return SharedImageCache::shared().import(request, [&] {
+            return MakeImageTexture(device, format, slot, bytes_per_pixel, block_bytes);
+        });
+    };
+    const Image::Slot plain  = SlotOf(Level(16, 16, 3));
+    const uint64_t    before = SharedImageCache::shared().optimized();
+
+    // No queue: a caller with nowhere to queue the work leaves the picture as written.
+    ASSERT_NE(import("metal-image-levels/no-queue", MTLPixelFormatRGBA8Unorm, plain, 4, 0, nil), nil);
+    EXPECT_EQ(SharedImageCache::shared().optimized(), before);
+
+    // The switch off (`WALLPAPER_MACHINE_OPTIMIZE_IMAGES=0`).
+    SharedImageCache::setOptimizationForTests(false);
+    ASSERT_NE(import("metal-image-levels/switched-off", MTLPixelFormatRGBA8Unorm, plain, 4, 0, queue), nil);
+    EXPECT_EQ(SharedImageCache::shared().optimized(), before);
+    SharedImageCache::setOptimizationForTests(true);
+
+    // Block-compressed blocks are compressed already.
+    if (device.supportsBCTextureCompression) {
+        const Image::Slot blocks = SlotOf(Level(8, 8, 0, 32, 32));
+        ASSERT_NE(import("metal-image-levels/blocks", MTLPixelFormatBC1_RGBA, blocks, 0, 8, queue), nil);
+        EXPECT_EQ(SharedImageCache::shared().optimized(), before);
+    }
+
+    ASSERT_NE(import("metal-image-levels/plain", MTLPixelFormatRGBA8Unorm, plain, 4, 0, queue), nil);
+    EXPECT_EQ(SharedImageCache::shared().optimized(), before + 1);
+    Drain(queue);
+}

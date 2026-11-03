@@ -33,10 +33,20 @@ pub enum RendererCounterKind {
     /// Frames that ran but were not drawn or presented because they would have
     /// put back exactly the pixels already on the surface.
     PresentsSkippedUnchanged,
+    /// Presented drawables the display reported as shown, and as never shown
+    /// (replaced or discarded before any refresh showed them).
+    PresentedFrames,
+    PresentsDropped,
+    /// Time from one shown frame to the next, in display refreshes.
+    PresentGaps1Vsync,
+    PresentGaps2Vsync,
+    PresentGaps3PlusVsync,
     // Surface state.
     PauseReasons,
     TickIntervalMicros,
     ContentPeriodMicros,
+    /// Refresh period the present gaps are measured in; 0 when unknown.
+    VsyncPeriodMicros,
     // Consumer work: this surface's use of decoded frames, including the
     // conversions and imports its own texture cache performs.
     VideoFramesSelected,
@@ -77,9 +87,17 @@ impl RendererCounterKind {
             Self::PresentsSkippedUnchanged => {
                 sys::owe_renderer_counter_OWE_RC_PRESENTS_SKIPPED_UNCHANGED
             }
+            Self::PresentedFrames => sys::owe_renderer_counter_OWE_RC_PRESENTED_FRAMES,
+            Self::PresentsDropped => sys::owe_renderer_counter_OWE_RC_PRESENTS_DROPPED,
+            Self::PresentGaps1Vsync => sys::owe_renderer_counter_OWE_RC_PRESENT_GAPS_1_VSYNC,
+            Self::PresentGaps2Vsync => sys::owe_renderer_counter_OWE_RC_PRESENT_GAPS_2_VSYNC,
+            Self::PresentGaps3PlusVsync => {
+                sys::owe_renderer_counter_OWE_RC_PRESENT_GAPS_3PLUS_VSYNC
+            }
             Self::PauseReasons => sys::owe_renderer_counter_OWE_RC_PAUSE_REASONS,
             Self::TickIntervalMicros => sys::owe_renderer_counter_OWE_RC_TICK_INTERVAL_MICROS,
             Self::ContentPeriodMicros => sys::owe_renderer_counter_OWE_RC_CONTENT_PERIOD_MICROS,
+            Self::VsyncPeriodMicros => sys::owe_renderer_counter_OWE_RC_VSYNC_PERIOD_MICROS,
             Self::VideoSourceCount => sys::owe_renderer_counter_OWE_RC_VIDEO_SOURCE_COUNT,
             Self::VideoSourceInstance => sys::owe_renderer_counter_OWE_RC_VIDEO_SOURCE_INSTANCE,
             Self::VideoDecodeOutputs => sys::owe_renderer_counter_OWE_RC_VIDEO_DECODE_OUTPUTS,

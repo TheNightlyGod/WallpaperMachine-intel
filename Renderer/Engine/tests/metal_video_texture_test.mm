@@ -298,10 +298,10 @@ protected:
 
     /// One whole renderer frame: import, then let the GPU finish so the test
     /// can read what was written.
-    bool RunFrame(std::string* error)
+    bool RunFrame(std::string* error, bool* imported = nullptr)
     {
         id<MTLCommandBuffer> command = [queue commandBuffer];
-        const bool           ok      = textures->beginFrame(scene, command, error);
+        const bool           ok      = textures->beginFrame(scene, command, error, imported);
         [command commit];
         [command waitUntilCompleted];
         return ok;
@@ -546,6 +546,67 @@ TEST_F(MetalVideoTexture, AGenerationIsConvertedOnlyOnce)
         << "an unchanged generation keeps the texture it already has";
     EXPECT_EQ(textures->texture("video"), first);
     EXPECT_EQ(textures->importsForTests(), 1u);
+}
+
+TEST_F(MetalVideoTexture, AFrameSaysWhetherItTookAVideoFrameAndEveryImportIsNumberedAnew)
+{
+    // What the renderer's reuse and present skip stand on: a frame that took
+    // nothing says so, and the number its consumers fold changes with every
+    // import -- a new generation, the same one for a changed demand, a frame
+    // whose planes are sampled directly -- and with nothing else.
+    auto source = std::make_shared<FakeVideoSource>(16, 16);
+    std::string error;
+    ASSERT_TRUE(textures->prepareForTests("video", source, &error)) << error;
+    EXPECT_EQ(textures->importSerial("video"), 0u) << "nothing has been imported yet";
+    EXPECT_EQ(textures->importSerial("not-a-video"), 0u);
+
+    source->produce(128, 128, 128);
+    bool imported = false;
+    ASSERT_TRUE(RunFrame(&error, &imported)) << error;
+    EXPECT_TRUE(imported);
+    const auto first = textures->importSerial("video");
+    EXPECT_NE(first, 0u);
+
+    // The same generation again: nothing taken, nothing encoded, same number.
+    const auto conversions = textures->conversionsEncodedForTests();
+    imported = true;
+    ASSERT_TRUE(RunFrame(&error, &imported)) << error;
+    EXPECT_FALSE(imported) << "an unchanged generation was reported as a new frame";
+    EXPECT_EQ(textures->importSerial("video"), first);
+    EXPECT_EQ(textures->conversionsEncodedForTests(), conversions);
+
+    // A paused source keeps its frame although the decoder has a newer one.
+    textures->setPaused(true);
+    source->produce(64, 100, 200);
+    imported = true;
+    ASSERT_TRUE(RunFrame(&error, &imported)) << error;
+    EXPECT_FALSE(imported);
+    EXPECT_EQ(textures->importSerial("video"), first);
+
+    textures->setPaused(false);
+    ASSERT_TRUE(RunFrame(&error, &imported)) << error;
+    EXPECT_TRUE(imported) << "the newer generation was taken without saying so";
+    const auto second = textures->importSerial("video");
+    EXPECT_NE(second, first);
+
+    // The same generation imported again for a demand that changed is a new
+    // input as well: its consumers now sample planes instead of an image.
+    textures->setDemand({ { "video", metal::VideoConsumerDemand { true, false } } });
+    ASSERT_TRUE(RunFrame(&error, &imported)) << error;
+    EXPECT_TRUE(imported);
+    EXPECT_EQ(textures->path("video"), metal::VideoFramePath::Nv12Direct);
+    const auto direct = textures->importSerial("video");
+    EXPECT_NE(direct, second);
+    EXPECT_NE(direct, first);
+
+    // On the direct path nothing is converted, and a new generation is still
+    // taken and still numbered anew.
+    source->produce(30, 90, 150);
+    ASSERT_TRUE(RunFrame(&error, &imported)) << error;
+    EXPECT_TRUE(imported);
+    EXPECT_NE(textures->importSerial("video"), direct);
+    ASSERT_TRUE(RunFrame(&error, &imported)) << error;
+    EXPECT_FALSE(imported);
 }
 
 TEST_F(MetalVideoTexture, PausedPlaybackKeepsTheLastTexture)

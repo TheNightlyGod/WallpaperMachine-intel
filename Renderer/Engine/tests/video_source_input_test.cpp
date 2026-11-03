@@ -614,6 +614,108 @@ TEST(VideoSourceClockSlowDecoder, ASlowDecoderKeepsToTheClockByLeavingOutLatePic
     EXPECT_EQ(source.sourceStats().seek_requests, 0u) << "the source sought ahead to catch up";
 }
 
+/// A decoder that plays at once but takes `kSeekTime` to deliver the first picture after a seek,
+/// as one does that has to decode a long group of pictures from its keyframe up to the target.
+class SlowSeekDecoder final : public VideoFrameBackend {
+public:
+    static constexpr double   kPassSeconds = 10.0;
+    static constexpr uint64_t kPassFrames  = 600;
+    static constexpr auto     kSeekTime    = std::chrono::milliseconds(600);
+
+    bool       open(std::string*) override { return true; }
+    StreamInfo streamInfo() const override { return { kPassSeconds, 1.0 / 60.0, 1.0 / 60.0 }; }
+    Decode     decodeNext(double, DecodedPosition* position, std::string* error) override {
+        if (m_sought) {
+            m_sought = false;
+            const auto until = std::chrono::steady_clock::now() + kSeekTime;
+            while (std::chrono::steady_clock::now() < until) {
+                if (m_cancelled.load()) return Decode::Cancelled;
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+        }
+        if (m_cancelled.load()) return Decode::Cancelled;
+        const uint64_t index = m_next++;
+        CVPixelBufferRef pixels = nullptr;
+        if (CVPixelBufferCreate(kCFAllocatorDefault, 16, 16, kCVPixelFormatType_32BGRA, nullptr, &pixels) !=
+            kCVReturnSuccess) {
+            *error = "no pixel buffer";
+            return Decode::Failed;
+        }
+        m_pixels              = pixels;
+        position->pts_seconds = static_cast<double>(index % kPassFrames) / 60.0;
+        position->loop_index  = index / kPassFrames;
+        return Decode::Frame;
+    }
+    bool takeFrame(VideoTextureFrame* out, std::string* error) override {
+        void* pixels = m_pixels;
+        m_pixels     = nullptr;
+        return AdoptPixelBufferAsVideoFrame(pixels, out, error);
+    }
+    void discardFrame() override {
+        if (m_pixels != nullptr) CFRelease(m_pixels);
+        m_pixels = nullptr;
+    }
+    bool seek(double wrapped_seconds, uint64_t loop_index, std::string*) override {
+        discardFrame();
+        m_next   = loop_index * kPassFrames + static_cast<uint64_t>(std::floor(wrapped_seconds * 60.0));
+        m_sought = true;
+        return true;
+    }
+    uint64_t loopIndex() const override { return m_next / kPassFrames; }
+    void     skipDisposableBefore(double) override {}
+    void     cancel() override { m_cancelled.store(true); }
+    void     close() override { discardFrame(); }
+
+private:
+    uint64_t          m_next { 0 };
+    bool              m_sought { false };
+    void*             m_pixels { nullptr };
+    std::atomic<bool> m_cancelled { false };
+};
+
+// A script that sends its clip back to the start (to loop or replay it) moves the clock back
+// past the picture shown. The seek that fetches the start takes as long as decoding from its
+// keyframe does, and every draw meanwhile goes on with the picture that was shown: a draw that
+// waited for the seek held every layer of the scene still for that long (up to two seconds).
+TEST(VideoSourceClockSlowSeek, AClockSentBackKeepsThePictureShownUntilTheSeekDelivers) {
+    ClockedVideoSource source(std::make_unique<SlowSeekDecoder>(), "slow seek");
+    std::string        error;
+    ASSERT_TRUE(source.prime(&error)) << error;
+    // Played on, a frame at a time, to 3 seconds without a seek.
+    for (int frame = 0; frame <= 180; ++frame) {
+        ASSERT_TRUE(source.syncPlayback(VideoPlaybackState { false, 1.0f, frame / 60.0 }, &error)) << error;
+        ASSERT_TRUE(source.refreshFrame(&error)) << error;
+        std::this_thread::sleep_for(std::chrono::microseconds(500));
+    }
+    ASSERT_NEAR(source.currentFrame().pts_seconds, 3.0, 0.05);
+    ASSERT_EQ(source.sourceStats().seek_requests, 0u);
+
+    // Back to the start, then a draw every few milliseconds while the seek is made.
+    const auto sent_back = std::chrono::steady_clock::now();
+    auto       longest   = std::chrono::steady_clock::duration::zero();
+    while (std::chrono::steady_clock::now() - sent_back < SlowSeekDecoder::kSeekTime / 2) {
+        const auto draw = std::chrono::steady_clock::now();
+        ASSERT_TRUE(source.syncPlayback(VideoPlaybackState { false, 1.0f, 0.0 }, &error)) << error;
+        ASSERT_TRUE(source.refreshFrame(&error)) << error;
+        longest = std::max(longest, std::chrono::steady_clock::now() - draw);
+        EXPECT_NEAR(source.currentFrame().pts_seconds, 3.0, 0.05) << "the picture shown changed before the seek delivered";
+        std::this_thread::sleep_for(std::chrono::milliseconds(4));
+    }
+    EXPECT_LT(longest, std::chrono::milliseconds(100)) << "a draw waited for the seek";
+    EXPECT_EQ(source.sourceStats().seek_requests, 1u) << "the seek was asked for again while it was on its way";
+
+    // The seek's first picture replaces the one shown as soon as it arrives.
+    const auto deadline = sent_back + std::chrono::seconds(3);
+    while (source.currentFrame().pts_seconds > 0.05 && std::chrono::steady_clock::now() < deadline) {
+        ASSERT_TRUE(source.syncPlayback(VideoPlaybackState { false, 1.0f, 0.0 }, &error)) << error;
+        ASSERT_TRUE(source.refreshFrame(&error)) << error;
+        std::this_thread::sleep_for(std::chrono::milliseconds(4));
+    }
+    EXPECT_NEAR(source.currentFrame().pts_seconds, 0.0, 0.05) << "the start never replaced the picture shown";
+    EXPECT_EQ(source.sourceStats().seek_requests, 1u);
+    EXPECT_EQ(source.loopCount(), 0u) << "going back counted a pass";
+}
+
 TEST_F(VideoSourceInput, DestroyingASourceMidDecodeCancelsPromptly) {
     const auto media = project_dir / "cancelled.mp4";
     ASSERT_TRUE(WriteSyntheticVideo(media, 96, "cancelled"));

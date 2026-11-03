@@ -89,9 +89,26 @@ powermetrics that fails or is refused at once does not shorten it.
   refusal is recorded as `package_power.measured = false` with sudo's reason,
   and the other rows are still written.
 
+The `app` role is every process named WallpaperMachine, and its figures are summed,
+so a second copy (the installed app beside a build under test, or a copy left from an
+earlier run) would be measured as part of the first. A window therefore refuses to
+start while more than one copy runs. `--app-pid PID` names the copy to measure and
+refuses while any other runs; a copy that starts during the window is listed under
+`measurement.app_guard.appeared_during_window`, and the window is to be rejected.
+
+`--home DIR`, the measured copy's `WALLPAPER_MACHINE_HOME`, attaches the diagnostics
+report that copy logged under `DIR/Logs/<launch>/` (the launch folder named at the
+process start; with `--app-pid`, never another launch's) as `measurement.diagnostics`:
+the report's own `window elapsed_ms` and, per renderer surface, its counters with draws,
+present requests and shown frames per second over that measured window. It waits up to
+`--home-wait` seconds (60) after the window for the report, because the two windows
+start independently. `--output FILE` writes the document there instead of a new file
+under `artifacts/power/`.
+
 A desktop run (which needs authorization, see [Authorization
 boundary](#authorization-boundary)) is taken serially, with the display set and
-power source unchanged across a comparison: quit the app with an Apple Event and
+power source unchanged across a comparison; [Desktop A/B runs](#desktop-ab-runs)
+automates the procedure below. By hand: quit the app with an Apple Event and
 wait until it has exited (`open` can fail with `-600` for a few seconds after
 that; `kill -TERM <pid>` quits it the same way, but a second signal ends it at once,
 perhaps before the desktop picture is restored, so wait for the exit), launch with
@@ -103,13 +120,19 @@ the delay alone does not synchronize their boundaries. The diagnostics report's
 by that duration is diagnostic-window draw throughput, not displayed FPS. A
 same-throughput power claim needs timestamped counter deltas aligned to the
 actual power window. Neither the configured ceiling nor timer-wakeup counts
-provide elapsed time or displayed-frame counts.
+provide elapsed time or displayed-frame counts; `presented_frames` over the same
+duration is the rate the display showed the wallpaper's frames at (see [Present
+feedback](#present-feedback)).
 
-The app opens its control panel at launch, so each such run includes it, and
-animated previews add frame decoding in the app and WindowServer work (Discover animates the
-tiles on screen; Installed shows still covers and animates only the tile under
-the pointer or keyboard focus, see [control panel](../features/control-panel.md));
-say whether the panel was open and on which page. The saving from Installed's
+The app opens its control panel at launch, and animated previews add frame decoding
+in the app and WindowServer work (Discover animates the tiles on screen; Installed
+shows still covers and animates only the tile under the pointer or keyboard focus, see
+[control panel](../features/control-panel.md)). Launch with `--env
+WALLPAPER_MACHINE_PANEL_AT_LAUNCH=0` to keep it closed, as a login launch does (read
+once at launch; an unfinished welcome guide or a failed start still opens it), so the
+window measures the wallpaper alone; otherwise say whether the panel was open and on
+which page. With the panel closed the app's own energy recorder samples too (its
+`EnergyRatings.json` in that home is a third readout). The saving from Installed's
 still covers has not been measured: compare a run with the panel open on
 Installed against a build before the change. System power includes every other application,
 so it is only comparable against a paired baseline taken minutes from the run;
@@ -133,6 +156,24 @@ comparison across a clock change reports throughput separately from power.
   substituted for the suppression observation. The admission-contract tests cover
   the inclusive boundary, one nanosecond beyond it, and actual observation-time
   anchoring; other real-thread integration checks remain.
+- A ceiling that spans two or more refreshes of its display presents each frame
+  with `presentDrawable:afterMinimumDuration:` and the frame clock's hold (whole
+  refreshes less a quarter refresh, 14.58 ms at 60 fps on 120 Hz), so frames
+  reach the display an even number of refreshes apart
+  ([scene rendering](../features/scene-rendering.md#update-only-when-the-scene-changes));
+  `WALLPAPER_MACHINE_VSYNC_PACING=0` restores plain presents. It moves no frame
+  of the cadence and changes no pixel, only when a frame is shown, and was
+  power-neutral in the probe below ([WindowServer's share](#windowservers-share)).
+  Headless, only the requested hold is observable (`PresentPacingTest.*` pins
+  the hold and a model of fixed-rate and ProMotion panels honouring it,
+  `MetalSceneDraw.APresentHoldsTheFrameOnlyWhilePacing` the present that asks
+  for it); a layer no window owns is never shown. Whether the display honours it
+  is the present gaps of a diagnostics window on the desktop: at 60 fps on a
+  120 Hz panel, `present_gaps_1_vsync` should fall to about zero and
+  `present_gaps_3plus_vsync` to the frames that were really late, against
+  `WALLPAPER_MACHINE_VSYNC_PACING=0` in the same binary. On ProMotion a 12.5 ms
+  gap is counted as two refreshes (the buckets split at 1.5 and 2.5), so there
+  the three-plus bucket, not the one-refresh one, shows the uneven gaps.
 
 `timer_delivery_benchmark`, run by `scripts/check_renderer.py`, reports a separate
 single-consumer measurement: requested 60 Hz ceiling, 18 ms of steady-clock busy
@@ -146,8 +187,10 @@ This acceptance change leaves production scheduling, recovery, backpressure,
 atomics and process policy unchanged. It does not diagnose or retroactively pass
 the historical 42–60 throughput-check failures, nor establish an energy improvement.
 
-This is measured delivery, not presentation: whether and when those frames were
-displayed is not observable. Measurements recorded before 2026-09-28, when the
+This is measured delivery, not presentation. Whether and when a presented frame
+reached the display is the renderer's present feedback (see [Runtime
+counters](#runtime-counters)), which a diagnostics window reports per surface; the
+benchmark above has no display. Measurements recorded before 2026-09-28, when the
 cadence was anchored, describe fewer delivered frames at a given ceiling and are
 not comparable with later ones.
 
@@ -255,7 +298,11 @@ negligible.
   60 fps wallpaper. Single 6-second traces disagreed, and about 30 composited
   frames a second had no attributed process even with nothing running. Panel
   power is outside coalition energy and `powermetrics`, and battery-telemetry
-  system power was too noisy to settle it.
+  system power was too noisy to settle it. The renderer's present gaps (see
+  [Runtime counters](#runtime-counters)) now show, without a trace, how many
+  refreshes of the display's top rate lie between two shown wallpaper frames, and
+  how many presented frames were never shown; they say when the wallpaper's own
+  frames reached the panel, not at what rate the panel itself refreshed.
 
 Two traps: with the user active an idle WindowServer drew 141–762 mW, so compare
 only quiet windows; and Chrome left open triggered about 60 composites a second
@@ -282,6 +329,87 @@ cost 29.4 W GPU against Ultra's 25.1 W in the same session (about 3,620 frames
 each, both windows marked contended, one window each), the extended-range surface
 and its linear combine included.
 
+## Headless A/B driver
+
+`python3 scripts/perf_bench.py` turns the headless harnesses into repeatable
+before/after numbers for scene wallpapers at the user's own settings. It needs no
+privileges, sets no wallpaper, opens no window and writes nothing under the user's
+wallpaper library, so it is safe to run unattended. It measures the renderer's own
+work, not a desktop: WindowServer, the panel and the display are not in it.
+
+- **Builds and variants.** `--bin LABEL=DIR` names the
+  `artifacts/renderer/bin/tests` directory `scripts/check_renderer.py` built in any
+  worktree (it needs `unchanged_present_test` and `metal_scene_draw_smoke`).
+  `--variant LABEL=BIN_LABEL:ENV=VALUE,...` is that set run with extra environment,
+  so a switch from [A/B comparison entry points](#ab-comparison-entry-points) is
+  measured within one binary. Each set is copied into scratch bundles under
+  `artifacts/perf-bench/bin/<label>/` with the bundle id
+  `dev.wallpapermachine.perfbench.<label>.<binary>` (a UI element with App Nap off),
+  so every set compiles its Metal source once into a cache of its own.
+  `perf_bench.py clean` deletes the bundles, the scene caches and those ids'
+  Metal cache folders.
+- **Settings.** Read from `~/Library/Application Support/WallpaperMachine`:
+  `config.toml`'s render scale, frame-rate cap, 2D scene resolution and scene
+  quality, and `wallpapers/<id>.json`'s property overrides and per-display scaling,
+  matched to the surfaces as the app matches them: the first surface is the main
+  display, and an entry saved for a display's identity applies to the connected
+  display of that surface's size with the same vendor, model and serial number.
+  `--surfaces` defaults to `3840x2160@2+3456x2234@2`, drawn at once. A setting the harness does not apply (MetalFX upscaling, on-demand
+  rendering, video plane sampling, drawing only the visible part of cropped scenes, the
+  system audio an audio-reactive scene hears, a scaling factor other than 1) is printed
+  and recorded. Video and web wallpapers are
+  skipped with their reason: only a desktop run measures them.
+- **`identity A B`.** Each wallpaper on each surface goes through the poster
+  harness at those settings, seeded, with text settled and 40 warm-up ticks, and
+  every 60th of 600 draws is hashed (`--frames`, `--hash-every`). A runs twice:
+  frames that differ between A's two runs are excluded as nondeterministic (scripts
+  and particles that read the wall clock), and B must match A on every other one.
+  The first frame that differs is drawn again by both, its differing pixels and
+  largest channel difference are counted, and the pictures are deleted.
+- **`cost A B`.** The energy test runs on all surfaces at once as fresh processes:
+  one unmeasured warm run per condition, then `--pairs` pairs (default 5) in ABBA
+  order, each with an 8 s warm-up and a 30 s window (`--warmup`, `--window`), at
+  least 20 s apart (`--cooldown`) and only once `pmset -g therm` reports no warning.
+  Each run is launched with `open -W -n -g` as an app of its own, so its coalition
+  figures are its own; `--launch direct` runs it as a foreground child instead,
+  sharing this terminal's coalition. `--saturated` adds, per surface, the timed
+  back-to-back draws of `WE_TEST_METAL_TIMING` (`sat_*` metrics: GPU and CPU ms per
+  draw, passes, blits and target bytes), and `--counters` turns the renderer
+  counters on in both conditions.
+- **Rejected runs.** A test that failed, failed frames, a held scene, other
+  coalitions keeping the GPU busy for more than 25 % of the window, a thermal state
+  above nominal, or a frame rate more than 1 % off its condition's median: the run
+  and its pair are left out and listed with the reason.
+- **Statistics and verdicts.** Per metric, the median and IQR of each condition,
+  and the paired difference B − A of each pair with its median and a 95 % bootstrap
+  interval (10,000 resamples, seeded). The verdict is `saving` or `regression` only
+  with at least three pairs, an interval that excludes zero and a median difference
+  larger than the A/A floor; a change in frame rate is `throughput up` or `down`,
+  never a saving.
+- **`aa A`.** A against a copy of itself in another folder; the 95th percentile of
+  |A − A′| per wallpaper and metric is recorded as `aa_noise_floor`, which
+  `cost --noise-floor <report.json>` uses.
+- **Output.** `artifacts/perf-bench/<time>-<kind>/report.json` (the
+  [manifest](#configuration-manifest), each build's source tree, commit, SHA-256
+  and Homebrew libraries, the conditions, the resolved settings, every run's record
+  and metrics, identity results, rejected runs and skips) and `report.csv` with one
+  row per wallpaper, surfaces, condition and metric (median, IQR, paired delta,
+  interval, verdict) for charting. `perf_bench.py report <dir>` prints the table and
+  writes the CSV again.
+
+The metrics are `cpu_mw` (the process's CPU energy), `cpu_p_mw` (on performance
+cores), `cpu_ms_per_s`, idle and interrupt wakeups per second, `gpu_own_busy_pct`,
+`gpu_ms_per_frame`, `cb_ms_p95`, `gpu_coalition_mw` (the process's own coalition,
+absent when it shares one), `gpu_all_mw`, peak and end footprint, and frames
+completed and presented per second.
+
+An app launched this way runs every thread at the QoS it asks for; a bundle marked
+`LSBackgroundOnly` instead had every thread clamped to legacy QoS, render threads
+included, which is why the bundles are UI elements. In a session with several
+compilers running, the windowless probe launched as an app ran on efficiency cores
+only, where the same probe started from a terminal also used performance cores:
+compare CPU figures only between runs of one launch method, never with the app's.
+
 ## Runtime counters
 
 Two counter surfaces answer two different questions, and a power claim needs
@@ -301,15 +429,15 @@ rather than growing without limit.
 The renderer counts its own work: the frame clock's wakeups and draw requests,
 draws executed and dropped, queue submissions, present requests, frame-fence
 completions, simulation ticks, frames left undrawn because they would have
-repeated the picture on screen (`presents_skipped_unchanged`), the effective
-pause reasons as independent bits,
+repeated the picture on screen (`presents_skipped_unchanged`), what the display
+did with the presented frames (below), the effective pause reasons as independent bits,
 and the decoder's outputs, seeks, selected/reused/skipped frames, conversions
 and imports. Those are also **off by default** — one relaxed atomic load gates
 each increment — and reading them is a pull: nothing is pushed to the UI, logged
 per frame or written to disk, and enabling starts no thread and no timer.
 
 The two groups inside a renderer row are deliberately separate.
-`timer_wakeups` through `presents_skipped_unchanged` are work a surface performs alone and
+`timer_wakeups` through `present_gaps_3plus_vsync` are work a surface performs alone and
 must stop when nobody can see it. The `video_*` values describe the decoded
 source, which may legitimately keep running while one of its consumers is
 hidden, provided another consumer still presents it. Collapsing them would make
@@ -334,13 +462,34 @@ The counters exist to answer one question per condition: did the work for a
 surface nobody can see actually stop? A count that keeps rising for an occluded
 surface falsifies the change regardless of what a CPU graph shows.
 
-### What the platform cannot report
+### Present feedback
 
-`present_requests` counts requests to present. Whether the compositor ever put
-a frame on a display is a different measurement, and this renderer, drawing into a
-`CAMetalLayer`, has no presentation-feedback source for it.
-The report says `presented_frames=unavailable`; the request count is never
-relabelled as displayed frames, and no frame-rate claim may be derived from it.
+`present_requests` counts requests to present. Whether the display ever showed
+the frame is a different measurement: while counting is on, each present asks its
+drawable to report when it was shown (`MTLDrawable` `presentedTime`, delivered on a
+framework thread, possibly after the renderer is gone, so a report only ever reaches
+the counters while the renderer that asked still holds them). A report of 0 is a
+drawable that was presented but never shown, replaced or discarded before any refresh
+(`presents_dropped`); any other is `presented_frames`, and the time since the
+surface's previous shown frame, rounded to refreshes of its display, lands in
+`present_gaps_1_vsync`, `present_gaps_2_vsync` or `present_gaps_3plus_vsync`
+(1.5 and 2.5 refreshes are the boundaries; a still scene that presented nothing in
+between lands in the last). The refresh period is the display mode's rate
+(`CGDisplayModeGetRefreshRate`, the top rate of a variable-rate panel), reported as
+`vsync_period_us`; while it is unknown (no display id, as for a layer no window
+owns) gaps are not counted rather than guessed. A gap is never measured across a
+time nothing was counted, and the reports trail the requests by the frames still in
+flight when a window closes. With counting off no report is asked for: the present
+path keeps its one relaxed load.
+
+The diagnostics report carries these per surface and ends with
+`presented_frames=available`; a renderer without the reports ends with
+`presented_frames=unavailable` and its surfaces carry no shown-frame count. The
+request count is never relabelled as shown frames, and a frame-rate claim about the
+display comes from `presented_frames` over the window, never from requests. A layer
+no window owns shows nothing, so in the headless tests every report is a drop
+(`MetalSceneDraw.EveryPresentedDrawableReportsWhetherItWasShownOnlyWhileCounting`);
+the gap and drop arithmetic is pinned in `timer_tests` (`PresentFeedbackTest.*`).
 
 ### A/B comparison entry points
 
@@ -351,10 +500,28 @@ decode-correctness defect.
 | Switch | Off (default) | On |
 |---|---|---|
 | `WALLPAPER_MACHINE_FEEDBACK_COPIES=1` | Native Metal trades textures for a copy a layer only makes to read the image it draws into | Every such copy is made as a copy; the picture is byte-identical either way |
+| `WALLPAPER_MACHINE_DESKTOP_POSTER_REUSE=0` | A wallpaper that comes back with the same look gets its settled desktop poster back: no readback, encode or new poster file ([desktop picture](../features/desktop-picture.md#when-a-poster-is-taken)) | Every return is captured again at once, after 3 s and after 15 s; the wallpaper's own frames are identical either way, only the still Mission Control shows differs |
 | `WALLPAPER_MACHINE_METAL_TARGET_SHARING=0` | Native Metal lets targets never alive together share images, and traded copies share a small set | Every target keeps an image of its own; the picture is byte-identical either way, the target memory is not |
+| `WALLPAPER_MACHINE_PRESENT_FEEDBACK=0` | While counting is on, every present asks its drawable to report when it was shown | No report is asked for and the present-feedback counters stay 0: what the reports themselves cost in a diagnostics or telemetry window. Counting off, nothing differs |
+| `WALLPAPER_MACHINE_VSYNC_PACING=0` | Native Metal holds each presented frame for the frame clock's hold when the ceiling spans two or more refreshes of the display, so a 60 fps wallpaper on a 120 Hz panel shows every frame two refreshes after the last | Every frame is presented at the next refresh, which shows frames ready near a refresh boundary one and three refreshes apart; the pixels are the same either way. Compare the present gaps of a diagnostics window ([Frame delivery](#frame-delivery)) |
+| `WALLPAPER_MACHINE_OVERWRITE_LOAD_ELISION=0` | Native Metal opens a render pass whose draw provably writes every texel of its target (an effect pass over its buffer) with a clear, and skips a traded reader's opening copy under the same proof | Every such render pass loads its target and every traded reader opens with its copy; the picture is byte-identical either way. `WE_TEST_METAL_PROJECTS` prints render passes loading their target and opening with a copy per frame |
+| `WALLPAPER_MACHINE_COPY_TRADES=0` | Native Metal leaves out a copy whose source is afterwards only read until it is written afresh (a motion blur's history copy, the bloom or colour-option result copied back into the scene's image) and trades the two images' names after the source's last reader | Every such copy is a blit again; byte-identical. `WE_TEST_METAL_PROJECTS` prints blits, MB copied and copies traded per frame |
+| `WALLPAPER_MACHINE_SKIP_NOOP_DRAWS=0` | Native Metal leaves out a draw that, with the frame's uniforms, writes alpha 0 over finite colour under a blend that keeps the destination there (a black screen faded out after an intro): the shader compiler proves each channel of the colour a product of uniforms and constants, and the frame's values make the alpha 0 | Every such draw is drawn; byte-identical. `WE_TEST_METAL_PROJECTS` prints draws left out as no-ops per frame |
+| `WALLPAPER_MACHINE_HIDDEN_LAYER_WORK=0` | Native Metal leaves out a clear, and a copy made only for draws after it, while no pass that reads what it leaves draws this frame (a layer a script hid keeps its effect buffers and the copy a lens reads in the graph); the next frame's passes ahead of a clear read none of it, whatever they draw. Read when a plan is built | Every such clear and copy runs every frame; byte-identical. `WE_TEST_METAL_PROJECTS` prints unread clears and copies left out per frame |
+| `WALLPAPER_MACHINE_ATTACHMENT_STORE_ELISION=0` | Native Metal stores a depth or multisampled colour attachment only while a later render pass of the frame (or, for samples, the next frame) reads it | Every render pass stores them; byte-identical. Scenes without 3D models or MSAA have none |
+| `WALLPAPER_MACHINE_OPTIMIZE_IMAGES=0` | Native Metal rearranges every newly uploaded plain 2D picture for sampling once, with one blit at load (`optimizeContentsForGPUAccess`), so the GPU reads it losslessly compressed | Pictures stay as the CPU wrote them and are read uncompressed every frame; the picture is byte-identical either way, the memory traffic of sampling them is not |
+| `WALLPAPER_MACHINE_MUTED_VIDEO_AUDIO=1` | A plain video that cannot be heard (muted, volume 0, Mute all, a mute rule, a mirror member without the group's sound) decodes no sound and runs no audio output: the AVFoundation player switches its one enabled audio track off, the WebM player stops feeding its audio renderer and takes it off the clock | The sound is decoded and played muted, as before; the picture and what is heard are the same either way. Compare a muted clip with sound: coreaudiod CPU and whether the default output reports `kAudioDevicePropertyDeviceIsRunningSomewhere` |
+| `WALLPAPER_MACHINE_SCRIPT_TICK_SKIP=0` | A property script without `update` costs no call into the script runtime on a tick with no timer due and no audio buffer registered | Every such script is called every tick; the scripts see the same things either way. `metal_scene_draw_smoke`'s local-project line `script calls/frame` counts the difference |
+| `WALLPAPER_MACHINE_VIDEO_REUSE=0` | A pass that samples a scene video is reused, with everything downstream of it that nothing else moves, while the video shows the frame it drew: a 24 or 30 fps clip on a 60 Hz clock, a paused one. A frame that took no video frame and reused every pass presents nothing | Every pass that samples a video is redrawn and every frame of a scene with a video presents, as before; byte-identical. Read when a graph is compiled. `metal_scene_draw_smoke`'s local-project line `passes drawn + reused/frame` and the energy record's `scene_passes` and `presents_skipped_unchanged` count the difference |
+| `WALLPAPER_MACHINE_AUDIO_REUSE=0` | A pass that reads the audio spectrum is reused, with everything downstream of it that nothing else moves, while the spectrum arrays it binds hold the bands it drew: silence (all zeros) above all, or a spectrum that repeats | Every such pass is redrawn every frame, as before; byte-identical. Read when a graph is compiled. `metal_scene_draw_smoke`'s local-project line `passes drawn + reused/frame` counts the difference; `WE_TEST_AUDIO_HZ` (silence at `0`, a tone, `WE_TEST_AUDIO_NOISE=1` for a spectrum that changes every frame) drives it in the local-project run and the poster harness |
+| `WALLPAPER_MACHINE_LAYER_LOCAL_SIGNATURES=0` | A pass drawn into a layer's own buffers (its picture and every effect but the last) leaves the layer's world transform and the scene camera out of what decides its reuse unless a uniform its shader reads is derived from them, so a still chain stays reused while its layer moves or the camera shakes. The reused pass holds the same pixels, but in a scene whose objects are drawn in their own order the draws into the scene's image around the chain then share one render pass, and an Apple GPU can blend a later draw one level apart in a texel (on an M5 Pro, two pixels of a few frames of 3808922316 at 3456x2234@2): accepted, not byte-identical | Every such pass is drawn again whenever its layer or the camera moves, as before. Read when a graph is compiled. `metal_scene_draw_smoke`'s local-project line `passes drawn + reused/frame` and its render passes on the scene output count the difference (167 + 23 against 184 + 6 passes and 32 against 42 scene render passes a frame on 3808922316) |
+| `WALLPAPER_MACHINE_PARTICLE_UPLOAD_DELTA=0` | Rewritten geometry (particles above all) is copied into a frame slot only as far as the draw reads it and the slot lacks it: the quads a particle system drew, its index pattern once per slot | The high-water mark of the vertices and every drawn index are copied every frame; the picture is byte-identical either way. The local-project line's `bytes of rewritten geometry copied/frame` counts the difference |
+| `WALLPAPER_MACHINE_SDR_FRAMING=1` (or `=0`); unset follows Settings → Performance → Advanced → Draw only the visible part of cropped scenes (`scene_display_framing` under `[experimental]`, off by default) | Native Metal draws an SDR Display-resolution scene's whole canvas-cover raster, the overhang Fill crops included | Only the window of that raster the display shows is drawn ([experimental switch](../features/performance.md#draw-only-the-visible-part-of-cropped-scenes)); `=0` draws the whole raster whatever the setting says. Not byte-identical: up to 0.6% of interior pixels move by one level, thin geometry differs in up to about 140 pixels, and a screen-space effect stops at the output's edge. Read once at launch; a running scene takes the setting at its next draw. The harness never pushes the app's setting, so a `perf_bench.py` run draws whole unless a `--variant` sets `=1` |
 | Settings → Performance → Quality → 2D scene resolution (`scene_resolution` under `[quality]`) | Display resolution: a 2D scene is rasterized at the size it is presented at | Canvas size: rasterized at the authored canvas and stretched; less GPU time and memory |
 
-Changes that are not switchable
+`scripts/perf_bench.py` measures such a switch within one binary: `cost on off
+--bin on=<dir> --variant off=on:WALLPAPER_MACHINE_FEEDBACK_COPIES=1` (see
+[Headless A/B driver](#headless-ab-driver)). Changes that are not switchable
 (correctness and resource-lifetime fixes) need a separate build directory or
 worktree. Whichever way two versions are compared, they need isolated
 `WALLPAPER_MACHINE_HOME` directories and must be measured serially, never
@@ -367,6 +534,54 @@ the framework, so they are reported as unavailable rather than invented.
 `AVPlayerLooper` keeps more than one copy of its template item queued to make
 the loop seam gapless, so the queued-item count is reported as the system gives
 it and is never claimed to be one with no pre-buffering.
+
+## Desktop A/B runs
+
+`scripts/power_ab.py` runs the desktop procedure above for two arms: two copies of
+the app (`--arm A <old>.app --arm B <new>.app`, built once and never moved, since
+compiled Metal is cached per app location), or one copy with a switch from the
+table above (`--arm A <app> --arm B <app> --arm-env B KEY=VALUE`). It is an
+authorized desktop run: it quits the running app, plays a wallpaper on the real
+displays and, with a password, runs `powermetrics`. `--dry-run` prints every
+command, path and the generated `config.toml` and executes nothing; read it first.
+
+- **Preconditions**: AC power, Low Power Mode off and no thermal CPU limit, or it
+  refuses before changing anything. `--allow-battery` measures on battery instead:
+  every window of the run then draws from it (the system figure is the battery's own
+  load), so keep the Mac unplugged throughout and compare only with runs on battery. A running Parallels VM is refused unless
+  `--suspend-vm` suspends it; an open Chrome is warned about. Brightness, hidden
+  windows and a still pointer remain the operator's.
+- **Isolated homes**: each arm gets its own home and preferences under one temporary
+  folder on the same volume: APFS clones (`cp -c`) of `Library/<id>` and
+  `SceneAssets`, a copy of `wallpapers/<id>.json` (saved properties and scaling),
+  `Library/.starter-installed`, and a `config.toml` with the user's `[quality]`
+  (and its subtables), `[power]`, `[experimental]`, `[primary_display]` and
+  `[[monitors]]`, the wallpaper set on the displays asked for (`--display-uuid`,
+  default all) and `""` elsewhere. A path-backed defaults suite sets `welcomeSeen`,
+  English and `writeDesktopPicture` off, so the user's desktop picture is never
+  rewritten. Nothing is written under the user's app-support folder.
+- **Order**: the running app is quit (one SIGTERM, then a wait for the exit; never a
+  second signal), each arm gets one unmeasured warm launch of `--settle` seconds,
+  then `B0, A, B, B0, B, A, B0, ...` for `--pairs` pairs (3). Every launch is `open
+  -n -g -a <app>` with the home, the suite and `WALLPAPER_MACHINE_PANEL_AT_LAUNCH=0`;
+  a measured one adds `WALLPAPER_MACHINE_DIAGNOSTICS=<window>` and `_DELAY=<settle>`,
+  and `power_benchmark.py --measure <window> --app-pid <pid> --home <home>` starts at
+  launch plus `--settle` (120 s; window 60 s). A `B0` window has every copy quit.
+- **Password**: read once from `--sudo-password-file` or stdin, checked with `sudo -S
+  -v`, kept in memory and given only to sudo's stdin; never in arguments, the
+  environment, the output or the results. Without one, package power is not sampled.
+- **Results** in `artifacts/power-ab/<timestamp>/`: each window's document,
+  `config.toml`, `plan.json` and `summary.json`, where each arm window's WindowServer,
+  all-coalition, package and system figures are taken minus the mean of the `B0`
+  windows around its pair (the app's coalition is its own), with per-arm medians
+  and the paired `B - A` differences. Read them by the [comparison
+  rules](#comparison-rules): an A/A run of one app is the noise floor.
+- **Afterwards**, also after a failure: any copy it started is quit, the app that was
+  running is opened again from where it was found (`open -g -a <app> --env
+  WALLPAPER_MACHINE_PANEL_AT_LAUNCH=0`) and the temporary folder is deleted.
+
+A fresh home has no Workshop cache, so the first launch can fetch metadata; it is the
+same for both arms, and the warm launch absorbs most of it.
 
 ## Condition matrix
 
@@ -425,7 +640,9 @@ saving                    = (old incremental - new incremental) / old incrementa
 The general rule is in [README.md](README.md#authorization-boundary). Without
 `--powermetrics`, `scripts/power_benchmark.py` is safe to run: it reads
 configuration and the counters of processes that are already running, and
-changes nothing. Everything else that produces an actual power number is out of
+changes nothing. `scripts/perf_bench.py` is safe too: it launches its own scratch
+bundles in the background, draws only into layers no window owns, and reads the
+user's settings without writing them. Everything else that produces an actual power number is out of
 scope for routine verification and needs explicit authorization, because it
 requires controlling the desktop, changing the user's wallpaper, or elevated
 sampling:

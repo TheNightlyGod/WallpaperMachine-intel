@@ -262,7 +262,7 @@ struct PlaybackSettingsSection: View {
     menu(key, saved: saved, options: SystemConditionAction.allCases.map { ($0, $0.title) }, perform: perform)
   }
 
-  /// What the settings above do, in thirteen short paragraphs.
+  /// What the settings above do, in fourteen short paragraphs.
   private var context: some View {
     SettingsProse {
       Text(
@@ -303,6 +303,9 @@ struct PlaybackSettingsSection: View {
       )
       Text(
         "Direct video plane sampling is experimental. It skips a color conversion when a layer’s shader can handle it; otherwise the picture is produced as before."
+      )
+      Text(
+        "Draw only the visible part of cropped scenes is experimental. It skips the part of a 2D scene your display crops off, so a few pixels can look very slightly different."
       )
     }
   }

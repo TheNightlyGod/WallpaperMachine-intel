@@ -1,5 +1,6 @@
 // Clean-room implementation from the WallpaperMachine spec e1b-scene-model.md; written without access to the original source.
 #include "SceneIndexArray.h"
+#include <atomic>
 #include <cstring>
 #include <utility>
 
@@ -27,6 +28,11 @@ bool QuadSlots(usize quadCount, SceneIndexWidth width, usize& slots) {
 }
 } // namespace
 
+uint64_t SceneIndexArray::NewRevision() noexcept {
+    static std::atomic<uint64_t> next { 1 };
+    return next.fetch_add(1, std::memory_order_relaxed);
+}
+
 SceneIndexArray::SceneIndexArray(std::size_t indexCount)
     : SceneIndexArray(indexCount, SceneIndexWidth::UInt16) {}
 
@@ -42,8 +48,9 @@ SceneIndexArray::SceneIndexArray(std::span<const uint32_t> data) {
     if (data.empty()) return;
     m_pData = new uint32_t[data.size()];
     std::memcpy(m_pData, data.data(), data.size() * sizeof(uint32_t));
-    m_size     = data.size();
-    m_capacity = data.size();
+    m_size          = data.size();
+    m_capacity      = data.size();
+    m_written_bytes = data.size_bytes();
 }
 
 SceneIndexArray::SceneIndexArray(std::span<const uint16_t> data)
@@ -53,6 +60,7 @@ SceneIndexArray::SceneIndexArray(std::span<const uint16_t> data)
     m_pData = AllocateSlots(slots);
     if (!data.empty()) std::memcpy(m_pData, data.data(), data.size_bytes());
     m_size = m_capacity = slots;
+    m_written_bytes = data.size_bytes();
     m_explicit_draw_count = data.size();
 }
 
@@ -67,6 +75,9 @@ SceneIndexArray::SceneIndexArray(SceneIndexArray&& o) noexcept
     : m_pData(std::exchange(o.m_pData, nullptr)),
       m_size(std::exchange(o.m_size, 0)),
       m_capacity(std::exchange(o.m_capacity, 0)),
+      m_written_bytes(std::exchange(o.m_written_bytes, 0)),
+      // The bytes move with the revision that names them; what stays behind is empty.
+      m_revision(std::exchange(o.m_revision, NewRevision())),
       m_render_size(std::exchange(o.m_render_size, std::numeric_limits<usize>::max())),
       m_explicit_draw_count(std::exchange(o.m_explicit_draw_count, std::numeric_limits<usize>::max())),
       m_width(o.m_width),
@@ -82,6 +93,7 @@ SceneIndexArray SceneIndexArray::Copy() const {
     }
     out.m_size        = m_size;
     out.m_capacity    = m_capacity;
+    out.m_written_bytes = m_written_bytes;
     out.m_render_size = m_render_size;
     out.m_explicit_draw_count = m_explicit_draw_count;
     out.m_width       = m_width;

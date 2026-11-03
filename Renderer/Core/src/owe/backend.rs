@@ -262,6 +262,19 @@ impl OweBackend {
         }
     }
 
+    /// Turns SDR display framing on or off inside native Metal scenes,
+    /// process-wide.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError`] if the call unwinds.
+    pub fn set_scene_display_framing_enabled(&self, enabled: bool) -> Result<(), EngineError> {
+        unsafe {
+            UnwindSafeFFI::new("owe_set_scene_display_framing_enabled")
+                .call(|| sys::owe_set_scene_display_framing_enabled(enabled))
+        }
+    }
+
     /// Turns MetalFX upscaling of scenes drawn below full resolution on or
     /// off, process-wide.
     ///

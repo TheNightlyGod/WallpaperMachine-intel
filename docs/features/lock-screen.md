@@ -43,11 +43,15 @@ unchanged. A newly acquired surface or a changed wallpaper still needs an initia
 load, macOS can show its own cached snapshot before it presents the extension, and
 real lock/wake timing is OS-controlled.
 
-Whether the display is asleep and whether the session is locked are read from the
-system each time a surface decides, not remembered from a notification. A surface asks
-about its own display, so one monitor sleeping does not pause the surface on another,
-and a surface acquired while the displays sleep pauses as soon as its first frame
-exists. Display sleep and wake, system sleep and wake, lock, unlock and the wallpaper
+Whether the display is asleep, whether the session is locked and whether it is on the
+console are read from the system each time a surface decides, not remembered from a
+notification. A surface asks about its own display, so one monitor sleeping does not pause
+the surface on another, and a surface acquired while the displays sleep pauses as soon as
+its first frame exists. A session that fast user switching moved off the screens
+(`kCGSessionOnConsoleKey` false; a missing key counts as on the console) has no lock
+screen, screen saver or desktop picture on any of them, so its surfaces pause even when the
+session also reads as locked, and play again once it is back. Display sleep and wake,
+system sleep and wake, lock, unlock, a session switched away or back and the wallpaper
 service's wake notice only start a re-check: at once, and again 0.25, 0.75 and 2
 seconds later, because displays, the session and the video decoder do not all come
 back at the same moment. A notification that arrives early, late or not at all
@@ -514,7 +518,10 @@ monitoring the retained screen saver, and those checks never restart the failed
 lock-screen attempt; disabling the screen saver in that state stops the monitor until
 either mode is explicitly reactivated. A pending display-identity lookup does not
 clear an error and does not by itself start the monitor; with no error, the same timer
-retries an unchanged scene set when the identity resolves.
+retries an unchanged scene set when the identity resolves. Whether the Mac is locked,
+switched away from or dark (`displaysAreAway`, a window-server round trip) is asked only
+when a committed display is missing from the scenes, so the steady ticks that find every
+display still named do not ask it.
 
 A library refresh, explicit wallpaper reload or managed-asset change invalidates the
 content check even when project paths and options stayed identical. The publisher
@@ -626,8 +633,9 @@ grep 'Re-checking presentation\|Playback display' ~/Library/Application\ Support
 ```
 
 `Re-checking presentation (display wake) surfaces=1` names the cause (`display sleep`,
-`display wake`, `system sleep`, `system wake`, `screen locked`, `screen unlocked` or
-`wallpaper service wake`). The `Playback ... paused=` line after it should match the real
+`display wake`, `system sleep`, `system wake`, `session switched away`, `session active`,
+`screen locked`, `screen unlocked` or `wallpaper service wake`); the `Playback` line
+carries `console=false` while another session has the screens. The `Playback ... paused=` line after it should match the real
 display state, including after a wake for which no `display wake` line appears.
 
 ### After a macOS update

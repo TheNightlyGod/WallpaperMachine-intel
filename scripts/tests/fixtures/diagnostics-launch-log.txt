@@ -1,0 +1,14 @@
+2026-11-03T10:05:01.120+08:00 INFO AppDelegate.swift:688 startup: bootstrap dispatched
+2026-11-03T10:05:01.122+08:00 INFO AppDelegate.swift:697 startup: WALLPAPER_MACHINE_PANEL_AT_LAUNCH=0; control panel stays closed
+2026-11-03T10:07:01.300+08:00 INFO AppDelegate.swift:989 diagnostics session open for 60s
+2026-11-03T10:07:30.004+08:00 INFO bridge.rs:2371 display 4 presentation resumed
+2026-11-03T10:08:01.312+08:00 INFO AppDelegate.swift:984 diagnostics window elapsed_ms=60012
+2026-11-03T10:08:01.312+08:00 INFO AppDelegate.swift:984 diagnostics surface=scene/4/gen1 presentation_resumed=1
+2026-11-03T10:08:01.313+08:00 INFO AppDelegate.swift:984 diagnostics renderer recording=true
+2026-11-03T10:08:01.313+08:00 INFO AppDelegate.swift:984 diagnostics surface=scene/1/handle1/gen1 paused=false reasons=none timer_wakeups=3601 draw_requests=3600 draw_ticks_suppressed=1 draws_executed=3600 draws_dropped=0 render_submissions=3598 render_failures=0 present_requests=3598 gpu_completions=3598 simulation_ticks=3600 presents_skipped_unchanged=2 presented_frames=3590 presents_dropped=6 present_gaps_1_vsync=3 present_gaps_2_vsync=3580 present_gaps_3plus_vsync=6 vsync_period_us=8333 tick_interval_us=16666 content_period_us=0 frames_selected=0 frames_reused=0 frames_skipped=0 selected_generation=0 conversions=0 imports=0 conversion_live_bytes=0 conversion_peak_live_bytes=0
+2026-11-03T10:08:01.313+08:00 INFO AppDelegate.swift:984 diagnostics source=unknown instances=0 path=/tmp/home/Library/3784370784/project.json consumed_by=1/gen1 decode_outputs=0 seeks=0
+2026-11-03T10:08:01.313+08:00 INFO AppDelegate.swift:984 diagnostics surface=scene/4/handle2/gen1 paused=false reasons=none timer_wakeups=3600 draw_requests=3600 draw_ticks_suppressed=0 draws_executed=3600 draws_dropped=0 render_submissions=3600 render_failures=0 present_requests=3600 gpu_completions=3600 simulation_ticks=3600 presents_skipped_unchanged=0 presented_frames=3598 presents_dropped=0 present_gaps_1_vsync=0 present_gaps_2_vsync=3597 present_gaps_3plus_vsync=0 vsync_period_us=8333 tick_interval_us=16666 content_period_us=0 frames_selected=0 frames_reused=0 frames_skipped=0 selected_generation=0 conversions=0 imports=0 conversion_live_bytes=0 conversion_peak_live_bytes=0
+2026-11-03T10:08:01.313+08:00 INFO AppDelegate.swift:984 diagnostics source=unknown instances=0 path=/tmp/home/Library/3784370784/project.json consumed_by=4/gen1 decode_outputs=0 seeks=0
+2026-11-03T10:08:01.313+08:00 INFO AppDelegate.swift:984 diagnostics process audio_analysis_deliveries=0 audio_accepted_frames=0 audio_active_consumers=0
+2026-11-03T10:08:01.313+08:00 INFO AppDelegate.swift:984 diagnostics presented_frames=available
+2026-11-03T10:08:02.010+08:00 INFO bridge.rs:2371 display 1 presentation suspended

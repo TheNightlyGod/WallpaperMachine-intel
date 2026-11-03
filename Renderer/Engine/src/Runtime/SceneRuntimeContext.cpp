@@ -5072,9 +5072,20 @@ bool SceneRuntimeContext::ConsumeSceneGraphMutationFlag() {
     return mutated;
 }
 
-audio::AudioSpectrumSnapshot SceneRuntimeContext::CurrentAudioSpectrumSnapshot() const {
-    if (! AudioResponseActive()) return {};
-    return audio::CurrentAudioSpectrumSnapshot();
+const audio::AudioSpectrumSnapshot& SceneRuntimeContext::CurrentAudioSpectrumSnapshot() const {
+    if (m_frame_audio_spectrum_taken) return m_frame_audio_spectrum;
+    // One copy under the analysis lock per frame, not one per pass, particle and script read:
+    // the analysis publishes 30 spectra a second, so reads spread over one frame's encode
+    // otherwise drew some bars from one window and some from the next.
+    m_frame_audio_spectrum = AudioResponseActive() ? audio::CurrentAudioSpectrumSnapshot()
+                                                   : audio::AudioSpectrumSnapshot {};
+    m_frame_audio_spectrum_taken = m_audio_frames_begun;
+    return m_frame_audio_spectrum;
+}
+
+void SceneRuntimeContext::BeginAudioFrame() {
+    m_audio_frames_begun         = true;
+    m_frame_audio_spectrum_taken = false;
 }
 
 void SceneRuntimeContext::RecordScriptError(std::string message) {

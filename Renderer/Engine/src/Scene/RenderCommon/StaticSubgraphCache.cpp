@@ -10,30 +10,48 @@ namespace
 {
 
 constexpr uint64_t kFnvOffset = 1469598103934665603ULL;
-constexpr uint64_t kFnvPrime = 1099511628211ULL;
+
+/// One step of the sample hash: a 64-bit word folded into the state, then the
+/// SplitMix64 finalizer (Stafford's Mix13). The finalizer is a bijection, so a
+/// step is one-to-one in the state for a given word and in the word for a given
+/// state: two streams of words that differ in exactly one word always end
+/// differently, and every bit of the result depends on every bit of both.
+/// Eight bytes cost two multiplies where folding them byte by byte cost eight.
+inline uint64_t HashStep(uint64_t state, uint64_t word)
+{
+    uint64_t x = state ^ word;
+    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
+    return x ^ (x >> 31);
+}
 
 } // namespace
 
 uint64_t wallpaper::render::StaticHashMix(uint64_t seed, uint64_t value)
 {
-    // The seed is folded byte by byte so that two different orderings of the
+    // Chained, never combined symmetrically, so two different orderings of the
     // same values do not collide, which matters because a pass sample is the
     // concatenation of several unrelated quantities.
-    for (int shift = 0; shift < 64; shift += 8) {
-        seed ^= static_cast<uint64_t>((value >> shift) & 0xFFULL);
-        seed *= kFnvPrime;
-    }
-    return seed;
+    return HashStep(seed, value);
 }
 
 uint64_t wallpaper::render::StaticHashBytes(uint64_t seed, const void* data, std::size_t size)
 {
     const auto* bytes = static_cast<const unsigned char*>(data);
-    for (std::size_t i = 0; i < size; ++i) {
-        seed ^= static_cast<uint64_t>(bytes[i]);
-        seed *= kFnvPrime;
+    std::size_t at    = 0;
+    for (; at + sizeof(uint64_t) <= size; at += sizeof(uint64_t)) {
+        uint64_t word;
+        std::memcpy(&word, bytes + at, sizeof(word));
+        seed = HashStep(seed, word);
     }
-    return seed;
+    if (at < size) {
+        uint64_t word = 0;
+        std::memcpy(&word, bytes + at, size - at);
+        seed = HashStep(seed, word);
+    }
+    // The length last: a zero-padded tail is not a shorter run of the same
+    // bytes, and two runs split at another place are not the same two runs.
+    return HashStep(seed, static_cast<uint64_t>(size));
 }
 
 void StaticSubgraphCache::Reset()

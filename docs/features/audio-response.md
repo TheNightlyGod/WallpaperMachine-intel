@@ -100,6 +100,12 @@ Its exact formula is not published; where this differs, it is an estimate.
 - Every spectrum stands alone. Wallpaper Engine leaves smoothing to the
   wallpaper, so a visualizer that smooths in its script looks as intended and
   one that does not jumps from frame to frame, as it does there.
+- A scene frame reads one spectrum, as Wallpaper Engine's do: the first read of a
+  frame takes the newest analysis, and every shader pass, particle emitter or
+  operator and script of that frame gets that same one, even when the analysis
+  publishes the next spectrum while the frame is drawn
+  (`ShaderUpdaterAudio.AFrameReadsOneSpectrumWhateverTheAnalysisPublishesMeanwhile`).
+  Turning audio response on or off takes effect with the next frame.
 
 Scenes receive the values as analysed; web pages receive them clamped to 0.0–1.0 (see
 [Web wallpapers](web-wallpapers.md#audio-response)).

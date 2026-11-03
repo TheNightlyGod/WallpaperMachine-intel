@@ -4,6 +4,8 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <array>
 #include <cstdint>
 #include <string>
 #include <unordered_map>
@@ -771,4 +773,215 @@ TEST(StaticSubgraphCache, ReorderedCopiesInsideASnapshotCycleRequestDelayedCatch
     EXPECT_TRUE(cache.HasPendingDelayedInputs());
     RunFrame(cache, samples);
     EXPECT_FALSE(cache.HasPendingDelayedInputs());
+}
+
+// ---- the sample hash
+//
+// Only equality of two samples is ever asked, so what matters is that inputs
+// that differ give samples that differ, and that equal inputs give equal ones.
+
+TEST(StaticSampleHash, EveryByteOfARunCountsWhereverItIs)
+{
+    using wallpaper::render::StaticHashBytes;
+    // A matrix of doubles, as a node transform or a camera is folded.
+    std::array<unsigned char, 128> bytes {};
+    for (std::size_t i = 0; i < bytes.size(); ++i) bytes[i] = static_cast<unsigned char>(i * 37 + 11);
+    const uint64_t seed = 0xcbf29ce484222325ULL;
+    const auto     base = StaticHashBytes(seed, bytes.data(), bytes.size());
+    EXPECT_EQ(StaticHashBytes(seed, bytes.data(), bytes.size()), base);
+    for (std::size_t at = 0; at < bytes.size(); ++at) {
+        for (const unsigned char flip : { 0x01, 0x80, 0xFF }) {
+            auto changed = bytes;
+            changed[at] ^= flip;
+            EXPECT_NE(StaticHashBytes(seed, changed.data(), changed.size()), base)
+                << "byte " << at << " changed by " << int(flip) << " left the sample unchanged";
+        }
+    }
+    // Every length, so a tail of fewer than eight bytes counts as well.
+    for (std::size_t size = 1; size <= 17; ++size) {
+        auto changed = bytes;
+        changed[size - 1] ^= 0x10;
+        EXPECT_NE(StaticHashBytes(seed, changed.data(), size), StaticHashBytes(seed, bytes.data(), size))
+            << "the last byte of a run of " << size << " did not count";
+    }
+}
+
+TEST(StaticSampleHash, ARunIsNotAShorterRunNorTheSameBytesSplitElsewhere)
+{
+    using wallpaper::render::StaticHashBytes;
+    const uint64_t      seed = 0xcbf29ce484222325ULL;
+    const unsigned char zeros[9] {};
+    // A zero-padded tail is not a shorter run.
+    for (std::size_t size = 0; size < 9; ++size) {
+        EXPECT_NE(StaticHashBytes(seed, zeros, size), StaticHashBytes(seed, zeros, size + 1))
+            << size << " zero bytes hash like " << size + 1;
+    }
+    // A material constant's name and value are folded one after the other: a
+    // boundary that moves is a different pair.
+    const std::string text = "g_Strength0123";
+    for (std::size_t split = 1; split + 1 < text.size(); ++split) {
+        const auto first = StaticHashBytes(StaticHashBytes(seed, text.data(), split),
+                                           text.data() + split, text.size() - split);
+        const auto other = StaticHashBytes(StaticHashBytes(seed, text.data(), split + 1),
+                                           text.data() + split + 1, text.size() - split - 1);
+        EXPECT_NE(first, other) << "splitting at " << split << " or " << split + 1 << " collided";
+    }
+}
+
+TEST(StaticSampleHash, ValuesFoldedInAnotherOrderAreAnotherSample)
+{
+    using wallpaper::render::StaticHashMix;
+    const uint64_t                seed = 0xcbf29ce484222325ULL;
+    const std::array<uint64_t, 6> values { 0, 1, 2, 640, 0x3FF0000000000000ULL, ~0ULL };
+    for (const auto a : values) {
+        for (const auto b : values) {
+            if (a == b) continue;
+            EXPECT_NE(StaticHashMix(StaticHashMix(seed, a), b), StaticHashMix(StaticHashMix(seed, b), a))
+                << a << " then " << b << " folded like " << b << " then " << a;
+            EXPECT_NE(StaticHashMix(seed, a), StaticHashMix(seed, b));
+        }
+    }
+}
+
+namespace
+{
+
+/// What one pass of the random graphs below reads, kept whole: two values and a
+/// matrix, the shape of a pass sample's real inputs.
+struct PassInputs
+{
+    uint64_t               first { 0 };
+    uint64_t               second { 0 };
+    std::array<double, 16> matrix {};
+    bool                   visible { true };
+
+    std::string Exact() const
+    {
+        std::string out(reinterpret_cast<const char*>(&first), sizeof(first));
+        out.append(reinterpret_cast<const char*>(&second), sizeof(second));
+        out.append(reinterpret_cast<const char*>(matrix.data()), sizeof(double) * matrix.size());
+        out.push_back(visible ? '1' : '0');
+        return out;
+    }
+
+    StaticPassSample Sample() const
+    {
+        using wallpaper::render::StaticHashBytes;
+        using wallpaper::render::StaticHashMix;
+        uint64_t hash = 0xcbf29ce484222325ULL;
+        hash          = StaticHashMix(hash, first);
+        hash          = StaticHashMix(hash, second);
+        hash          = StaticHashBytes(hash, matrix.data(), sizeof(double) * matrix.size());
+        return { .hash = hash, .visible = visible };
+    }
+};
+
+} // namespace
+
+TEST(StaticSampleHash, ReuseDecisionsAreThoseOfComparingEveryInputExactly)
+{
+    // The hash decides nothing of its own: a target is reused exactly when every
+    // input of every pass that writes it, and of every target it reads, is what
+    // it was last frame. Random graphs and random edits -- one bit, one value,
+    // two values swapped, a matrix entry negated, a change undone the next frame
+    // -- are planned through the cache and against an oracle that compares the
+    // inputs themselves.
+    uint64_t   random_state = 0x9E3779B97F4A7C15ULL;
+    const auto random       = [&random_state](uint64_t bound) {
+        random_state ^= random_state << 13;
+        random_state ^= random_state >> 7;
+        random_state ^= random_state << 17;
+        return random_state % bound;
+    };
+    std::size_t reused = 0;
+    std::size_t drawn  = 0;
+    for (int graph = 0; graph < 20; ++graph) {
+        const std::size_t target_count = 4 + random(10);
+        const std::size_t pass_count   = target_count + random(target_count);
+        // Every target has a writer; a pass reads only targets before its own,
+        // so the graph has no cycle.
+        std::vector<std::size_t>              writes(pass_count);
+        std::vector<std::vector<std::size_t>> reads(pass_count);
+        std::vector<StaticPassDesc>           passes;
+        for (std::size_t p = 0; p < pass_count; ++p) {
+            writes[p] = p < target_count ? p : random(target_count);
+            std::vector<std::string> inputs;
+            for (std::size_t t = 0; t < writes[p]; ++t) {
+                if (random(3) != 0) continue;
+                reads[p].push_back(t);
+                inputs.push_back("t" + std::to_string(t));
+            }
+            passes.push_back(Pass("t" + std::to_string(writes[p]), inputs));
+        }
+        // Passes in the order of the targets they write, as the renderer's list is.
+        std::vector<std::size_t> order(pass_count);
+        for (std::size_t p = 0; p < pass_count; ++p) order[p] = p;
+        std::stable_sort(order.begin(), order.end(),
+                         [&](std::size_t a, std::size_t b) { return writes[a] < writes[b]; });
+        StaticSubgraphCache cache;
+        cache.Compile(passes);
+        cache.SetExecutionOrder(order);
+        PinAllCacheable(cache);
+        ASSERT_EQ(cache.stats().cacheable_targets, target_count);
+
+        std::vector<PassInputs> inputs(pass_count);
+        for (auto& pass : inputs) {
+            pass.first  = random(1000);
+            pass.second = random(4);
+            for (auto& value : pass.matrix) value = double(random(9)) - 4.0;
+        }
+        std::vector<std::string> last_exact(target_count);
+        bool                     first_frame = true;
+        std::vector<PassInputs>  undo;
+        for (int frame = 0; frame < 60; ++frame) {
+            // Edits, some of them undone on the next frame.
+            if (! undo.empty()) {
+                inputs = undo;
+                undo.clear();
+            }
+            const auto edits = random(3);
+            if (edits != 0 && random(4) == 0) undo = inputs;
+            for (uint64_t e = 0; e < edits; ++e) {
+                auto& pass = inputs[random(pass_count)];
+                switch (random(6)) {
+                case 0: pass.first += 1; break;
+                case 1: std::swap(pass.first, pass.second); break;
+                case 2: pass.matrix[random(16)] = -pass.matrix[random(16)]; break;
+                case 3: {
+                    auto* bytes = reinterpret_cast<unsigned char*>(pass.matrix.data());
+                    bytes[random(sizeof(double) * 16)] ^= static_cast<unsigned char>(1u << random(8));
+                    break;
+                }
+                case 4: pass.visible = ! pass.visible; break;
+                default: break; // written again with what it holds
+                }
+            }
+
+            // The oracle: each target's inputs in full, its sources' included.
+            std::vector<std::string> exact(target_count);
+            for (std::size_t t = 0; t < target_count; ++t) {
+                for (const auto p : order) {
+                    if (writes[p] != t) continue;
+                    exact[t] += inputs[p].Exact();
+                    for (const auto source : reads[p]) exact[t] += "<" + exact[source] + ">";
+                }
+            }
+            std::vector<StaticPassSample> samples;
+            for (const auto& pass : inputs) samples.push_back(pass.Sample());
+            const auto skip = RunFrame(cache, samples);
+            for (std::size_t p = 0; p < pass_count; ++p) {
+                const auto t        = writes[p];
+                const bool expected = ! first_frame && exact[t] == last_exact[t];
+                ASSERT_EQ(skip[p] != 0, expected)
+                    << "graph " << graph << ", frame " << frame << ", pass " << p << " (target t" << t
+                    << ")";
+                (expected ? reused : drawn) += 1;
+            }
+            last_exact  = exact;
+            first_frame = false;
+        }
+    }
+    // Both answers occurred, so neither half of the comparison is vacuous.
+    EXPECT_GT(reused, 1000u);
+    EXPECT_GT(drawn, 1000u);
 }

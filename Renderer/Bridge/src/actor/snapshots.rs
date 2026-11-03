@@ -531,6 +531,7 @@ impl BridgeActorState {
             scene_video_plane_sampling_enabled: candidate
                 .experimental
                 .scene_video_plane_sampling,
+            scene_display_framing_enabled: candidate.experimental.scene_display_framing,
             scene_resolution: match candidate.quality.scene_resolution {
                 SceneResolutionCfg::Canvas => SCENE_RESOLUTION_CANVAS.to_string(),
                 SceneResolutionCfg::Display => SCENE_RESOLUTION_DISPLAY.to_string(),

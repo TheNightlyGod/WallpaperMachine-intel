@@ -167,6 +167,90 @@ final class WallpaperEnergyRatingsTests: XCTestCase {
     XCTAssertEqual(ratings.entries["100"]?.milliwatts ?? 0, 200, accuracy: 0.001)
   }
 
+  func testSceneSettingsAreConditionsOfAScenesRating() throws {
+    let display = WallpaperEnergySceneSettings(
+      resolution: "display",
+      quality: BridgeSceneQuality(
+        msaa: .off, shadows: .medium, volumetrics: .medium, reflections: true,
+        postProcessing: .enabled),
+      metalFXUpscaling: false)
+    func resolve(_ scene: WallpaperEnergySceneSettings, isScene: Bool = true) -> WallpaperEnergyContext? {
+      WallpaperEnergyContext.resolve(
+        assignments: [("1", "a")], suspendedDisplays: [], frameRateCap: 60, renderScale: 0.75,
+        scene: scene, isScene: { _ in isScene })
+    }
+    var canvas = display
+    canvas.resolution = "canvas"
+    var ultra = display
+    ultra.quality = WallpaperEnergySceneSettings(
+      resolution: "display",
+      quality: BridgeSceneQuality(
+        msaa: .off, shadows: .medium, volumetrics: .medium, reflections: true,
+        postProcessing: .ultra),
+      metalFXUpscaling: false
+    ).quality
+    var noReflections = display
+    noReflections.quality = WallpaperEnergySceneSettings(
+      resolution: "display",
+      quality: BridgeSceneQuality(
+        msaa: .off, shadows: .medium, volumetrics: .medium, reflections: false,
+        postProcessing: .enabled),
+      metalFXUpscaling: false
+    ).quality
+    var metalFX = display
+    metalFX.metalFXUpscaling = true
+    let base = resolve(display)
+    for other in [canvas, ultra, noReflections, metalFX] {
+      XCTAssertNotEqual(resolve(other), base, "\(other) costs something else to draw")
+    }
+    XCTAssertEqual(resolve(display), base)
+    XCTAssertEqual(
+      resolve(canvas, isScene: false), resolve(display, isScene: false),
+      "a video or a web page draws no scene, so the scene settings are no condition of its rating")
+
+    let ratings = WallpaperEnergyRatings(file: file)
+    ratings.record(try XCTUnwrap(base), milliwatts: 1_000, seconds: 120)
+    ratings.record(try XCTUnwrap(resolve(canvas)), milliwatts: 4_000, seconds: 120)
+    XCTAssertEqual(
+      ratings.entries["a"]?.milliwatts ?? 0, 4_000, accuracy: 0.001,
+      "a measurement at another scene resolution replaces the rating instead of averaging into it")
+    XCTAssertEqual(ratings.entries["a"]?.conditions.scene?.resolution, "canvas")
+    ratings.flush()
+    XCTAssertEqual(WallpaperEnergyRatings(file: file).entries["a"]?.conditions.scene, canvas)
+  }
+
+  func testVersionTwoRatingsAreReadShownAndReplacedRatherThanAveraged() throws {
+    // Saved before the scene settings were conditions: their scene may have been measured
+    // at any scene resolution or quality.
+    let saved = """
+      {"scene": {"milliwatts": 2000, "seconds": 600, "updated": 0, "version": 2,
+                 "conditions": {"displays": 1, "frameRateCap": 60, "renderScale": 0.75}},
+       "video": {"milliwatts": 900, "seconds": 600, "updated": 0, "version": 2,
+                 "conditions": {"displays": 1, "frameRateCap": 60, "renderScale": 0.75}}}
+      """
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    try Data(saved.utf8).write(to: file)
+    let ratings = WallpaperEnergyRatings(file: file)
+    XCTAssertNotNil(ratings.snapshot(for: "scene", kind: .projectScene), "an older rating is still shown")
+    XCTAssertNotNil(
+      ratings.snapshot(for: "video", kind: .video), "version 2 already left the native player out")
+    XCTAssertNil(ratings.entries["scene"]?.conditions.scene)
+
+    let scene = WallpaperEnergyContext(
+      wallpaperID: "scene",
+      conditions: WallpaperEnergyConditions(
+        displays: 1, frameRateCap: 60, renderScale: 0.75,
+        scene: WallpaperEnergySceneSettings(resolution: "display", quality: "q", metalFXUpscaling: false)))
+    ratings.record(scene, milliwatts: 500, seconds: 30)
+    XCTAssertEqual(
+      ratings.entries["scene"]?.milliwatts ?? 0, 500, accuracy: 0.001, "the old figure is not averaged in")
+    XCTAssertEqual(ratings.entries["scene"]?.version, WallpaperEnergyRating.currentVersion)
+
+    // Same displays, ceiling and scale, now under version 3: still a new rating.
+    ratings.record(context("video", cap: 60, scale: 0.75), milliwatts: 100, seconds: 30)
+    XCTAssertEqual(ratings.entries["video"]?.milliwatts ?? 0, 100, accuracy: 0.001)
+  }
+
   func testLongHistoryDoesNotFreezeTheRating() {
     let ratings = WallpaperEnergyRatings(file: file)
     ratings.record(context(), milliwatts: 100, seconds: 3_600)
@@ -218,6 +302,41 @@ final class WallpaperEnergyRatingsTests: XCTestCase {
     XCTAssertEqual(ratings.entries["a"]?.seconds ?? 0, 60, accuracy: 0.001)
   }
 
+  /// While presentation is suspended nothing can be credited, so the loop does not run and
+  /// asks nothing; it runs again once presentation does.
+  func testAParkedRecorderDoesNotWake() async throws {
+    let ratings = WallpaperEnergyRatings(file: file)
+    var asked = 0
+    let recorder = WallpaperEnergyRecorder(
+      source: UnchangingSource(), ratings: ratings, interval: .milliseconds(5), tolerance: .zero
+    ) {
+      asked += 1
+      return nil
+    }
+    recorder.setParked(true)
+    recorder.start()
+    XCTAssertFalse(recorder.isRunning, "parked before it started")
+    try await Task.sleep(for: .milliseconds(80))
+    XCTAssertEqual(asked, 0)
+
+    recorder.setParked(false)
+    XCTAssertTrue(recorder.isRunning)
+    let deadline = Date().addingTimeInterval(2)
+    while asked < 3, Date() < deadline { try await Task.sleep(for: .milliseconds(5)) }
+    XCTAssertGreaterThanOrEqual(asked, 3, "running again, it asks every interval")
+
+    recorder.setParked(true)
+    XCTAssertFalse(recorder.isRunning)
+    try await Task.sleep(for: .milliseconds(20))
+    let parkedAt = asked
+    try await Task.sleep(for: .milliseconds(80))
+    XCTAssertEqual(asked, parkedAt, "parked, it asks nothing")
+
+    recorder.stop()
+    recorder.setParked(false)
+    XCTAssertFalse(recorder.isRunning, "a stopped recorder stays stopped")
+  }
+
   func testRecorderLetsAWallpaperFinishLoadingBeforeAnIntervalStarts() {
     let ratings = WallpaperEnergyRatings(file: file)
     let recorder = WallpaperEnergyRecorder(source: nil, ratings: ratings) { nil }
@@ -230,5 +349,12 @@ final class WallpaperEnergyRatingsTests: XCTestCase {
 
     recorder.record(sample(at: 62, joules: 45), context: a)
     XCTAssertEqual(ratings.entries["a"]?.milliwatts ?? 0, 500, accuracy: 0.001)
+  }
+}
+
+/// Counters that read the same every time; the parking test only counts the loop's ticks.
+private struct UnchangingSource: EnergyUsageSource {
+  func sample() -> EnergyUsageSample? {
+    EnergyUsageSample(uptimeNanoseconds: 0, own: [:], otherGPUTime: [:])
   }
 }

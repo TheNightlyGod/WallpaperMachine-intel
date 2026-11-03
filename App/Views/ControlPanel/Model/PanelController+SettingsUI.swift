@@ -9,7 +9,8 @@ enum SettingsSwitchKey: String, CaseIterable, Sendable {
   case lockScreenEnabled, screenSaverEnabled
   case wallpapersMuted, playOnlyOnActiveDisplay
   case metalFXUpscaling
-  case sceneOptimization, sceneOnDemand, sceneVideoPlaneSampling, sceneReflections
+  case sceneOptimization, sceneOnDemand, sceneVideoPlaneSampling, sceneDisplayFraming
+  case sceneReflections
   /// Different wallpaper for each desktop, on the display the Library applies wallpapers to: the
   /// same switch as that display's card in Settings › Displays and the toolbar's display menu.
   case desktopWallpapers
@@ -38,6 +39,7 @@ extension PanelController {
     case .sceneOptimization: store.settingsSnapshot.sceneOptimizationEnabled
     case .sceneOnDemand: store.settingsSnapshot.sceneOnDemandEnabled
     case .sceneVideoPlaneSampling: store.settingsSnapshot.sceneVideoPlaneSamplingEnabled
+    case .sceneDisplayFraming: store.settingsSnapshot.sceneDisplayFramingEnabled
     case .sceneReflections: store.settingsSnapshot.sceneQuality.reflections
     case .desktopWallpapers: automationState(for: targetDisplayID).mode == .spaces
     }
@@ -85,6 +87,7 @@ extension PanelController {
     case .sceneOnDemand: try await setSceneOnDemand(on)
     case .desktopWallpapers: try await setDesktopWallpapers(on, display: targetDisplayID)
     case .sceneVideoPlaneSampling: try await setSceneVideoPlaneSampling(on)
+    case .sceneDisplayFraming: try await setSceneDisplayFraming(on)
     case .sceneReflections: try await setSceneReflections(on)
     }
   }

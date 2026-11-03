@@ -326,6 +326,10 @@ pub struct SetSceneVideoPlaneSamplingEnabled {
     pub enabled: bool,
 }
 
+pub struct SetSceneDisplayFramingEnabled {
+    pub enabled: bool,
+}
+
 /// A web page registered or dropped its audio listener.
 pub struct SetWebAudioSubscribed {
     pub wallpaper_id: String,
@@ -508,6 +512,7 @@ pub type SetSceneQualityReply = AllSnapshotsReply;
 pub type SetSceneOnDemandEnabledReply = AllSnapshotsReply;
 pub type SetMetalFxUpscalingEnabledReply = AllSnapshotsReply;
 pub type SetSceneVideoPlaneSamplingEnabledReply = AllSnapshotsReply;
+pub type SetSceneDisplayFramingEnabledReply = AllSnapshotsReply;
 pub type SetWebAudioSubscribedReply = Result<(), BridgeError>;
 pub type AudioRequirementChangedReply = Result<(), BridgeError>;
 pub type SetMediaIntegrationEnabledReply = WallpaperMutationReply;

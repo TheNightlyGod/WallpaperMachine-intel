@@ -15,7 +15,7 @@ enum RenderingSetting: String, CaseIterable, Sendable {
   case batteryMode, batteryRenderScale, batteryTargetFps, frameRateCap, qualityPreset, renderScale
   case metalFXUpscaling
   case sceneOptimization, sceneOnDemand
-  case sceneVideoPlaneSampling, sceneResolution
+  case sceneVideoPlaneSampling, sceneDisplayFraming, sceneResolution
   case sceneMSAA, sceneShadows, sceneVolumetrics, sceneReflections, scenePostProcessing
   case lowPowerModeAction, thermalAction, lowBatteryAction
 }
@@ -288,6 +288,13 @@ extension PanelController {
   func setSceneVideoPlaneSampling(_ enabled: Bool) async throws {
     try await change(.sceneVideoPlaneSampling) {
       try await store.setSceneVideoPlaneSamplingEnabledAsync(enabled)
+    }
+  }
+
+  /// `sceneDisplayFraming` (experimental): running 2D scenes take it at their next frame.
+  func setSceneDisplayFraming(_ enabled: Bool) async throws {
+    try await change(.sceneDisplayFraming) {
+      try await store.setSceneDisplayFramingEnabledAsync(enabled)
     }
   }
 

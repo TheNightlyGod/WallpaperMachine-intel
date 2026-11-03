@@ -24,7 +24,11 @@ final class RuntimeDiagnosticsReportTests: XCTestCase {
         conversionLiveBytes: UInt64 = 0,
         conversionPeakLiveBytes: UInt64 = 0,
         sourceInstance: String = "instance:1",
-        sourceCount: UInt64 = 1
+        sourceCount: UInt64 = 1,
+        presentedFrames: UInt64 = 0,
+        presentsDropped: UInt64 = 0,
+        gaps: (UInt64, UInt64, UInt64) = (0, 0, 0),
+        vsyncPeriodMicros: UInt64 = 0
     ) -> BridgeRendererSurfaceCounters {
         BridgeRendererSurfaceCounters(
             displayId: displayID,
@@ -47,8 +51,14 @@ final class RuntimeDiagnosticsReportTests: XCTestCase {
             gpuCompletions: 0,
             simulationTicks: 0,
             presentsSkippedUnchanged: 0,
+            presentedFrames: presentedFrames,
+            presentsDropped: presentsDropped,
+            presentGaps1Vsync: gaps.0,
+            presentGaps2Vsync: gaps.1,
+            presentGaps3plusVsync: gaps.2,
             tickIntervalMicros: 16666,
             contentPeriodMicros: 0,
+            vsyncPeriodMicros: vsyncPeriodMicros,
             videoDecodeOutputs: decodeOutputs,
             videoSeeks: 0,
             videoFramesSelected: 0,
@@ -63,7 +73,8 @@ final class RuntimeDiagnosticsReportTests: XCTestCase {
 
     private func report(
         _ surfaces: [BridgeRendererSurfaceCounters],
-        consumers: UInt32 = 0
+        consumers: UInt32 = 0,
+        feedback: Bool = false
     ) -> BridgeRendererCountersReport {
         BridgeRendererCountersReport(
             recording: true,
@@ -71,7 +82,7 @@ final class RuntimeDiagnosticsReportTests: XCTestCase {
             audioAnalysisDeliveries: 0,
             audioAcceptedFrames: 0,
             audioActiveConsumers: consumers,
-            presentationFeedbackAvailable: false)
+            presentationFeedbackAvailable: feedback)
     }
 
     func testSurfaceExclusiveWorkIsReportedApartFromSharedSourceWork() {
@@ -203,6 +214,36 @@ final class RuntimeDiagnosticsReportTests: XCTestCase {
         XCTAssertFalse(
             lines.contains { $0.contains("presented_frames=300") },
             "a request to present is not evidence that a frame reached a display")
+        XCTAssertFalse(
+            lines.contains { $0.hasPrefix("surface=") && $0.contains("presented_frames=") },
+            "without the display's reports a surface carries no shown-frame count at all")
+    }
+
+    func testShownAndDroppedFramesComeFromTheDisplaysReportsNotFromRequests() throws {
+        // 120 requests in the window; the display reported 116 shown and 2
+        // dropped, and two were still on their way when the window closed.
+        let lines = RuntimeDiagnosticsSession.rendererLines(
+            report(
+                [
+                    surface(
+                        displayID: "7", generation: 1, source: "/library/scene/project.json",
+                        paused: false, presentRequests: 120, renderSubmissions: 120,
+                        presentedFrames: 116, presentsDropped: 2, gaps: (4, 108, 3),
+                        vsyncPeriodMicros: 8_333)
+                ],
+                feedback: true))
+
+        let row = try XCTUnwrap(lines.first { $0.hasPrefix("surface=") })
+        let fields = Set(row.split(separator: " ").map(String.init))
+        XCTAssertTrue(fields.contains("present_requests=120"))
+        XCTAssertTrue(fields.contains("presented_frames=116"))
+        XCTAssertTrue(fields.contains("presents_dropped=2"))
+        XCTAssertTrue(fields.contains("present_gaps_1_vsync=4"))
+        XCTAssertTrue(fields.contains("present_gaps_2_vsync=108"))
+        XCTAssertTrue(fields.contains("present_gaps_3plus_vsync=3"))
+        XCTAssertTrue(fields.contains("vsync_period_us=8333"))
+        XCTAssertFalse(fields.contains("presented_frames=120"), "requests were relabelled as shown frames")
+        XCTAssertTrue(lines.contains("presented_frames=available"))
     }
 
     func testDroppedFramesAreVisibleSoAPacingRegressionCanBeFalsified() {

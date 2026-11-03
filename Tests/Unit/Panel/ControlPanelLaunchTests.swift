@@ -33,6 +33,38 @@ final class ControlPanelLaunchTests: XCTestCase {
                       "The renderer failed to start")
     }
 
+    func testAMeasurementLaunchKeepsThePanelClosedOnceSetUp() {
+        let measured = [ControlPanelLaunch.panelAtLaunchKey: "0"]
+        let launches: [(String, NSAppleEventDescriptor?)] = [
+            ("Finder or open", Self.openApplication(launchedAs: nil)),
+            ("no launch event", nil),
+        ]
+        for (name, event) in launches {
+            XCTAssertFalse(ControlPanelLaunch.opensPanel(
+                launchEvent: event, welcomeSeen: true, startupFailed: false, environment: measured), name)
+        }
+    }
+
+    func testAMeasurementLaunchStillOpensThePanelWhenTheUserHasSomethingToDo() {
+        let measured = [ControlPanelLaunch.panelAtLaunchKey: "0"]
+        let launch = Self.openApplication(launchedAs: nil)
+        XCTAssertTrue(ControlPanelLaunch.opensPanel(
+            launchEvent: launch, welcomeSeen: false, startupFailed: false, environment: measured),
+            "The welcome guide is unfinished")
+        XCTAssertTrue(ControlPanelLaunch.opensPanel(
+            launchEvent: launch, welcomeSeen: true, startupFailed: true, environment: measured),
+            "The renderer failed to start")
+    }
+
+    func testOnlyAnExplicitZeroKeepsThePanelClosed() {
+        let launch = Self.openApplication(launchedAs: nil)
+        for value in ["1", "", "false", "no"] {
+            XCTAssertTrue(ControlPanelLaunch.opensPanel(
+                launchEvent: launch, welcomeSeen: true, startupFailed: false,
+                environment: [ControlPanelLaunch.panelAtLaunchKey: value]), value)
+        }
+    }
+
     private static func openApplication(launchedAs property: OSType?) -> NSAppleEventDescriptor {
         let event = NSAppleEventDescriptor(
             eventClass: kCoreEventClass, eventID: AEEventID(kAEOpenApplication),

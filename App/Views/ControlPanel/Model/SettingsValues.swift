@@ -256,6 +256,7 @@ struct PerformanceSettings: Equatable {
   var sceneOptimization: Bool
   var sceneOnDemand: Bool
   var sceneVideoPlaneSampling: Bool
+  var sceneDisplayFraming: Bool
   var sceneUpdates: [SceneUpdateReport]
   var sceneRenderers: [SceneRendererReport]
 

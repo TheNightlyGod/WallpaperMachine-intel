@@ -264,10 +264,26 @@ final class NSAppleScriptNowPlayingRunner: AppleScriptRunning {
     /// `NSAppleScript` is not thread safe, so one serial queue owns every
     /// instance this type ever compiles.
     private let queue = DispatchQueue(label: "WallpaperMachine.applescript-now-playing")
+    /// Each source is compiled once and run again on every poll: compiling parses the
+    /// script and loads the player's scripting terminology, which is most of what a
+    /// once-a-second query costs. Touched only on `queue`.
+    private let scripts: AppleScriptCache<NSAppleScript>
     private let session: URLSession
 
-    init(session: URLSession = .shared) {
+    /// `compile` runs on the private queue; tests pass one that counts and compiles a
+    /// script that contacts no application.
+    init(
+        session: URLSession = .shared,
+        compile: @escaping @Sendable (String) -> NSAppleScript? = { NSAppleScriptNowPlayingRunner.compile($0) }
+    ) {
         self.session = session
+        scripts = AppleScriptCache(compile: compile)
+    }
+
+    nonisolated static func compile(_ source: String) -> NSAppleScript? {
+        guard let script = NSAppleScript(source: source) else { return nil }
+        var error: NSDictionary?
+        return script.compileAndReturnError(&error) ? script : nil
     }
 
     func runningPlayers() -> [AppleScriptPlayer] {
@@ -276,13 +292,17 @@ final class NSAppleScriptNowPlayingRunner: AppleScriptRunning {
     }
 
     func query(_ player: AppleScriptPlayer) async -> AppleScriptNowPlaying? {
-        await offMainThread { Self.parse(Self.run(Self.stateSource(for: player)), player: player) }
+        let scripts = scripts
+        return await offMainThread {
+            Self.parse(Self.run(Self.stateSource(for: player), from: scripts), player: player)
+        }
     }
 
     func fetchArtwork(from player: AppleScriptPlayer) async -> Data? {
         guard player == .music else { return nil }
+        let scripts = scripts
         return await offMainThread {
-            let data = Self.run(Self.musicArtworkSource)?.data
+            let data = Self.run(Self.musicArtworkSource, from: scripts)?.data
             return data?.isEmpty == false ? data : nil
         }
     }
@@ -311,7 +331,8 @@ final class NSAppleScriptNowPlayingRunner: AppleScriptRunning {
         // Addressed by bundle identifier, as every other script here is: a
         // name can be localised or claimed by something else.
         let source = "tell application id \"\(player.bundleIdentifier)\" to \(verb)"
-        return await offMainThread { Self.run(source) != nil }
+        let scripts = scripts
+        return await offMainThread { Self.run(source, from: scripts) != nil }
     }
 
     private func offMainThread<T: Sendable>(_ work: @escaping @Sendable () -> T) async -> T {
@@ -322,9 +343,15 @@ final class NSAppleScriptNowPlayingRunner: AppleScriptRunning {
 
     // MARK: - Script execution
 
-    private nonisolated static func run(_ source: String) -> NSAppleEventDescriptor? {
+    /// Runs the compiled script for `source`; on `queue` only. A script stays
+    /// addressed by bundle identifier once compiled, so a player that quits and opens
+    /// again is reached by the same script. Every variable it reads is set first in the
+    /// same run, so nothing one run leaves behind reaches the next.
+    private nonisolated static func run(
+        _ source: String, from scripts: AppleScriptCache<NSAppleScript>
+    ) -> NSAppleEventDescriptor? {
         var error: NSDictionary?
-        guard let script = NSAppleScript(source: source) else { return nil }
+        guard let script = scripts.script(for: source) else { return nil }
         let result = script.executeAndReturnError(&error)
         if error != nil && result.numberOfItems == 0 && result.stringValue == nil { return nil }
         return result
@@ -435,4 +462,25 @@ final class NSAppleScriptNowPlayingRunner: AppleScriptRunning {
           end try
         end tell
         """
+}
+
+/// Compiled scripts by source text. The sources are a fixed handful (one state query
+/// per player, the cover query and three transport commands), so it never grows past
+/// them. A source that fails to compile is not kept, and is compiled again next time,
+/// as it was before scripts were kept. Not thread safe: its owner calls it from one
+/// serial queue.
+final class AppleScriptCache<Script>: @unchecked Sendable {
+    private let compile: (String) -> Script?
+    private var compiled: [String: Script] = [:]
+
+    init(compile: @escaping (String) -> Script?) {
+        self.compile = compile
+    }
+
+    func script(for source: String) -> Script? {
+        if let script = compiled[source] { return script }
+        guard let script = compile(source) else { return nil }
+        compiled[source] = script
+        return script
+    }
 }

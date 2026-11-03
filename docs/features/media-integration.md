@@ -49,7 +49,12 @@ Automation permission. The app declares `NSAppleEventsUsageDescription`; without
 macOS refuses every Apple Event before the Automation prompt can appear. If the
 fallback player exits or neither player reports a readable track, the title, cover,
 playback, timeline and transport target are withdrawn together; late artwork from
-the previous subscription is ignored, and a recovered player is read afresh.
+the previous subscription is ignored, and a recovered player is read afresh. The
+fallback asks once a second; `NSAppleScriptNowPlayingRunner` compiles each script (a
+player's state query, Music's cover query, a transport command) once on its private
+serial queue and runs the compiled script again, rather than parsing it and loading
+the player's scripting terminology on every question. A script that fails to compile
+is compiled again next time.
 
 **Stream rules.** The stream runs only while a host has consumers. Complete JSON
 snapshots are decoded with an 8 MiB pending-input bound, artwork is downscaled to

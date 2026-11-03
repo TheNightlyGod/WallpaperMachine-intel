@@ -148,12 +148,12 @@ Inputs and outputs:
 | --- | --- | --- |
 | `WE_TEST_PROJECT` | `offscreen_scene_probe`, `text_object_runtime_test` | Path to a scene `project.json` |
 | `WE_TEST_PROJECTS` | `scene_reload_cycle_probe` | `;`-separated project list |
-| `WE_TEST_METAL_PROJECTS` | `metal_scene_draw_smoke` | Colon-separated `project.json` paths run through the production parser into the native backend offscreen. A fallback is printed with its reason and is not a failure; an accepted scene must prepare and draw every requested frame. Frames after initialization are summarised as render passes per frame (how many rendered into the scene's own image), blits per frame and thread CPU milliseconds per `drawFrame`, and one `N graph rebuild(s), M target resize(s) in F draws, X ms wall in all` line says how often the host would have built the graph again or resized its targets, how long that took and what asked for each (`text-resized-buffers`, `effect-visibility`, ...): a scene that rebuilds every few draws decodes and uploads its images each time. A scene whose graph has layer link textures read before the frame fills them (a layer sampling its own or a later layer's last composite) also prints one `[ LOCAL    ] <id>: N layer link texture(s) read before the frame fills them` line: its picture depends on the frame before, so compare it across builds with `WE_TEST_COMPARE_PROJECTS`. With `WE_TEST_OUTPUT` set, the last frame is written there. Unset, the test skips. Read any `metal translation of '…' failed` line as a failed effect, not a clean native run |
+| `WE_TEST_METAL_PROJECTS` | `metal_scene_draw_smoke` | Colon-separated `project.json` paths run through the production parser into the native backend offscreen. A fallback is printed with its reason and is not a failure; an accepted scene must prepare and draw every requested frame. Frames after initialization are summarised as render passes per frame (how many rendered into the scene's own image, loaded their target from memory and how many megabytes that read, opened with a traded copy's image, and stored their depth or multisampled colour), blits per frame, the megabytes the GPU's copies (blits and resampling passes) wrote, copies replaced by a trade of textures, draws left out because they leave their image as it is and clears and copies left out because nothing drawn reads them, and thread CPU milliseconds per `drawFrame`; a second line counts per frame the calls into the scripts and from them into the host, the frames of scripts without `update` left out, the vertex and index bytes of rewritten geometry copied for the GPU, and the passes scene optimisation drew and reused (`passes drawn + reused/frame`), counts that are the same in every run of a scene and clock where the CPU time is not; and one `N graph rebuild(s), M target resize(s) in F draws, X ms wall in all` line says how often the host would have built the graph again or resized its targets, how long that took and what asked for each (`text-resized-buffers`, `effect-visibility`, ...): a scene that rebuilds every few draws decodes and uploads its images each time. A scene whose graph has layer link textures read before the frame fills them (a layer sampling its own or a later layer's last composite) also prints one `[ LOCAL    ] <id>: N layer link texture(s) read before the frame fills them` line: its picture depends on the frame before, so compare it across builds with `WE_TEST_COMPARE_PROJECTS`. With `WE_TEST_OUTPUT` set, the last frame is written there. Unset, the test skips. Read any `metal translation of '…' failed` line as a failed effect, not a clean native run |
 | `WE_TEST_ASSETS` | probes | Shared `SceneAssets` directory |
 | `WE_TEST_OUTPUT` | probes | Output/cache directory (disposable) |
 | `WE_TEST_CACHE` | `text_object_runtime_test` | Disposable shader cache directory |
 | `WE_TEST_CYCLES` | `scene_reload_cycle_probe` | Reload cycles per project |
-| `WE_TEST_PROPERTIES` | `offscreen_scene_probe`, `metal_scene_draw_smoke` | Flat JSON property overrides, in memory only. A layer gated on a saved property draws nothing without this, so both harnesses have to be driven with the same overrides to compare one |
+| `WE_TEST_PROPERTIES` | `offscreen_scene_probe`, `metal_scene_draw_smoke`, the energy test | Flat JSON property overrides, in memory only (the energy test hands them to the scene wallpaper as the app's saved overrides). A layer gated on a saved property draws nothing without this, so both harnesses have to be driven with the same overrides to compare one |
 | `WE_TEST_RANDOM_SEED` | both scene probes | Seeds the particle random source before the scene is parsed, so the same project simulates the same particles in both harnesses and across builds |
 
 Frames, time and surfaces:
@@ -166,17 +166,21 @@ Frames, time and surfaces:
 | `WE_TEST_SAMPLE_FRAMES` | both scene probes | JSON array of frame indices. Saves each frame and `state-N.json` with live transforms, material values, text and script-error count |
 | `WE_TEST_METAL_FRAMES` | `metal_scene_draw_smoke` | Frames the local-project Metal test draws, 1/60 s apart: 120 by default, 2–3600 accepted. Its own knob, so the probe's `WE_TEST_FRAMES` in the same environment cannot move the Metal frame's scene time. The last frame is the output; the test also prints the bytes of this scene's render targets and, separately, the device-wide Metal allocation, which includes the layer's drawables and varies between runs |
 | `WE_TEST_METAL_FRAME_STEP` | `metal_scene_draw_smoke` | Simulation delta in seconds; default `1/60`. Use `1/120` and twice as many frames for a matched-duration 120 FPS scenario |
-| `WE_TEST_MSAA` | native local/compare probes in `metal_scene_draw_smoke` | Requested sample count: `0` (default), `2`, `4` or `8`. The normal model eligibility and device capability checks apply; it does not force unsupported samples |
-| `WE_TEST_REFLECTION` | native local/compare probes in `metal_scene_draw_smoke` | Reflection quality: `0` disabled or `1` enabled (default), for matching Wallpaper Engine's quality setting without changing installed preferences |
-| `WE_TEST_POSTPROCESSING` | native local/compare probes in `metal_scene_draw_smoke` | Requested post-processing quality: Disabled `0`, Enabled `2` (default), Ultra `4`, or Display HDR `5`. HDR still requires authored HDR and bloom; the setting does not force a pipeline |
+| `WE_TEST_MSAA` | native local/compare probes in `metal_scene_draw_smoke`, the energy test | Requested sample count: `0` (default), `2`, `4` or `8`. The normal model eligibility and device capability checks apply; it does not force unsupported samples |
+| `WE_TEST_REFLECTION` | native local/compare probes in `metal_scene_draw_smoke`, the energy test | Reflection quality: `0` disabled or `1` enabled (default), for matching Wallpaper Engine's quality setting without changing installed preferences |
+| `WE_TEST_POSTPROCESSING` | native local/compare probes in `metal_scene_draw_smoke`, the energy test | Requested post-processing quality: Disabled `0`, Enabled `2` (default), Ultra `4`, or Display HDR `5`. HDR still requires authored HDR and bloom; the setting does not force a pipeline |
+| `WE_TEST_SHADOWS`, `WE_TEST_VOLUMETRICS` | the same | Shadow and volumetric quality, `0`–`4` (default `2`, medium). All five quality variables are read by one parser (`tests/support/scene_quality_environment.hpp`); a value out of range fails the test |
 | `WE_TEST_METAL_WARMUP_TICKS` | `metal_scene_draw_smoke` | Runtime ticks of 1/60 s before the graph is built, as `offscreen_scene_probe` takes 40; `0..3600`. Unset, none. The scene clock is not advanced by them, here or there |
-| `WE_TEST_COMPARE_PROJECTS` | `metal_scene_draw_smoke --gtest_filter='*LocalProjectsDrawAPosterPicture*'` | Colon-separated `project.json` paths drawn through `SceneRendererHandle` on a layer no window owns, the last frame's final composition written as `<scene id>.ppm` under `WE_TEST_OUTPUT` (see below). Unset, the test skips |
+| `WE_TEST_COMPARE_PROJECTS` | `metal_scene_draw_smoke --gtest_filter='*LocalProjectsDrawAPosterPicture*'` | Colon-separated `project.json` paths drawn through `SceneRendererHandle` on a layer no window owns, the last frame's final composition written as `<scene id>.ppm` under `WE_TEST_OUTPUT` (see below), and `<scene id>: N picture upload(s), M optimized for sampling` printed for what loading the pictures cost. Unset, the test skips |
 | `WE_TEST_COMPARE_SURFACE` | the same test | `<width>x<height>` of the layer drawn into; default `960x540` |
 | `WE_TEST_COMPARE_RESOLUTION` | the same test | `display` rasterizes a 2D scene at the size it is presented at on the layer; `canvas`, the default, at the size it was authored at. Perspective scenes and videos ignore it |
 | `WE_TEST_COMPARE_SCALE_FACTOR` | the same test | The layer's backing scale, `1`–`4` (default `1`); with `WE_TEST_COMPARE_SURFACE` it makes a laptop-panel-sized layer |
 | `WE_TEST_COMPARE_SCALING` | the same test | The scaling mode the host pushes: `fill` (the default), `fit`, `fit_blurred`, `stretch` or `none`; anything else fails the test |
+| `WE_TEST_COMPARE_RENDER_SCALE` | the same test | The render scale the host pushes, `0.25`–`1` (default `1`), set on the scene before its graph is built, where the scene wallpaper sets it: the picture the app's render scale setting gives |
+| `WE_TEST_COMPARE_HASH_FRAMES`, `WE_TEST_COMPARE_HASH_EVERY` | the same test | Draws whose final composition is hashed: a JSON array of draw indices, or every k-th draw counting from one (`60` hashes draws 59, 119, …). Each is captured through the poster path (a draw that left the picture as it was is served from that picture, as the host serves an idle wallpaper's) and printed as `[ HASH     ] <scene> <W>x<H> frame=<n> sha256=<hex>`, the last draw too; `<scene>-frame-<n>.ppm` is written only under `WE_TEST_OUTPUT`. Asking for posters changes no picture: the last frame hashes the same with and without it |
 | `WE_TEST_COMPARE_REALTIME` | the same test | Set (any value) to pace the frames in real time, so a script that reads the wall clock (`Date.now()`) sees as much time pass as the scene does on a desktop; unset, the frames run as fast as they draw |
 | `WE_TEST_COMPARE_STOP_AFTER_REBUILD` | the same test | `<n>`: the run ends `n` draws after the first time the host would build the graph again (a script that shows a layer the graph left out does), `WE_TEST_METAL_FRAMES` bounding the wait, and prints the draw the rebuild came before, so a run without one can be drawn to the same scene time. A scene's own scripts cause rebuilds as it starts; `WE_TEST_COMPARE_REBUILD_FROM=<m>` leaves out those before draw `m` |
+| `WE_TEST_COMPARE_COUNTERS` | the same test | Set (not `0`): the renderer counters are on for the run, as in a diagnostics window, so the picture is drawn through the counted paths (the present feedback among them), and `[ COUNTERS ]` prints the present requests, the presents skipped as unchanged and the presentation reports that arrived before the renderer closed. With `WALLPAPER_MACHINE_PRESENT_FEEDBACK=0` beside it, the same run without the reports |
 | `WE_TEST_COMPARE_REBUILD_AT` | the same test | `<k>`: builds the graph again before draw `k` whether or not the scene asked, as the host does for any change of the graph, so what a rebuild leaves behind (a video's frame, the draw's length) is looked at on a scene that would not rebuild by itself at a draw of your choosing |
 | `WE_TEST_RESIZE_AS_REBUILD` | `metal_scene_draw_smoke`, `offscreen_scene_probe` | Set (not `0`): a change that only resized render targets (a text card that changed size in texels) builds the whole graph again, as every build did before `ResizeRenderTargets`. The way to draw one scene both ways in one binary, for a picture or cost comparison; the targeted tests that assert the resize path skip under it |
 | `WE_TEST_SETTLE_TEXT` | `metal_scene_draw_smoke` | Set (not `0`): every text layout a tick asked for lands in that frame (`WaitForTextLayoutForTests`), instead of whenever the text worker is done. Two runs of a scene whose text changes as it runs then lay out on the same frames; a scene whose scripts read the wall clock or a random source still differs between runs |
@@ -184,6 +188,9 @@ Frames, time and surfaces:
 | `WE_TEST_TEXTURE_SURFACE` | `offscreen_scene_probe` | `<width>x<height>` opts into the production display-sized texture mip policy (a leading mip is dropped only while the next is still at least as long as the surface's longest side, so the level kept covers the surface) without changing raster extent; unset retains all source levels for before/after image and allocation comparisons. Native Metal uses its surface size automatically |
 | `WE_TEST_METAL_SURFACE` | `metal_scene_draw_smoke` | `<width>x<height>` for the surface the native backend rasterizes; defaults to `960x540`. Screen-space shader inputs follow it, so comparing this backend's output with another's is only meaningful when both rasterize the same extent |
 | `WE_TEST_METAL_RESOLUTION`, `WE_TEST_METAL_SCALE_FACTOR` | `metal_scene_draw_smoke` | `display` rasterizes a 2D scene at the size it is presented at on that surface, `canvas` (the default) at the size it was authored at; the scale factor (`1`–`4`, default `1`) is the surface's backing scale. The `render target bytes` line and `WE_TEST_METAL_DUMP_TARGETS=*` then show what the choice costs |
+| `WE_TEST_METAL_SCALING` | `metal_scene_draw_smoke` local-project run | The scaling mode the host would push before the graph is built: `fill`, `fit`, `fit_blurred`, `stretch` or `none`; anything else fails the test. Unset, the renderer keeps its own default, original size (`none`), which lays a canvas larger than the surface out at one point per canvas unit, so a cost or target figure meant for the app's Fill needs `fill` |
+| `WE_TEST_METAL_RENDER_SCALE` | `metal_scene_draw_smoke` local-project run | The render scale, `0.25`–`1` (default `1`), set before the graph is built; at 0.75 a display-resolution scene's render target bytes fall to about 0.57 of 1's (targets that do not follow the screen keep their size) |
+| `WE_TEST_METAL_TIMING` | the same | Set (not `0`): each draw's command buffers are timed on the GPU from their own start and end, and one `[ COST     ] <scene> {json}` line reports draws after the first: `gpu_ms_p50`, `gpu_ms_p95`, `gpu_ms_mean` (a draw that committed nothing counts 0), `cpu_ms_mean`, command buffers, render passes and blits per draw, the bytes those copies wrote and the copies traded per draw (`copied_bytes_per_draw`, `traded_copies_per_draw`), the draws left out as no-ops and the unread clears and copies left out per draw (`noop_draws_per_draw`, `skipped_clears_per_draw`, `skipped_copies_per_draw`), render target and device bytes. The draws run back to back, so the GPU stays near its top clock: a work figure, not paced energy |
 
 Allocation, optimisation and dumps:
 
@@ -195,10 +202,11 @@ Allocation, optimisation and dumps:
 | `WE_TEST_DUMP_SOURCE=1` | `offscreen_scene_probe` | Write the packaged scene JSON beneath `WE_TEST_OUTPUT`; `nodes.txt` also records per-node visibility, translate and scale, which diffs layer placement between builds without comparing pixels |
 | `WE_TEST_ASSET_PATH` | `offscreen_scene_probe` | Copy one asset from the mounted package to `asset.txt` under `WE_TEST_OUTPUT` for shader diagnosis; keep private asset output uncommitted |
 | `WE_TEST_DUMP_TARGETS` | `offscreen_scene_probe` | Render target names, or `*` for every target the scene declares; the last frame of each is written as `target-<name>.ppm`. Names carry a per-run suffix, so `*` is the only way to name one across two processes |
-| `WE_TEST_METAL_DUMP_TARGETS` | `metal_scene_draw_smoke` | Same selection as above. Each target is reported with its size and mean luma and, with `WE_TEST_OUTPUT` set, written as a PPM. Target names carry a per-run suffix, so `*` is the only way to name one across two processes |
+| `WE_TEST_METAL_DUMP_TARGETS` | `metal_scene_draw_smoke` | Same selection as above. Each target is reported with its size and mean luma and, with `WE_TEST_OUTPUT` set, written as a PPM. Target names carry a per-run suffix, so `*` is the only way to name one across two processes. After a frame, targets that share an image show its last user's pixels and a copy trade's source (a motion blur's accumulation, the bloom combine) a stale image; `WALLPAPER_MACHINE_METAL_TARGET_SHARING=0` and `WALLPAPER_MACHINE_COPY_TRADES=0` give every target its own |
 | `WE_TEST_DUMP_ALPHA=1` | both scene probes | Writes each dumped target's alpha channel separately as grey. Effects that weight by coverage (the bokeh downsample divides by the sum of its taps' alpha) make different color from the same RGB when alpha differs |
 | `WE_TEST_DUMP_POSES=1` | `wpdump` | Dump sampled bone transforms |
 | `WE_TEST_EXPECT_WARM=1` | `text_object_runtime_test` | Assert zero shader compilations on a second run |
+| `WALLPAPER_MACHINE_GPU_LABELS` | Native Metal, in the app and every harness | `1`: names every command buffer and encoder after what it runs, for [GPU time per pass](#gpu-time-per-pass); `split` as well gives each pass a render pass of its own. Read once; unset or `0`, no label is built |
 
 Synthetic input, media and audio (none reads the desktop, a media player or an
 audio device):
@@ -215,9 +223,9 @@ audio device):
 | `WE_TEST_MEDIA_EVENTS` | both scene probes | JSON array of SceneScript media event objects, dispatched in order after the warm-up ticks. Enables media integration for the run, so a wallpaper that only draws its player while something is playing can be rendered without a system media source or Automation permission. Without events a scene hears no media event, as in the app with no player |
 | `WE_TEST_MEDIA_ARTWORK` | both scene probes | `<width>x<height>:<rrggbb>`; publishes one opaque cover through the same path the app uses, so `$mediaThumbnail` and `$mediaPreviousThumbnail` carry a color that is legible in the rendered frame. Without it a background drawn from the current cover renders flat grey and a comparison says nothing |
 | `WE_TEST_MEDIA_JSON` | `offscreen_scene_probe` | A JSON array of media events dispatched right after the parse, before the warm-up ticks |
-| `WE_TEST_AUDIO_HZ` | both scene probes | Synthetic PCM at `0..24000` Hz; `0` means silence. Each frame submits one analysis window (1,600 frames at 48 kHz) through the same service the desktop tap feeds, and the Metal gate enables audio response for the run. The 64 bands follow Wallpaper Engine's layout: one ~23 Hz bin each up to about 400 Hz (band 0 ≈ 23 Hz, band 3 ≈ 95 Hz), then widening to ~15 kHz, so a shader reading only the lowest bands needs a bass tone, not 440 Hz |
-| `WE_TEST_AUDIO_FILE` | both scene probes | Raw float32 mono PCM at 48 kHz played instead of the synthetic tone, continuing across frames and looping; `WE_TEST_AUDIO_HZ` must still be set to enable audio. A music-like signal is the only way to judge a visualizer's look: a tone lights one band and white noise lights all of them |
-| `WE_TEST_AUDIO_AMPLITUDE`, `WE_TEST_AUDIO_NOISE=1` | both scene probes | Amplitude `0..1` (default `.025`) and optional deterministic broadband PCM instead of a sine, with `WE_TEST_AUDIO_HZ` set. A single tone cannot exercise scripts averaging several frequency bands |
+| `WE_TEST_AUDIO_HZ` | both scene probes and the poster harness (`*LocalProjectsDrawAPosterPicture*`) | Synthetic PCM at `0..24000` Hz; `0` means silence. Each frame submits one analysis window (1,600 frames at 48 kHz) through the same service the desktop tap feeds, and the Metal gate enables audio response for the run. The 64 bands follow Wallpaper Engine's layout: one ~23 Hz bin each up to about 400 Hz (band 0 ≈ 23 Hz, band 3 ≈ 95 Hz), then widening to ~15 kHz, so a shader reading only the lowest bands needs a bass tone, not 440 Hz |
+| `WE_TEST_AUDIO_FILE` | both scene probes and the poster harness | Raw float32 mono PCM at 48 kHz played instead of the synthetic tone, continuing across frames and looping; `WE_TEST_AUDIO_HZ` must still be set to enable audio. A music-like signal is the only way to judge a visualizer's look: a tone lights one band and white noise lights all of them |
+| `WE_TEST_AUDIO_AMPLITUDE`, `WE_TEST_AUDIO_NOISE=1` | both scene probes and the poster harness | Amplitude `0..1` (default `.025`) and optional deterministic broadband PCM instead of a sine, with `WE_TEST_AUDIO_HZ` set. A single tone cannot exercise scripts averaging several frequency bands |
 | `WE_TEST_AUDIO_ENABLED=0` | `offscreen_scene_probe` | Exercise the disabled audio gate |
 
 Audio is submitted after GPU setup so shader compilation cannot expire its
@@ -263,7 +271,16 @@ and is written as `<scene id>.ppm` under `WE_TEST_OUTPUT`. It asserts nothing ab
 the picture: it is a diagnostic for comparing two builds (two runs with the same
 seed, clock and properties give byte-identical pictures, so a difference is what
 the build changed) or a build with a reference from outside the harness, such as
-Wallpaper Engine's own frames. A difference found by comparing
+Wallpaper Engine's own frames. With `WE_TEST_COMPARE_HASH_EVERY` or
+`WE_TEST_COMPARE_HASH_FRAMES` it hashes the final composition of sampled draws as
+well, at the render scale and scaling mode the host pushes
+(`WE_TEST_COMPARE_RENDER_SCALE`, `WE_TEST_COMPARE_SCALING`): that is the pixel-identity
+check `scripts/perf_bench.py identity` runs (see
+[power benchmarking](power-benchmark.md#headless-ab-driver)). It hears nothing unless
+`WE_TEST_AUDIO_HZ` is set: then audio response is on and one window of synthetic sound is
+analysed before every draw, as in the local-project run, so an audio-reactive scene can be
+compared with a tone or noise playing (a `perf_bench.py identity` variant passes it, e.g.
+`--variant tone=new:WE_TEST_AUDIO_HZ=60,WE_TEST_AUDIO_AMPLITUDE=0.5`). A difference found by comparing
 `offscreen_scene_probe` with the poster harness is not yet a renderer
 difference: the two harnesses differ in the ways below.
 
@@ -281,6 +298,51 @@ each parse on a fresh thread with fresh VFS mounts, the way a wallpaper switch
 builds a new `SceneWallpaper`. It catches per-process state that survives a
 scene teardown and stalls the next load; a stall is reported as a probe timeout.
 It covers scene parsing and script compilation only, not presentation.
+
+### GPU time per pass
+
+`WALLPAPER_MACHINE_GPU_LABELS=1` makes Native Metal name each frame's command buffer
+(`scene frame <scene image WxH> on <surface WxH>`) and every render and blit encoder the
+renderer makes in it (the video conversion and the blurred backdrop always carry fixed names;
+MetalFX encodes its own, unnamed), so Instruments' Metal System Trace shows the GPU time of
+each pass. A pass
+reads `<shader or step> -> <target> <WxH> <format>[ x<samples>] [<layer name> #<id>]
+{load|clear|dontcare|opening copy}`: an effect pass names the layer whose chain it is in, a
+copy `copy <source> -> <target>`, and the composition `composition <scene image> -> <surface>`.
+Draws that share one render pass (consecutive draws into one target) show as
+`[<n> passes] <first> + <shader> [<layer>] x<count>, ...`, cut at 250 characters; with
+`WALLPAPER_MACHINE_GPU_LABELS=split` each pass gets a render pass of its own instead, so each
+is timed apart (the picture is the same; the total rises by the loads and stores the split
+adds). Instruments records no label that holds a character outside ASCII, so each run of
+such characters in a layer name becomes `?`. Unset (the default), nothing is named and no
+label string is built.
+
+A recording of the local-project run at the user's settings (any `WE_TEST_*` variable from
+the tables above can be added the same way):
+
+```sh
+xcrun xctrace record --template 'Metal System Trace' --output artifacts/<task>/<id>.trace \
+  --env WALLPAPER_MACHINE_GPU_LABELS=1 \
+  --env WE_TEST_METAL_PROJECTS="$HOME/Library/Application Support/WallpaperMachine/Library/<id>/project.json" \
+  --env WE_TEST_ASSETS="$HOME/Library/Application Support/WallpaperMachine/SceneAssets" \
+  --env WE_TEST_METAL_SURFACE=3840x2160 --env WE_TEST_METAL_SCALE_FACTOR=2 \
+  --env WE_TEST_METAL_RESOLUTION=display --env WE_TEST_METAL_RENDER_SCALE=0.75 \
+  --env WE_TEST_METAL_FRAMES=240 --env WE_TEST_METAL_WARMUP_TICKS=40 --env WE_TEST_RANDOM_SEED=1 \
+  --launch -- artifacts/renderer/bin/tests/metal_scene_draw_smoke \
+  --gtest_filter='*LocalProjectsNamedByTheEnvironment*'
+xcrun xctrace export --input artifacts/<task>/<id>.trace \
+  --xpath '/trace-toc/run[@number="1"]/data/table[@schema="metal-gpu-intervals"]' > intervals.xml
+```
+
+Each row of `metal-gpu-intervals` is one encoder's work on one GPU channel (`Vertex`,
+`Fragment`, `Compute`; blits run on `Compute`) with its start, duration, command buffer id
+and `event-label` (`<command buffer label>:<encoder label>  (<process>) <id>`); the export
+writes repeated values once and refers back to them by `ref`. The draws run back to back, so
+a frame's command buffer is about as long as its GPU work. Render passes of one frame overlap
+on the GPU, so their durations add up to more than the frame: share each instant among the
+intervals running then to attribute a frame's time. A scene with an intro (a layer whose
+animation plays once) needs enough frames to be past it. Keep traces under `artifacts/`;
+they hold the scene's layer names.
 
 ### Metal compile across processes
 
@@ -867,10 +929,18 @@ once and that an on-demand scene wakes for exactly one frame. See
 would repeat the picture, through the real frame clock and drawable loop on a
 `CAMetalLayer` no window owns (the counters it reads are draws executed, presents
 requested and presents skipped). The engine is never given a
-plain video, and Native Metal's repeat-frame behaviour for a scene's video layer
-is pinned in `metal_scene_draw_smoke`
-(`AFrameThatWouldRepeatThePictureTakesNoDrawableAndPresentsNothing` and its
-neighbours). In
+plain video, and Native Metal's repeat-frame behaviour is pinned in
+`metal_scene_draw_smoke` (`AFrameThatWouldRepeatThePictureTakesNoDrawableAndPresentsNothing`
+and its neighbours); for a scene's video layer by
+`AVideoFrameShownAgainIsReusedAndANewOneRedrawsOnTheConvertedPath` and
+`...OnTheDirectPlanePath` (a 30 fps clip on a 60 Hz clock, drawn beside a renderer with
+scene optimisation off: every tick that took no video frame draws and presents nothing,
+every tick that took one draws and presents, and every picture equals the other
+renderer's for the same decoded frame) and `APausedVideoSceneStopsDrawingOnlyWhileVideoReuseIsOn`
+(`WALLPAPER_MACHINE_VIDEO_REUSE=0` keeps drawing and presenting a paused video's frame).
+`MetalVideoTexture.AFrameSaysWhetherItTookAVideoFrameAndEveryImportIsNumberedAnew`
+pins what that rests on: a frame that imported nothing says so, and every import, a
+re-import for a changed demand and a directly sampled one included, is numbered anew. In
 `AStaticSceneStopsPresentingOnceEveryPassIsReused` it also reads
 `surfaceHealth()` across the 1000 ms window: with the skip on, frames completed
 tracks the draws that ran while frames presented stays flat and no stop is
@@ -885,34 +955,64 @@ count kept, and the next failure reports again.
 `ADrawFailureBeforeTheFirstFrameIsCountedButNotReported` pins that a scene that
 has not presented yet counts the failure and does not call back. The seam
 replaces only the failure, not its consequences; a real swapchain failure is not
-produced.
+produced. A frame whose final composition fails (no output target, no present
+pipeline for a new drawable format, no encoder) is such a failure: it presents
+nothing, counts no present request and records nothing as shown, so the next
+frame draws the picture again rather than skipping it as unchanged
+(`MetalSceneDraw.AFrameThatCannotBeComposedIsNeitherPresentedNorRememberedAsShown`,
+through the test-only `RefuseNextCompositionForTests`).
 
 `LocalProjectEnergyIsMeasuredHeadlessly`, in the same binary, is the headless
 energy measurement: it skips unless `WE_TEST_ENERGY_PROJECT` names a local
 `project.json` (with `WE_TEST_ASSETS`), then runs the production
 `SceneWallpaper` (Native Metal, the only renderer; `WE_TEST_ENERGY_RENDERER` is no
-longer read) with its own 60 FPS clock into an unattached layer
-of `WE_TEST_ENERGY_WIDTH` x `WE_TEST_ENERGY_HEIGHT` (default 1920x1080), waits
-`WE_TEST_ENERGY_WARMUP` seconds (default 5) after the first frame and samples a
-`WE_TEST_ENERGY_SECONDS` window (default 20). `WE_TEST_ENERGY_RESOLUTION`
-(`canvas`, the default, or `display`) picks the 2D scene resolution the run draws
-at and `WE_TEST_ENERGY_SCALE_FACTOR` (default 1) the surface's backing scale, so a
-3456 x 2234 surface at 2 is a laptop panel. `WE_TEST_ENERGY_SCALING` (`fill`, `fit`,
-`fit_blurred`, `stretch` or `none`) is pushed as the host's scaling mode; unset, none is
-pushed and the scene keeps the renderer's own (Fit), as before the variable existed. It prints one `ENERGY {...}` line:
-the backend actually used, this process's CPU seconds and CPU energy
-(`ri_energy_nj`), the GPU time of this process's own Metal command buffers and
+longer read) with its own frame clock into unattached layers, waits
+`WE_TEST_ENERGY_WARMUP` seconds (default 5) after every surface's first frame and
+samples a `WE_TEST_ENERGY_SECONDS` window (default 20). It takes the settings the app
+applies, in the app's order: `WE_TEST_ENERGY_SURFACES` (`3840x2160@2,3456x2234@2`)
+draws one scene wallpaper per display in the one process, each on a layer of that
+pixel size and backing scale (unset, one surface of `WE_TEST_ENERGY_WIDTH` x
+`WE_TEST_ENERGY_HEIGHT`, default 1920x1080, at `WE_TEST_ENERGY_SCALE_FACTOR`, default 1);
+`WE_TEST_ENERGY_SCALING` (`fill`, `fit`, `fit_blurred`, `stretch` or `none`, one for all
+surfaces or one per surface, comma-separated) is pushed as the host's scaling mode
+(unset, none is pushed and the scene keeps the renderer's own, Fit);
+`WE_TEST_ENERGY_RESOLUTION` (`canvas`, the default, or `display`) picks the 2D scene
+resolution; `WE_TEST_ENERGY_FPS` (default 60) is the frame rate;
+`WE_TEST_PROPERTIES` are the saved property overrides; the five quality variables
+above are set before the configuration; and `WE_TEST_ENERGY_RENDER_SCALE` is sent
+after it, as the app sends any scale below 1 (unset, none is sent). It prints one
+`ENERGY {...}` line: the backend actually used, this process's CPU seconds and CPU
+energy (`ri_energy_nj`), the GPU time of this process's own Metal command buffers and
 how many there were (`gpu_own_s`, `command_buffers`: the test wraps the device's
-command-buffer `commit` to read each buffer's GPU start and end, which counts
-every buffer the process commits), the whole GPU's energy and
-busy time over all resource coalitions (other processes included), frames
-completed and presented, and the physical footprint. Counting is off and scene
-optimisation on, as shipped; `WE_TEST_ENERGY_CACHE` keeps the shader and pipeline
-caches between runs. Run one renderer per process, warm the caches with an
-unmeasured run first and alternate the settings under comparison. The whole-GPU figures are only
-usable against an idle window of the same length on an otherwise quiet machine:
-a process launched from a terminal shares a coalition with that terminal, and
-any other process drawing at the time is in them. GPU time is workload, not
+command-buffer `commit`, `tests/support/command_buffer_gpu_time.hpp`, to read each
+buffer's GPU start and end, which counts every buffer the process commits), the whole
+GPU's energy and busy time over all resource coalitions (other processes included;
+only coalitions present at both ends of the window are differenced, and one whose
+counters went down is left out, so a coalition that ends during the window can no
+longer make the figure wrap), frames completed and presented summed over surfaces,
+the passes scene optimisation drew and reused over every surface (`passes_executed`,
+`passes_skipped`) and the physical footprint. `WE_TEST_ENERGY_OUTPUT=<path>` also writes the run's
+schema-2 record there: the settings; per surface its size, scaling, backend, frames
+and failures (and, with `WE_TEST_ENERGY_COUNTERS=1`, the renderer counters' timer
+wakeups, draws, presents and presents skipped as unchanged, counted the same in both
+builds compared); `cpu` from `RUSAGE_INFO_V6` (user, system and P-core seconds
+normalized from Mach ticks, CPU and P-core energy, package-idle and interrupt
+wakeups per second, instructions, cycles, milliseconds per QoS class); `gpu` (own
+busy seconds, command buffers, ms per frame, the 50th/95th/99th percentile of the
+per-buffer GPU time from a 0.1 ms histogram, the process's own coalition's GPU and
+CPU energy and busy time with `coalition_shared` when the parent process is in the
+same coalition, the all-coalition figures and `other_busy_share`, the GPU busy share
+of every other coalition); end and lifetime-peak footprint; the thermal state
+before and after; and `scene_passes`, the passes drawn (`executed`) and reused
+(`skipped`) over every surface. `EnergyAccounting.*` pins the coalition differencing, the
+histogram quantiles and the surface list. Counting is off unless asked for and
+scene optimisation on, as shipped; `WE_TEST_ENERGY_CACHE` keeps the shader and
+pipeline caches between runs. Run one scene per process, warm the caches with an
+unmeasured run first and alternate the settings under comparison:
+`scripts/perf_bench.py cost` does all of that
+([power benchmarking](power-benchmark.md#headless-ab-driver)). A process launched from
+a terminal shares a coalition with that terminal, so its coalition figures are the
+terminal's; one launched as an app of its own has its own. GPU time is workload, not
 energy. It changes nothing on
 the desktop and needs no privileges; it is not a power measurement in the
 sense of [power benchmarking](power-benchmark.md), which observes the app and

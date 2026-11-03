@@ -78,6 +78,7 @@ fn sample_reflection() -> Reflection {
             format: VertexFormat::new(VertexScalar::Float, 3).unwrap(),
         }],
         active_texture_slots: BTreeSet::from([0]),
+        ..Reflection::default()
     }
 }
 

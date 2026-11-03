@@ -17,6 +17,7 @@ final class SettingsRecordingBridge: LayoutSnapshotBridge {
   var sceneOnDemandCalls: [Bool] = []
   var metalFXUpscalingCalls: [Bool] = []
   var sceneVideoPlaneSamplingCalls: [Bool] = []
+  var sceneDisplayFramingCalls: [Bool] = []
   var sceneResolutionCalls: [String] = []
   var sceneQualityCalls: [BridgeSceneQuality] = []
   var verboseLoggingCalls: [Bool] = []
@@ -64,6 +65,12 @@ final class SettingsRecordingBridge: LayoutSnapshotBridge {
   {
     try await record({ $0.sceneVideoPlaneSamplingCalls.append(enabled) }) {
       $0.sceneVideoPlaneSamplingEnabled = enabled
+    }
+  }
+
+  override func setSceneDisplayFramingEnabled(enabled: Bool) async throws -> BridgeSnapshotBundle {
+    try await record({ $0.sceneDisplayFramingCalls.append(enabled) }) {
+      $0.sceneDisplayFramingEnabled = enabled
     }
   }
 

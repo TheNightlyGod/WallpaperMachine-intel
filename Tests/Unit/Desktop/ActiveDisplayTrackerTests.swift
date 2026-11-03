@@ -330,7 +330,7 @@ final class ActiveDisplayTrackerTests: XCTestCase {
             workspaceCenter: NotificationCenter(), lockCenter: NotificationCenter(),
             windowCenter: NotificationCenter(),
             surfaces: { [WallpaperSurfaceVisibility(displayID: 1, isVisible: true), WallpaperSurfaceVisibility(displayID: 2, isVisible: true)] },
-            isSessionLocked: { false },
+            sessionState: { .init() },
             inactiveDisplays: { known in rig.tracker.inactive(among: known) },
             screenLayout: { [] },
             occlusionSettleDelay: .zero,

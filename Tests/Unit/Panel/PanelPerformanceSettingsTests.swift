@@ -246,6 +246,31 @@ final class PanelPerformanceSettingsTests: PanelTestCase {
     }
   }
 
+  func testDisplayFramingShipsOffAndTheSwitchRoundTrips() async throws {
+    try await withRecordingPanel { panel, bridge in
+      panel.store.settingsSnapshot = BridgeSnapshotFixtures.settings()
+      let controller = panel.controller
+      XCTAssertFalse(
+        controller.performanceSettings.sceneDisplayFraming,
+        "Drawing only the visible part moves a few pixels, so it ships off")
+      XCTAssertFalse(controller.isSwitchOn(.sceneDisplayFraming))
+
+      try await controller.setSwitch(.sceneDisplayFraming, to: true)
+      XCTAssertEqual(bridge.sceneDisplayFramingCalls, [true])
+      XCTAssertTrue(
+        controller.isSwitchOn(.sceneDisplayFraming),
+        "The state is the one the engine returned, not the click")
+      XCTAssertTrue(controller.performanceSettings.sceneDisplayFraming)
+      XCTAssertFalse(
+        controller.performanceSettings.sceneVideoPlaneSampling,
+        "One experimental switch does not turn another on")
+
+      try await controller.setSwitch(.sceneDisplayFraming, to: false)
+      XCTAssertEqual(bridge.sceneDisplayFramingCalls, [true, false])
+      XCTAssertFalse(controller.isSwitchOn(.sceneDisplayFraming))
+    }
+  }
+
   // MARK: Playback choices
 
   func testConditionChoicesAreSavedAndSurviveARelaunch() async throws {

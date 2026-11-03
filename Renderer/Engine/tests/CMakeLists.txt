@@ -843,7 +843,9 @@ gtest_discover_tests(
 )
 
 add_executable(timer_tests timer/frame_timer_test.cpp
-                           timer/request_admission_contract_test.cpp)
+                           timer/request_admission_contract_test.cpp
+                           timer/present_feedback_test.cpp
+                           timer/present_pacing_test.cpp)
 target_link_libraries(timer_tests PRIVATE wpTimer GTest::gtest_main)
 target_include_directories(timer_tests PRIVATE . ${CMAKE_SOURCE_DIR}/src)
 target_compile_features(timer_tests PRIVATE cxx_std_20)
@@ -912,7 +914,8 @@ if(APPLE)
   # encoder. Creates only private textures and an offscreen layer.
   add_executable(metal_scene_draw_smoke metal_scene_draw_smoke.mm camera_fade_gpu_test.mm
       scene_general_gpu_test.mm puppet_morph_gpu_test.mm scene_hierarchy_gpu_test.mm model_data_gpu_test.mm
-      volumetrics_gpu_test.mm volumetrics_depth_gpu_test.mm spot_cookie_gpu_test.mm planar_reflection_gpu_test.mm transparent_sorting_gpu_test.mm transparent_sorting_lifetime_gpu_test.mm)
+      volumetrics_gpu_test.mm volumetrics_depth_gpu_test.mm spot_cookie_gpu_test.mm planar_reflection_gpu_test.mm transparent_sorting_gpu_test.mm transparent_sorting_lifetime_gpu_test.mm
+      static_reuse_inputs_gpu_test.mm)
   target_link_libraries(metal_scene_draw_smoke PRIVATE
       ${PROJECT_NAME} wpMetalRender wpScene wpRGraph
       wpParticle wpAudio wpFs nlohmann_json::nlohmann_json GTest::gtest_main

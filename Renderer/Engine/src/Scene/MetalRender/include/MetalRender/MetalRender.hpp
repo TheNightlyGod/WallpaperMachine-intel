@@ -6,6 +6,7 @@
 #include "Scene/include/Scene/SceneResolution.hpp"
 #include "Type.hpp"
 
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <span>
@@ -35,6 +36,11 @@ struct MetalDisplayCharacteristics {
     float current_headroom {1.0f};
     float potential_headroom {1.0f};
 };
+
+/// The refresh period of the current mode of display `display_id`, exact rather than the
+/// whole number of hertz the host is told (59.94 Hz is 16 683 351 ns, not 60 Hz's 16 666 667),
+/// or zero for no display, an unknown one or one that reports no fixed rate.
+std::chrono::nanoseconds DisplayRefreshPeriod(uint32_t display_id);
 
 struct MetalRenderInitInfo
 {
@@ -150,6 +156,11 @@ public:
     /// Applies an event-delivered surface color/headroom snapshot on the render thread.
     void RefreshDisplayOutput(Scene& scene);
     void SetDisplayId(uint32_t identity);
+    /// How long the frame on screen stays before the next present replaces it
+    /// (`FrameTimer::PresentHold`), for the presents that follow. Zero, the
+    /// default, presents at the next refresh. A hold changes when a frame is
+    /// shown, never what it shows.
+    void SetPresentHold(std::chrono::nanoseconds hold);
     /// Applies a new internal rasterization scale, and the resolution the scene
     /// is rasterized at, to an already compiled graph. Render targets and the
     /// pipelines attached to them are rebuilt, and only when one of the two
@@ -259,6 +270,19 @@ public:
     [[nodiscard]] uint64_t RuntimeImageUploadsForTests() const;
     /// Draw-time light projection/packing updates, for demand regressions.
     [[nodiscard]] uint64_t LightFeatureUpdatesForTests() const;
+    /// The next frame that takes a drawable fails to compose onto it, the way a
+    /// present pipeline that cannot be built for a new drawable format fails.
+    /// Test-only: no real composition failure can be produced without breaking
+    /// the GPU, and what matters is what the frame does after one.
+    void RefuseNextCompositionForTests();
+    /// The hold the last present asked for, zero for a plain present, and the
+    /// presents that asked for one. Test-only: a layer no window owns is never
+    /// shown, so when a held frame would have been shown cannot be observed.
+    [[nodiscard]] std::chrono::nanoseconds LastPresentHoldForTests() const;
+    [[nodiscard]] uint64_t HeldPresentsForTests() const;
+    /// Turns present pacing (`WALLPAPER_MACHINE_VSYNC_PACING`) on or off for the
+    /// whole process; returns the previous state.
+    static bool SetPresentPacingForTests(bool enabled);
 
     /// Encoders the pass loop of the last drawn frame opened: render passes,
     /// how many of them rendered into the scene's output image, and blits.
@@ -272,6 +296,25 @@ public:
         uint32_t render_passes { 0 };
         uint32_t scene_output_passes { 0 };
         uint32_t blit_passes { 0 };
+        /// Render passes that loaded their target from memory (colour, or a shadow
+        /// caster's depth image), and those that opened with a traded feedback image's copy.
+        uint32_t loaded_passes { 0 };
+        uint32_t opening_copies { 0 };
+        /// Render passes that stored their depth attachment, and their colour samples.
+        uint32_t stored_depth_attachments { 0 };
+        uint32_t stored_multisample_attachments { 0 };
+        /// The bytes the loading render passes read (texels times samples times texel size).
+        uint64_t loaded_bytes { 0 };
+        /// The bytes the copies made by the GPU wrote, and the copies a trade of textures
+        /// replaced, which wrote none.
+        uint64_t copied_bytes { 0 };
+        uint32_t traded_copies { 0 };
+        /// Draws left out because, with the frame's uniforms, they leave their target exactly as
+        /// it is (alpha 0 under a blend that keeps the destination), and clears and copies left
+        /// out because no pass drawn in the frame reads what they leave (a hidden layer's).
+        uint32_t noop_draws { 0 };
+        uint32_t skipped_clears { 0 };
+        uint32_t skipped_copies { 0 };
     };
     [[nodiscard]] FrameEncodeCountsForTests LastFrameEncodeCountsForTests() const;
 
@@ -289,6 +332,18 @@ public:
     /// Load operation of the first enabled scene-output pass in execution order.
     [[nodiscard]] MetalLoadAction FirstSceneOutputLoadForTests() const;
     [[nodiscard]] uint64_t ModelDataUploadBytesForTests() const;
+    /// Bytes of geometry the CPU rewrites (particles, text glyphs, script-made models) copied
+    /// into the frame slots' storage since this renderer was made, vertices and indices apart.
+    struct DynamicUploadBytesForTests {
+        uint64_t vertex { 0 };
+        uint64_t index { 0 };
+    };
+    [[nodiscard]] DynamicUploadBytesForTests DynamicGeometryUploadBytesForTests() const;
+    /// Whether that copy leaves out what the slot already holds: index bytes it holds of the
+    /// same content, and vertices past the ones an indexed draw reads. On unless
+    /// `WALLPAPER_MACHINE_PARTICLE_UPLOAD_DELTA=0`; process-wide, test-only. Answers the
+    /// setting it replaced.
+    static bool SetDynamicUploadDeltaForTests(bool enabled);
     /// Actual GPU sample counts of live MS color/depth attachments; empty while Off.
     [[nodiscard]] std::vector<uint32_t> MultisampleCountsForTests() const;
 
@@ -296,6 +351,63 @@ public:
     /// one image, for graphs compiled from now on. On unless
     /// `WALLPAPER_MACHINE_METAL_TARGET_SHARING=0`; process-wide, test-only.
     static void SetTargetSharingForTests(bool enabled);
+
+    /// Whether a render pass opened by a draw that provably writes every texel of its
+    /// target clears it instead of loading it, from the next frame on. On unless
+    /// `WALLPAPER_MACHINE_OVERWRITE_LOAD_ELISION=0`; process-wide, test-only.
+    static void SetOverwriteLoadElisionForTests(bool enabled);
+    /// Whether depth and multisampled colour attachments are left unstored when nothing
+    /// reads them again, from the next frame on. On unless
+    /// `WALLPAPER_MACHINE_ATTACHMENT_STORE_ELISION=0`; process-wide, test-only.
+    static void SetAttachmentStoreElisionForTests(bool enabled);
+    /// GPU labels (`WALLPAPER_MACHINE_GPU_LABELS`) for pass tables built and frames drawn from
+    /// now on: 0 off, 1 on, 2 on with every pass in a render pass of its own (`split`).
+    /// Process-wide, test-only.
+    static void SetGpuLabelsForTests(int mode);
+    /// Each pass's GPU label, in pass order; empty while the labels are off.
+    [[nodiscard]] std::vector<std::string> GpuPassLabelsForTests() const;
+    /// Whether a copy whose source is only read afterwards, until it is written afresh, gives
+    /// way to a trade of textures after its last reader, for graphs compiled from now on. On
+    /// unless `WALLPAPER_MACHINE_COPY_TRADES=0`; process-wide, test-only.
+    static void SetCopyTradesForTests(bool enabled);
+    /// Whether a pass that samples a scene video is reused while the video shows the
+    /// frame it drew, and a frame that imported no video frame may skip its present, for
+    /// graphs compiled from now on. On unless `WALLPAPER_MACHINE_VIDEO_REUSE=0`;
+    /// process-wide, test-only.
+    static void SetVideoReuseForTests(bool enabled);
+    /// Whether a pass that reads the audio spectrum is reused while the bands its uniforms
+    /// carry are the ones it drew, for graphs compiled from now on. On unless
+    /// `WALLPAPER_MACHINE_AUDIO_REUSE=0`; process-wide, test-only.
+    static void SetAudioReuseForTests(bool enabled);
+    /// Whether a pass drawn through a layer-local or effect camera leaves out of its reuse sample
+    /// the node's world transform and the active camera when no uniform its program reads is
+    /// derived from them, for graphs compiled from now on. On unless
+    /// `WALLPAPER_MACHINE_LAYER_LOCAL_SIGNATURES=0`; process-wide, test-only. Returns what it was,
+    /// for the caller to put back.
+    static bool SetLayerLocalSignaturesForTests(bool enabled);
+    /// Whether a draw that leaves its target as it is with the frame's uniforms is left out,
+    /// from the next frame on. On unless `WALLPAPER_MACHINE_SKIP_NOOP_DRAWS=0`; process-wide,
+    /// test-only.
+    static void SetSkipNoopDrawsForTests(bool enabled);
+    /// Whether a clear or copy nothing drawn reads is left out, for graphs compiled from now on.
+    /// On unless `WALLPAPER_MACHINE_HIDDEN_LAYER_WORK=0`; process-wide, test-only.
+    static void SetHiddenLayerWorkForTests(bool enabled);
+    /// SDR display framing's override (`WALLPAPER_MACHINE_SDR_FRAMING`), from the next draw
+    /// on: 1 frames, 0 never frames, -1 follows `SetMetalSceneDisplayFramingEnabled`.
+    /// Process-wide, test-only. Answers the override it replaced.
+    static int SetSdrFramingOverrideForTests(int forced);
+    /// The window of its canvas-cover raster an SDR scene is drawn into, in that raster's
+    /// pixels; `framed` false when the whole raster is drawn
+    /// (`SetMetalSceneDisplayFramingEnabled`).
+    struct RasterWindowForTests {
+        uint32_t cover_width { 0 }, cover_height { 0 };
+        uint32_t x { 0 }, y { 0 };
+        uint32_t width { 0 }, height { 0 };
+        bool     framed { false };
+        /// A layout change left the window short: the next draw sizes the targets again.
+        bool     stale { false };
+    };
+    [[nodiscard]] RasterWindowForTests RasterWindowStateForTests() const;
 
     /// How many shader sources this process has handed to the Metal compiler.
     ///
@@ -316,6 +428,11 @@ public:
     [[nodiscard]] static std::size_t SharedImageEntriesForTests();
     /// Picture slots uploaded to a GPU by any renderer since the process started.
     [[nodiscard]] static uint64_t ImageUploadsForTests();
+    /// Of those, the ones rearranged for sampling (`optimizeContentsForGPUAccess`).
+    [[nodiscard]] static uint64_t ImagesOptimizedForTests();
+    /// Whether uploads from now on are rearranged for sampling. On unless
+    /// `WALLPAPER_MACHINE_OPTIMIZE_IMAGES=0`; process-wide, test-only.
+    static void SetImageOptimizationForTests(bool enabled);
 
     /// Whether the pipeline archive can supply every pipeline this process has
     /// created so far, asked strictly.

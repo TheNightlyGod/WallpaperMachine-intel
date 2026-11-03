@@ -282,7 +282,8 @@ fill only some languages. Do not list the changes again.
 - Claims: never claim energy, battery or power savings, even when a commit measured \
 less work. Never call anything fully supported or fully compatible. Keep \
 "optional", "experimental" or "off by default" on opt-in features such as content \
-pacing and on-demand scene idle, and on the animated lock screen. Native Metal is \
+pacing, on-demand scene idle and drawing only the visible part of cropped scenes, \
+and on the animated lock screen. Native Metal is \
 the only scene renderer, not an option, and the app's own video players are the \
 only way a video wallpaper plays (a format they cannot play is refused with its \
 format named), not an option either. Every language keeps \

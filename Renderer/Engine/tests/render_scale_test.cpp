@@ -20,6 +20,10 @@
 
 #include <gtest/gtest.h>
 
+#include <string>
+#include <utility>
+#include <vector>
+
 namespace wallpaper::render
 {
 namespace
@@ -423,6 +427,204 @@ TEST(RasterResolution, TheResolutionOnlyMattersToASceneWithACanvasToRasterize) {
     EXPECT_FALSE(SceneResolutionAffectsRaster(perspective));
 
     EXPECT_TRUE(SceneResolutionAffectsRaster(Scene {}));
+}
+
+// ---- SDR display framing: the window of the cover raster a framed scene draws.
+
+/// How the unframed composition lays a `cover`-sized FILL raster of `canvas` on `output`
+/// at `factor`, with the user's `zoom` and position, per axis.
+std::pair<RasterAxisPlacement, RasterAxisPlacement>
+FillPlacement(Extent2D canvas, Extent2D output, double factor, double zoom = 1.0,
+              double pan_x = 0.5, double pan_y = 0.5) {
+    const auto logical = [factor](uint32_t pixels) {
+        return static_cast<uint32_t>(std::lround(pixels / factor));
+    };
+    const auto layout = ComputeWallpaperScalingLayout(
+        WallpaperScalingMode::FILL, canvas.width, canvas.height, logical(output.width),
+        logical(output.height), factor, zoom, pan_x, pan_y);
+    return { RasterAxisPlacement { double(layout.viewport_px.x), double(layout.viewport_px.width),
+                                   output.width },
+             RasterAxisPlacement { double(layout.viewport_px.y), double(layout.viewport_px.height),
+                                   output.height } };
+}
+
+TEST(RasterWindow, AWiderCanvasDrawsOnlyThePartTheOutputShows) {
+    // A 5120x2160 canvas filled over a 3840x2160 display at 2x: the cover raster is 5120
+    // wide and the composition shows the 3840 pixels in its middle, 1:1.
+    const Extent2D cover { 5120, 2160 };
+    const auto [x, y] = FillPlacement({ 5120, 2160 }, kOutput, 2.0);
+    const auto window = PlanSceneRasterWindow(cover, x, y, 4, false);
+    EXPECT_TRUE(window.Framed());
+    EXPECT_EQ(window.x, 640u);
+    EXPECT_EQ(window.y, 0u);
+    EXPECT_EQ(window.size.width, 3840u);
+    EXPECT_EQ(window.size.height, 2160u);
+    // The canvas, which fills the cover raster, overhangs the window by 640 on each side.
+    const auto clip = SceneRasterWindowClip(window);
+    EXPECT_DOUBLE_EQ(clip[0], 5120.0 / 3840.0);
+    EXPECT_DOUBLE_EQ(clip[1], 1.0);
+    EXPECT_DOUBLE_EQ(clip[2], 0.0);
+    EXPECT_DOUBLE_EQ(clip[3], 0.0);
+    // The composition puts the window where its texels sit: the whole output.
+    const auto [left, width] = RasterWindowFootprint(cover.width, window.x, window.size.width,
+                                                     x.origin, x.extent, false);
+    EXPECT_DOUBLE_EQ(left, 0.0);
+    EXPECT_DOUBLE_EQ(width, 3840.0);
+}
+
+TEST(RasterWindow, AMinifiedRasterKeepsTheBilinearPairOfEveryVisiblePixel) {
+    // 16:9 on the 3456x2234 panel at render scale 0.75: the 3972-pixel cover becomes 2979
+    // texels, and the composition samples 0.75 texels per output pixel starting 258 pixels
+    // left of the output. Its first pixel samples texel 193.375: the pair 193 and 194.
+    const Extent2D cover { 2979, 1676 };
+    const auto [x, y] = FillPlacement({ 3840, 2160 }, kLaptop, 2.0);
+    ASSERT_EQ(x.origin, -258.0);
+    ASSERT_EQ(x.extent, 3972.0);
+    const auto window = PlanSceneRasterWindow(cover, x, y, 1, false);
+    EXPECT_EQ(window.x, 193u);
+    // The last output pixel samples 2784.625: texels 2784 and 2785.
+    EXPECT_EQ(window.x + window.size.width, 2786u);
+    EXPECT_EQ(window.size.height, 1676u);
+}
+
+TEST(RasterWindow, AWindowCutsOnlyAtTheGridOfTheScreenTargetsItSamples) {
+    const Extent2D cover { 3972, 2234 };
+    const auto [x, y] = FillPlacement({ 1920, 1080 }, kLaptop, 2.0);
+    // Quarter-size targets: the 258-pixel crop rounds out to 256 and 3716.
+    const auto quarter = PlanSceneRasterWindow(cover, x, y, 4, false);
+    EXPECT_EQ(quarter.x, 256u);
+    EXPECT_EQ(quarter.size.width, 3460u);
+    EXPECT_EQ(quarter.x % 4, 0u);
+    EXPECT_EQ(quarter.size.width % 4, 0u);
+    // Eighth-size targets cannot keep a 3972-pixel raster's grid (496.5 texels): nothing is
+    // framed rather than drawing them at another pitch.
+    EXPECT_FALSE(PlanSceneRasterWindow(cover, x, y, 8, false).Framed());
+    // Nor without a known grid.
+    EXPECT_FALSE(PlanSceneRasterWindow(cover, x, y, 0, false).Framed());
+}
+
+TEST(RasterWindow, AnOddCropKeepsTheCoverRastersOwnPixels) {
+    // A 101-wide canvas on a 64x64 output: the cover is 101 wide and starts 19 pixels left of
+    // the output (half of 37, rounded away from zero), an odd offset.
+    const Extent2D cover { 101, 64 };
+    const auto [x, y] = FillPlacement({ 101, 64 }, { 64, 64 }, 1.0);
+    ASSERT_EQ(x.origin, -19.0);
+    const auto window = PlanSceneRasterWindow(cover, x, y, 1, false);
+    EXPECT_EQ(window.x, 19u);
+    EXPECT_EQ(window.size.width, 64u);
+    // With half-size targets the window starts and ends on even texels: a 102-wide canvas
+    // starts 19 pixels out too, and its window is cut at 18 and 84.
+    const auto [even_x, even_y] = FillPlacement({ 102, 64 }, { 64, 64 }, 1.0);
+    ASSERT_EQ(even_x.origin, -19.0);
+    const auto halves = PlanSceneRasterWindow(Extent2D { 102, 64 }, even_x, even_y, 2, false);
+    EXPECT_EQ(halves.x, 18u);
+    EXPECT_EQ(halves.size.width, 66u);
+    // A cover that is itself odd cannot keep half-size targets' grid.
+    EXPECT_FALSE(PlanSceneRasterWindow(cover, x, y, 2, false).Framed());
+}
+
+TEST(RasterWindow, ThePictureMovesInsideAWindowWithHeadroom) {
+    const Extent2D cover { 5120, 2160 };
+    const auto [x, y] = FillPlacement({ 5120, 2160 }, kOutput, 2.0);
+    auto exact = PlanSceneRasterWindow(cover, x, y, 4, false);
+    auto roomy = PlanSceneRasterWindow(cover, x, y, 4, true);
+    EXPECT_GT(roomy.size.width, exact.size.width);
+    EXPECT_LE(roomy.size.width, exact.size.width + 8);
+    for (const double pan : { 0.0, 0.13, 0.5, 0.77, 1.0 }) {
+        SCOPED_TRACE(pan);
+        const auto [moved_x, moved_y] = FillPlacement({ 5120, 2160 }, kOutput, 2.0, 1.0, pan);
+        EXPECT_TRUE(PlaceSceneRasterWindow(roomy, moved_x, moved_y, 4));
+        EXPECT_EQ(roomy.x % 4, 0u);
+        const auto sampled = moved_x.origin;
+        // The window holds every texel the moved composition reads.
+        EXPECT_LE(double(roomy.x), -sampled);
+        EXPECT_GE(double(roomy.x + roomy.size.width), -sampled + 3840.0);
+    }
+    // Without headroom a move to the edge leaves the window and is refused, as it was.
+    const auto before = exact;
+    const auto [edge_x, edge_y] = FillPlacement({ 5120, 2160 }, kOutput, 2.0, 1.0, 0.13);
+    EXPECT_FALSE(PlaceSceneRasterWindow(exact, edge_x, edge_y, 4));
+    EXPECT_EQ(exact.x, before.x);
+}
+
+TEST(RasterWindow, AZoomedInPictureFitsTheWindowOfAZoomOfOne) {
+    const Extent2D cover { 5120, 2160 };
+    const auto [x, y] = FillPlacement({ 5120, 2160 }, kOutput, 2.0);
+    auto window = PlanSceneRasterWindow(cover, x, y, 4, false);
+    for (const double zoom : { 1.0, 1.25, 2.0, 3.5 }) {
+        SCOPED_TRACE(zoom);
+        const auto [zx, zy] = FillPlacement({ 5120, 2160 }, kOutput, 2.0, zoom);
+        EXPECT_TRUE(PlaceSceneRasterWindow(window, zx, zy, 4));
+    }
+}
+
+TEST(RasterWindow, FitAndStretchShowTheWholeCanvasSoNothingIsCut) {
+    const Extent2D cover { 3972, 2234 };
+    for (const auto mode : { WallpaperScalingMode::FIT, WallpaperScalingMode::STRETCH }) {
+        SCOPED_TRACE(static_cast<int>(mode));
+        const auto layout = ComputeWallpaperScalingLayout(mode, 1920, 1080, 1728, 1117, 2.0, 1.0);
+        const RasterAxisPlacement x { double(layout.viewport_px.x), double(layout.viewport_px.width),
+                                      kLaptop.width };
+        const RasterAxisPlacement y { double(layout.viewport_px.y), double(layout.viewport_px.height),
+                                      kLaptop.height };
+        EXPECT_FALSE(PlanSceneRasterWindow(cover, x, y, 1, false).Framed());
+    }
+}
+
+TEST(RasterWindow, AFlippedCompositionReadsTheMirroredSpan) {
+    // Off-centre and flipped: the composition reads the raster right to left, so what it
+    // shows is what an unflipped one shows with the viewport mirrored about the output.
+    const Extent2D cover { 5120, 2160 };
+    const auto [x, y] = FillPlacement({ 5120, 2160 }, kOutput, 2.0, 1.0, 0.2);
+    RasterAxisPlacement mirrored = x;
+    mirrored.origin = kOutput.width - x.origin - x.extent;
+    const auto window = PlanSceneRasterWindow(cover, mirrored, y, 1, false);
+    EXPECT_EQ(window.x, static_cast<uint32_t>(-mirrored.origin));
+    // The flipped footprint puts the window's right edge where its texels' mirror image is.
+    const auto [left, width] = RasterWindowFootprint(cover.width, window.x, window.size.width,
+                                                     x.origin, x.extent, true);
+    EXPECT_DOUBLE_EQ(left + width, x.origin + x.extent - window.x);
+}
+
+TEST(RasterWindow, PlannedSizingDrawsTheWindowAndKeepsTheFractions) {
+    Scene scene;
+    InstallAuthoredTargets(scene, 5120, 2160);
+    scene.resolution     = SceneResolution::Display;
+    scene.display_framed = true;
+    auto surface         = Surface(2.0);
+    EXPECT_EQ(ResolveSceneCoverRaster(scene, kOutput, surface).width, 5120u);
+    surface.window = { 3840, 2160 };
+    const auto extents = ResolveScreenBoundRenderTargetSizes(scene, kOutput, surface);
+    EXPECT_EQ(extents.raster.width, 3840u);
+    EXPECT_EQ(extents.source.width, 5120u);
+    EXPECT_EQ(scene.renderTargets[std::string(SpecTex_Default)].width, 3840);
+    EXPECT_EQ(scene.renderTargets["_rt_bloom_mip1"].width, 1920);
+    EXPECT_EQ(scene.renderTargets["_rt_4FrameBuffer"].width, 1280);
+    // Unframed, the same surface draws the whole cover raster.
+    scene.display_framed = false;
+    EXPECT_EQ(ResolveScreenBoundRenderTargetSizes(scene, kOutput, surface).raster.width, 5120u);
+}
+
+TEST(RasterWindow, TheGridIsTheFinestFractionOfTheRasterAScreenTargetIsDrawnAt) {
+    Scene scene;
+    InstallAuthoredTargets(scene, 1920, 1080);
+    const std::string output(SpecTex_Default);
+    scene.renderTargets["_rt_quarter"] = SceneRenderTarget {
+        .width = 1, .height = 1, .bind = { .enable = true, .name = "_rt_bloom_mip1", .scale = 0.5 } };
+    scene.renderTargets["_rt_third"] = SceneRenderTarget {
+        .width = 1, .height = 1, .bind = { .enable = true, .screen = true, .scale = 1.0 / 3.0 } };
+    scene.renderTargets["_rt_mips"] = SceneRenderTarget {
+        .width = 1, .height = 1, .has_mipmap = true, .mipmap_level = 9,
+        .bind = { .enable = true, .name = output } };
+    using Keys = std::vector<std::string>;
+    EXPECT_EQ(ScreenBoundWindowAlignment(scene, Keys { output }), 1u);
+    EXPECT_EQ(ScreenBoundWindowAlignment(scene, Keys { output, "_rt_bloom_mip1" }), 2u);
+    EXPECT_EQ(ScreenBoundWindowAlignment(scene, Keys { output, "_rt_quarter" }), 4u);
+    EXPECT_EQ(ScreenBoundWindowAlignment(scene, Keys { "_rt_quarter", "_rt_third" }), 12u);
+    // An author-sized target is not cut by the window, whatever its size.
+    EXPECT_EQ(ScreenBoundWindowAlignment(scene, Keys { output, "_rt_4FrameBuffer" }), 1u);
+    // A mip chain of the frame would need its smallest level's grid: no window at all.
+    EXPECT_EQ(ScreenBoundWindowAlignment(scene, Keys { output, "_rt_mips" }), 0u);
 }
 
 } // namespace

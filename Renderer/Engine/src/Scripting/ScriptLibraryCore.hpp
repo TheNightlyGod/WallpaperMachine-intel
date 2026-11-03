@@ -156,12 +156,32 @@ engine.on = addListener;
 // ---- timers ---------------------------------------------------------------
 var timers = [];
 var cancelers = new WeakMap();
+// The host leaves out the frame's call of a value program without `update` while no timer is
+// due and no audio buffer is registered, since `evaluate` would only have run those. It is
+// told the earliest due time of the live timers whenever that may have moved earlier, and
+// after every pass that ran or dropped one; a timer cleared in between is still counted.
+var toldDue = Infinity, toldAudio = false;
+function tellHost() {
+  var due = Infinity;
+  for (var i = 0; i < timers.length; ++i) {
+    var timer = timers[i];
+    if (timer.dead) continue;
+    var at = timer.due === timer.due ? timer.due : -Infinity;
+    if (at < due) due = at;
+  }
+  var audio = audioBuffers.length > 0;
+  if (due === toldDue && audio === toldAudio) return;
+  toldDue = due;
+  toldAudio = audio;
+  n.waiting(due, audio);
+}
 function addTimer(fn, delay, repeat) {
   var ms = Number(delay);
   if (!(ms > 0)) ms = 0;
   var seconds = ms / 1000;
   var timer = { fn: fn, due: sceneTime + seconds, period: seconds, repeat: repeat && ms > 0, dead: false };
   timers.push(timer);
+  if (!(timer.due >= toldDue)) tellHost();
   var cancel = function () { timer.dead = true; };
   cancelers.set(cancel, timer);
   return cancel;
@@ -176,11 +196,12 @@ function runTimers() {
   if (count === 0) return;
   var now = sceneTime;
   var failed = false, failure;
-  var anyDead = false;
+  var anyDead = false, anyRan = false;
   for (var i = 0; i < count; ++i) {
     var timer = timers[i];
     if (timer.dead) { anyDead = true; continue; }
     if (timer.due > now) continue;
+    anyRan = true;
     if (timer.repeat) {
       var next = timer.due + timer.period;
       timer.due = next <= now ? now + timer.period : next;
@@ -196,6 +217,7 @@ function runTimers() {
     for (var j = 0; j < timers.length; ++j) if (!timers[j].dead) kept.push(timers[j]);
     timers = kept;
   }
+  if (anyRan || anyDead || timers.length !== count) tellHost();
   if (failed) reportError('timer pass', failure);
 }
 engine.setTimeout = function (fn, delay) { return addTimer(fn, delay, false); };

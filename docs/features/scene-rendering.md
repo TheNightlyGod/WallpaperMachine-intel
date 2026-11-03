@@ -179,6 +179,13 @@ Wallpaper Engine, which registers each script while it parses the object list an
 dispatches `update` down that list (`sub_1401A4DB0`, `sub_140177AD0`). What `init`
 returns is the property's value from then on, as what `update` returns is: a drag
 handle hides itself there, and a typing text starts empty.
+A property script without `update` (an `init` that plays an animation, a click handler)
+costs no call into the script runtime on a tick where no timer is due and no audio
+buffer is registered: that call would only have run those. Its parameters and the
+`engine` values are still refreshed in its place in the order, so a handler, a later
+timer or another script's closure sees what it saw before, and a timer that comes due,
+or one an earlier script sets for now, runs at the same point of the same tick.
+`WALLPAPER_MACHINE_SCRIPT_TICK_SKIP=0` makes every tick call it, for a comparison.
 `engine.isObjectValid(value)` checks a native wrapper's current lifetime. Removed
 layers, their effects and removed animation layers become invalid; hiding a layer
 does not destroy it. Plain objects, vectors and objects inheriting a wrapper do not
@@ -201,6 +208,14 @@ shape removes it and a null index buffer removes that index stream. It prepares 
 replacement before publishing it and is rejected during `update`; use an event
 callback such as `applyUserProperties`. Explicit model bounds can cover animated
 vertices without rescanning them on every upload.
+
+Geometry the CPU rewrites (particles, text glyphs, script-made models) is copied into a
+frame slot's GPU storage only as far as the draw reads it and the slot lacks it. A
+particle system copies the quads it drew this frame, not the most it ever held, and its
+index pattern, which only ever grows, reaches each frame slot once; indices written over
+(a text relayout, `applyData`) are copied whole again. The draw reads the same bytes
+either way. `WALLPAPER_MACHINE_PARTICLE_UPLOAD_DELTA=0` copies everything every frame,
+for a comparison.
 
 WE 2.8.0.42's ModelData object is a token wrapper: `engine.isObjectValid(data)`
 returns false even while its model draws. Its `toConfigString()` returns the numeric
@@ -942,9 +957,8 @@ Outside the clock's own box the picture after either rebuild is the picture of a
 not rebuild, pixel for pixel: the seeks of this wallpaper's clips land while the later videos
 are still opening, so the head of a clip is not seen on it, only the wait.
 
-A video that is opened while the clock is already some way into the clip (a scene that falls
-back to the other renderer, a surface split off a shared decoder with shared decode on) opens
-at the head of the clip, as any open does, and the first call that gives it the clock seeks it
+A video that is opened while the clock is already some way into the clip (a scene that is
+rebuilt after a failure) opens at the head of the clip, as any open does, and the first call that gives it the clock seeks it
 there. The open waits for no seek, so it costs what opening at the head costs. The head of the
 clip is on screen until the seek has landed and the decoder has caught up with the clock, which
 kept running while the seek was made: 0.35 to 0.75 s for a 1080p clip and 0.7 to 1.5 s for a
@@ -954,10 +968,11 @@ length to the draw that opens it (0.3 to 0.6 s on the 1080p clip, 0.5 to 1.1 s o
 1.4 to 1.5 s on the 60 frame one) and fail once it passed the two seconds an open waits for a
 first frame, as the 4K 60 frame clip's did at 9.9 s and at 19.9 s.
 
-A clock that jumps, as when a script sets a time, is one seek to the new time. A jump forward
-leaves the frame the video had on screen until the seek lands; a jump back by more than two
-frames clears it, and the draw that follows waits, for two seconds at most, for the seek's first
-frame. A seek that is on its way is not made again, because that restarts the decode from the
+A clock that jumps, as when a script sets a time, is one seek to the new time. Either way the
+frame the video had stays on screen until the seek lands, and no draw waits for it. A jump back
+by more than two frames (a script restarting its clip) has the seek's first frame replace that
+frame as soon as it is decoded; a draw that waited for it instead held every layer of the scene
+still for as long as the seek took, up to two seconds. A seek that is on its way is not made again, because that restarts the decode from the
 keyframe and drops what it had decoded: asked for on every draw, a seek that takes longer than a
 draw would never land. It is made again only when the clock goes back before its target, or jumps
 on past it by more than a second beyond the time the seek has been made for, a clock that only
@@ -2030,14 +2045,12 @@ The only scene control that ships on. It reuses the result of scene subgraphs wh
 inputs have not changed and removes render passes proven redundant, inside the scene
 renderer's own render graph. It is not a quality tier: the same pixels are
 produced, and resolution, frame rate and animation speed are untouched. It reaches
-wallpapers the scene engine draws — scenes on either renderer, and video wallpapers
-on Compatibility, which the engine draws as a one-texture scene; native video and
-web wallpapers do not go through it. It is on the
+the wallpapers the scene engine draws, which are scenes only: video and web
+wallpapers have players of their own and do not go through it. It is on the
 [Performance page](performance.md#advanced) so it can be turned off and on for an
 A/B comparison without an environment variable.
 
-Unlike [content pacing and shared video decode](performance.md#experimental-switches),
-which are read back from the renderer, its row reports the saved preference: the renderer publishes no query for
+Its row reports the saved preference: the renderer publishes no query for
 it. The engine applies a change to a running scene in place, on that scene's next
 frame in either direction — the copy plan, the targets it governs and the reuse
 table are rebuilt over the graph that is already compiled, without reparsing the
@@ -2045,6 +2058,51 @@ project, reopening a video or resetting a timeline — so nothing restarts and n
 wallpaper reloads. The **In force now** row beneath the switch reports what each
 running scene is actually under, so a preference that has not reached a scene yet is
 visible as such.
+
+A pass that samples a scene video is reusable like any other while the video
+shows the frame the pass drew: which import of the video it samples (a new frame,
+or the same one taken again for a consumer that changed what it reads), and whether
+it reads it through its plane variant, are part of what decides it. A clip slower
+than the frame rate, or a paused one, therefore leaves its chain and everything
+downstream that nothing else moves undrawn on the frames it repeats; a playing video
+still keeps the scene's clock running.
+
+A pass that reads the audio spectrum is reusable in the same way while the spectrum
+arrays its shader binds (`g_AudioSpectrum16Left` to `g_AudioSpectrum64Right`) hold the
+bands it drew: the frame's one spectrum, as its uniforms are given it, is part of what
+decides it, every band of every array it binds and no array it does not bind. Silence
+is a spectrum of zeros, so an audio visualizer and everything downstream that nothing
+else moves stays undrawn while nothing plays (or audio response is off), and so does a
+spectrum that repeats; any band changing redraws it on that frame. A frame drawn before
+the host's first frame, when two reads may see two analyses, redraws it. An
+audio-reactive shader still keeps the scene's clock running. A material slot the shader
+never samples was already left empty when the scene was parsed, so an effect that
+declares the layer's picture and draws without it (a visualizer built from the spectrum
+alone) does not depend on the buffer named there either. Being reusable, such a pass keeps
+its buffer to itself instead of sharing it with other targets, inside the same reuse memory
+budget as any other reused pass (on 3784370784, two 768x768 buffers, about 2.4 MB); while
+music plays it is redrawn on most frames all the same.
+
+A layer's own picture and its effects up to the last are drawn into the layer's own
+buffers, through a camera local to the layer, so where the layer sits and where the
+scene camera looks reach them only through the uniforms that say so: the effect
+matrices (`g_EffectModelViewProjectionMatrix` and its kind), the eye and view axes,
+lights, puppet bones and the cursor. Such a pass is reused while the layer moves (an
+animated parent, a bone it is attached to, a script) or the camera shakes, unless its
+shader reads one of those uniforms. What it reads is what the shader compiler proved
+can reach the picture, not what it declares: Wallpaper Engine's image shader computes
+a view direction from `g_EyePosition` in every variant but uses it only when lit. The
+last pass, which puts the layer on the scene, follows the layer and the camera and is
+drawn again either way, and so is a composition layer's first pass, which reads the
+screen behind the layer. The reused buffers hold the same pixels, but the frame is not
+always byte for byte the same: in a scene whose objects are drawn in their own order (a
+layer reads another layer's picture, sorted transparency) a layer's buffers sit between
+two draws into the scene's image, and leaving them out lets those draws share one render
+pass that drawing them splits in two. An Apple GPU can then blend a later draw one level
+apart in a texel: an M5 Pro did in two pixels of a few frames of 3808922316 at
+3456x2234@2, where the reuse leaves out 17 passes a frame (about 8 % of its GPU time).
+That difference is accepted for the saving; `WALLPAPER_MACHINE_LAYER_LOCAL_SIGNATURES=0`
+draws such passes again whenever the layer or the camera moves, for comparison.
 
 Reuse needs a target that is both cacheable and holding a pinned allocation,
 because the render-target pool may otherwise hand that image to another key.
@@ -2064,7 +2122,36 @@ size their render targets from one shared function
 follows the screen come from the raster, a target the author sized keeps scaling
 with the render scale alone, and the canvas stays the source extent of layout,
 cursor mapping and scripts. SDR uses the Fill layout of the canvas over the
-output in whole points, at the display's backing scale. Native HDR Display output
+output in whole points, at the display's backing scale, and draws that whole
+canvas-cover raster. With the experimental SDR display framing on
+([**Draw only the visible part of cropped scenes**](performance.md#draw-only-the-visible-part-of-cropped-scenes),
+`scene_display_framing`; off by default), an SDR scene draws only the window of that
+raster the composition reads (`SceneRasterWindow`): the
+bilinear pairs under the output's pixels, rounded out to whole texels of the cover
+raster and to the grid of every screen-sized target the graph names at a fraction
+of it (a quarter-size buffer needs a window cut at multiples of 4). The window is
+drawn at the cover raster's pitch and phase and the composition lays it where its
+texels sit in that raster, so the visible picture is the whole raster's except
+within a screen-space effect's reach of the window's edge, which then clamps there
+as Wallpaper Engine's window-sized frame does. It is not byte-identical: the GPU
+does not rasterize a translated projection to the same sub-pixel positions, which
+leaves single-level differences on a fraction of a percent of pixels at content
+edges in some frames, and more on thin geometry. A cover raster that is not a multiple
+of that grid, a mip-mapped screen-sized target, a capped raster, a zoom below 1, Fit,
+Stretch, original size showing the whole canvas, Fit with blurred backdrop and a scene
+MetalFX upscales (render scale below 1 with MetalFX upscaling on: it would upscale the
+window on another grid and its filter reads across the window's edge) draw the whole
+cover raster. The window is sized for a
+zoom of 1, so the Zoom slider moves it without a resize; the first move of the
+picture off the centre sizes it once with room for any position, and a layout it no
+longer holds, the switch turned on or off, or MetalFX taking or leaving the upscale
+sizes the targets again before the next draw (`ResizeRenderTargets` semantics, no
+graph rebuild); a poster is not composed from a window the layout no longer holds.
+With the switch off a draw only reads the switch (the compile still notes the
+window's grid), and the frames are byte-identical to those of a build without the
+window (`perf_bench.py identity`).
+`WALLPAPER_MACHINE_SDR_FRAMING=1` or `=0` overrides the setting either way, read once
+at launch. Native HDR Display output
 uses the physical output rectangle: placement and clipping happen before bloom,
 so its edge samples see the same boundary as Wallpaper Engine. Fit with blurred
 backdrop keeps the full canvas-cover raster that the backdrop samples. Canvas size
@@ -2074,10 +2161,13 @@ perspective scene and a plain video do not read this resolution choice.
 The HDR placement uses a lazily cached shader projection for each camera that needs
 one; script coordinates and cursor queries keep the authored camera. Local effect
 buffers stay local, while scene-sampling matrices and their inverses use the framed
-projection. Pass-through layers also update their baked scene UVs when placement
-changes: moving cards use their existing geometry upload, fixed cards request the
-existing graph rebuild. These updates run at layout events; idle frames add no card
-scan or relayout. Crossing into or out of Fit with blurred backdrop rebuilds the
+projection. Pass-through layers whose shader samples the screen at their texture
+coordinates also update those baked scene UVs when placement changes: moving cards
+use their existing geometry upload, fixed cards request the existing graph rebuild.
+A compose layer's card (`composelayer`, such as a project layer over the whole
+canvas) finds the screen position it samples through the framed projection, and its
+texture coordinates only place it in its own buffer, so they are left as they are.
+These updates run at layout events; idle frames add no card scan or relayout. Crossing into or out of Fit with blurred backdrop rebuilds the
 raster before the next draw. The change adds no rendering pass or target and usually
 reduces the HDR framebuffer area compared with the canvas-cover raster.
 
@@ -2095,20 +2185,16 @@ bloom scene pays more than one with author-sized buffers, is under
 
 With scene render optimisation on, a frame that would put back exactly the picture
 already on screen is not drawn, submitted or presented, and the surface keeps
-showing the last frame. Two cases qualify:
-
-- a Compatibility video wallpaper whose playback clock selected the same decoded
-  frame as the last present, which is most ticks of a 24 or 30 fps clip under a 60
-  or 120 fps limit;
-- a scene, on either renderer, whose every pass was reused from the previous frame,
-  leaving only the final composition to redo.
+showing the last frame. That is a scene whose every pass was reused from the
+previous frame or drew nothing, with nothing else to encode, leaving only the final
+composition to redo. A frame that imports a video frame never qualifies; one whose
+videos all show the frame they showed before (a 24 or 30 fps clip on a 60 Hz clock,
+a paused video) can, since the passes that sample them are reused too.
 
 The frame clock still ticks at the configured rate, and the scene still runs its
 scripts, timeline, sound and events on every tick; only drawing an identical
-picture is left out. A newly decoded video frame is presented on the tick that
-selects it, so this is neither content pacing (an
-[experimental switch](performance.md#experimental-switches)) nor updating only when
-the scene changes, and no drawable is held to keep the picture. A resize, fill, scaling,
+picture is left out. This is not updating only when the scene changes, and no
+drawable is held to keep the picture. A resize, fill, scaling,
 position or flip change, a render-scale or scene-optimisation change, a rebuilt graph or
 surface, a resumed wallpaper, a failed frame or a poster request makes the next
 frame present. The renderer counters report these frames as
@@ -2160,6 +2246,36 @@ short, but only as far as the ceiling. A request is never discarded to enforce a
 of that: it stays outstanding until a draw consumes it, so a tick dropped because a
 draw was still in flight loses the tick and not the update, and the end of that draw
 re-arms the clock — one wake at that edge, not a retry per frame period.
+
+The frame period is the configured rate's to the nanosecond, rounded up so the clock never
+runs faster than asked (16 666 667 ns at 60), and never shorter than the period of the
+display the scene is on, read from the display's current mode. A 59.94 Hz display is a 60 Hz
+one wherever a whole number of hertz is wanted, including its rate ceiling, so frames at 60 a
+second would outrun it; they come at its own 59.94. Whole microseconds (16 666 µs) made 60.0024
+frames a second, one more than a 60 Hz display shows every seven minutes. Either way the
+drawable queue ahead of the display then filled and stayed full, adding two frames of latency
+and a wait for a drawable to every frame (`FrameTimerTest.TheCadenceIsTheExactPeriodOfTheRequiredFps`,
+`.TheCadenceNeverOutrunsTheDisplay`).
+
+A frame rate below the display's reaches it an even number of refreshes apart. The frame clock
+is not driven by the display, so a 60 fps cadence on a 120 Hz panel can sit within a
+millisecond or two of a refresh boundary for minutes, and the render time's jitter then shows
+neighbouring frames one and three refreshes apart instead of two and two: a stutter on slow
+pans, parallax and drifting particles. When the frame period spans two or more refreshes,
+Native Metal presents each frame with `presentDrawable:afterMinimumDuration:` and a hold of
+those whole refreshes less a quarter refresh (14.58 ms at 60 on 120 Hz): the frame shows no
+sooner than the refresh the cadence aims at, on a fixed-rate panel and on a ProMotion one, which
+can also refresh at the half-steps between. A frame that is late still shows at the next
+refresh, and the frames after it are held from it, so one late frame costs one longer gap
+instead of a run of uneven ones. The hold counts whole refreshes rounding down, so frames never
+reach the display more slowly than the clock makes them: a ceiling at or above the display's
+rate (one refresh or less), a display of unknown or variable rate, and a frame period just
+short of two refreshes (30 fps on 59.94 Hz) present at the next refresh as before. The pixels of
+every frame are the same either way; what changes is when a frame is shown, and a frame that
+would have been shown a refresh early is shown a refresh later, which can add up to one refresh
+of latency to a pointer-reactive scene. Content pacing and events do not lengthen the hold: it
+follows the ceiling. `WALLPAPER_MACHINE_VSYNC_PACING=0` presents every frame at the next refresh
+(`PresentPacingTest.*`, `MetalSceneDraw.APresentHoldsTheFrameOnlyWhilePacing`).
 
 Both renderers implement this. The status line reports what each running scene is
 doing right now — updating continuously and why, waiting for events, paused by you,
@@ -2350,7 +2466,22 @@ gets its own, and so does a display that keeps a different mip range (above). Th
 cache holds the textures weakly: a picture is freed when the last display showing it
 unloads. Confirming a match reads the shared texture back once while the scene
 loads; nothing is added per frame. Render targets, pictures a script writes and
-video frames stay per display, and the Compatibility backend does not share.
+video frames stay per display.
+
+A picture is written into its texture by the CPU, in a layout the GPU reads uncompressed;
+on Apple GPUs only a texture laid out by the GPU itself is losslessly compressed. So every
+newly uploaded plain 2D picture (not a block-compressed one, which is compressed already, and
+not one a script rewrites) is rearranged for sampling once, by one blit queued ahead of the
+first frame that samples it (`optimizeContentsForGPUAccess`). The values sampled do not
+change, and a display that compares its own bytes with the texture (above) waits for the
+blit and reads back the bytes written. Sampling an illustrated 4068x1979 layer at three
+quarters of its size took 0.042 instead of 0.125 ms of GPU time on an M5 Pro, a picture of
+random noise, which does not compress, the same either way; a scene loading 65 pictures
+costs 65 such blits once, and nothing per frame. `WALLPAPER_MACHINE_OPTIMIZE_IMAGES=0`
+leaves pictures as written, for an A/B ([power benchmarking](../testing/power-benchmark.md#ab-comparison-entry-points));
+`MetalImageLevels.ANewUploadIsOptimizedForSamplingOnceAndStillComparesEqual`,
+`.OnlyAPlainPictureUploadedWithAQueueAndTheSwitchOnIsOptimized` and
+`SharedPictures.AnOptimizedPictureDrawsTheSameBytesAsOneLeftAsWritten` cover it.
 
 An authored `hdr` scene with bloom on selects the HDR path on either scene backend
 when post-processing is Ultra or Display HDR: overbright color is preserved in
@@ -2501,6 +2632,55 @@ render scale, animation speed or audio-response subscription:
   seconds instead of walking its directory for every property or playback update;
   explicit settings-snapshot requests and cache clearing force a fresh
   measurement. This affects storage statistics only.
+- On Native Metal, a render pass opened by a draw that provably writes every texel of
+  its target clears the target instead of loading it from memory. Effect passes
+  alternate between two buffers, so every effect but a layer's first and last (and
+  a multi-pass effect writing its own buffer again) used to read its whole buffer
+  back before drawing over all of it. The proof is
+  general: the shader compiler reports that the fragment shader never discards and
+  that the vertex position is the mesh's own position, as given or through one
+  matrix uniform; the draw's two triangles, through this frame's matrix, must cover
+  the whole target with a quarter-texel margin, with nothing culled or depth-tested,
+  every channel written and blending that replaces the texel (an 8-bit target when it
+  is `One`/`Zero` rather than off). A traded copy's reader that passes the same test
+  also skips the copy it opened with. Anything unproven keeps its load, and the clear
+  is to transparent black, so the picture is the same byte for byte. Depth and
+  multisampled colour attachments are no longer stored after the last render pass of
+  the frame that uses them (each frame's first one clears them). The switches are in
+  [power benchmarking](../testing/power-benchmark.md#ab-comparison-entry-points).
+- On Native Metal, a copy whose source is afterwards only read until it is drawn
+  afresh is no longer made: the two images trade names once the source's last reader
+  is encoded. That is a motion blur's copy of its accumulation into its history every
+  frame, and bloom's and the colour options' result copied back into the scene's
+  image, each a full-size blit per frame (14 of them, 17 MB written, in a scene with 14
+  blurred layers at 4K and render scale 0.75). The source then holds a stale image
+  until its next writer replaces it: later in the frame (a load that cannot be proven
+  to overwrite opens with the copy, as a traded feedback copy's reader does), or as the
+  next frame's first pass on it. When that pass may leave the image alone (a hidden
+  layer), the image is copied back from the copy's name first, so the picture is the
+  same byte for byte; a sorted scene keeps its copies.
+- On Native Metal, a draw that leaves its image exactly as it was is left out. Wallpaper
+  Engine's common intro is a black screen that fades out and then sits at alpha 0 for
+  the rest of the run, and it was drawn over the whole screen every frame. The shader
+  compiler proves which channels of a shader's colour are a product of uniforms and
+  constants (a solid layer's `vec4(g_Color, g_Alpha)`); a frame whose values make the
+  alpha 0 and every factor finite, under a blend that keeps the destination there
+  (source over or additive, not a replace or a multiply), into an 8-bit linear image,
+  with no depth written and one sample, changes no texel, so its draw is not made.
+  Anything unproven is drawn, and the frame the alpha is no longer 0 draws it again.
+- On Native Metal, as on Compatibility, a clear only hidden passes would read is left
+  out. A layer a script hides stays in the graph, and its effect buffers were still
+  cleared every frame, each in a render pass of its own, and the copy a hidden lens
+  reads was still made. A clear (or a copy made for draws after it alone) is left out
+  while none of the passes that read what it leaves draws this frame, up to the next
+  pass that clears the image again; the next frame's passes ahead of it may read none
+  of it, whatever they draw then. A copy nothing samples at all stays the copy plan's to
+  remove, so with scene optimisation off it is still made. Images another name holds,
+  trades or pins, the scene output, depth, multisampled and mip-mapped images are left
+  alone, and a sorted scene keeps them. An image a left-out clear left as it was is given that clear's colour
+  before another plan or graph takes it over, so the frame a layer is shown again, and
+  the first frame of a new graph, are the same byte for byte. Both switches are in
+  [power benchmarking](../testing/power-benchmark.md#ab-comparison-entry-points).
 
 The contracts and tests behind each item are in
 [renderer verification](../testing/runtime-regressions.md#continuous-playback-work-contracts).

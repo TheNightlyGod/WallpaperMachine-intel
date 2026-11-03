@@ -5,6 +5,7 @@
 
 #include <array>
 #include <functional>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -37,6 +38,22 @@ inline constexpr uint32_t kBones    = 1u << 4;
 inline constexpr uint32_t kAudio    = 1u << 5;
 inline constexpr uint32_t kAll      = 0x3Fu;
 } // namespace frame_varying_uniform
+
+/// What of the scene's moving state reaches a draw's uniforms besides its material, its inputs and
+/// the camera it is drawn through: what a static-reuse sample of the draw has to fold. The
+/// default is everything a sample folds today, so an updater that cannot tell never makes a draw
+/// look reusable by omission.
+struct DrawTransformInputs {
+    /// The drawn node's world transform, and the transform it is drawn at.
+    bool node_transform { true };
+    /// The scene's active camera.
+    bool active_camera { true };
+    /// Another node whose world transform and draw offset reach the uniforms (the layer of an
+    /// effect pass that reads the layer's matrices), or null.
+    SceneNode* owner { nullptr };
+
+    bool operator==(const DrawTransformInputs&) const = default;
+};
 
 class IShaderValueUpdater : NoCopy, NoMove {
 public:
@@ -84,6 +101,21 @@ public:
         (void)camera_override;
         return frame_varying_uniform::kAll;
     }
+    /// Which of the node's world transform, another node's and the scene's active camera the
+    /// uniforms of this draw are derived from, drawn through `camera_override` (or the node's own
+    /// camera) by a program that reads exactly the uniforms `reads` accepts.
+    ///
+    /// The default is all of the first two, which is what every sample folded before this was
+    /// asked.
+    virtual DrawTransformInputs TransformInputs(SceneNode* node, uint32_t material_slot,
+                                                const std::string& camera_override,
+                                                const ExistsUniformOp& reads) const {
+        (void)node;
+        (void)material_slot;
+        (void)camera_override;
+        (void)reads;
+        return {};
+    }
     /// The scene's lights as this node's material reads them, hashed, or 0
     /// when it reads no light uniform. Lights move, fade and switch on and off
     /// without a graph edit or a material change, so a pass that lights itself
@@ -101,6 +133,18 @@ public:
         (void)material_slot;
         (void)camera_override;
         return 0;
+    }
+    /// The audio spectrum this frame's uniforms give this node's material, hashed: every
+    /// `g_AudioSpectrum*` array it binds, as `UpdateUniforms` writes them, and 0 when it binds
+    /// none. Silence is a spectrum of zeros, so it hashes the same on every frame.
+    ///
+    /// `std::nullopt` when the updater cannot say which spectrum the uniforms carry -- the
+    /// default, and a frame whose spectrum is not fixed yet -- so a pass that folds this into
+    /// its static sample is redrawn instead of reused by omission.
+    virtual std::optional<uint64_t> AudioStateHash(SceneNode* node, uint32_t material_slot) const {
+        (void)node;
+        (void)material_slot;
+        return std::nullopt;
     }
     /// Drops what was recorded for a node that is about to be freed, so a
     /// later node allocated at the same address starts from nothing.

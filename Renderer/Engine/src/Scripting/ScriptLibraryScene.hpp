@@ -1157,6 +1157,7 @@ engine.registerAudioBuffers = function (resolution) {
                  average: new Float32Array(size) };
   audioBuffers.push(buffer);
   audioUpToDate = -1;
+  tellHost();
   return { left: buffer.left, right: buffer.right, average: buffer.average };
 };
 function refreshAudio() {
@@ -1179,6 +1180,7 @@ function refreshAudio() {
     }
   }
   audioUpToDate = generation;
+  if (audioBuffers.length === 0) tellHost();
 }
 
 // ---- user shortcuts -------------------------------------------------------

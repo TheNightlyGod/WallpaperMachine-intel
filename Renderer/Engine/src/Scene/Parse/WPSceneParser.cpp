@@ -394,6 +394,10 @@ struct PassthroughCardShape {
     float canvas_width { 1.0f };
     float canvas_height { 1.0f };
     bool  clip_space { false };
+    /// The card's shader finds the screen position it samples through the projection
+    /// (`composelayer`, see `SamplesScreenBackground`) rather than at its texture coordinates,
+    /// which then only place the card in its own buffer.
+    bool  screen_through_projection { false };
 };
 
 namespace { struct LazyParseInputs; }
@@ -750,7 +754,10 @@ void LayOutPassthroughCard(SceneMesh& mesh, const PassthroughCardShape& shape, c
     std::array<float, 12> positions {};
     std::array<float, 8>  uvs {};
     PassthroughCardVertices(shape, world, positions, uvs);
-    if (scene.display_framed) {
+    // A card that samples the screen at its texture coordinates samples the framed raster, so
+    // they follow the framing. One that finds its screen position through the projection
+    // already gets the framed projection; its coordinates place it in its own buffer.
+    if (scene.display_framed && ! shape.screen_through_projection) {
         const auto& clip = scene.display_clip;
         for (std::size_t corner = 0; corner < 4; ++corner) {
             uvs[corner*2] = clip[0]*uvs[corner*2] + (1.0-clip[0]+clip[2])*0.5;
@@ -4191,6 +4198,7 @@ bool LoadImageEntry(ParseContext& context, std::size_t at, const nlohmann::json&
         shape.canvas_width  = static_cast<float>(std::max(1, context.ortho_w));
         shape.canvas_height = static_cast<float>(std::max(1, context.ortho_h));
         shape.clip_space    = image.material.shader == "passthrough";
+        shape.screen_through_projection = image.material.shader == "composelayer";
         // A card that something in the scene can move is rewritten in place by an event; any
         // other is fixed, and rewritten (with the graph built again) only if it moves anyway.
         mesh = MakePassthroughMesh(shape, local,

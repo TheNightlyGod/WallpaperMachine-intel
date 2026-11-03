@@ -214,7 +214,8 @@ source of the notes: write them for the reader
 The instructions also carry the project's rules on claims, because CI commits the
 notes without review: no energy, battery or power-saving claims, nothing called
 fully supported or fully compatible, and opt-in features (direct video plane sampling,
-on-demand scene idle, the animated lock screen) keep their optional, experimental
+on-demand scene idle, drawing only the visible part of cropped scenes, the animated lock
+screen) keep their optional, experimental
 or off-by-default qualifier in every language; Native Metal is the default
 renderer and native video is the default video player, and neither is ever called
 optional. The model groups many commits about

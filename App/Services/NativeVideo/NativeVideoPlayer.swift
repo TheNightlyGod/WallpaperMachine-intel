@@ -98,6 +98,25 @@ final class NativeVideoPlayer {
     /// The project's `schemecolor`, shown around the picture in Fit-style modes (I2).
     private var borderColor: CGColor?
     private weak var container: NSView?
+    /// Whether the clip can be heard: not muted and above zero volume. A clip
+    /// that cannot be heard has its audio track switched off, so its sound is
+    /// neither decoded nor sent to an output (`SilentVideoAudio`).
+    private var audible = true
+    private let releasesSilentAudio: Bool
+    /// The file's one audio track its container marks enabled: the track the
+    /// platform plays when the clip is heard, and the one switched off while it
+    /// is not. `nil` when the file has no such track or several the platform
+    /// chooses between; that clip keeps its sound running muted, as before.
+    private var silenceableAudioTrack: CMPersistentTrackID?
+    /// The `tracks` observation of each copy of the item the looper plays: a
+    /// copy's tracks exist only once it has loaded, and its audio track has to
+    /// be set before the platform prepares the copy to play. Emptied with the looper.
+    private var copyObservations: [ObjectIdentifier: NSKeyValueObservation] = [:]
+    /// The copies whose audio track this player switched off. Until a copy is
+    /// switched off, the platform's own choice of its tracks stands, so a clip
+    /// that is always heard plays exactly as it did; becoming audible switches
+    /// back on only these.
+    private var silencedCopies: Set<ObjectIdentifier> = []
     /// Reported when the clip keeps playing without its audio, with the
     /// failure that caused it, so the host can log it against its load.
     var onAudioDropped: (@MainActor (String) -> Void)?
@@ -136,10 +155,12 @@ final class NativeVideoPlayer {
         sleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
         configureComposition: @escaping @MainActor (VideoColorPipeline, AVPlayerItem) async throws -> Void = {
             try await $0.configure($1)
-        }
+        },
+        releasesSilentAudio: Bool = SilentVideoAudio.isReleased
     ) {
         self.surface = surface
         self.counters = counters
+        self.releasesSilentAudio = releasesSilentAudio
         self.userPaused = paused
         self.recovery = NativeVideoRecoveryBudget(policy: recovery)
         self.now = now
@@ -298,14 +319,29 @@ final class NativeVideoPlayer {
         let item = AVPlayerItem(url: url)
         // Held as the pending rebuild so a repair cannot start an item of its
         // own before this one is playing, and `stop()` cancels it.
+        let releasesSilentAudio = self.releasesSilentAudio
         rebuild = Task { @MainActor [weak self] in
             let range = await Self.loopRange(of: item.asset)
+            // Every rebuild reopens this same file, so its tracks are read once.
+            let audioTrack = releasesSilentAudio ? await Self.silenceableAudioTrack(of: item.asset) : nil
             guard let self, !self.stopped, !Task.isCancelled else { return }
+            self.silenceableAudioTrack = audioTrack
             guard await self.attachComposition(to: item) else { self.rebuild = nil; return }
             guard !self.stopped, !Task.isCancelled else { return }
             self.rebuild = nil
             self.start(item, looping: range)
         }
+    }
+
+    /// The file's only audio track that its container marks enabled, or `nil`
+    /// when it has none or several. One such track is the one the platform
+    /// plays, so switching it back on restores exactly what it chose; between
+    /// several, its choice is not known here, and that clip is left alone.
+    nonisolated static func silenceableAudioTrack(of asset: AVAsset) async -> CMPersistentTrackID? {
+        guard let tracks = try? await asset.loadTracks(withMediaType: .audio) else { return nil }
+        var enabled: [CMPersistentTrackID] = []
+        for track in tracks where (try? await track.load(.isEnabled)) == true { enabled.append(track.trackID) }
+        return enabled.count == 1 ? enabled[0] : nil
     }
 
     /// The stretch of the file one pass of the loop plays: the video track's
@@ -332,6 +368,7 @@ final class NativeVideoPlayer {
         self.looper = looper
         counters.record(.nativeVideoItemCreated, for: surface)
         observeFailures(looper: looper)
+        followLoopCopies()
         applyPlaybackState()
     }
 
@@ -349,6 +386,8 @@ final class NativeVideoPlayer {
         // the check that is replacing it.
         if cancellingCheck { supervisor.cancel() }
         detachLivenessOutput()
+        copyObservations.removeAll()
+        silencedCopies.removeAll()
         // The looper holds the queue; disabling it first stops it re-filling
         // the queue while the items are being removed.
         looper.disableLooping()
@@ -404,6 +443,9 @@ final class NativeVideoPlayer {
         // The copy the check's output sits on has left the screen, so taking
         // the output off it no longer disturbs the picture.
         if let livenessItem, livenessItem !== item { detachLivenessOutput() }
+        // The looper can finish making its copies after `start`; the first one
+        // it queues is seen here.
+        followLoopCopies()
         guard let item else {
             currentItemObservation = nil
             sizeObservation = nil
@@ -633,10 +675,72 @@ final class NativeVideoPlayer {
         applyPlacement()
     }
 
+    /// The volume and mute. A clip that cannot be heard (muted, or at zero
+    /// volume) has its audio track switched off on every copy the looper
+    /// plays, so nothing decodes its sound and no audio output runs for it:
+    /// muting the player alone still starts the audio output. The item is not
+    /// rebuilt either way, and the picture is not touched.
     func setVolume(_ volume: Float, muted: Bool) {
         player.volume = max(0, min(volume, 1))
         player.isMuted = muted
+        let audible = !muted && volume > 0
+        guard audible != self.audible else { return }
+        self.audible = audible
+        followLoopCopies()
+        for item in looper?.loopingPlayerItems ?? [] { applyAudibility(to: item) }
     }
+
+    /// Follows every copy the looper has made that is not followed yet,
+    /// setting its audio track at once and again whenever its tracks load.
+    private func followLoopCopies() {
+        // A clip already playing without its audio has none to switch off.
+        guard releasesSilentAudio, !stopped, !audioDropped, silenceableAudioTrack != nil, let looper else { return }
+        // A copy the looper no longer holds is forgotten, so a new copy at a reused address
+        // is followed afresh rather than taken for one already switched off.
+        let current = Set(looper.loopingPlayerItems.map(ObjectIdentifier.init))
+        for key in copyObservations.keys where !current.contains(key) {
+            copyObservations.removeValue(forKey: key)?.invalidate()
+            silencedCopies.remove(key)
+        }
+        for item in looper.loopingPlayerItems where copyObservations[ObjectIdentifier(item)] == nil {
+            copyObservations[ObjectIdentifier(item)] = item.observe(\.tracks, options: [.new]) {
+                [weak self] item, _ in
+                if Thread.isMainThread {
+                    MainActor.assumeIsolated { self?.applyAudibility(to: item) }
+                } else {
+                    DispatchQueue.main.async { MainActor.assumeIsolated { self?.applyAudibility(to: item) } }
+                }
+            }
+            applyAudibility(to: item)
+        }
+    }
+
+    /// Sets a copy's audio track for whether the clip can be heard. It is
+    /// switched off explicitly even while it reads as off: the platform chooses
+    /// a copy's tracks only when it prepares it, and then turns on, and starts
+    /// the audio output for, every track nobody switched off.
+    private func applyAudibility(to item: AVPlayerItem) {
+        let key = ObjectIdentifier(item)
+        guard !stopped, let trackID = silenceableAudioTrack, copyObservations[key] != nil else { return }
+        // A copy that was never switched off keeps the platform's own choice.
+        if audible && !silencedCopies.contains(key) { return }
+        for track in item.tracks {
+            // The media type too: a composition numbers its own tracks.
+            guard let asset = track.assetTrack, asset.trackID == trackID, asset.mediaType == .audio else { continue }
+            track.isEnabled = audible
+        }
+        if audible { silencedCopies.remove(key) } else { silencedCopies.insert(key) }
+    }
+
+    /// Whether the audio track of each queued copy is switched on, in queue
+    /// order; a copy whose tracks have not loaded yet reports none.
+    var queuedAudioTracksEnabledForTest: [[Bool]] {
+        player.items().map { item in
+            item.tracks.filter { $0.assetTrack?.mediaType == .audio }.map(\.isEnabled)
+        }
+    }
+    /// How many copies of the item the looper keeps and recycles.
+    var loopCopyCountForTest: Int { looper?.loopingPlayerItems.count ?? 0 }
 
     /// The user's own pause. Independent of presentation suspension: a display
     /// becoming visible again must not start a wallpaper the user paused.

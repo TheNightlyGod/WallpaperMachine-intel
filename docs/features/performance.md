@@ -130,8 +130,12 @@ background by `WallpaperEnergyRecorder` and kept by `WallpaperEnergyRatings` (bo
 in `App/Services/Diagnostics/WallpaperEnergyRatings.swift`), owned by the app
 delegate and reachable from the panel as `BridgeStore.wallpaperEnergyRatings`:
 
-- **When a sample is credited.** Every 30 seconds the recorder asks the app
-  delegate for a `WallpaperEnergyContext`. There is none, and no sample is taken,
+- **When a sample is credited.** Every 30 seconds (a tick may come up to 5 s late,
+  so the system can share the wakeup) the recorder asks the app delegate for a
+  `WallpaperEnergyContext`. While presentation is suspended or unloaded the app
+  delegate parks it (`setParked`): no tick runs at all, so a locked Mac or sleeping
+  displays get no wakeup from it, and the first interval after the resume starts a
+  full interval later. There is none, and no sample is taken,
   unless presentation is running and playback is playing (no display sleep, lock,
   app rule, other-audio, Focus-filter or battery pause, and no Low Power Mode, heat or
   low-battery pause or stop: choosing Reduced quality for those three keeps the
@@ -153,9 +157,15 @@ delegate and reachable from the panel as `BridgeStore.wallpaperEnergyRatings`:
   playback.
 - **Conditions.** The context records the displays showing it, the frame-rate
   ceiling in force (the reduced-quality one included, whichever reason holds it,
-  read from the engine's `effectiveFrameRateCap`) and the effective render scale. A
-  measurement under other conditions replaces the rating rather than being averaged
-  in, so the line always names the settings it describes. A Mac that moves in and
+  read from the engine's `effectiveFrameRateCap`) and the effective render scale,
+  and for a scene (or a wallpaper of unknown kind) the scene settings that change
+  what drawing it costs (`WallpaperEnergySceneSettings`): the 2D scene resolution
+  (display or canvas), the saved scene quality (MSAA, shadows, volumetrics,
+  reflections and post-processing, levels the renderer does not draw yet included)
+  and MetalFX upscaling. A video or web page leaves them out, since they change
+  nothing it draws. A measurement under other conditions replaces the rating rather
+  than being averaged in, so the line always names the settings it describes; the
+  line itself names only the displays, frame rate and render scale. A Mac that moves in and
   out of Reduced quality therefore replaces a wallpaper's rating each time, as
   unplugging does.
 - **Averaging.** Intervals combine as a time-weighted mean. History is weighted as
@@ -169,10 +179,13 @@ delegate and reachable from the panel as `BridgeStore.wallpaperEnergyRatings`:
 - **Storage.** `<support>/EnergyRatings.json`, keyed by wallpaper id. It is saved
   when a rating first appears or changes grade, at most every ten minutes
   otherwise, and on quit. An unreadable file is logged and starts empty. Each
-  rating carries `version` (`WallpaperEnergyRating.currentVersion`); one from
-  another version is replaced by the next measurement, not averaged with it.
-  Ratings saved without a version may have credited native video playback, so a
-  video wallpaper's is not shown.
+  rating carries `version` (`WallpaperEnergyRating.currentVersion`, 3); one from
+  another version is still read and shown, and is replaced by the next measurement,
+  not averaged with it. Ratings saved without a version (1) may have credited native
+  video playback, so a video wallpaper's is not shown. Versions 1 and 2 left the
+  scene settings out of the conditions, so a scene's rating may average measurements
+  taken at different scene resolutions, qualities and upscaling; telemetry sends only
+  ratings of the current version.
 - **Cost.** One coalition sample (about 3 ms of kernel calls) every 30 seconds while
   a single wallpaper plays; only a state check otherwise.
 - **What it is not.** The figure includes everything in the app's coalition at the
@@ -300,8 +313,10 @@ canvas, drawn with an orthographic camera.
   display: the Fill layout's scale times the display's backing scale, which is what
   Wallpaper Engine does. The 1920×1080 canvas of a scene on a 3456×2234 panel is drawn
   into a 3972×2234 image (Fill crops the part that overhangs the panel, but it is
-  rasterized) instead of 1920×1080 stretched to that size at the last step, so edges
-  and grain keep the panel's own pixels. Text layout and atlas sizes stay in canvas
+  rasterized unless the experimental [**Draw only the visible part of cropped
+  scenes**](#draw-only-the-visible-part-of-cropped-scenes) is on) instead of 1920×1080
+  stretched to that size at the last step, so edges and grain keep the panel's own
+  pixels. Text layout and atlas sizes stay in canvas
   units, while glyph shaders draw at the target resolution. Coverage atlases gain
   no source detail; MSDF edges are evaluated at that resolution. At the Low and
   Medium presets the render scale then applies to that size (50% is half of it in
@@ -427,6 +442,9 @@ scene's cost follows its frame rate, and so does WindowServer's compositing shar
 rate is one choice away: the per-display slider still goes up to the display's
 refresh. Web wallpapers draw near 60 fps below that refresh and at the full
 refresh once the rate reaches it ([frame rate](web-wallpapers.md#runtime-shape)).
+A scene at 60 on a 120 Hz display shows each frame two refreshes after the last
+rather than one or three when its frames are ready near a refresh boundary
+([scene rendering](scene-rendering.md#update-only-when-the-scene-changes)).
 
 The wallpaper config stores the rate as `frame_rate` in each `monitors` entry, and
 a mirror display stores it as `frame_rate` in its `[[monitor_settings]]` table. The
@@ -840,6 +858,15 @@ is, at that display's own volume. The others play silently, so the sound is neve
 and a covered source hands the sound to a mirror still in sight. The same clip chosen for two
 independent displays is two wallpapers, and both are heard.
 
+A plain video that cannot be heard does not decode its sound at all ([below](#background-work-only-while-it-has-a-consumer)):
+one that is muted or at volume 0, muted by **Mute all wallpapers** or a rule (another app in front,
+other-app sound, Focus), or a mirror member that does not carry its group's sound. The
+AVFoundation player switches the clip's audio track off on every copy of the item the loop
+plays, before the platform prepares it; the WebM player stops feeding its audio renderer and takes
+it off the clock. Being heard again switches the same track back on, or feeds the WebM sound from
+where the clock is, without reopening the clip. A clip with several audio tracks the file marks
+enabled keeps its sound running muted, because which of them the platform plays is its own choice.
+
 Applying a video checks that its entry is a readable, nonempty file. A file that is
 missing or empty fails with the usual error. It also checks that the format can be played,
 on both **Apply** and **Apply changes** (and on Reapply), before any display changes. A
@@ -880,7 +907,8 @@ file the reader goes back to the first key frame and its times rise by one durat
 the clock runs on with no flush; the sound wraps the same way and is cut where the picture
 wraps. A single-frame file is shown and held. Opus, Vorbis, AAC and MP3 are played (Opus
 above stereo and more than two channels in the others are left out, with a log line); the
-sound follows the wallpaper's volume and mute. The player handles scaling, scale factor,
+sound follows the wallpaper's volume and mute, and is not decoded while it cannot be heard
+(above). The player handles scaling, scale factor,
 position and the file's own orientation with the same layout rule as the AVFoundation
 player, pauses by stopping the clock (the renderers fill and stop asking for samples), and
 keeps a poster for the desktop-picture sync from one decoded key frame. Its health check
@@ -1055,19 +1083,23 @@ lid produce the disagreement has not been checked on a desktop
 ([display layouts](display-layouts.md#mirror-sets-airplay-and-a-closed-lid)).
 
 When the clip's audio output cannot start (no output device, or one that will not
-start), AVFoundation fails the whole clip, muted or not, and reports only
-`AVErrorUnknown`. Native playback then rebuilds the clip from its video track alone
+start), AVFoundation fails the whole clip and reports only `AVErrorUnknown`; muting the
+player does not prevent it, and neither does pausing it, because the output is started when
+an item with an audio track switched on is prepared. A clip that cannot be heard has its
+audio track switched off before that (above), so it starts no output and this cannot happen
+to it until it is heard again. Native playback then rebuilds the clip from its video track alone
 and keeps playing it natively without sound, logging the original failure against
 the wallpaper's load. A clip without audio, or one whose picture fails too, is reported as failed. Failure
 reasons include each error's domain and code, so a report shows which part of playback failed.
 
 ## Experimental switches
 
-The one experimental switch is off by default.
+Both experimental switches are off by default.
 
 | Setting | Notes |
 | --- | --- |
 | Direct video plane sampling | Lets a Native Metal scene's own shader read the decoder's two video planes instead of a colour image converted for it each frame |
+| Draw only the visible part of cropped scenes | Lets an SDR 2D scene at Display resolution whose canvas the display crops draw only the part the display shows, instead of its whole layout |
 
 Content pacing and Shared video decode, the two other switches this page once
 listed, are gone. Both only reached a plain video that the scene engine played,
@@ -1075,27 +1107,18 @@ and the app's own players play every plain video now; a configuration file that
 still holds `content_pacing` or `shared_video_decode` loads, and the keys are not
 written back.
 
-Scene videos packed into `.tex` mip payloads participate too: when the switch is
-on, opening a source first resolves its bytes to the existing content-named
-temporary file, then uses the same file-based session registry as ordinary video
-files. Identical payloads can share even under different texture names; different
-payloads do not share just because their names or sizes match. Extraction and
-identity lookup happen when the source opens, not per frame.
-
 Memory a running wallpaper holds is kept to what it shows. Displays showing one scene
 share the pictures they have in common instead of each holding a copy, a destroyed
 layer's script state and a let-go pipeline-archive store are released, and a scene's
-video is opened from its file (or a content-named cache file) instead of being read
-whole into memory; the details are in [renderer
+video is decoded from its file where it lies instead of being read whole into memory (a
+clip packed into the scene's package is read where the package left it, and a large
+one moved into an unnamed file); the details are in [renderer
 memory](scene-rendering.md#renderer-memory). None of it adds per-frame work, a render
 pass or render-target memory, and the pictures are unchanged.
 
-Consumers share one driving playback clock. Each surface still owns its pause
-and retained frame; an incompatible playback rate splits that consumer onto a
-private decoder, reopened from the same file even after the packed image is gone.
-With the switch off, each source keeps its own decoder as before. The switch stays
-off by default: reducing duplicate queues does not establish that one shared
-clock is suitable for every scene or independently timed display.
+A scene's video texture, a file or a clip packed into a `.tex` payload, is decoded
+once for each surface that shows it: every display's scene opens its own decoder on its
+own playback clock, and two displays never share one.
 
 ### Direct video plane sampling
 
@@ -1140,6 +1163,49 @@ a real difference, not floating-point noise, and it is why the setting is opt-in
 No power measurement has been taken: what is claimed is only that a conversion is not
 encoded and its destination is not allocated when nothing asks for one.
 
+### Draw only the visible part of cropped scenes
+
+At [Display resolution](#2d-scene-resolution) a 2D scene whose canvas is not the
+display's shape is laid out to cover the display, and **Fill** (or **Original size**,
+for a canvas larger than the display) crops what overhangs it. By default that overhang
+is still drawn, effects and all, and thrown away when the picture is composed. Wallpaper
+Engine's frame is the window's size, so it never draws that part. With this switch on
+(`scene_display_framing` under `[experimental]` in `config.toml`), Native Metal draws an
+SDR scene only over the part of its layout the display shows, on the same pixel grid,
+and composes it where the whole layout would have put it. Off, every scene draws
+exactly as it did before the switch existed.
+
+It applies only to an SDR scene at Display resolution with a zoom of 1 or more, under
+Fill or Original size, and only when the scene is not upscaled by
+[MetalFX](#metalfx-upscaling): MetalFX would upscale the visible part on another grid
+than the whole layout's, and its filter reads across that part's edge, so a scene it
+upscales keeps drawing its whole layout. Fit, Stretch and Fit with blurred backdrop
+show the whole canvas and are untouched; an HDR scene is already drawn over the
+display's own rectangle. A scene whose layout cannot be cut on the grid of its
+screen-sized buffers (a quarter-size bloom buffer needs cuts at multiples of 4; a
+mip-mapped one, or a layout that is not a multiple of that grid, cannot be cut) is
+not framed either. A running scene takes the switch at its next frame by sizing its
+render targets again in place: nothing is reloaded. A paused wallpaper, or one waiting
+for events with **Update only when the scene changes**, takes it when it next draws, and
+until then its Mission Control picture is not captured again. The mechanism is under
+[scene rendering](scene-rendering.md#2d-scene-resolution).
+
+**What it saves.** Measured on an M5 Pro: Hoshimi Miyabi (3784370784, a 5120×2160
+canvas) on a 3840×2160 display at backing scale 2 and render scale 0.75 held 437 MB of
+render targets instead of 508.5 MB (−14%), with GPU time about 6 to 16% lower. A 16:9
+scene on the 3456×2234 built-in panel held 3 to 5.5% less render-target memory, with GPU
+time within noise. A scene the display does not crop saves nothing.
+
+**What it changes.** The picture is not byte-identical to drawing the whole layout,
+which is why the switch is opt-in. The GPU does not rasterize the shifted picture to the
+same sub-pixel positions: up to 0.6% of interior pixels move by one level, and thin
+geometry such as rain streaks can differ more, in a few dozen to about 140 pixels of a
+frame. A screen-space effect that reaches across the edge of the screen (bloom, a blur)
+now stops at that edge, as in Wallpaper Engine; near the edges the picture comes about
+0.4% closer to Wallpaper Engine's own frame. No power measurement has been taken.
+`WALLPAPER_MACHINE_SDR_FRAMING=1` or `=0` overrides the setting either way for a
+comparison in one build ([power benchmark](../testing/power-benchmark.md#ab-comparison-entry-points)).
+
 ## Background work only while it has a consumer
 
 These change no setting, frame rate, render scale or sound; they stop work that
@@ -1151,6 +1217,14 @@ nothing could see or hear.
   wallpaper that arrives paused, and the lock-screen extension (always muted) start
   no output, so Core Audio runs no output cycle for them and holds no idle-sleep
   assertion on their behalf. Resuming or unmuting costs one device start.
+- **Plain video sound.** A plain video that cannot be heard (muted, at volume 0, muted by
+  **Mute all wallpapers** or a rule, or a mirror member that does not carry its group's
+  sound) decodes no sound and starts no audio output: muting the platform player only
+  turned the decoded sound down. See [Video playback](#video-playback). Being heard again
+  restarts the output without reopening the clip. A WebM clip that opens silent may decode
+  its first audio buffers before the host's mute reaches it. No power measurement has been
+  taken; `WALLPAPER_MACHINE_MUTED_VIDEO_AUDIO=1` restores the old behaviour for a comparison
+  ([power benchmark](../testing/power-benchmark.md#ab-comparison-entry-points)).
 - **System audio capture.** Runs only for a presenting wallpaper that actually reads
   the sound; see [audio response](audio-response.md). A wallpaper that reads audio
   still runs the tap, and no drop in coreaudiod cost is claimed for it.

@@ -67,7 +67,12 @@ local under `artifacts/`, and do not commit them.
 - CPU hot spots and memory growth: Instruments Time Profiler and Allocations.
 - GPU/CPU scheduling and final Metal execution: Instruments Metal System Trace
   and Xcode Metal debugger. Correlate findings with renderer logs; Metal capture
-  does not directly explain the shader translation behavior.
+  does not directly explain the shader translation behavior. With
+  `WALLPAPER_MACHINE_GPU_LABELS=1` (off by default) Native Metal names every command
+  buffer and encoder after the pass, target and layer it draws, so the trace attributes
+  GPU time per pass; `split` also times draws that share a render pass apart. The
+  recipe, label format and caveats are in
+  [GPU time per pass](testing/renderer.md#gpu-time-per-pass).
 - Power and energy claims: the procedure and comparison rules in
   [testing/power-benchmark.md](testing/power-benchmark.md).
 

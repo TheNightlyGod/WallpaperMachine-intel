@@ -146,6 +146,7 @@ public:
     }
     void RefreshDisplayOutput(Scene& scene) { OWE_FORWARD_VOID(RefreshDisplayOutput(scene)); }
     void SetDisplayId(uint32_t identity) { OWE_FORWARD_VOID(SetDisplayId(identity)); }
+    void SetPresentHold(std::chrono::nanoseconds hold) { OWE_FORWARD_VOID(SetPresentHold(hold)); }
     bool ApplyRenderScale(Scene& scene, rg::RenderGraph& graph, double scale,
                           SceneResolution resolution) {
         OWE_FORWARD(ApplyRenderScale(scene, graph, scale, resolution));

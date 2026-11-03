@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Core/RendererCounters.hpp"
+#include "PresentPacing.hpp"
 #include "ThreadTimer.hpp"
 #include <deque>
 #include <limits>
@@ -25,6 +26,21 @@ public:
     double IdeaTime() const;
 
     void SetRequiredFps(u16);
+
+    /// The display's own refresh period, which no cadence runs faster than: the
+    /// required FPS is a whole number, so a 59.94 Hz display's ceiling reads 60,
+    /// and frames made at 60 a second would outrun it and fill the drawable queue
+    /// ahead of it. Zero (the default) when the display is unknown or reports no
+    /// fixed rate, which leaves the cadence to the required FPS alone.
+    void SetDisplayRefreshPeriod(std::chrono::nanoseconds);
+
+    /// How long a presented frame should stay on screen before the next one replaces it, so the
+    /// ceiling's frames reach the display an even number of refreshes apart
+    /// (`PresentHoldFor` of the ceiling's period and the display's). Zero when the ceiling
+    /// spans less than two refreshes or the display's rate is unknown: the frame is then shown
+    /// at the next refresh, as a plain present does. Follows the ceiling, never the content
+    /// pacing: a frame an event asks for may come one ceiling period after the last.
+    [[nodiscard]] std::chrono::nanoseconds PresentHold() const;
 
     /// How often the content itself can change.
     ///
@@ -75,7 +91,7 @@ public:
     [[nodiscard]] bool Idle() const;
 
     /// Interval the next tick will use, for diagnostics and tests.
-    [[nodiscard]] std::chrono::microseconds TickInterval() const;
+    [[nodiscard]] std::chrono::nanoseconds TickInterval() const;
 
     /// Gap above which a frame boundary is read as the process having been
     /// suspended rather than as the content simply not having changed yet.
@@ -102,16 +118,25 @@ private:
     void UpdateFrametime();
     void FrameBegin(std::chrono::steady_clock::time_point now);
     void FrameEnd(std::chrono::steady_clock::time_point now);
-    std::chrono::microseconds ResolveInterval();
+    std::chrono::nanoseconds ResolveInterval();
+    /// The ideal period from the required FPS and the display's refresh period.
+    void ApplyIdealPeriod();
+    /// The ideal period as one simulation step, in the microseconds frame times are counted in.
+    std::chrono::microseconds IdealStep() const;
     /// The thread timer's tick, on the timer thread: asks for a draw unless one is in flight.
     void OnTick();
 
     std::atomic<RendererCounters*>        m_counters { nullptr };
 
     std::atomic<u16>                        m_req_fps;
-    std::atomic<std::chrono::microseconds> m_ideatime;
+    std::atomic<std::chrono::nanoseconds>  m_refresh_period { std::chrono::nanoseconds::zero() };
+    std::mutex                             m_period_mutex;
+    /// The period of the required FPS, to the nanosecond, never below the refresh period.
+    std::atomic<std::chrono::nanoseconds>  m_ideatime;
+    /// `PresentHoldFor(m_ideatime, m_refresh_period)`, written with the ideal period.
+    std::atomic<std::chrono::nanoseconds>  m_present_hold { std::chrono::nanoseconds::zero() };
     std::atomic<std::chrono::microseconds> m_elapsed_frametime;
-    std::atomic<std::chrono::microseconds> m_tick_interval;
+    std::atomic<std::chrono::nanoseconds>  m_tick_interval;
     /// Zero means unknown, which keeps the fixed cadence.
     std::atomic<std::chrono::microseconds> m_content_period { std::chrono::microseconds::zero() };
     std::atomic<FrameDemand::Kind>         m_demand_kind { FrameDemand::Kind::Continuous };

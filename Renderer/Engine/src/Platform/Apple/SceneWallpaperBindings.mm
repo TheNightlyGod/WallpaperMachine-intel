@@ -13,6 +13,7 @@
 #include "Runtime/MediaArtwork.hpp"
 #include "SceneWallpaperSurface.hpp"
 #include "Utils/Logging.h"
+#include "MetalRender/MetalDisplayFraming.hpp"
 #include "MetalRender/MetalUpscaling.hpp"
 #include "MetalRender/MetalVideoSupport.hpp"
 #include "RenderCommon/StaticSubgraphCache.hpp"
@@ -1391,6 +1392,16 @@ extern "C" void owe_set_scene_video_plane_sampling_enabled(bool enabled)
 extern "C" bool owe_scene_video_plane_sampling_enabled(void)
 {
     return wallpaper::metal::MetalVideoPlaneSamplingEnabled();
+}
+
+extern "C" void owe_set_scene_display_framing_enabled(bool enabled)
+{
+    wallpaper::metal::SetMetalSceneDisplayFramingEnabled(enabled);
+}
+
+extern "C" bool owe_scene_display_framing_enabled(void)
+{
+    return wallpaper::metal::MetalSceneDisplayFramingEnabled();
 }
 
 extern "C" void owe_set_metalfx_upscaling_enabled(bool enabled)

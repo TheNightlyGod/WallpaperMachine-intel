@@ -284,6 +284,40 @@ final class AppleScriptMediaProviderTests: XCTestCase {
         XCTAssertEqual(covers.count, 2, "A new track publishes its own cover")
     }
 
+    /// The fallback asks once a second; compiling its script (parsing it and loading the
+    /// player's scripting terminology) happens once per script, not once per question.
+    /// The compiler stands in a script that contacts no application.
+    func testEachScriptIsCompiledOnceHoweverOftenItRuns() async {
+        let compiled = CompiledSources()
+        let runner = NSAppleScriptNowPlayingRunner { source in
+            compiled.record(source)
+            return NSAppleScriptNowPlayingRunner.compile("return {}")
+        }
+        for _ in 0..<5 {
+            let answer = await runner.query(.music)
+            XCTAssertNil(answer, "an empty reply is not a track")
+        }
+        _ = await runner.query(.spotify)
+        _ = await runner.query(.music)
+        XCTAssertEqual(compiled.counts.count, 2, "one script per player")
+        XCTAssertEqual(Set(compiled.counts.values), [1], "each compiled once: \(compiled.counts)")
+    }
+
+    /// A script that does not compile is not kept: the next question compiles it again,
+    /// as every question did before scripts were kept.
+    func testAScriptThatDidNotCompileIsCompiledAgain() {
+        var attempts = 0
+        let cache = AppleScriptCache<Int> { _ in
+            attempts += 1
+            return attempts < 3 ? nil : attempts
+        }
+        XCTAssertNil(cache.script(for: "a"))
+        XCTAssertNil(cache.script(for: "a"))
+        XCTAssertEqual(cache.script(for: "a"), 3)
+        XCTAssertEqual(cache.script(for: "a"), 3)
+        XCTAssertEqual(attempts, 3)
+    }
+
     private static func track(
         _ player: AppleScriptPlayer, title: String, durationSeconds: Double
     ) -> AppleScriptNowPlaying {
@@ -389,4 +423,13 @@ final class FakeAppleScriptRunner: AppleScriptRunning {
         urlArtworkFetches += 1
         return artwork
     }
+}
+
+/// Sources a script runner compiled, counted on whatever queue it compiles on.
+final class CompiledSources: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [String: Int] = [:]
+
+    func record(_ source: String) { lock.withLock { recorded[source, default: 0] += 1 } }
+    var counts: [String: Int] { lock.withLock { recorded } }
 }
