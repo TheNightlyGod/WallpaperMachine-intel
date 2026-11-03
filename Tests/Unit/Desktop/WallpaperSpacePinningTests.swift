@@ -68,6 +68,10 @@ private final class FakeMover: WallpaperSpaceWindowMoving {
     }
 }
 
+/// The waits the pinning asked for, in order.
+@MainActor
+private final class SleepLog { var durations: [Duration] = [] }
+
 @MainActor
 private final class PinRig {
     let log = Log()
@@ -76,8 +80,12 @@ private final class PinRig {
     var pins: [UInt32: WallpaperSpacePin] = [:]
     var holding = Set<UInt32>()
     var reduceMotion = false
+    /// Owned by the sleep closure, not reached through the rig: the pinning's ceiling task keeps
+    /// that closure, and runs it, after the test and its rig are gone (a cancelled task still
+    /// starts, and only the sleep itself notices the cancellation).
+    private let sleepLog = SleepLog()
     /// Every wait the pinning asked for, in order.
-    private(set) var sleeps: [Duration] = []
+    var sleeps: [Duration] { sleepLog.durations }
     private(set) var clock = ContinuousClock.now
     private(set) var pinning: WallpaperSpacePinning!
     let center = NotificationCenter()
@@ -93,8 +101,8 @@ private final class PinRig {
             mover: available ? mover : nil,
             reduceMotion: { [unowned self] in self.reduceMotion },
             now: { [unowned self] in self.clock },
-            sleep: { [unowned self] duration in
-                await MainActor.run { self.sleeps.append(duration) }
+            sleep: { [sleepLog] duration in
+                await MainActor.run { sleepLog.durations.append(duration) }
                 try await Task.sleep(for: .seconds(3_600))
             },
             center: center,
