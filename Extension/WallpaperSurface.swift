@@ -502,7 +502,11 @@ final class WallpaperSurface: LockScreenSurfaceLifecycle {
       projectURL: project.deletingLastPathComponent(), entryFile: entry,
       readAccessURL: project.deletingLastPathComponent(),
       size: size, scale: scale, propertiesJSON: scene.propertiesJSON ?? "{}", fps: scene.fps,
-      paused: !WallpaperPresentationAuthority.suspensionReasons(for: authorityRequest).isEmpty)
+      // The page renders its readiness frame live, as a scene or a clip does; `applyPolicy`
+      // pauses it after that frame. Created paused it would hold its first frame while this
+      // surface counted it as playing, and the settling desktop and a lock in its first
+      // seconds would never resume it.
+      paused: rendererPaused)
     web = page
     firstFrameReply = completion
     page.onFrame = { [weak self] image in
@@ -590,8 +594,9 @@ final class WallpaperSurface: LockScreenSurfaceLifecycle {
     }
     if let web {
       do {
+        // The page keeps the state this surface tracks; `applyPolicy` below changes both together.
         try web.update(propertiesJSON: scene.propertiesJSON ?? "{}", fps: scene.fps,
-          paused: !WallpaperPresentationAuthority.suspensionReasons(for: authorityRequest).isEmpty)
+          paused: rendererPaused)
       } catch {
         contentError = error
         web.stop()
@@ -619,8 +624,7 @@ final class WallpaperSurface: LockScreenSurfaceLifecycle {
       hostActivity: activity == "suspended" ? .suspended : .active,
       presentedFor: presentingSince.map { ContinuousClock.now - $0 },
       continuousPreviewRequested: continuousPreviewRequested,
-      lockScreenEnabled: scene.webEntryFile == nil
-        && (WallpaperController.shared.configuration?.lockScreenEnabled ?? false),
+      lockScreenEnabled: WallpaperController.shared.configuration?.lockScreenEnabled ?? false,
       screenSaverEnabled: WallpaperController.shared.configuration?.screenSaverEnabled ?? false)
   }
 

@@ -84,12 +84,10 @@ actor WallpaperCompatibilityService {
            String(localized: "Target display"), context.targetAvailable
            ? String(localized: "Checking this display at \(context.targetFPS) FPS, including its mirror group and global frame-rate cap.")
            : String(localized: "Choose a connected, enabled independent display. A mirror follows its source wallpaper."))
-    append("lockScreen", context.kind == .web || context.kind == .unknown ? .unavailable : .warning,
-           String(localized: "Lock screen"), context.kind == .web
-           ? String(localized: "Web wallpapers are not supported on the lock screen.")
-           : context.kind == .unknown
-             ? String(localized: "This wallpaper type has no supported lock-screen route.")
-             : String(localized: "Video and scene wallpapers have a lock-screen route. Publishing, resource access and extension playback still require runtime verification."))
+    append("lockScreen", context.kind == .unknown ? .unavailable : .warning,
+           String(localized: "Lock screen"), context.kind == .unknown
+           ? String(localized: "This wallpaper type has no supported lock-screen route.")
+           : String(localized: "Video, scene and web wallpapers have a lock-screen route. Publishing, resource access and extension playback still require runtime verification."))
     guard Self.validID(context.wallpaperID) else {
       append("project", .unavailable, String(localized: "Installed project"),
              String(localized: "The installed wallpaper identifier is not a safe library path."))

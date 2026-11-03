@@ -225,11 +225,11 @@ final class WallpaperCompatibilityTests: XCTestCase {
     XCTAssertEqual(read, 0, "a scene cannot load without them, so reading it would say nothing new")
   }
 
-  func testWebLockScreenRemainsNotApplicable() async throws {
+  func testWebWallpapersHaveALockScreenRoute() async throws {
     try install(type: "web", entry: "index.html")
     let service = WallpaperCompatibilityService(libraryURL: root)
     let checks = await service.check(context(kind: .web))
-    XCTAssertEqual(status(checks, "lockScreen"), .unavailable)
+    XCTAssertEqual(status(checks, "lockScreen"), .warning, "the same route as scenes and videos")
     XCTAssertEqual(status(checks, "webRuntime"), .unknown)
   }
 

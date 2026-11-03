@@ -8,7 +8,7 @@ what the user gets and the rules that keep the two native modes consistent.
 
 ## Enabling it
 
-Apply a video or live scene to a display, then enable **Settings → Desktop & Lock Screen →
+Apply a scene, video, web or still wallpaper to a display, then enable **Settings → Desktop & Lock Screen →
 Animate lock screen**, or the same switch on the welcome guide's Preferences page
 (it applies at once there too; the guide's **Skip** turns it back to what it was
 when the guide opened). A status row next to the Settings switch reports the
@@ -263,8 +263,16 @@ Web and still wallpapers use a live WebKit layer tree, not a recorded video or a
 periodic screenshot. Only their staged project and referenced imports are granted file
 access. Audio, media integration, camera/microphone/display capture, interaction and
 author dialogs are disabled. Pause freezes page execution and retains the compositor
-tree; it does not resume playback the user paused. Web projects remain unsupported for
-**Animate lock screen**; that combination is reported as not applicable.
+tree; it does not resume playback the user paused. **Animate lock screen** takes them like
+a scene: the page loads and draws its first frame live, settles as the desktop picture,
+then holds a frame and runs again while the Mac is locked. The page's paused state is the
+one the surface tracks: a page loaded paused while the surface counted it as playing kept
+its first frame (often black or grey) through the settling and through a lock in its first
+seconds. Pausing or resuming waits on the page itself for at most
+5 seconds (its properties, its media, the held frame) and then goes on without it: a heavy
+page can take longer to rebuild after a resume, especially when its WebKit process has
+reached its memory limit, and that is not a failure. Only WebKit not suspending or
+resuming the page within 15 seconds is, and it is reported like any other surface error.
 
 ## Caveats
 

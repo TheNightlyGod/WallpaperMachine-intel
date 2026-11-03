@@ -25,6 +25,41 @@ and moves whatever falls past ten verbatim into a monthly file under
 [archive/](archive/); promote anything durable before it goes. Editing an
 entry's recorded result is not allowed.
 
+## 2026-11-03 — Web lock screen: page paused state follows the surface (issue 155)
+
+- Cause: the extension created a web page paused before its first frame while WallpaperSurface tracked it as playing; applyPolicy never resumed it, so the settling desktop and any lock within ~15 s kept the readiness frame (black/grey for 音域回响 and 阿洛娜指纹识别2.0). Evidence: unified log showed WebPageProxy::suspend 60 ms after load and no resume at the following lock.
+- Fix: Extension/WallpaperSurface.swift creates and updates the page with rendererPaused, like scenes and clips; docs/features/lock-screen.md updated.
+- python3 scripts/test.py: 4296 passed, 0 failed, 53 skipped.
+- python3 scripts/build.py --swift-only --configuration Release: OK.
+- Gap: WallpaperSurface is extension-only and has no unit-test harness, so no regression test; real lock behaviour not checked by the agent.
+
+## 2026-11-03 — Web lock screen: a busy page no longer fails its pause or resume
+
+- Symptom: a 3D web wallpaper sometimes held a still frame on lock; the app log showed 'The web wallpaper did not produce a frame in time.' at unlock and the lock screen was handed back to macOS.
+- Unified log: on resume the extension's WebKit GPU process got a process-limit-critical memory event (32) and WebKit's display link reported the main thread stuck; the page's property delivery ran only after the 5 s transition deadline had closed the page.
+- Fix: ScreenSaverWebSurface bounds waits on the page (properties, media, held frame) at 5 s and goes on without them; only WebKit's suspend/resume not answering within 15 s fails the surface.
+- New test ScreenSaverWebSurfaceTests/testABusyPageIsStillResumedAndPausedWithoutFailingTheSurface fails on the old reconcile with timedOut, passes with the fix.
+- python3 scripts/test.py: 4291 passed, 0 failed, 53 skipped. Release build OK.
+- Not verified: repeated real locks with the user's wallpaper; why the GPU process reaches its limit on resume (two copies of a heavy page: desktop and lock screen) is not addressed.
+
+## 2026-11-03 — Web lock screen and screen saver: export the live page, not only its snapshot
+
+- Symptom after the issue 155 change: a web wallpaper on the lock screen showed a still frame; extension.log showed it was not paused while locked.
+- Cause: ScreenSaverWebSurface.attach added the content view's backing layer to the exported root; AppKit kept it in the window's tree, so the CAContext held only the readiness snapshot beneath it (screen saver too).
+- Headless probe (never-ordered window, CARenderer over the root): old attach left the root empty; exporting the frame view layer rendered the page's canvas alternating red/blue.
+- New test ScreenSaverWebSurfaceTests/testTheLivePageStaysInTheLayerTreeItWasAttachedTo fails on the old attach, passes with the fix.
+- python3 scripts/test.py: 4290 passed, 0 failed, 53 skipped. Release build: python3 scripts/build.py --swift-only --configuration Release, OK.
+- Not verified: a real lock with the web wallpaper (the user's next run), and the screen saver on a real idle.
+
+## 2026-11-03 — Web and still wallpapers animate the lock screen (issue 155)
+
+- Change: web projects (and still images, which are web projects) are published for Animate lock screen, take the Desktop selection and follow the lock-screen settle/pause policy in the extension; the 'not applicable' status and compatibility verdict are gone.
+- python3 scripts/test.py --only LockScreenWallpaperServiceTests --only WallpaperCompatibilityTests --only ScreenSaverWebSurfaceTests --only WallpaperPresentationAuthorityTests: 108 passed.
+- python3 scripts/test.py: 4289 passed, 0 failed, 53 skipped; Python stage (localization catalogs, panel localization, doc links) OK.
+- New test: a web wallpaper takes the lock screen and keeps it when the screen saver turns off.
+- Catalogs: five web-surface errors reworded from 'web screen saver' to 'web wallpaper' in both catalogs; compatibility and Settings copy updated; three unused keys removed; all six languages.
+- Not verified: a real lock/unlock with a web wallpaper on the desktop, extension WebKit memory while held, no Release build.
+
 ## 2026-11-02 — When another app is in front (discussion #91)
 
 - Feature: Settings → Playback & Power gains When another app is in front (Keep running / Mute / Pause), default Keep running.
@@ -79,34 +114,3 @@ The poster sync now hears about native video windows that open or close after a 
 - Energy (coalition, no root, VM suspended): scene 3615154110, three alternating new/old pairs at ~60 fps, difference under ~0.5 W GPU (upper bound). Display HDR 29.4 W against Ultra 25.1 W on 3662790108. No powermetrics.
 - check_renderer: 3,322 passed, 0 failed, 7 skipped; build.py --renderer-only OK; test.py 4,150 passed, 0 failed, 50 skipped; Release build OK.
 - 17-scene sweep against the previous final: 34/34 frames rendered and within 0.3 mean, except 3280146735-0, whose date text changes with the calendar day (calendar caveat), and 3665954520-1 (+0.24).
-
-## 2026-10-31 — WE parity: last rope branches, zero-direction box, 3D far plane, final sweep
-
-- Steady uvsmoothing rope (0x140230A42: length steady-1, start saturate(first age / birth spacing) - 1) and scrolling rope trails (TRAILSCROLLALPHA with fade combos, g_RenderVar0.x/.w per 0x1402366F0) follow WE; tests added.
-- boxrandom with directions 0 0 0: WE divides velocity by the zero spread length (0x140238B3C), so the particles are NaN and never drawn (probes bisect-clock vs bisect-clock-dir); ported; 38 test fixtures that used zero directions for 'no spread' now use 1 1 1 with distancemax 0.
-- WE probe far-plane-v1: cards beyond farz are clipped and the near pair occludes identically in WE and here; WE's reversed-Z clip layout is therefore not visible to ordinary materials and was not ported.
-- check_renderer.py 3,321 passed, 0 failed, 7 skipped; build.py --renderer-only OK; test.py 4,150 passed, 0 failed, 50 skipped.
-- Plan V3 17-scene comparison against the Phase 0 baseline: 34/34 frames, 5 better, 0 worse; final equals the previous sweep on all 34 frames.
-
-## 2026-10-31 — WE parity: rope texture rules from a WE UV probe
-
-- WE probe rope-uv-v3/v4 (parabola ropes whose stock fragment, overridden in the project, writes its texture coordinate): rope length = points / uvscale; scrolling = first emitter rate x average lifetime (lifetime override included) - 1, rate capped by the frame-rate cap while filling, offset by deaths; uvsmoothing plain until steady.
-- After the change every non-steady cell agrees with WE within 0.01 of v (scrolling was 0.55 against 0.93; uvscale 2 end -0.98 against -1.05); subdivided rope silhouettes match WE (0.995-0.998). Steady-state uvsmoothing offset and scrolling rope trails remain this port's.
-- Compile fallback now keeps a geometry stage when only the fragment fails, as WE replaces only the failing stage. boxrandom with directions 0 0 0 draws nothing in WE (documented, not changed).
-- check_renderer.py 3,318 passed, 0 failed, 7 skipped; build.py --renderer-only OK; test.py 4,150 passed, 0 failed, 50 skipped; 17-scene sweep 33/34 unchanged (3280146735-1 clock text).
-
-## 2026-10-31 — WE parity: rope strips per pair, blended operator kernels
-
-- Ropes with a geometry stage now take WE's one record per pair (0x1402308A0) and are subdivided by the stage (TRAILSUBDIVISION, 4 + 2s strip vertices, D3D strip order); the vertex-only fallback keeps CPU pieces. Trail probe unchanged (straight, untextured: curved ribbons not compared); heavy-rope probe at subdivision 32: no cost beyond noise.
-- The blended operator kernels (opcodes 28-40) decompile after reading 0x14023FBC0's jump table to 40 entries: remap/inherit lerp old to new by the window weight (as implemented); angularmovement now weighs its turn and clamps drag before weighing; controlpointattract weighs the pull after the flag-2 cap.
-- Rope texture-length rules decoded (flags, 1/uvscale, scroll/smoothing lengths) but not changed: +444/+448 field identities need a runtime probe.
-- check_renderer.py 3,316 passed, 0 failed, 7 skipped; build.py --renderer-only OK; test.py 4,150 passed, 0 failed, 50 skipped; 17-scene sweep 33/34 unchanged, 3280146735-1 clock text.
-
-## 2026-10-31 — WE parity: culling, rope-trail recording clock, event-death and rope geometry follow-up
-
-- WE 2.8.0.42 probe ordinary-cull-v1 (2D canvas): WE culls `cullmode normal` without depth and keeps the authored card; ours now agrees on 8/8 tiles (cards counter-clockwise, cull mode in every pass, no reflection-pass winding flip).
-- reflection-cull-v7 now agrees on 24/24 samples including the ordinary clip pair; the reflected world pair is unchanged (31,119 pixels, same bounds).
-- Rope-trail recording follows WE's countdown in 0x1402308A0 (first frame due, whole-frame periods, no prewarm recording, oldest point kept): trail probe spans 75.0/58.8 px -> 81.2-84.0/67.9-70.7 px against WE 80.0-82.8/69.4.
-- `check_renderer.py` 3,314 passed, 0 failed, 7 skipped; `build.py --renderer-only` OK; `test.py` 4,150 passed, 0 failed, 50 skipped.
-- 17-scene sweep after the change: 33/34 frames equal to the previous sweep within 0.01 (including the five scenes with culling materials), 3280146735-1 improved (clock text).
-- Not done: perspective:true layers in 3D scenes (WE pulls the view back ~1990 units with a 2000x zoom) and WE's infinite reversed-Z projection (clip z = near); Release build; desktop run.

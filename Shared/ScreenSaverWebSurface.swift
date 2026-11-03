@@ -10,18 +10,18 @@ final class ScreenSaverWebSurface: NSObject, WKNavigationDelegate, WKUIDelegate 
       switch self {
       case .invalidEntry: String(localized: "The web wallpaper entry or asset is outside its published folder.")
       case .invalidProperties: String(localized: "The published web wallpaper properties are invalid.")
-      case .unavailable: String(localized: "This macOS version cannot host a live web screen saver.")
-      case .timedOut: String(localized: "The web screen saver did not produce a frame in time.")
-      case .noFrame: String(localized: "The web screen saver frame is unavailable.")
-      case .terminated: String(localized: "The web screen saver stopped unexpectedly.")
-      case .suspension: String(localized: "The web screen saver could not suspend or resume playback.")
+      case .unavailable: String(localized: "This macOS version cannot host a live web wallpaper.")
+      case .timedOut: String(localized: "The web wallpaper did not produce a frame in time.")
+      case .noFrame: String(localized: "The web wallpaper frame is unavailable.")
+      case .terminated: String(localized: "The web wallpaper stopped unexpectedly.")
+      case .suspension: String(localized: "The web wallpaper could not suspend or resume playback.")
       }
     }
   }
 
   /// WebKit requires an in-window, visible view to submit live compositor updates.
   /// This scheduling host is never ordered into WindowServer or made key. Its
-  /// view layer is exported to CAContext, not displayed in an AppKit window.
+  /// frame view's layer is exported to CAContext, not displayed in an AppKit window.
   private final class SchedulingWindow: NSWindow {
     override var isVisible: Bool { true }
     override var occlusionState: NSWindow.OcclusionState { .visible }
@@ -45,6 +45,8 @@ final class ScreenSaverWebSurface: NSObject, WKNavigationDelegate, WKUIDelegate 
   private let readAccessURL: URL
   private let container: NSView
   private let window: SchedulingWindow
+  /// The layer `attach(to:)` placed in the exported tree.
+  private var exported: CALayer?
   private let proxy = MessageProxy()
   private var properties: [String: Any]
   private var propertiesJSON: String
@@ -69,6 +71,18 @@ final class ScreenSaverWebSurface: NSObject, WKNavigationDelegate, WKUIDelegate 
   private var suspensionReply: CheckedContinuation<Void, Error>?
   var onFrame: ((NSImage) throws -> Void)?
   var onFailure: ((Error) -> Void)?
+  /// How long a pause or resume waits on the page itself (its properties, its media, the held
+  /// frame) before going on without it. A page still busy then is not broken: a heavy page can take
+  /// seconds to rebuild after a resume, more so when its WebKit process has reached its memory limit.
+  private let pageWait: Duration = .seconds(5)
+  /// How long WebKit's own suspend or resume of the page may take before the surface counts as broken.
+  private let suspensionWait: Duration = .seconds(15)
+  /// Whether the page has an audio listener registered.
+  private var audioSubscribed = false
+  /// Feeds a subscribed page silence while it plays; see `updateSilence()`.
+  private var silence: Task<Void, Never>?
+  /// How often silence reaches a subscribed page: the desktop's spacing for a quiet stretch.
+  static let silenceInterval: Duration = .seconds(1)
 
   init(projectURL: URL, entryFile: String, readAccessURL: URL, size: CGSize,
        scale: CGFloat, propertiesJSON: String, fps: UInt32, paused: Bool) throws {
@@ -119,6 +133,9 @@ final class ScreenSaverWebSurface: NSObject, WKNavigationDelegate, WKUIDelegate 
     webView.allowsMagnification = false
     webView.allowsBackForwardNavigationGestures = false
     window.isReleasedWhenClosed = false
+    // The exported frame view would otherwise paint the window background behind the page.
+    window.isOpaque = false
+    window.backgroundColor = .clear
     window.colorSpace = .sRGB
     window.ignoresMouseEvents = true
     container.wantsLayer = true
@@ -130,12 +147,20 @@ final class ScreenSaverWebSurface: NSObject, WKNavigationDelegate, WKUIDelegate 
     rebuildDirectories()
   }
 
+  /// Puts the live page into `root`. AppKit keeps a view's backing layer in its window's own
+  /// tree, so the content view's layer added anywhere else goes straight back and `root` would
+  /// show nothing live. The frame view's layer is the top of that tree, and since the window
+  /// is never ordered in, nothing else parents it.
   func attach(to root: CALayer) throws {
-    container.layoutSubtreeIfNeeded()
-    guard let layer = container.layer else { throw Failure.unavailable }
+    guard let frame = container.superview else { throw Failure.unavailable }
+    frame.wantsLayer = true
+    frame.layoutSubtreeIfNeeded()
+    guard let layer = frame.layer else { throw Failure.unavailable }
     layer.frame = root.bounds
     root.addSublayer(layer)
     CATransaction.flush()
+    guard layer.superlayer === root else { throw Failure.unavailable }
+    exported = layer
   }
 
   func start(completion: @escaping (Error?) -> Void) {
@@ -168,40 +193,98 @@ final class ScreenSaverWebSurface: NSObject, WKNavigationDelegate, WKUIDelegate 
     guard desiredPaused != paused else { return }
     desiredPaused = paused
     commitRevision &+= 1
+    updateSilence()
     reconcile()
   }
 
+  /// Wallpaper Engine calls a page's audio listener on its fixed cadence whether or not anything is
+  /// playing, and the desktop keeps a quiet stretch fed once a second. The lock screen captures no
+  /// audio, so a subscribed page is fed silence on that spacing while it plays. A page that only
+  /// starts its idle animation once the listener has been called (an audio visualiser that waits
+  /// for the host's first spectrum) otherwise never moves off its first frame.
+  private func updateSilence() {
+    let wanted = audioSubscribed && isReady && !isStopped && !isPaused && !desiredPaused
+    guard wanted != (silence != nil) else { return }
+    silence?.cancel()
+    silence = nil
+    guard wanted else { return }
+    silence = Task { @MainActor [weak self] in
+      while !Task.isCancelled {
+        await self?.deliverSilence()
+        do { try await Task.sleep(for: Self.silenceInterval) } catch { return }
+      }
+    }
+  }
+
+  private func deliverSilence() async {
+    _ = try? await webView.callAsyncJavaScript(
+      "return window.__mweWallpaperHost.deliverAudio(bins)",
+      arguments: ["bins": [Double](repeating: 0, count: 128)], in: nil, contentWorld: .page)
+  }
+
+  /// Brings the page to `desiredPaused`. Only WebKit's suspend or resume failing, or not answering
+  /// within `suspensionWait`, fails the surface; what waits on the page is bounded by `pageWait`
+  /// and skipped past, so a busy page is suspended or resumed all the same.
   private func reconcile() {
     guard isReady, !isStopped, !transitioning else { return }
     transitioning = true
-    armDeadline(seconds: 5)
     operation = Task { @MainActor [weak self] in
       guard let self else { return }
       do {
         if self.isPaused {
-          try await self.changePageSuspension(false)
+          try await self.changePageSuspension(false, within: self.suspensionWait)
           guard !self.isStopped else { return }
           self.isPaused = false
-          await self.webView.setAllMediaPlaybackSuspended(false)
+          _ = try await self.bounded(self.pageWait) {
+            await self.webView.setAllMediaPlaybackSuspended(false)
+          }
         }
         let revision = self.commitRevision
         let pause = self.desiredPaused
-        try await self.deliverCommitted(paused: pause)
+        _ = try await self.bounded(self.pageWait) { try await self.deliverCommitted(paused: pause) }
         guard !self.isStopped else { return }
         if pause {
-          await self.webView.setAllMediaPlaybackSuspended(true)
-          let image = try await self.capture()
+          _ = try await self.bounded(self.pageWait) {
+            await self.webView.setAllMediaPlaybackSuspended(true)
+          }
+          // A page too busy to be captured keeps the frame it was last held with.
+          if let image = try? await self.capture(), !self.isStopped { try? self.onFrame?(image) }
           guard !self.isStopped else { return }
-          try self.onFrame?(image)
-          try await self.changePageSuspension(true)
+          try await self.changePageSuspension(true, within: self.suspensionWait)
           guard !self.isStopped else { return }
           self.isPaused = true
         }
         self.transitioning = false
-        self.deadline?.cancel()
-        self.deadline = nil
+        self.updateSilence()
         if revision != self.commitRevision { self.reconcile() }
       } catch { if !self.isStopped { self.fail(error) } }
+    }
+  }
+
+  /// Whichever of an operation and its time limit ended first.
+  private final class Once { var done = false }
+
+  /// `operation`'s result, or nil once `limit` has passed without one; the operation is left to
+  /// finish on its own. What it throws within the limit is rethrown.
+  private func bounded<T>(
+    _ limit: Duration, _ operation: @escaping @MainActor () async throws -> T
+  ) async throws -> T? {
+    let once = Once()
+    return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<T?, Error>) in
+      let timer = Task { @MainActor in
+        try? await Task.sleep(for: limit)
+        guard !once.done else { return }
+        once.done = true
+        continuation.resume(returning: nil)
+      }
+      Task { @MainActor in
+        let result: Result<T, Error>
+        do { result = .success(try await operation()) } catch { result = .failure(error) }
+        guard !once.done else { return }
+        once.done = true
+        timer.cancel()
+        continuation.resume(with: result.map { $0 })
+      }
     }
   }
 
@@ -254,6 +337,11 @@ final class ScreenSaverWebSurface: NSObject, WKNavigationDelegate, WKUIDelegate 
     captures.removeValue(forKey: id)?(result)
   }
 
+  private func changePageSuspension(_ suspended: Bool, within limit: Duration) async throws {
+    guard try await bounded(limit, { try await self.changePageSuspension(suspended); return true }) != nil
+    else { throw Failure.suspension }
+  }
+
   private func changePageSuspension(_ suspended: Bool) async throws {
     try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
       suspensionReply = continuation
@@ -295,6 +383,8 @@ final class ScreenSaverWebSurface: NSObject, WKNavigationDelegate, WKUIDelegate 
     deadline = nil
     operation?.cancel()
     operation = nil
+    silence?.cancel()
+    silence = nil
     let reply = firstReply
     firstReply = nil
     reply?(CancellationError())
@@ -306,7 +396,8 @@ final class ScreenSaverWebSurface: NSObject, WKNavigationDelegate, WKUIDelegate 
     webView.navigationDelegate = nil
     webView.uiDelegate = nil
     webView.removeFromSuperview()
-    container.layer?.removeFromSuperlayer()
+    exported?.removeFromSuperlayer()
+    exported = nil
     if webView.responds(to: NSSelectorFromString("_close")) { webView.perform(NSSelectorFromString("_close")) }
     window.contentView = nil
     window.close()
@@ -331,6 +422,7 @@ final class ScreenSaverWebSurface: NSObject, WKNavigationDelegate, WKUIDelegate 
         self.isReady = true
         self.deadline?.cancel()
         self.deadline = nil
+        self.updateSilence()
         self.reconcile()
         let reply = self.firstReply
         self.firstReply = nil
@@ -368,8 +460,18 @@ final class ScreenSaverWebSurface: NSObject, WKNavigationDelegate, WKUIDelegate 
                for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? { nil }
 
   private func receive(_ body: Any) {
-    guard !isStopped, !isPaused, pendingRandomReplies < 32, let message = body as? [String: Any],
-      message["type"] as? String == "randomFileRequest", let id = message["requestId"] as? String,
+    guard !isStopped, let message = body as? [String: Any], let type = message["type"] as? String else { return }
+    switch type {
+    case "audioSubscribed", "audioUnsubscribed":
+      audioSubscribed = type == "audioSubscribed"
+      updateSilence()
+    case "randomFileRequest": receiveRandomFileRequest(message)
+    default: return
+    }
+  }
+
+  private func receiveRandomFileRequest(_ message: [String: Any]) {
+    guard !isPaused, pendingRandomReplies < 32, let id = message["requestId"] as? String,
       let property = message["propertyId"] as? String, id.count <= 128, property.count <= 256
     else { return }
     let path = directories[property]?.randomElement() ?? ""

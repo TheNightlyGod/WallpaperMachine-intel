@@ -818,7 +818,7 @@ contracts they must agree on:
   time-limited, per-surface runtime counters for power work, off by default (see
   [testing/power-benchmark.md](testing/power-benchmark.md)).
 - `ScreenSaverWebSurface` and `WebWallpaperProtocol` host and describe web wallpapers for the
-  screen saver (selected by `LockScreenScene.webEntryFile`); `LockScreenSurfaceRegistry`,
+  lock screen and the screen saver (selected by `LockScreenScene.webEntryFile`); `LockScreenSurfaceRegistry`,
   `LockScreenFrameBacking` and `LockScreenIdleExit` manage surface lifecycle, pixel backing and
   the extension process's exit once nothing uses it, so the next launch runs the registered copy.
 - `LockScreenVideoPlanner` decides, from a scene and the file, which of the extension's own players
@@ -869,7 +869,11 @@ Rules of the exchange:
   revisions directory. Network-client access allows wallpaper resources, but capture, audio and
   author dialogs are disabled. The page's un-ordered scheduling window does not present on the
   desktop; the existing remote context owns the live layer tree, and suspension freezes it,
-  accelerated content included. Web surface errors enter the existing readiness channel.
+  accelerated content included. What goes into that context is the scheduling window's frame
+  view layer, the top of the window's own tree: AppKit takes a view's backing layer straight back
+  into its window, so the web view's or content view's layer added there would leave the context
+  showing only the readiness snapshot beneath it. Web surface errors enter the existing readiness
+  channel.
 
 User-facing behaviour: [features/lock-screen.md](features/lock-screen.md).
 

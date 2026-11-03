@@ -44,13 +44,12 @@ for them.
   settings first) and open the Web Inspector on one. It is off in a release build
   until the user turns it on, takes effect on running pages without a reload and is
   not part of a backup. See [inspecting a web wallpaper](diagnostics.md#inspecting-a-web-wallpaper).
-- On macOS 26+, **Use wallpaper as screen saver** can present web and still-image
-  projects through the native extension. It uses committed properties and isolated
-  file copies, without audio, capture or interaction. See
-  [Screen saver](lock-screen.md#use-wallpaper-as-screen-saver) for activation,
-  independent selection and verification limits. **Animate lock screen** does not
-  support web projects; that combination is reported as not applicable, never as a
-  failure.
+- On macOS 26+, **Animate lock screen** and **Use wallpaper as screen saver** present
+  web and still-image projects through the native extension, as live pages. They use
+  committed properties and isolated file copies, without audio, capture or
+  interaction. See [web and still wallpapers](lock-screen.md#web-and-still-wallpapers)
+  and [Screen saver](lock-screen.md#use-wallpaper-as-screen-saver) for activation,
+  independent selection and verification limits.
 
 ## Host protocol
 
@@ -64,14 +63,14 @@ Security for web content only (`NSAllowsArbitraryLoadsInWebContent` in their
 WebKit still blocks an `http://` subresource of an `https://` page as mixed content.
 The sign-in windows are web content too, and load only Steam's and pixiv's HTTPS pages.
 
-Four scripts are installed at document start, built in one place
+Five scripts are installed at document start, built in one place
 (`Shared/WebWallpaperUserScripts.swift`) for the desktop page, the preview and the
 screen-saver web surface alike; desktop and preview pages get a copy built for each
 document. The host script (`Shared/WebWallpaperProtocol.swift`) is the author API and
-everything in the table below, and runs in the main frame only. The other three close
-gaps between WebKit and Chromium: one in file requests, one in idle callbacks
-([below](#idle-callbacks)) and one in fonts ([below](#windows-fonts)). The first one is
-described here. WebKit
+everything in the table below, and runs in the main frame only. The other four close
+gaps between WebKit and Chromium: one in file requests, one in error stacks
+([below](#error-stacks)), one in idle callbacks ([below](#idle-callbacks)) and one in
+fonts ([below](#windows-fonts)). The first one is described here. WebKit
 answers a `fetch()` or `XMLHttpRequest` of a project file with status 0 and no
 headers, where Chromium answers 200 with a `Content-Type` taken from the extension. The script gives a found `file://` GET/HEAD response that status and
 type, so loaders that check `ok`, and WebGL exports (Unity, Emscripten) that call
@@ -91,6 +90,24 @@ frame, so a frame (a remote embed included) cannot subscribe to audio or ask for
 files on the wallpaper's behalf. A frame served over http(s) keeps its own `fetch` and `XMLHttpRequest`.
 Web workers are out of reach of a user script, so a worker's own `fetch` of a project
 file still sees WebKit's status 0.
+
+### Error stacks
+
+Chromium's `Error().stack` starts with a `Name: message` line and gives each frame as
+`    at function (location)`, or `    at location` for top-level code and anonymous
+functions; WebKit writes `function@location` lines and no header. A page written for
+Wallpaper Engine that reads its caller off a fixed line of a stack, as a common logging
+helper built at start-up does, got `undefined` there and threw before it set up its
+canvas, property listener and animation loop, leaving only its plain background. The
+error-stack script (`Shared/WebWallpaperErrorStacks.swift`) runs first in every frame and
+replaces `Error` and its native subclasses with constructors that build the browser's own
+error (same prototype, so `instanceof`, `constructor` and `extends Error` are unchanged),
+leave their own frame out, and give it a `stack` in V8's format, written from WebKit's
+frames when first read. Built-in frames read `at name (<anonymous>)`; `new ` before a
+constructor's frame and the receiver's type before a method name are not reproduced.
+`Error.stackTraceLimit` and `Error.captureStackTrace` keep working, and `stack` can be
+assigned. Errors the engine raises itself (a `TypeError` from reading a property of
+`undefined`) are not built through a constructor and keep WebKit's format.
 
 ### Idle callbacks
 
@@ -270,7 +287,7 @@ it is removed when the page stops.
   scale, paused, volume, mute, audio and media consent, and the effective property
   values as the `applyUserProperties` payload). A running web wallpaper makes the
   render-scale control applicable. The same web descriptors are exported to the
-  native screen saver as lock-screen scenes with a web entry file.
+  native lock screen and screen saver as lock-screen scenes with a web entry file.
 - Swift (`App/Services/WebWallpaper/`): `WebWallpaperHost` re-reads
   `webWallpapers()` on every snapshot and diffs it against one `WebWallpaperWindow`
   (`MWEWebWallpaperDesktopWindow`, desktop level, all Spaces, mouse-transparent) per
@@ -596,7 +613,10 @@ hand-moved clock, the inspection switch on running, new and preview pages,
 `WebWallpaperIdleCallbackTests` (a page that asks for an idle callback before its first
 frame gets to its frame, a self-repeating callback runs once per 50 ms period, order,
 cancellation, a throwing callback and the timeout, a native function kept, and every frame
-of every surface given the script), and `WebWallpaperFontAliasTests`: SimHei and Microsoft YaHei draw their Han in PingFang SC
+of every surface given the script), `WebWallpaperErrorStackTests` (a logger built at start-up
+that reads its caller off the fifth stack line starts, V8's header and frame lines, types,
+`cause`, the frame limit, `captureStackTrace` and assignment unchanged, one install per
+document, every frame of every surface given the script), and `WebWallpaperFontAliasTests`: SimHei and Microsoft YaHei draw their Han in PingFang SC
 and not Songti, Segoe UI's digits are PT Sans's at 98.7 percent and the four Latin fonts have the
 real fonts' digit advance, a page's own `@font-face` of the same name wins, the style comes first in the
 document, subframes get it, an https document does not, and every surface's user scripts hold it) and the bridge contract in

@@ -70,7 +70,6 @@ final class LockScreenWallpaperService {
   @ObservationIgnored private let contentRevision: () -> UInt64
   @ObservationIgnored private var lastLockScreenRequested: Bool?
   @ObservationIgnored private var lastScreenSaverRequested = false
-  @ObservationIgnored private var lastHasWebWallpapers = false
   @ObservationIgnored private var published: LockScreenConfiguration?
   /// The published activation whose first frame has not arrived, and when the wait for it gives
   /// up. A refresh that interrupts the wait waits on for the same revision until that deadline.
@@ -373,9 +372,6 @@ final class LockScreenWallpaperService {
         committed.revision = UUID().uuidString
         committed.lockScreenEnabled = committed.lockScreenEnabled && isRequested
         committed.screenSaverEnabled = committed.screenSaverEnabled && screenSaverRequested
-        if !committed.screenSaverEnabled {
-          committed.scenes.removeAll { $0.webEntryFile != nil }
-        }
         if !committed.lockScreenEnabled && !committed.screenSaverEnabled {
           committed.scenes.removeAll()
         }
@@ -388,7 +384,7 @@ final class LockScreenWallpaperService {
             try afterDeactivation?()
           }
         }
-        updateStatuses(committed, hasWebWallpapers: lastHasWebWallpapers)
+        updateStatuses(committed)
       }
       guard (isRequested && lockScreenActivationError == nil) || screenSaverRequested else {
         status = String(localized: "Restoring system wallpapers…")
@@ -452,7 +448,7 @@ final class LockScreenWallpaperService {
         // The selection takes over the former and reports the latter, rereading the
         // store only after something wrote it.
         try applySelection(published, inputs: inputs)
-        updateStatuses(published, hasWebWallpapers: lastHasWebWallpapers)
+        updateStatuses(published)
         return
       }
       guard !inputs.isEmpty else {
@@ -466,11 +462,9 @@ final class LockScreenWallpaperService {
       let root = exchange
       let userAssets = UserAssetStorage.managedRootURL
       let sceneStorage = ClientPaths.sceneStorageURL
-      let includeWeb = screenSaverRequested
       let staging = Task.detached(priority: .utility) {
         try LockScreenAssetPublisher.prepare(
-          inputs: inputs, exchange: root, userAssets: userAssets, sceneStorage: sceneStorage,
-          includeWeb: includeWeb)
+          inputs: inputs, exchange: root, userAssets: userAssets, sceneStorage: sceneStorage)
       }
       let prepared = try await withTaskCancellationHandler {
         try await staging.value
@@ -481,7 +475,7 @@ final class LockScreenWallpaperService {
       guard generation == revision, anyRequested else { return }
       var configuration = prepared.configuration
       configuration.lockScreenEnabled = isRequested && lockScreenActivationError == nil
-        && configuration.scenes.contains { $0.webEntryFile == nil }
+        && !configuration.scenes.isEmpty
       configuration.screenSaverEnabled = screenSaverRequested && !configuration.scenes.isEmpty
       if (configuration.lockScreenEnabled || configuration.screenSaverEnabled)
         && (published?.scenes.isEmpty != false
@@ -513,11 +507,10 @@ final class LockScreenWallpaperService {
         lastContentRevision = currentContentRevision
         lastLockScreenRequested = isRequested
         lastScreenSaverRequested = screenSaverRequested
-        lastHasWebWallpapers = prepared.hasWebWallpapers
         try checkReadinessFailures(published)
         try applySelection(published, inputs: inputs)
         guard unconfirmed?.revision == published.revision else {
-          updateStatuses(published, hasWebWallpapers: prepared.hasWebWallpapers)
+          updateStatuses(published)
           return
         }
         // A refresh interrupted the wait for this activation's first frame. It is still not
@@ -528,6 +521,10 @@ final class LockScreenWallpaperService {
           try beforeActivation?()
           ownsDesktopProvider = true
         }
+        // Selecting a new revision reloads WallpaperAgent, which ends the processes that drew the
+        // old one. That is expected, not a renderer failing: stop watching them before it happens.
+        // `awaitReadiness` watches the processes that draw this revision.
+        cancelRendererWatches()
         try publish(configuration)
         extensionPreparation = nil
         LockScreenAssetPublisher.collectGarbage(
@@ -567,8 +564,7 @@ final class LockScreenWallpaperService {
       lastContentRevision = currentContentRevision
       lastLockScreenRequested = isRequested
       lastScreenSaverRequested = screenSaverRequested
-      lastHasWebWallpapers = prepared.hasWebWallpapers
-      updateStatuses(configuration, hasWebWallpapers: prepared.hasWebWallpapers)
+      updateStatuses(configuration)
       copyRecoveryAttempted = false
       electionRepairOffered = false
       forceRepublish = false
@@ -632,20 +628,16 @@ final class LockScreenWallpaperService {
   private func applySelection(
     _ configuration: LockScreenConfiguration, inputs: [LockScreenPublishInput]
   ) throws {
-    let lockIDs = Set(configuration.scenes.lazy.filter { $0.webEntryFile == nil }.map(\.displayID))
-    let allIDs = Set(configuration.scenes.lazy.map(\.displayID))
+    let ids = Set(configuration.scenes.lazy.map(\.displayID))
+    let displays = Set(inputs.lazy.filter { ids.contains($0.displayID) }.map(\.displayUUID))
     try selection.synchronize(
-      desktopDisplays: configuration.lockScreenEnabled
-        ? Set(inputs.lazy.filter { lockIDs.contains($0.displayID) }.map(\.displayUUID)) : [],
-      screenSaverDisplays: configuration.screenSaverEnabled
-        ? Set(inputs.lazy.filter { allIDs.contains($0.displayID) }.map(\.displayUUID)) : [],
+      desktopDisplays: configuration.lockScreenEnabled ? displays : [],
+      screenSaverDisplays: configuration.screenSaverEnabled ? displays : [],
       revision: configuration.revision)
   }
 
-  private func updateStatuses(
-    _ configuration: LockScreenConfiguration, hasWebWallpapers: Bool = false
-  ) {
-    let lockCount = configuration.scenes.reduce(0) { $0 + ($1.webEntryFile == nil ? 1 : 0) }
+  private func updateStatuses(_ configuration: LockScreenConfiguration) {
+    let lockCount = configuration.scenes.count
     isEnabled = isRequested && configuration.lockScreenEnabled && lockCount > 0
     screenSaverEnabled = screenSaverRequested && configuration.screenSaverEnabled
       && !configuration.scenes.isEmpty
@@ -653,9 +645,7 @@ final class LockScreenWallpaperService {
     status = !isRequested ? String(localized: "Off") : errorMessage != nil
       ? String(localized: "Not enabled — action required") : isEnabled
         ? String(localized: "Enabled for \(lockCount) display(s)")
-        : hasWebWallpapers
-          ? String(localized: "Not applicable — web wallpapers have no lock-screen support")
-          : String(localized: "Waiting for an applied video or live scene on a connected display")
+        : String(localized: "Waiting for an applied wallpaper on a connected display")
     if isEnabled, errorMessage == nil, let held = heldNotice(for: configuration) {
       status += " — " + held
     }
@@ -745,7 +735,7 @@ final class LockScreenWallpaperService {
   /// those. An extension copy that does not report its process is not watched.
   private func armRendererWatches(_ configuration: LockScreenConfiguration) {
     let processes = Set(
-      configuration.scenes.lazy.filter { $0.webEntryFile == nil }.compactMap {
+      configuration.scenes.lazy.compactMap {
         self.readiness(displayID: $0.displayID, revision: configuration.revision)?.processID
       }.filter { $0 > 0 })
     for pid in rendererWatches.keys where !processes.contains(pid) {
@@ -765,7 +755,7 @@ final class LockScreenWallpaperService {
     guard let cancel = rendererWatches.removeValue(forKey: pid) else { return }
     cancel()
     guard !stopping, isEnabled, let published, published.lockScreenEnabled else { return }
-    let lockScenes = published.scenes.filter { $0.webEntryFile == nil }
+    let lockScenes = published.scenes
     let serving = lockScenes.compactMap {
       readiness(displayID: $0.displayID, revision: published.revision)?.processID
     }
@@ -861,7 +851,7 @@ final class LockScreenWallpaperService {
       try checkExtensionFailure(configuration)
       var ready = true
       var noted: [UInt32: String] = [:]
-      for scene in configuration.scenes where scene.webEntryFile == nil {
+      for scene in configuration.scenes {
         let file = exchange.appendingPathComponent("ready-\(scene.displayID).json")
         guard let data = try? Data(contentsOf: file),
           let state = try? JSONDecoder().decode(LockScreenReadiness.self, from: data),
@@ -974,16 +964,13 @@ private enum LockScreenAssetPublisher {
   struct Prepared {
     var configuration: LockScreenConfiguration
     var referencedRevisions: Set<String>
-    var hasWebWallpapers: Bool
   }
 
   static func prepare(
-    inputs: [LockScreenPublishInput], exchange: URL, userAssets: URL, sceneStorage: URL,
-    includeWeb: Bool
+    inputs: [LockScreenPublishInput], exchange: URL, userAssets: URL, sceneStorage: URL
   ) throws -> Prepared {
     var sources: [String: String] = [:]
     var scenes: [LockScreenScene] = []
-    var hasWebWallpapers = false
     for input in inputs {
       try Task.checkCancellation()
       guard input.projectPath.hasPrefix("/"), input.assetsPath.hasPrefix("/") else {
@@ -1004,8 +991,6 @@ private enum LockScreenAssetPublisher {
           message: String(localized: "The committed wallpaper does not declare a project type."))
       }
       let isWeb = type.lowercased() == "web"
-      hasWebWallpapers = hasWebWallpapers || isWeb
-      if isWeb && !includeWeb { continue }
       guard ["video", "scene", "web"].contains(type.lowercased()) else {
         throw LockScreenWallpaperFailure(
           message: String(localized: "This wallpaper type cannot be presented by the native wallpaper provider."))
@@ -1086,7 +1071,7 @@ private enum LockScreenAssetPublisher {
     }
     return Prepared(
       configuration: LockScreenConfiguration(scenes: scenes),
-      referencedRevisions: Set(sources.values), hasWebWallpapers: hasWebWallpapers)
+      referencedRevisions: Set(sources.values))
   }
 
   /// The media file of a video project the extension may open natively: the project's `file`

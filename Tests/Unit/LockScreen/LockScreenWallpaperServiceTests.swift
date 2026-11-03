@@ -1448,15 +1448,11 @@ final class LockScreenWallpaperServiceTests: XCTestCase {
     exchange: exchange, defaults: defaults, scheduleMonitor: scheduleMonitor,
     displayUUID: { _ in "one" })
     try service.start()
-    service.setEnabled(true)
-    await waitFor("web excluded from lock screen") { !service.isBusy }
-    XCTAssertFalse(service.isEnabled)
-    XCTAssertFalse(service.ownsDesktopProvider)
-    XCTAssertEqual(try selectedProvider("Desktop"), "display-one-desktop")
     service.setScreenSaverEnabled(true)
     await waitFor("web saver selected") { !service.isBusy }
     XCTAssertTrue(service.screenSaverEnabled)
     XCTAssertFalse(service.isEnabled)
+    XCTAssertFalse(service.ownsDesktopProvider)
     let configuration = try publishedConfiguration()
     let published = try XCTUnwrap(configuration.scenes.first)
     XCTAssertEqual(published.webEntryFile, "pages/index.html")
@@ -1478,6 +1474,46 @@ final class LockScreenWallpaperServiceTests: XCTestCase {
     XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: emptyURL.path), [])
     XCTAssertEqual(try selectedProvider("Desktop"), "display-one-desktop")
     try await service.shutdown()
+  }
+
+  /// A web wallpaper animates the lock screen like a scene or a video (issue 155): it takes the
+  /// Desktop selection, and turning the screen saver off leaves it there.
+  @MainActor
+  func testAWebWallpaperTakesTheLockScreenAndKeepsItWhenTheScreenSaverTurnsOff() async throws {
+    try Data(#"{"type":"web","title":"t","file":"index.html"}"#.utf8).write(
+      to: project.appendingPathComponent("project.json"))
+    try Data("<html></html>".utf8).write(to: project.appendingPathComponent("index.html"))
+    var record = scene()
+    record.displayId = 1
+    let service = LockScreenWallpaperService(prepareExtension: {}, notifyConfigurationChanged: {}, scenes: { [record] },
+      selection: LockScreenWallpaperSelection(storeURL: store, journalURL: journal, reload: {}),
+      exchange: exchange, defaults: defaults, scheduleMonitor: scheduleMonitor,
+      displayUUID: { _ in "one" })
+    let responder = readinessResponder()
+    defer { responder.cancel() }
+    try service.start()
+    service.setEnabled(true)
+    service.setScreenSaverEnabled(true)
+    await waitFor("web lock screen and saver") {
+      service.isEnabled && service.screenSaverEnabled && !service.isBusy
+    }
+    XCTAssertNil(service.errorMessage)
+    XCTAssertTrue(service.ownsDesktopProvider)
+    XCTAssertEqual(try selectedProvider("Desktop"), LockScreenConfiguration.extensionIdentifier)
+    XCTAssertEqual(try selectedProvider("Idle"), LockScreenConfiguration.extensionIdentifier)
+    XCTAssertEqual(try publishedConfiguration().scenes.first?.webEntryFile, "index.html")
+
+    service.setScreenSaverEnabled(false)
+    await waitFor("saver off") { !service.screenSaverEnabled && !service.isBusy }
+    let published = try publishedConfiguration()
+    XCTAssertTrue(published.lockScreenEnabled)
+    XCTAssertFalse(published.screenSaverEnabled)
+    XCTAssertEqual(published.scenes.first?.webEntryFile, "index.html")
+    XCTAssertTrue(service.isEnabled)
+    XCTAssertEqual(try selectedProvider("Desktop"), LockScreenConfiguration.extensionIdentifier)
+    XCTAssertEqual(try selectedProvider("Idle"), "display-one-idle")
+    try await service.shutdown()
+    XCTAssertEqual(try selectedProvider("Desktop"), "display-one-desktop")
   }
 
   @MainActor
@@ -1818,11 +1854,8 @@ final class LockScreenWallpaperServiceTests: XCTestCase {
     let responder = readinessResponder()
     defer { responder.cancel() }
     try service.start()
-    // A web page can only be a screen saver; the others take the lock screen.
-    if type == "web" { service.setScreenSaverEnabled(true) } else { service.setEnabled(true) }
-    await waitFor("\(type) published") {
-      (service.isEnabled || service.screenSaverEnabled) && !service.isBusy
-    }
+    service.setEnabled(true)
+    await waitFor("\(type) published") { service.isEnabled && !service.isBusy }
     let published = try XCTUnwrap(publishedConfiguration().scenes.first)
     try await service.shutdown()
     return published
