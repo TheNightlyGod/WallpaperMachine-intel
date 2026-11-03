@@ -60,10 +60,12 @@ final class ScreenSaverWebSurfaceTests: XCTestCase {
     try? FileManager.default.removeItem(at: rootURL)
   }
 
-  private func make(entry: String = "index.html", properties: String = "{}", paused: Bool = false) throws -> ScreenSaverWebSurface {
+  private func make(
+    entry: String = "index.html", properties: String = "{}", fps: UInt32 = 30, paused: Bool = false
+  ) throws -> ScreenSaverWebSurface {
     let surface = try ScreenSaverWebSurface(projectURL: project, entryFile: entry,
       readAccessURL: rootURL, size: CGSize(width: 128, height: 96), scale: 1,
-      propertiesJSON: properties, fps: 30, paused: paused)
+      propertiesJSON: properties, fps: fps, paused: paused)
     surfaces.append(surface)
     let layer = CALayer()
     layer.frame = CGRect(x: 0, y: 0, width: 128, height: 96)
@@ -83,6 +85,21 @@ final class ScreenSaverWebSurfaceTests: XCTestCase {
   private func state(_ surface: ScreenSaverWebSurface) async throws -> [String: Any] {
     let result = try await surface.webView.callAsyncJavaScript("return window.state", arguments: [:], in: nil, contentWorld: .page)
     return try XCTUnwrap(result as? [String: Any])
+  }
+
+  /// Animation frames per second over one second of the page's own clock.
+  private func frameRate(_ surface: ScreenSaverWebSurface) async throws -> Double {
+    func sample() async throws -> (frames: Double, time: Double) {
+      let value = try await surface.webView.callAsyncJavaScript(
+        "return { frames: window.state.frames, time: performance.now() }",
+        arguments: [:], in: nil, contentWorld: .page)
+      let sample = try XCTUnwrap(value as? [String: Any])
+      return (try XCTUnwrap(sample["frames"] as? Double), try XCTUnwrap(sample["time"] as? Double))
+    }
+    let start = try await sample()
+    try await Task.sleep(for: .seconds(1))
+    let end = try await sample()
+    return (end.frames - start.frames) / ((end.time - start.time) / 1000)
   }
 
   private func poll(timeout: Duration = .seconds(5), _ condition: () async throws -> Bool) async throws {
@@ -192,6 +209,23 @@ final class ScreenSaverWebSurfaceTests: XCTestCase {
     try await poll { (try await self.state(surface)["userKeys"] as? [[String]])?.count == 2 }
     received = try await state(surface)
     XCTAssertEqual(received["userKeys"] as? [[String]], [["color", "size"], ["color"]])
+  }
+
+  /// The lock screen and the screen saver hold the page's animation to the published frame rate,
+  /// as the desktop does, rather than WebKit's own cadence near 60; a frame rate changed on the
+  /// running page (the reduced rate on battery) applies without a reload.
+  func testThePageAnimatesAtThePublishedFrameRateAndFollowsAChange() async throws {
+    let surface = try make(fps: 10)
+    try await start(surface)
+    let slow = try await frameRate(surface)
+    XCTAssertGreaterThan(slow, 5)
+    XCTAssertLessThan(slow, 14)
+
+    try surface.update(propertiesJSON: "{}", fps: 20, paused: false)
+    try await poll { (try await self.state(surface)["general"] as? [String: Any])?["fps"] as? Int == 20 }
+    let faster = try await frameRate(surface)
+    XCTAssertGreaterThan(faster, 14)
+    XCTAssertLessThan(faster, 26)
   }
 
   func testPauseSuspendsUncooperativeTimersAndResumeRestoresAnimation() async throws {

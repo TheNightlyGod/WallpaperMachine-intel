@@ -105,7 +105,12 @@ final class ScreenSaverWebSurface: NSObject, WKNavigationDelegate, WKUIDelegate 
     configuration.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
     // File resources and ES modules are confined by loadFileURL's sandbox grant.
     // Unlike desktop pages, native saver content gets no universal file access.
-    for script in WebWallpaperProtocol.userScripts() { configuration.userContentController.addUserScript(script) }
+    // Its `requestAnimationFrame` is held to the published frame rate as the desktop page's is,
+    // so the lock screen and the screen saver draw no more often than the frame-rate limit
+    // and the reduced rate on battery; `deliverCommitted` retunes it when that changes.
+    let seed = WebWallpaperProtocol.Seed(
+      framePacing: true, frameLimit: WebWallpaperProtocol.frameLimit(forFPS: fps))
+    for script in WebWallpaperProtocol.userScripts(seed: seed) { configuration.userContentController.addUserScript(script) }
     configuration.userContentController.addUserScript(WKUserScript(
       source: Self.denyCaptureScript, injectionTime: .atDocumentStart, forMainFrameOnly: false))
     webView = WKWebView(frame: CGRect(origin: .zero, size: size), configuration: configuration)
@@ -297,6 +302,7 @@ final class ScreenSaverWebSurface: NSObject, WKNavigationDelegate, WKUIDelegate 
     }
     _ = try await webView.callAsyncJavaScript("""
       window.__mweWallpaperHost.applyGeneralProperties(general);
+      window.__mweWallpaperHost.setFrameLimit(limit);
       window.__mweWallpaperHost.applyUserProperties(properties);
       window.__mweWallpaperHost.setPaused(paused);
       window.__mweWallpaperHost.deliverMedia('status', {enabled:false});
@@ -304,7 +310,8 @@ final class ScreenSaverWebSurface: NSObject, WKNavigationDelegate, WKUIDelegate 
         window.__mweWallpaperHost.userDirectoryFilesRemoved(property, files);
       for (const [property, files] of Object.entries(directories))
         window.__mweWallpaperHost.userDirectoryFilesAddedOrChanged(property, files);
-      """, arguments: ["general": ["fps": Int(fps)], "properties": properties,
+      """, arguments: ["general": ["fps": Int(fps)], "limit": WebWallpaperProtocol.frameLimit(forFPS: fps),
+                         "properties": properties,
                          "paused": paused, "directories": currentDirectories, "removed": removed], in: nil, contentWorld: .page)
     deliveredDirectories = currentDirectories
   }

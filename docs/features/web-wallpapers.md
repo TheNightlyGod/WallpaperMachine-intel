@@ -236,7 +236,10 @@ call of a page, a reload and a content-process restart are paced; a change on a
 running page (a Performance or power-source change) is sent together with
 `applyGeneralProperties` and applies from the next frame without reloading, and
 callbacks already waiting are kept. It is logged at debug level
-(`frame limit <n|none>`). The native screen-saver surface does not get the wrapper.
+(`frame limit <n|none>`). The lock-screen and screen-saver surface
+(`ScreenSaverWebSurface`) builds its page with the same limit from the published `fps`
+and retunes it with each property delivery, so a page there draws no more often than on
+the desktop; its readiness check waits two paced frames, at most two intervals of the limit.
 
 ### Render scale
 

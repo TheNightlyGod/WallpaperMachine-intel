@@ -32,8 +32,8 @@ enum WebWallpaperProtocol {
     /// of `devicePixelRatio`, so both are baked into the script of each document
     /// instead of being delivered once the document has loaded.
     struct Seed: Equatable {
-        /// Wraps `requestAnimationFrame` so the limit can be enforced (desktop
-        /// and preview pages). The screen saver keeps the native function.
+        /// Wraps `requestAnimationFrame` so the limit can be enforced (desktop,
+        /// preview, lock-screen and screen-saver pages). Off, the page keeps the native function.
         var framePacing = false
         /// Callbacks per second, or 0 for none; `frameLimit(forFPS:)` derives it.
         var frameLimit = 0
