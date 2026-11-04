@@ -134,7 +134,7 @@ private struct SelectionBar: View {
   var body: some View {
     let model = controller.library
     VStack(alignment: .leading, spacing: 6) {
-      TagFlow(spacing: 10) {
+      TagFlow(spacing: 10, centersRows: true) {
         Text("\(count) selected")
           .font(.system(size: 12, weight: .semibold))
           .foregroundStyle(theme.surface.text.color)
