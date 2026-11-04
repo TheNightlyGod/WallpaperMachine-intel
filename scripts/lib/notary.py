@@ -16,7 +16,9 @@ no secure timestamp); a submission Apple has not finished with its id, so
 `xcrun notarytool info <id>` can follow it. A new team's first submissions can stay
 `In Progress` for hours. After stapling, `stapler validate` and a Gatekeeper assessment must both
 pass: Gatekeeper has to call the source `Notarized Developer ID`, which is what lets a
-downloaded copy open without **Open Anyway**, offline included.
+downloaded copy open without **Open Anyway**, offline included. Stapling fetches the
+ticket from Apple's CloudKit service, which can drop a connection or not serve a fresh
+ticket yet, so a failed staple is retried after `STAPLE_RETRY_DELAYS` before it fails.
 
 The tool runner is a parameter, so the flow is tested without Apple's service.
 """
@@ -26,12 +28,18 @@ import json
 from pathlib import Path
 import subprocess
 import tempfile
+import time
 from typing import NamedTuple
 
 # Generous: Apple usually answers within minutes, but the first submissions of a new
 # team can be held for analysis much longer. The build job's own timeout still applies.
 WAIT = "50m"
 NOTARIZED = "source=Notarized Developer ID"
+# Seconds to wait before each new stapling attempt. The ticket lookup is a network call
+# (a release once failed on "The network connection was lost", stapler error 68) and a
+# just-accepted ticket can take a moment to reach the service; a real refusal still
+# fails, about two minutes later.
+STAPLE_RETRY_DELAYS = (15, 30, 60)
 
 
 class NotarizationError(Exception):
@@ -100,12 +108,25 @@ def submit(path, credentials, run=_run):
                             + _issues(log.stdout if log.returncode == 0 else log.stderr))
 
 
-def staple(path, run=_run):
-    """Attaches the ticket to `path` and validates it, so Gatekeeper needs no network to accept it."""
+def _staple_once(path, run):
     for action in ("staple", "validate"):
         completed = run(["xcrun", "stapler", action, path])
         if completed.returncode != 0:
-            raise NotarizationError(f"stapler could not {action} {Path(path).name}: {(completed.stdout + completed.stderr).strip()}")
+            return f"stapler could not {action} {Path(path).name}: {(completed.stdout + completed.stderr).strip()}"
+    return None
+
+
+def staple(path, run=_run, sleep=time.sleep):
+    """Attaches the ticket to `path` and validates it, so Gatekeeper needs no network to accept it."""
+    failure = _staple_once(path, run)
+    for delay in STAPLE_RETRY_DELAYS:
+        if failure is None:
+            return
+        print(f"{failure}\nRetrying in {delay}s.", flush=True)
+        sleep(delay)
+        failure = _staple_once(path, run)
+    if failure is not None:
+        raise NotarizationError(f"{failure} (after {len(STAPLE_RETRY_DELAYS) + 1} attempts)")
 
 
 def assess(path, run=_run):
@@ -118,7 +139,7 @@ def assess(path, run=_run):
         raise NotarizationError(f"Gatekeeper does not accept {path.name} as notarized: {verdict}")
 
 
-def notarize(path, credentials, run=_run):
+def notarize(path, credentials, run=_run, sleep=time.sleep):
     """Notarizes, staples and assesses `path`: an `.app` (uploaded as a zip) or a signed `.dmg`."""
     path = Path(path)
     if path.suffix == ".app":
@@ -130,7 +151,7 @@ def notarize(path, credentials, run=_run):
             submit(upload, credentials, run)
     else:
         submit(path, credentials, run)
-    staple(path, run)
+    staple(path, run, sleep)
     assess(path, run)
 
 

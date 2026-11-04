@@ -19,14 +19,17 @@ LOG = json.dumps({"status": "Invalid", "issues": [
     {"severity": "error", "path": "WallpaperMachine.zip/WallpaperMachine.app/Contents/Frameworks/libfoo.dylib",
      "message": "The binary is not signed with a valid Developer ID certificate."}]})
 ASSESSED = "accepted\nsource=Notarized Developer ID\norigin=Developer ID Application: Example (ABCDE12345)"
+LOST = (68, "", "error is Error Domain=NSURLErrorDomain Code=-1005 \"The network connection was lost.\"\n"
+                "The staple and validate action failed! Error 68.")
+STAPLED = (0, "The staple and validate action worked!", "")
 
 
 class Tools:
-    """Records each command and answers by the tool and action it names."""
+    """Records each command and answers by the tool and action it names; a list answers in turn, then repeats its last."""
 
     def __init__(self, **answers):
         self.commands = []
-        self.answers = {"submit": (0, ACCEPTED, ""), "log": (0, LOG, ""), "staple": (0, "The staple and validate action worked!", ""),
+        self.answers = {"submit": (0, ACCEPTED, ""), "log": (0, LOG, ""), "staple": STAPLED,
                         "validate": (0, "The validate action worked!", ""), "spctl": (0, "", ASSESSED), "ditto": (0, "", ""),
                         **answers}
 
@@ -34,7 +37,10 @@ class Tools:
         command = list(map(str, command))
         self.commands.append(command)
         key = Path(command[0]).name if command[0] != "xcrun" else command[2]
-        code, stdout, stderr = self.answers[key]
+        answer = self.answers[key]
+        if isinstance(answer, list):
+            answer = answer.pop(0) if len(answer) > 1 else answer[0]
+        code, stdout, stderr = answer
         return subprocess.CompletedProcess(command, code, stdout, stderr)
 
     def named(self, key):
@@ -118,10 +124,26 @@ class NotarizeTests(unittest.TestCase):
         order = [command[2] if command[0] == "xcrun" else Path(command[0]).name for command in tools.commands]
         self.assertEqual(order, ["ditto", "submit", "staple", "validate", "spctl"])
 
-    def test_a_ticket_that_cannot_be_stapled_fails(self):
-        tools = Tools(staple=(65, "", "Could not find base64 encoded ticket in response"))
+    def test_a_ticket_that_cannot_be_stapled_fails_after_the_retries(self):
+        tools, waits = Tools(staple=(65, "", "Could not find base64 encoded ticket in response")), []
         with self.assertRaisesRegex(notary.NotarizationError, "could not staple"):
-            notary.notarize(Path("/build/x.dmg"), CREDENTIALS, tools)
+            notary.notarize(Path("/build/x.dmg"), CREDENTIALS, tools, sleep=waits.append)
+        self.assertEqual(len(tools.named("staple")), len(notary.STAPLE_RETRY_DELAYS) + 1)
+        self.assertEqual(waits, list(notary.STAPLE_RETRY_DELAYS))
+        self.assertEqual(tools.named("spctl"), [])
+
+    def test_a_lost_connection_while_stapling_is_retried(self):
+        tools, waits = Tools(staple=[LOST, LOST, STAPLED]), []
+        notary.notarize(Path("/build/WallpaperMachine-1.9.1-arm64.dmg"), CREDENTIALS, tools, sleep=waits.append)
+        self.assertEqual(len(tools.named("staple")), 3)
+        self.assertEqual(len(tools.named("validate")), 1)
+        self.assertEqual(waits, list(notary.STAPLE_RETRY_DELAYS[:2]))
+        self.assertEqual(len(tools.named("spctl")), 1)
+
+    def test_a_ticket_that_staples_at_once_waits_for_nothing(self):
+        waits = []
+        notary.notarize(Path("/build/WallpaperMachine.app"), CREDENTIALS, Tools(), sleep=waits.append)
+        self.assertEqual(waits, [])
 
     def test_gatekeeper_must_call_the_source_notarized(self):
         tools = Tools(spctl=(0, "", "accepted\nsource=Unnotarized Developer ID"))
