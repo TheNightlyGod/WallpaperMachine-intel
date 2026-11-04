@@ -186,7 +186,10 @@ struct DisplayCard: View {
         }
         .labelsHidden()
         .pickerStyle(.menu)
-        .fixedSize()
+        // A menu is as wide as its longest choice ("Fit with blurred backdrop"); held at that width
+        // it squeezed the row's name into a column one letter wide. Capped like the property menus,
+        // it truncates instead and leaves the name room.
+        .frame(minWidth: 110, maxWidth: 170)
         .accessibilityLabel("Scaling mode")
       }
       .disabled(controller.isInspectorControlDisabled(options, key: modeKey))
