@@ -9,6 +9,8 @@ from `project.yml`, and `xcodebuild` builds the app. See docs/build.md.
 into DIR, the way Xcode would; `--app-icon DIR` builds the app with that output instead
 of compiling the icon. Xcode 26's actool crashes on most attempts to compile an `.icon`
 on macOS 15, where releases are built, so CI compiles it on macOS 26 and hands it over.
+The release build does not wait for it: `--no-app-icon` builds without the icon, and
+`--install-app-icon DIR` puts the handed-over icon into that build once it arrives.
 
 Each stage's full output goes to `artifacts/build/<stage>-<timestamp>.log`; the
 terminal only sees errors and the final verdict unless `--verbose` is given.
@@ -133,6 +135,10 @@ def main():
         help="Only compile the app icon and asset catalog into DIR.")
     parser.add_argument("--app-icon", type=Path, metavar="DIR",
         help="Build with the icon --compile-app-icon wrote to DIR instead of compiling it.")
+    parser.add_argument("--no-app-icon", action="store_true",
+        help="Build without compiling the app icon; --install-app-icon adds it afterwards.")
+    parser.add_argument("--install-app-icon", type=Path, metavar="DIR",
+        help="Only put the icon --compile-app-icon wrote to DIR into the built app, and re-sign it.")
     parser.add_argument("--xcode-setting", action="append", default=[], metavar="NAME=VALUE",
         help="Pass a build setting to xcodebuild; repeatable (CodeQL's traced Swift build uses it).")
     parser.add_argument("--verbose", action="store_true", help="Echo every tool line instead of only errors.")
@@ -142,13 +148,23 @@ def main():
     for setting in args.xcode_setting:
         if "=" not in setting:
             parser.error(f"--xcode-setting expects NAME=VALUE, got {setting!r}")
+    if args.app_icon and args.no_app_icon:
+        parser.error("--app-icon already builds without compiling the icon; drop --no-app-icon")
     if args.compile_app_icon:
         compile_app_icon(args.compile_app_icon.resolve())
         print(f"{MARK.ok} Compiled the app icon into {args.compile_app_icon}")
         return
-    compiled_icon = args.app_icon.resolve() if args.app_icon else None
+    compiled_icon = args.app_icon or args.install_app_icon
+    compiled_icon = compiled_icon.resolve() if compiled_icon else None
     if compiled_icon and not all((compiled_icon / name).is_file() for name in (*APP_ICON_OUTPUTS, APP_ICON_PLIST)):
         raise SystemExit(f"{compiled_icon} is not --compile-app-icon output")
+    if args.install_app_icon:
+        app = app_bundle(args.configuration)
+        if not (app / "Contents/Info.plist").is_file():
+            raise SystemExit(f"No built app at {app}; build it with --no-app-icon first")
+        install_app_icon(app, compiled_icon)
+        print(f"{MARK.ok} Added the app icon to {app}")
+        return
     env = build_environment()
     if not args.swift_only:
         run(["cargo", "build", "--workspace", "--release"], RENDERER, cargo_environment(), stage="cargo")
@@ -163,7 +179,7 @@ def main():
     # which keeps Xcode's incremental build state (and `scripts/test.py` agrees).
     run(["xcodegen", "generate", "--use-cache", "--quiet"], env=env, stage="xcodegen")
     settings = []
-    if compiled_icon:
+    if compiled_icon or args.no_app_icon:
         # The asset catalog is still compiled; only the .icon is left out, and with it
         # the app-icon name actool would otherwise look for in the catalog.
         settings = [f"EXCLUDED_SOURCE_FILE_NAMES={APP_ICON.name}", "ASSETCATALOG_COMPILER_APPICON_NAME="]

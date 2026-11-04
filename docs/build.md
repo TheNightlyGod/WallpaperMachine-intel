@@ -77,6 +77,8 @@ python3 scripts/build.py --swift-only             # skip the renderer
 python3 scripts/build.py --renderer-only          # renderer + bindings only
 python3 scripts/build.py --compile-app-icon DIR   # only compile AppIcon.icon + Assets.xcassets into DIR
 python3 scripts/build.py --app-icon DIR           # build with that output instead of compiling the icon
+python3 scripts/build.py --no-app-icon            # build without the icon, for --install-app-icon to add
+python3 scripts/build.py --install-app-icon DIR   # only put that output into the built app and re-sign it
 python3 scripts/build.py --xcode-setting N=V      # also pass build setting N=V to xcodebuild (repeatable)
 ```
 
@@ -86,7 +88,9 @@ python3 scripts/build.py --xcode-setting N=V      # also pass build setting N=V 
 writes `Assets.car`, `AppIcon.icns` and `partial-info.plist`. `--app-icon` builds
 with `AppIcon.icon` excluded (`EXCLUDED_SOURCE_FILE_NAMES`, empty
 `ASSETCATALOG_COMPILER_APPICON_NAME`), then copies those files into the bundle,
-merges the Info.plist keys and re-signs it ad hoc. Both exist because on macOS 15
+merges the Info.plist keys and re-signs it ad hoc. `--no-app-icon` and
+`--install-app-icon` are the two halves of `--app-icon`, so the release build can
+compile while the icon is still being compiled elsewhere. They exist because on macOS 15
 Xcode 26's `actool` crashes on most `.icon` compiles: CI compiles the icon on
 macOS 26 ([release.md](release.md#build-buildyml)), and a local build on macOS 15
 can do the same (see Troubleshooting). A build on macOS 26 never needs them.
@@ -376,8 +380,9 @@ certificate) needs a release whose requirement accepts both teams first.
 its leaf, as a release ([telemetry](features/telemetry.md#what-a-report-holds)).
 
 `.github/workflows/build.yml` imports the certificate and the notary credentials into
-a temporary keychain from five repository secrets and fails when any is missing,
-rather than shipping a build Gatekeeper holds:
+a temporary keychain from five repository secrets before it compiles anything, and fails
+when any is missing or Apple refuses the key, rather than shipping a build Gatekeeper
+holds:
 
 | Secret | Holds |
 |---|---|

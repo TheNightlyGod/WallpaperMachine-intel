@@ -7,7 +7,9 @@
 #
 # Three jobs. `app-icon` compiles the Icon Composer icon on macOS 26, because Xcode 26's
 # actool crashes on most attempts to compile an .icon on macOS 15. `build` makes the
-# Release image on macOS 15 with that icon, and `publish` releases it. The test gate is
+# Release image on macOS 15, and starts with `app-icon`: it compiles the app without the
+# icon and adds it once compiled, by which time the icon is long done, so the icon job
+# is not part of a release's time. `publish` releases the image. The test gate is
 # not part of a release: every change passes `python3 scripts/test.py` before it is
 # committed, and on hosted VMs the gate failed only on timing and layout the VM got
 # wrong, unpublishing five 1.5 tags in a row; Test runs it by hand. The release is
@@ -32,6 +34,8 @@ permissions:
 
 jobs:
   app-icon:
+    # `build` waits for this job by its name (step "Wait for the app icon").
+    name: App icon (macOS 26)
     # A few seconds of actool, but it has to be macOS 26: on macOS 15, Xcode 26's actool
     # (every 26.x on the runner image) exits 255 on most .icon compiles. The asset
     # catalog alone compiles there reliably, so `build` still compiles that itself.
@@ -58,12 +62,17 @@ jobs:
           retention-days: 7
 
   build:
-    needs: app-icon
+    name: Build, sign and notarize (macOS 15)
+    # Not `needs: app-icon`: the icon is only needed once the app is compiled.
     # The oldest runner that carries Xcode 26. Homebrew pours bottles built for the
     # runner's own release, and the app bundles those dylibs, so the runner's macOS
     # is the lowest release the published app can launch on (docs/build.md).
     runs-on: macos-15
     timeout-minutes: 150
+    permissions:
+      contents: read
+      # Reads this run's jobs and artifacts while it waits for the app icon.
+      actions: read
     steps:
       - uses: actions/checkout@v4
         with:
@@ -91,26 +100,10 @@ jobs:
           cp CHANGELOG.md "${RUNNER_TEMP}/release/CHANGELOG.md"
           cat "${RUNNER_TEMP}/release/notes.md" >> "$GITHUB_STEP_SUMMARY"
 
-      - uses: ./.github/actions/prepare-build
-        with:
-          # Restore only: an upload here would hold up the release. Warm caches saves
-          # them every day, and the renderer build is reused for every source this
-          # release has not changed since.
-          save-object-cache: "false"
-          reuse-renderer-build: "true"
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: app-icon-${{ inputs.tag }}
-          path: ${{ runner.temp }}/app-icon
-
-      - name: Build
-        run: |
-          set -euo pipefail
-          xcodebuild -version
-          python3 scripts/build.py --configuration Release --app-icon "${RUNNER_TEMP}/app-icon"
-
       - name: Import the Developer ID certificate and the notary credentials
+        # Before the long build, so a missing secret or a key Apple refuses fails in a
+        # minute rather than after it, as 1.9.0's did. Xcode signs ad hoc
+        # (CODE_SIGN_IDENTITY "-"), so the identity in the keychain changes nothing there.
         # Releases are signed with the project's Developer ID and notarized, so a downloaded
         # copy opens without Open Anyway, and their designated requirement (identifier,
         # Apple's Developer ID chain, team) is the same from one release to the next, so
@@ -168,6 +161,58 @@ jobs:
           xcrun notarytool store-credentials "WallpaperMachine Notary" --key "${key}" \
             --key-id "${NOTARY_API_KEY_ID}" --issuer "${NOTARY_API_ISSUER}" --keychain "${keychain}"
           rm -f "${key}"
+
+      - uses: ./.github/actions/prepare-build
+        with:
+          # Restore only: an upload here would hold up the release. Warm caches saves
+          # them every day, and the renderer build is reused for every source this
+          # release has not changed since.
+          save-object-cache: "false"
+          reuse-renderer-build: "true"
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          python3 scripts/build.py --configuration Release --no-app-icon
+
+      - name: Wait for the app icon
+        # The icon job started with this one and needs about a minute against this job's
+        # ten, so its artifact is normally there already. It is looked up by name, which
+        # also finds the artifact of an earlier attempt when only this job is re-run; an
+        # icon job that ended without one fails this job.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT: app-icon-${{ inputs.tag }}
+          ICON_JOB: App icon (macOS 26)
+        run: |
+          set -euo pipefail
+          artifacts="repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?name=${ARTIFACT}"
+          jobs="repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}/jobs?per_page=100"
+          for _ in $(seq 1 180); do
+            # A failed lookup counts as not yet, and is asked again.
+            count="$(gh api "${artifacts}" --jq '.total_count' || echo 0)"
+            if [ "${count}" -gt 0 ]; then
+              echo "${ARTIFACT} is ready."
+              exit 0
+            fi
+            conclusion="$(gh api "${jobs}" --jq "[.jobs[] | select(.name | endswith(\"${ICON_JOB}\")) | .conclusion // empty] | last // empty" || true)"
+            if [ -n "${conclusion}" ] && [ "${conclusion}" != success ]; then
+              echo "::error::The ${ICON_JOB} job ended ${conclusion}, so there is no icon to build with."
+              exit 1
+            fi
+            sleep 10
+          done
+          echo "::error::${ARTIFACT} did not appear within 30 minutes."
+          exit 1
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: app-icon-${{ inputs.tag }}
+          path: ${{ runner.temp }}/app-icon
+
+      - name: Add the app icon
+        run: python3 scripts/build.py --configuration Release --install-app-icon "${RUNNER_TEMP}/app-icon"
 
       - name: Package
         # Relocates the bundle and signs it with the Developer ID and the hardened runtime,
@@ -227,6 +272,7 @@ jobs:
           retention-days: 7
 
   publish:
+    name: Publish the release
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 15

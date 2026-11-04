@@ -506,8 +506,9 @@ in [CONTRIBUTING.md](../CONTRIBUTING.md#automated-review). `checks.yml` runs
 described [below](#codeql-codeqlyml).
 
 Version, Build and Release grant `contents: write`; Build's publish job also needs
-`id-token: write` and `attestations: write` for its provenance attestation, and
-both callers pass those through, together with the repository's secrets (`secrets:
+`id-token: write` and `attestations: write` for its provenance attestation, and its
+build job `actions: read` to find the app icon among the run's jobs and artifacts. Both
+callers pass those through, together with the repository's secrets (`secrets:
 inherit`). Warm caches only reads. Supporters writes only `README.md`,
 `README.zh-CN.md`, `README.pt-BR.md` and `README.ko.md`, with `contents: write`, and reads Version's runs with
 `actions: read`. The macOS setup Build and Warm caches share lives in one
@@ -573,10 +574,13 @@ protection must allow GitHub Actions.
 
 `workflow_call` only, with a required `tag` input. It is the single place a
 publishable artifact is produced, called by Version for CI-produced tags and by
-Release for hand-pushed ones. It runs three jobs. `app-icon` compiles the app icon
-on a `macos-26` runner. `build` then runs on `macos-15` (the oldest runner that
-carries Xcode 26, whose Homebrew bottles set the published app's minimum macOS),
-with a 150-minute timeout. `publish` runs on `ubuntu-latest` once it succeeds.
+Release for hand-pushed ones. It runs three jobs. `app-icon` ("App icon (macOS 26)")
+compiles the app icon on a `macos-26` runner. `build` ("Build, sign and notarize
+(macOS 15)") starts at the same time on `macos-15` (the oldest runner that carries
+Xcode 26, whose Homebrew bottles set the published app's minimum macOS), with a
+150-minute timeout, and takes the icon only once the app is compiled, so the icon job,
+about a minute, is never what a release waits for. `publish` ("Publish the release")
+runs on `ubuntu-latest` once `build` succeeds.
 
 The test gate is not part of a release. Every change passes `python3 scripts/test.py`
 before it is committed, and on hosted VMs the gate failed 1.5.0 through 1.5.4 only on
@@ -601,12 +605,22 @@ artifact.
    with the notes, so the update manifest carries every translation of the new
    section. Missing translations or malformed source history fail here, in seconds,
    rather than after the macOS build;
-3. runs `prepare-build` (below) and downloads the `app-icon-<tag>` artifact;
-4. runs `python3 scripts/build.py --configuration Release --app-icon DIR`, which
-   leaves `AppIcon.icon` out of the Xcode build, puts the compiled icon and catalog
-   into the bundle with their Info.plist keys and re-signs it;
-5. imports the Developer ID certificate and the notary API key from the signing
-   secrets into a temporary keychain ([build.md](build.md#release-signing)), then runs
+3. imports the Developer ID certificate and the notary API key from the signing
+   secrets into a temporary keychain ([build.md](build.md#release-signing)), also
+   before anything is built: a missing secret, a certificate that does not import
+   (1.9.0's failure, which then came after the whole build) or a key Apple refuses
+   fails in about a minute. Xcode signs ad hoc, so the identity changes nothing there;
+4. runs `prepare-build` (below), restoring both caches and reusing the renderer build
+   for every source unchanged since it (`reuse-renderer-build`);
+5. runs `python3 scripts/build.py --configuration Release --no-app-icon`, which
+   leaves `AppIcon.icon` out of the Xcode build;
+6. waits until `app-icon` has uploaded `app-icon-<tag>`, which it normally has, looking
+   the artifact up by name so a re-run of only this job finds an earlier attempt's,
+   and fails if that job ended without one; downloads it and runs
+   `python3 scripts/build.py --configuration Release --install-app-icon DIR`, which
+   puts the compiled icon and catalog into the bundle with their Info.plist keys and
+   re-signs it;
+7. runs
    `python3 scripts/package.py --configuration Release --require-deployment-target
    --sign-identity "Developer ID Application" --notarize "WallpaperMachine Notary"
    --notary-keychain <that keychain>`, which fails if a bundled library needs a newer
@@ -627,13 +641,13 @@ artifact.
    contract](build.md#bundle-contract)), the `Applications` link and the window
    layout, then writes the `.sha256` sidecar
    ([build.md](build.md#packaging-and-installing));
-6. matches the image to the tag: it must be named
+8. matches the image to the tag: it must be named
    `WallpaperMachine-<tag without v>-arm64.dmg`, and its checksum is echoed into the
    job summary;
-7. hands the image, its sidecar, the notes and that `CHANGELOG.md` to `publish` as
+9. hands the image, its sidecar, the notes and that `CHANGELOG.md` to `publish` as
    the `release-<tag>` artifact.
 
-Step 6 is the guard that the bump actually reached the build:
+Step 8 is the guard that the bump actually reached the build:
 `scripts/package.py` names the image from the bundle's
 `CFBundleShortVersionString`, so a mismatch means the published tag and the
 built version disagree and the job fails instead of publishing the wrong binary.

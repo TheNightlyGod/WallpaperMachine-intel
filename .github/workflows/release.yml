@@ -13,6 +13,7 @@ permissions:
 
 jobs:
   publish:
+    name: Release ${{ github.ref_name }}
     uses: ./.github/workflows/build.yml
     with:
       tag: ${{ github.ref_name }}
@@ -23,6 +24,8 @@ jobs:
       contents: write
       id-token: write
       attestations: write
+      # Build's build job reads this run's jobs and artifacts for the app icon.
+      actions: read
     # Same group as Version's publish job: one tag is only ever built once at a time.
     concurrency:
       group: publish-${{ github.ref_name }}
