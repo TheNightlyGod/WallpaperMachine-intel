@@ -64,10 +64,12 @@ Wallpapers moved to Trash leave every list and every day or night choice.
 
 ### Playing from Installed
 
-**Play** and **Shuffle** at the end of Installed's view chips, and in a local
-collection's context menu in the Filters sidebar, turn the view on show (All
-wallpapers, Favorites or that collection) into the target display's rotation:
-**Play** in order, **Shuffle** shuffled. The display changes to its first wallpaper at
+**Play** at the end of Installed's view chips, and **Play** and **Shuffle** in a
+local collection's context menu in the Filters sidebar, turn the view on show (All
+wallpapers, Favorites or that collection) into the target display's rotation. Installed's
+**Play** keeps the order the target display already uses; the menu in the same capsule names
+and ticks that order and plays in the one chosen (**In order** or **Shuffle**). In the context menu,
+**Play** plays in order and **Shuffle** shuffled. The display changes to its first wallpaper at
 once, keeps its interval or unlock trigger, and a display you emptied is filled again;
 when it already shows the only wallpaper the source has, the rotation is set and the
 wallpaper stays. A source with no wallpaper that can play is refused and nothing
@@ -272,7 +274,7 @@ left out of a backup too.
 | Persistence and dates | `App/Services/Playlist/PlaylistStore.swift` |
 | Timer and switching | `App/Services/Playlist/PlaylistScheduler.swift`, wired in `AppDelegate.startPlaylistScheduler` |
 | Panel actions | `editPlaylist`, `playPlaylist`, `addToPlaylist`, `removeFromPlaylist`, `reorderPlaylist`, `clearPlaylistFailures`, `skipPlaylist`, `resumePlaylist` in `App/Views/ControlPanel/Model/PanelController+Playlists.swift`; the menus' rules in `Model/PlaylistEdit.swift` |
-| Panel | Settings → Displays in `App/Views/ControlPanel/Settings/Sections/DisplaysPlaylistRows.swift`, with drag and button ordering in `DisplaysOrderEditor.swift` and the page state in `Settings/DisplaysSettingsModel.swift`; the inspector's playlist item and Installed's **Add to playlist** in `Inspector/` and `Library/`; Installed's Play and Shuffle in `Library/InstalledScopeBar.swift` and `Library/CollectionsFilterGroup.swift`; Now Playing's playlist in `Shell/NowPlayingPlaylist.swift` |
+| Panel | Settings → Displays in `App/Views/ControlPanel/Settings/Sections/DisplaysPlaylistRows.swift`, with drag and button ordering in `DisplaysOrderEditor.swift` and the page state in `Settings/DisplaysSettingsModel.swift`; the inspector's playlist item and Installed's **Add to playlist** in `Inspector/` and `Library/`; Installed's Play and its order menu in `Library/InstalledScopeBar.swift`, the collection's Play and Shuffle in `Library/CollectionsFilterGroup.swift`; Now Playing's playlist in `Shell/NowPlayingPlaylist.swift` |
 | Collections and saved-plan actions | `WallpaperCollectionStore.swift`; `createCollection` … `removeFromCollection` in `Model/PanelController+Collections.swift` and `savePlaylistPlan` … `applyPlaylistPlan` in `Model/PanelController+Playlists.swift`; the sidebar's `Library/CollectionsFilterGroup.swift` and the Saved playlists group in `Settings/Sections/DisplaysGroups.swift` |
 
 ## Verification

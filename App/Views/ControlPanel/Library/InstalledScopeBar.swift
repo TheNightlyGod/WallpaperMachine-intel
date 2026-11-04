@@ -8,8 +8,8 @@ import SwiftUI
 /// accent dot while Workshop wallpapers have an update, with how many as its tooltip and for
 /// VoiceOver.
 ///
-/// Play and Shuffle at the end turn the view on show into the target display's rotation, so a
-/// collection plays from where it is chosen rather than only from Settings › Displays.
+/// Play at the end, with its order menu, turns the view on show into the target display's rotation,
+/// so a collection plays from where it is chosen rather than only from Settings › Displays.
 struct InstalledScopeBar: View {
   @Environment(PanelController.self) private var controller
 
@@ -46,38 +46,74 @@ struct InstalledScopeBar: View {
   }
 }
 
-/// Play and Shuffle: the target display rotates through the view on show, in library order or
-/// shuffled, and changes to it at once. Unavailable while the view has no wallpaper that can play
-/// or the target display has no playlist of its own (off, or a mirror).
+/// Play and its order menu, the two halves of one capsule: the target display rotates through the view on show and changes to it
+/// at once. Play keeps the order that display already uses; the menu beside it shows that order and
+/// plays in the one chosen. Unavailable while the view has no wallpaper that can play or the target
+/// display has no playlist of its own (off, or a mirror).
 private struct ScopePlayButtons: View {
   let scope: LibraryScope
 
   @Environment(PanelController.self) private var controller
+  @Environment(\.panelTheme) private var theme
 
   var body: some View {
     let key = PanelActionCoordinator.key("playlistPlay")
     let isEnabled =
       controller.targetDisplay?.isSelectable == true && !controller.isBusy(key)
       && controller.canPlay(scope.playlistSource)
-    HStack(spacing: 6) {
+    let order = controller.playlistState(for: controller.targetDisplayID).playlist.order
+    HStack(spacing: 0) {
       Button {
-        play(order: .sequential, key: key)
+        play(order: order, key: key)
       } label: {
         Label("Play", systemImage: "play.fill")
       }
-      .help(L("Plays these wallpapers in order on this display"))
+      .buttonStyle(PlaySegmentStyle(leading: 10, trailing: 8))
+      .help(
+        order == .shuffle
+          ? L("Plays these wallpapers in a random order on this display")
+          : L("Plays these wallpapers in order on this display")
+      )
+      .accessibilityValue(Text(verbatim: order == .shuffle ? L("Shuffle") : L("In order")))
       .accessibilityIdentifier("scope-play")
-      Button {
-        play(order: .shuffle, key: key)
+      Rectangle()
+        .fill(theme.surface.divider.color)
+        .frame(width: 1, height: 14)
+        .accessibilityHidden(true)
+      Menu {
+        // Toggles rather than a picker, so choosing the order already ticked still plays.
+        ForEach([PlaylistOrder.sequential, .shuffle], id: \.self) { choice in
+          Toggle(
+            isOn: Binding(get: { order == choice }, set: { _ in play(order: choice, key: key) })
+          ) {
+            if choice == .shuffle {
+              Label("Shuffle", systemImage: "shuffle")
+            } else {
+              Label("In order", systemImage: "repeat")
+            }
+          }
+        }
       } label: {
-        Label("Shuffle", systemImage: "shuffle")
-          .labelStyle(.iconOnly)
+        HStack(spacing: 4) {
+          if order == .shuffle {
+            Text("Shuffle")
+          } else {
+            Text("In order")
+          }
+          Image(systemName: "chevron.down").font(.system(size: 8.5, weight: .bold))
+        }
       }
-      .help(L("Plays these wallpapers in a random order on this display"))
-      .accessibilityLabel(Text("Shuffle"))
-      .accessibilityIdentifier("scope-shuffle")
+      .menuStyle(.button)
+      .menuIndicator(.hidden)
+      .buttonStyle(PlaySegmentStyle(leading: 8, trailing: 10))
+      .help(L("Order"))
+      .accessibilityLabel(Text("Order"))
+      .accessibilityValue(Text(verbatim: order == .shuffle ? L("Shuffle") : L("In order")))
+      .accessibilityIdentifier("scope-play-order")
     }
-    .buttonStyle(.panelCapsule)
+    .background(theme.surface.hover.color, in: Capsule())
+    .clipShape(Capsule())
+    .opacity(isEnabled ? 1 : 0.4)
     .fixedSize()
     .disabled(!isEnabled)
   }
@@ -85,6 +121,48 @@ private struct ScopePlayButtons: View {
   private func play(order: PlaylistOrder, key: String) {
     let source = scope.playlistSource
     controller.launch(key) { [controller] in try await controller.playPlaylist(source, order: order) }
+  }
+}
+
+/// One half of the Play capsule: the capsule's type and height, lit on its own on hover and press
+/// by a pill inset within the half.
+/// The capsule's resting fill and its dimming while unavailable belong to the whole.
+private struct PlaySegmentStyle: ButtonStyle {
+  let leading: CGFloat
+  let trailing: CGFloat
+
+  func makeBody(configuration: Configuration) -> some View {
+    PlaySegmentBody(configuration: configuration, leading: leading, trailing: trailing)
+  }
+}
+
+private struct PlaySegmentBody: View {
+  let configuration: ButtonStyleConfiguration
+  let leading: CGFloat
+  let trailing: CGFloat
+
+  @Environment(\.panelTheme) private var theme
+  @Environment(\.isEnabled) private var isEnabled
+  @State private var isHovering = false
+
+  var body: some View {
+    configuration.label
+      .font(.system(size: 12.5, weight: .medium))
+      .foregroundStyle(theme.surface.text.color)
+      .lineLimit(1)
+      .padding(.leading, leading)
+      .padding(.trailing, trailing)
+      .frame(minHeight: 26)
+      // An inset pill, so the light stops short of the divider and the capsule's edge.
+      .background(Capsule().fill(background).padding(2))
+      .contentShape(Rectangle())
+      .onHover { isHovering = $0 }
+  }
+
+  private var background: Color {
+    guard isEnabled else { return .clear }
+    if configuration.isPressed { return theme.surface.pressed.color }
+    return isHovering ? theme.surface.selected.color : .clear
   }
 }
 
