@@ -1598,7 +1598,8 @@ and `WorkshopDownloadPersistenceTests`:
 - Free space (`DownloaderLifecycleTests`, injected disk): a download that cannot
   fit fails before SteamCMD launches with the needed and available sizes, Try again
   checks again, partial data already staged lowers the requirement, and an unknown
-  size, an unreadable disk or a sign-in-only run never blocks. Scene assets use a
+  size, an unreadable disk or a sign-in-only run never blocks; an important-usage
+  figure of 0 does not hide the plain free space. Scene assets use a
   fixed floor whatever is staged, since their depot download starts over; a
   checkpoint an earlier version kept is deleted, not restored. Depot progress is
   the network bytes against the (compressed) size SteamCMD names, never the

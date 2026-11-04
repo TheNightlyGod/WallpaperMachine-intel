@@ -738,10 +738,28 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
     }
 
     /// Free bytes the system would give this app on the volume holding `url`, counting space it
-    /// can reclaim on demand (purgeable caches, local snapshots); nil when it cannot be read.
+    /// can reclaim on demand (purgeable caches, local snapshots), or the plain free space when that
+    /// is higher; nil when it cannot be read.
     nonisolated static func availableCapacity(at url: URL) -> Int64? {
-        try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
-            .volumeAvailableCapacityForImportantUsage
+        guard let values = try? url.resourceValues(
+            forKeys: [.volumeAvailableCapacityForImportantUsageKey, .volumeAvailableCapacityKey])
+        else { return nil }
+        return usableCapacity(
+            importantUsage: values.volumeAvailableCapacityForImportantUsage,
+            plain: values.volumeAvailableCapacity.map(Int64.init))
+    }
+
+    /// The larger of the two figures macOS gives for a volume. The important-usage figure counts
+    /// reclaimable space and so is normally the larger, but on some Macs it reads 0 for every
+    /// volume while the plain free space is right; a 0 would look like a full disk and block every
+    /// download, so the plain figure is used when it is higher. Nil only when neither can be read.
+    nonisolated static func usableCapacity(importantUsage: Int64?, plain: Int64?) -> Int64? {
+        switch (importantUsage, plain) {
+        case let (important?, plain?): max(important, plain)
+        case let (important?, nil): important
+        case let (nil, plain?): plain
+        case (nil, nil): nil
+        }
     }
 
     /// What a download asks Steam's public details endpoint by default; tests pass their own.

@@ -1729,4 +1729,17 @@ final class DownloaderLifecycleTests: DownloaderTestCase {
         at: folder.appendingPathComponent("mwe-missing-\(UUID().uuidString)")),
       "A folder that cannot be read is unknown, which never blocks a download")
   }
+
+  func testUsableCapacityIgnoresAnImportantUsageZeroWhenThePlainFigureHasRoom() {
+    XCTAssertEqual(
+      WorkshopDownloader.usableCapacity(importantUsage: 0, plain: 33_955_844_096), 33_955_844_096,
+      "A bogus 0 must not read as a full disk")
+    XCTAssertEqual(
+      WorkshopDownloader.usableCapacity(importantUsage: 600_000_000_000, plain: 250_000_000_000),
+      600_000_000_000, "Reclaimable space still counts when macOS reports it")
+    XCTAssertEqual(WorkshopDownloader.usableCapacity(importantUsage: 0, plain: 0), 0, "A full disk stays full")
+    XCTAssertEqual(WorkshopDownloader.usableCapacity(importantUsage: nil, plain: 5), 5)
+    XCTAssertEqual(WorkshopDownloader.usableCapacity(importantUsage: 7, plain: nil), 7)
+    XCTAssertNil(WorkshopDownloader.usableCapacity(importantUsage: nil, plain: nil))
+  }
 }

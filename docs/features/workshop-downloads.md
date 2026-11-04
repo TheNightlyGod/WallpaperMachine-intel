@@ -1032,7 +1032,9 @@ Workshop item needs the part of its listed size not already staged, plus 15% for
 Steam's staging and 64 MiB of margin; whatever a paused or failed attempt kept as
 partial download data is counted from disk, so a retry only needs what is still
 missing. Free space is the figure macOS calls available for important usage,
-which includes space it can reclaim on demand. Shared scene resources have no
+which includes space it can reclaim on demand, or the plain free space when that
+is higher (some Macs report 0 for important usage on every volume, which would
+otherwise read as a full disk). Shared scene resources have no
 listed size before SteamCMD starts, so they need a fixed 3 GiB (the content
 depot is about 800 MB on disk): a lower bound meant to block only a clearly full
 disk. Their depot download cannot resume, so nothing staged counts against it. When the disk is short
