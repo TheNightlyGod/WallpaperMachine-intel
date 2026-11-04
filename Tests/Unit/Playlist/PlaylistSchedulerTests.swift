@@ -8,6 +8,8 @@ final class PlaylistSchedulerTests: XCTestCase {
     private var collections: WallpaperCollectionStore!
     private var shown: [String: String] = [:]
     private var running = true
+    /// Playing, but paused only because nobody can see the display (covered, full screen).
+    private var unseen = false
     private var displayIDs = ["primary"]
     private var clock = Date()
     private var applied: [String] = []
@@ -24,6 +26,7 @@ final class PlaylistSchedulerTests: XCTestCase {
         collections = WallpaperCollectionStore(defaults: defaults)
         shown = ["primary": "a"]
         running = true
+        unseen = false
         displayIDs = ["primary"]
         clock = calendar.date(from: DateComponents(year: 2027, month: 1, day: 15, hour: 12))!
         applied = []
@@ -43,7 +46,7 @@ final class PlaylistSchedulerTests: XCTestCase {
     ) -> PlaylistScheduler {
         PlaylistScheduler(
             store: store, collections: collections, displays: { self.displayIDs }, library: { library }, favorites: { favorites },
-            current: { self.shown[$0] }, isRunning: { _ in self.running },
+            current: { self.shown[$0] }, isRunning: { _ in self.running }, isUnseen: { _ in self.unseen },
             activate: activate ?? { display, choose in
                 guard let id = choose() else { return nil }
                 self.shown[display] = id
@@ -298,6 +301,94 @@ final class PlaylistSchedulerTests: XCTestCase {
         scheduler.evaluate()
         await settle()
         XCTAssertEqual(applied, ["b"], "missed intervals are not caught up one by one")
+    }
+
+    /// Issue #160: a rotation that falls due while windows or a full-screen app cover the desktop
+    /// changes behind them, so the desktop shows the new wallpaper instead of switching the moment
+    /// the user returns to it. It changes once while out of sight, and showing again starts a whole
+    /// interval.
+    func testARotationOutOfSightChangesBehindTheWindowsOnceAndShowingStartsAnInterval() async {
+        store.update("primary") {
+            $0.mode = .rotate
+            $0.interval = 5
+        }
+        let scheduler = makeScheduler()
+        scheduler.start()
+        defer { scheduler.stop() }
+        running = false
+        unseen = true
+        clock.addTimeInterval(5 * 60)
+        scheduler.evaluate()
+        await settle()
+        XCTAssertEqual(applied, ["b"], "a covered display changes when its interval ends")
+
+        clock.addTimeInterval(3 * 60 * 60)
+        scheduler.evaluate()
+        await settle()
+        XCTAssertEqual(applied, ["b"], "one change while out of sight, not one per interval")
+
+        running = true
+        unseen = false
+        scheduler.evaluate()
+        await settle()
+        XCTAssertEqual(applied, ["b"], "the desktop does not switch the moment it shows")
+        XCTAssertEqual(store.nextChange["primary"], clock.addingTimeInterval(5 * 60))
+
+        clock.addTimeInterval(5 * 60)
+        scheduler.evaluate()
+        await settle()
+        XCTAssertEqual(applied, ["b", "c"])
+    }
+
+    func testAPlanAppliedToADisplayOutOfSightAppliesAtOnce() async throws {
+        store.update("source") { $0.mode = .rotate; $0.interval = 5; $0.wallpaperIDs = ["c"]; $0.source = .list }
+        let plan = try store.savePlan(from: "source", name: "Only c")
+        store.update("primary") { $0.mode = .rotate; $0.interval = 5 }
+        let scheduler = makeScheduler()
+        scheduler.start()
+        defer { scheduler.stop() }
+        running = false
+        unseen = true
+        clock.addTimeInterval(5 * 60)
+        scheduler.evaluate()
+        await settle()
+        XCTAssertEqual(applied, ["b"])
+
+        try store.applyPlan(plan.id, to: "primary")
+        await settle()
+        XCTAssertEqual(applied, ["b", "c"], "a playlist chosen meanwhile is not held back")
+    }
+
+    func testDayAndNightSwitchesADisplayOutOfSight() async {
+        store.update("primary") {
+            $0.mode = .dayNight
+            $0.dayWallpaperID = "b"
+        }
+        running = false
+        unseen = true
+        let scheduler = makeScheduler()
+        scheduler.start()
+        defer { scheduler.stop() }
+        await settle()
+        XCTAssertEqual(applied, ["b"])
+    }
+
+    func testNothingChangesOutOfSightWhileTheUserPausedOrForAnUnlock() async {
+        store.update("primary") { $0.mode = .rotate; $0.interval = 5 }
+        let scheduler = makeScheduler()
+        scheduler.start()
+        defer { scheduler.stop() }
+        running = false
+        clock.addTimeInterval(5 * 60)
+        scheduler.evaluate()
+        await settle()
+        XCTAssertTrue(applied.isEmpty, "paused, not merely out of sight")
+
+        store.update("primary") { $0.trigger = .unlock }
+        unseen = true
+        scheduler.noteUnlock()
+        await settle()
+        XCTAssertTrue(applied.isEmpty, "an unlock change waits until the display shows")
     }
 
     func testDayAndNightFollowTheClockButLeaveAManualChoiceAlone() async {

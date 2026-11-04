@@ -46,7 +46,7 @@ panel's Now Playing bar (for the target display), and a link, Shortcuts action o
 shortcut key asking for the next wallpaper, on the panel's target display unless one is
 named, do the same for a display that rotates, and otherwise take the next wallpaper
 in library order. All of them are asked for, so they also change a display that is
-paused or covered; only the timer's own changes wait (see below). When the playlist has
+paused or covered; only the timer's own changes wait for a pause (see below). When the playlist has
 nothing else to change to (its only wallpaper is already on screen), Change now, the
 Now Playing button and a link, keyboard shortcut or Shortcuts action asking for the next
 wallpaper say so
@@ -89,7 +89,8 @@ collections and saved playlists too.
 Each display's Playlist disclosure has **Saved playlist** and **Save as…**.
 Saving keeps a named copy of the mode, source, order, trigger, interval and day/night
 choices; choosing it applies a copy to an enabled independent display. A rotating
-copy on a timer becomes due immediately, but waits while that display cannot play; one
+copy on a timer becomes due immediately, also on a display that is only out of sight,
+but waits while that display is paused; one
 that changes when the Mac is unlocked waits for the next unlock. Manual
 edits detach the display's copy from the saved plan. Renaming a plan preserves its
 identity; deleting it leaves active copies and their deadlines intact. Deleting a
@@ -102,10 +103,24 @@ next-change stores remain the source of active playback state.
 
 ## When a change happens
 
-A change the timer brings only happens while its display is playing and
-presenting. One that falls due while the user paused playback, that display is covered or is not the one in use ([Playback](performance.md#playback)), the screen is locked
-or the displays sleep waits, and happens once when it can play again; missed intervals are not caught up
-one by one. The timer sleeps on the continuous clock, so a change that fell due
+A change the timer brings only happens while wallpapers are playing. One that falls
+due while the user paused playback, a Playback & Power choice, an app
+rule or a Focus paused every wallpaper, the screen is locked or the displays sleep
+waits, and happens once when it can play again; missed intervals are not caught up one by one.
+
+A display that is only out of sight (windows cover it, a full-screen app or a hidden
+Space is in front of it, or it is not the one in use; see
+[Playback](performance.md#playback)) is not waited for: its change happens behind
+the windows, so the desktop already shows the new wallpaper when you come back to it,
+instead of switching in front of you. It changes once while it stays out of sight, so
+a long full-screen session does not load a wallpaper every interval; when it shows
+again, the next change is a whole interval later rather than at once. A saved
+playlist chosen meanwhile still applies at once, and an edited one may change it
+again. Day and night switches at its boundary in the same way. A rotation set to
+change when the Mac is unlocked still waits for the display to show (see
+[below](#each-time-the-mac-is-unlocked)).
+
+The timer sleeps on the continuous clock, so a change that fell due
 while the Mac slept happens on wake. Nothing is polled: `PlaylistScheduler` arms
 one timer for the earliest change and re-evaluates when playback, presentation
 (of every display together or of one display alone), the library, the playlists,

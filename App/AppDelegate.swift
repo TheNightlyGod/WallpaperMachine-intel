@@ -748,6 +748,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
             playlists.clearFailure(wallpaper, on: display)
             self?.schedulePosterRefresh()
         }
+        // Nil while wallpapers do not play on the display; otherwise whether it is paused only
+        // because it is out of sight (covered, behind a full-screen app, not the display in use).
+        let outOfSight: @MainActor (String) -> Bool? = { [weak self] display in
+            guard store.appSnapshot.playbackState == .playing,
+                self?.automaticWallpapers?.scheduler.inFlight.contains(display) != true,
+                let policy = self?.presentationPolicy, policy.globalPresentation == .running,
+                let row = store.settingsSnapshot.displays.first(where: { $0.displayId == display }),
+                let physicalID = ResolvedDisplayTitles.liveDisplayID(display, title: row.title)
+            else { return nil }
+            return policy.suspendedDisplayIDs.contains(physicalID)
+        }
         let scheduler = PlaylistScheduler(
             store: playlists,
             collections: WallpaperCollectionStore.shared,
@@ -757,15 +768,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
             library: { store.librarySnapshot.wallpapers.filter(\.supported).map(\.id) },
             favorites: { Self.favoriteWallpaperIDs() },
             current: { store.shownWallpaperID(on: $0) },
-            isRunning: { [weak self] display in
-                guard store.appSnapshot.playbackState == .playing,
-                    self?.automaticWallpapers?.scheduler.inFlight.contains(display) != true,
-                    let policy = self?.presentationPolicy, policy.globalPresentation == .running,
-                    let row = store.settingsSnapshot.displays.first(where: { $0.displayId == display }),
-                    let physicalID = ResolvedDisplayTitles.liveDisplayID(display, title: row.title)
-                else { return false }
-                return !policy.suspendedDisplayIDs.contains(physicalID)
-            },
+            isRunning: { outOfSight($0) == false },
+            isUnseen: { outOfSight($0) == true },
             activate: { display, choose in
                 var applied: String?
                 try await store.commands.run(slot: BridgeStore.activationSlot(displayId: display), origin: .playlist) {

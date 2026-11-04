@@ -551,9 +551,9 @@ once two displays are enabled, and stays while the option is on so it can be tur
 off. Turning it off, or unplugging down to one display, resumes everything.
 
 A display that is paused this way is treated like a covered one: an automatic
-wallpaper change, a playlist step and a scheduled rule for it wait until it plays
-again, and its energy counts as not playing. The settle and periodic captures of its
-Mission Control picture skip it while it is paused; a new wallpaper still asks it for
+wallpaper change and a scheduled rule for it wait until it plays again, a playlist
+step is made behind it once ([Playlists](playlists.md#when-a-change-happens)), and
+its energy counts as not playing. The settle and periodic captures of its Mission Control picture skip it while it is paused; a new wallpaper still asks it for
 a frame, and so does a Space change or a wake when its picture is not fresh
 ([Desktop picture](desktop-picture.md)). A web wallpaper set on such a display, or
 rebuilt there, loads and draws its first frame before it is paused, as one paused with
