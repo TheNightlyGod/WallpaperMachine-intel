@@ -419,7 +419,7 @@ final class InstalledPageRenderTests: PanelTestCase {
           filters.width, FilterSidebar.width + FilterSidebar.inset, accuracy: 1,
           "filters, \(language)")
         let importing = try await popoverSize(ImportPopover(), panel, dark: dark)
-        XCTAssertEqual(importing.width, 320, accuracy: 1, "import, \(language)")
+        XCTAssertEqual(importing.width, ImportPopover.width, accuracy: 1, "import, \(language)")
         XCTAssertLessThanOrEqual(importing.height, 520)
       }
     }
