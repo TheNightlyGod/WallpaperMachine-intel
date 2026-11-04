@@ -365,8 +365,10 @@ Installed and Discover tiles wear status marks as small round badges:
 
 On Discover the marks stack in the upper-left corner. On Installed the trophy and the
 update arrow sit in the lower-right corner, clear of the selection check in the
-upper-left corner, which the Active or Other display capsule sits beside. VoiceOver
-reads the marks with the tile.
+upper-left corner, which the Active or Other display capsule sits beside. Both draw
+each mark as the same small round chip: a glyph on a dark disc in either appearance
+(a bright green trophy), and an accent-filled disc for Discover's library check and
+Installed's update arrow. VoiceOver reads the marks with the tile.
 
 ## Selection versus apply
 

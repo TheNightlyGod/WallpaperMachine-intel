@@ -173,7 +173,7 @@ private struct MarkStack: View {
       symbol = "checkmark"
     case .approved:
       fill = theme.surface.markFill.color
-      glyph = theme.surface.approved.color
+      glyph = theme.surface.markApproved.color
       symbol = "trophy.fill"
     case .favorite:
       fill = theme.surface.markFill.color
@@ -188,11 +188,7 @@ private struct MarkStack: View {
       glyph = theme.surface.markGlyph.color
       symbol = "slider.horizontal.3"
     }
-    return Image(systemName: symbol)
-      .font(.system(size: 9.5, weight: .bold))
-      .foregroundStyle(glyph)
-      .frame(width: 20, height: 20)
-      .background(fill, in: Circle())
+    return TileMarkChip(systemImage: symbol, glyph: glyph, fill: fill)
       .help(mark.label)
       .accessibilityHidden(true)
   }

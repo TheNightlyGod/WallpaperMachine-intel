@@ -149,6 +149,7 @@
 		23E0EB2DCF5EBBF484634E0D /* SettingsControlsRenderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA564132324391B5F9A1B24B /* SettingsControlsRenderTests.swift */; };
 		2417AA2177D81BA03D8E49E2 /* SyntheticVideoFixtureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B034A3927E65C890496F757E /* SyntheticVideoFixtureTests.swift */; };
 		24448A238384F0F19D80DE6C /* AppUpdateInstaller.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E923E82D4021F3D72B15588 /* AppUpdateInstaller.swift */; };
+		246A9108284787EA2683157F /* TileMarkChip.swift in Sources */ = {isa = PBXBuildFile; fileRef = 46F40440815578279FF7B378 /* TileMarkChip.swift */; };
 		24ED419000896A0950AAE1FD /* WorkshopTile.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D8721AC6B121C6523F3E7B5 /* WorkshopTile.swift */; };
 		2515B6BA95C8ED13B3B5F1F0 /* env.h in Headers */ = {isa = PBXBuildFile; fileRef = 70B1662F855F7E90CE25177F /* env.h */; settings = {ATTRIBUTES = (Public, ); }; };
 		252E49697C4B0133A4964C91 /* TransferFormat.swift in Sources */ = {isa = PBXBuildFile; fileRef = 282A4E43DC02367CA0EDCC12 /* TransferFormat.swift */; };
@@ -1376,6 +1377,7 @@
 		458581908CBD73097E36CA8B /* WallpaperDisplayLayoutStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WallpaperDisplayLayoutStore.swift; sourceTree = "<group>"; };
 		45DCDB56DF1903672060FF71 /* DisplaysRowLayoutTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DisplaysRowLayoutTests.swift; sourceTree = "<group>"; };
 		464D8584533BB342E1B49082 /* SupportPromptPresenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SupportPromptPresenter.swift; sourceTree = "<group>"; };
+		46F40440815578279FF7B378 /* TileMarkChip.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TileMarkChip.swift; sourceTree = "<group>"; };
 		471267FE1E893288498CF1C2 /* SettingsMiniWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsMiniWindow.swift; sourceTree = "<group>"; };
 		477A4746DD39D30E6DA97B68 /* BridgeSnapshotFixtures.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BridgeSnapshotFixtures.swift; sourceTree = "<group>"; };
 		484338F5F148E06E3E39E5EF /* StorageLocationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StorageLocationTests.swift; sourceTree = "<group>"; };
@@ -2375,6 +2377,7 @@
 				175E281EB156BB1345AA822E /* SymbolTile.swift */,
 				046A572F9CB54E0A797EA211 /* TagChip.swift */,
 				047925697BDB4D1DB36EE606 /* TileGrid.swift */,
+				46F40440815578279FF7B378 /* TileMarkChip.swift */,
 				5F9B4F5237758E38F343EE69 /* WallpaperTile.swift */,
 			);
 			path = Components;
@@ -4862,6 +4865,7 @@
 				8365B5777DBC250A3C2C3F3F /* TerminationSignalRelay.swift in Sources */,
 				F7D8A2F001270B8E09B7DD65 /* TileDownloadState.swift in Sources */,
 				536163B194C2AF02C90E7FC3 /* TileGrid.swift in Sources */,
+				246A9108284787EA2683157F /* TileMarkChip.swift in Sources */,
 				B318EE561ECE2646184E943F /* TransferEstimator.swift in Sources */,
 				252E49697C4B0133A4964C91 /* TransferFormat.swift in Sources */,
 				035127D3A4EA257A5CA08FC3 /* UncaughtExceptionLog.swift in Sources */,

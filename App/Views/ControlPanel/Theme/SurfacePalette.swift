@@ -41,10 +41,13 @@ struct SurfacePalette: Equatable, Sendable {
   let warning: PanelColor
   let approved: PanelColor
   let heart: PanelColor
-  /// A mark over a preview picture (a Workshop tile's chips): a dark disc and a white glyph in
-  /// both appearances, since the picture under it is either.
+  /// A mark over a preview picture (a Library or Workshop tile's chips): a dark disc and a
+  /// white glyph in both appearances, since the picture under it is either.
   let markFill: PanelColor
   let markGlyph: PanelColor
+  /// The approved trophy on that dark disc: a bright green in both appearances, since the
+  /// light-appearance `approved` green is too dark to read on it.
+  let markApproved: PanelColor
 
   init(tone: AppThemePreferences.Tone, appearance: PanelAppearance) {
     self.init(look: .tone(tone), appearance: appearance)
@@ -119,6 +122,7 @@ struct SurfacePalette: Equatable, Sendable {
     heart = byAppearance(dark: "#ff5c86", light: "#e0245e")
     markFill = PanelColor(rgb: 0, alpha: 0.58)
     markGlyph = PanelColor(rgb: 0xffffff)
+    markApproved = PanelColor(rgb: 0x5cf27c)
   }
 
   /// The three colours of a miniature window, as the Settings appearance cards and the welcome

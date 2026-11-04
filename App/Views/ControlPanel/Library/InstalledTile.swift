@@ -191,12 +191,18 @@ struct InstalledTile: View {
     if marks.isApproved || marks.hasUpdate {
       HStack(spacing: 4) {
         if marks.isApproved {
-          TileMark(systemImage: "trophy.fill", color: theme.surface.approved.color)
-            .help(L("Approved by Wallpaper Engine"))
+          TileMarkChip(
+            systemImage: "trophy.fill", glyph: theme.surface.markApproved.color,
+            fill: theme.surface.markFill.color
+          )
+          .help(L("Approved by Wallpaper Engine"))
         }
         if marks.hasUpdate {
-          TileMark(systemImage: "arrow.down", color: theme.accent.control.color)
-            .help(L("Update available"))
+          TileMarkChip(
+            systemImage: "arrow.down", glyph: theme.accent.onPrimary.color,
+            fill: theme.accent.primary.color
+          )
+          .help(L("Update available"))
         }
       }
     }
@@ -303,19 +309,5 @@ private struct TileHeart: View {
     .accessibilityLabel(
       Text(verbatim: isOn ? L("Remove favorite: \(title)") : L("Add favorite: \(title)")))
     .accessibilityAddTraits(isOn ? .isSelected : [])
-  }
-}
-
-/// A small white disc with a coloured glyph: approved, update available.
-private struct TileMark: View {
-  let systemImage: String
-  let color: Color
-
-  var body: some View {
-    Image(systemName: systemImage)
-      .font(.system(size: 9.5, weight: .bold))
-      .foregroundStyle(color)
-      .frame(width: 18, height: 18)
-      .background(.white.opacity(0.94), in: Circle())
   }
 }
