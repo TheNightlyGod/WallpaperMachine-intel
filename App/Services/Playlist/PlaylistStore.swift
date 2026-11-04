@@ -7,9 +7,9 @@ import Foundation
 final class PlaylistStore {
     static let shared = PlaylistStore()
     static let didChangeNotification = Notification.Name("WallpaperMachine.playlistsDidChange")
-    private static let playlistsKey = "WallpaperMachine.playlists"
-    private static let nextChangeKey = "WallpaperMachine.playlistNextChange"
-    static let plansKey = "WallpaperMachine.playlistPlans"
+    nonisolated static let playlistsKey = "WallpaperMachine.playlists"
+    nonisolated static let nextChangeKey = "WallpaperMachine.playlistNextChange"
+    nonisolated static let plansKey = "WallpaperMachine.playlistPlans"
     private static let holdsKey = "WallpaperMachine.playlistHolds"
     private static let roundsKey = "WallpaperMachine.playlistRounds"
     /// The most wallpapers one saved round keeps. A round holds each wallpaper of the playlist

@@ -348,10 +348,11 @@ struct DisplaysTransferDisclosure: View {
         }
         // The result of a copy or swap is reported by the layouts group; it is repeated here, on the
         // display it was started from only, so a failure is not out of sight below the cards.
-        if model.transferSource == display.id {
-          if let error = model.layoutError {
+        if let outcome = model.layoutOutcome, outcome.source == display.id {
+          switch outcome.kind {
+          case .failure(let error):
             DisplaysMessageRow(text: error, isError: true)
-          } else if let status = model.layoutStatus {
+          case .status(let status):
             DisplaysMessageRow(text: status)
           }
         }

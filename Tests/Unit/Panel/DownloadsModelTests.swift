@@ -439,14 +439,14 @@ final class DownloadsModelTests: MediaPanelTestCase {
   func testAnActionKeyNamesTheQueueTheRowBelongsTo() {
     let steam = DownloadRow(id: "222", title: "T")
     let pixiv = DownloadRow(id: "pixiv-1-p0", source: .pixiv, title: "T")
-    XCTAssertEqual(DownloadsModel.key("pause", row: steam), "downloadPause:222::")
-    XCTAssertEqual(DownloadsModel.key("cancel", row: steam), "downloadCancel:222::")
-    XCTAssertEqual(DownloadsModel.key("resume", row: steam), "downloadResume:222::")
-    XCTAssertEqual(DownloadsModel.key("retry", row: steam), "downloadRetry:222::")
-    XCTAssertEqual(DownloadsModel.key("pause", row: pixiv), "pixivPause:pixiv-1-p0::")
-    XCTAssertEqual(DownloadsModel.key("cancel", row: pixiv), "pixivCancel:pixiv-1-p0::")
-    XCTAssertEqual(DownloadsModel.key("resume", row: pixiv), "pixivResume:pixiv-1-p0::")
-    XCTAssertEqual(DownloadsModel.key("retry", row: pixiv), "pixivRetryDownload:pixiv-1-p0::")
+    XCTAssertEqual(DownloadsModel.key(.pause, row: steam), "downloadPause:222::")
+    XCTAssertEqual(DownloadsModel.key(.cancel, row: steam), "downloadCancel:222::")
+    XCTAssertEqual(DownloadsModel.key(.resume, row: steam), "downloadResume:222::")
+    XCTAssertEqual(DownloadsModel.key(.retry, row: steam), "downloadRetry:222::")
+    XCTAssertEqual(DownloadsModel.key(.pause, row: pixiv), "pixivPause:pixiv-1-p0::")
+    XCTAssertEqual(DownloadsModel.key(.cancel, row: pixiv), "pixivCancel:pixiv-1-p0::")
+    XCTAssertEqual(DownloadsModel.key(.resume, row: pixiv), "pixivResume:pixiv-1-p0::")
+    XCTAssertEqual(DownloadsModel.key(.retry, row: pixiv), "pixivRetryDownload:pixiv-1-p0::")
   }
 
   func testTheDownloadsListIsTheShellsPopoverSoAPageChangeClosesItAndItOpensFolded() async throws {

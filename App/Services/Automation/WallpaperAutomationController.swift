@@ -55,7 +55,7 @@ final class WallpaperAutomationController {
     private static func apply(_ target: WallpaperAutomationTarget, to display: String,
                               bridge: BridgeStore, playlists: PlaylistStore, collections: WallpaperCollectionStore) async throws {
         try Task.checkCancellation()
-        guard bridge.settingsSnapshot.displays.contains(where: { $0.displayId == display && $0.enabled && $0.mode == .standalone }) else {
+        guard bridge.settingsSnapshot.displays.contains(where: { $0.displayId == display && $0.isIndependent }) else {
             throw AutomationError(message: String(localized: "The automatic wallpaper target display is unavailable."))
         }
         switch target.kind {

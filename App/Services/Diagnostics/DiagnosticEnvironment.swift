@@ -27,7 +27,7 @@ enum DiagnosticEnvironment {
         ]
         let main = NSScreen.main
         for screen in NSScreen.screens {
-            let id = (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0
+            let id = SystemDisplays.id(of: screen) ?? 0
             let scale = screen.backingScaleFactor
             let width = Int((screen.frame.width * scale).rounded())
             let height = Int((screen.frame.height * scale).rounded())
@@ -64,9 +64,7 @@ enum DiagnosticEnvironment {
     /// One display's size and rate as a load header names them.
     @MainActor
     static func display(_ displayID: UInt32) -> String {
-        guard let screen = NSScreen.screens.first(where: {
-            ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == displayID
-        }) else {
+        guard let screen = SystemDisplays.screen(for: displayID) else {
             return "display \(displayID) (not connected)"
         }
         let scale = screen.backingScaleFactor

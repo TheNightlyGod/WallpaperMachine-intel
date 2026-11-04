@@ -5,7 +5,7 @@ appearance or Focus. Global keyboard shortcuts, actions in the Shortcuts app
 (and so Siri and Spotlight), and `wallpapermachine://` links run explicit
 commands (`AutomationCommand`)
 through `AppAutomation` into `AppDelegate.performAutomation`, which the menu bar's
-Mute Wallpapers, Previous, Next, Random Wallpaper, Recently used, Remove from Display and Start Again items use too (with
+Play/Pause, Mute Wallpapers, Previous, Next, Random Wallpaper, Recently used, Remove from Display and Start Again items use too (with
 two or more displays the menu has a submenu for each, see
 [the menu bar](control-panel.md#menu-bar-one-display-at-a-time)). They only do what the
 menu bar and the panel already offer: play, pause, mute or unmute every wallpaper, the previous, next or a random wallpaper,

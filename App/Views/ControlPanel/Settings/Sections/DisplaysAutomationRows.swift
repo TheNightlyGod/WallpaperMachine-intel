@@ -230,7 +230,7 @@ private struct DisplaysScheduleRows: View {
 
   var body: some View {
     let model = controller.displaysSettings
-    let editing = model.ruleEditorDisplay == display.id ? model.ruleEditor : nil
+    let editing = model.ruleEditing.flatMap { $0.display == display.id ? $0.draft : nil }
     if state.rules.isEmpty && editing == nil {
       DisplaysNote(text: L("No time rules yet. Add one to choose when this display changes."))
     }
@@ -367,7 +367,8 @@ private struct DisplaysRuleEditor: View {
 
   var body: some View {
     let model = controller.displaysSettings
-    let draft = Binding(get: { model.ruleEditor ?? DisplaysRuleDraft() }, set: { model.ruleEditor = $0 })
+    let draft = Binding(
+      get: { model.ruleEditing?.draft ?? DisplaysRuleDraft() }, set: { model.ruleEditing?.draft = $0 })
     let value = draft.wrappedValue
     VStack(alignment: .leading, spacing: 10) {
       formRow(L("When")) {

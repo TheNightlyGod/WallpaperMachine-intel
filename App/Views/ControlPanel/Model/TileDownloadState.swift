@@ -25,6 +25,16 @@ struct TileDownloadState: Equatable {
   /// The mark in the ring's centre when it has no text.
   enum Glyph: Equatable {
     case play, shield, download, refresh
+
+    /// The SF Symbol the Workshop's and pixiv's rings draw for it.
+    var systemImage: String {
+      switch self {
+      case .play: "play.fill"
+      case .shield: "exclamationmark.shield.fill"
+      case .download: "arrow.down"
+      case .refresh: "arrow.clockwise"
+      }
+    }
   }
 
   enum Action: Equatable {

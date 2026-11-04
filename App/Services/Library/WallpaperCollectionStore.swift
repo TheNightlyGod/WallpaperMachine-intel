@@ -10,7 +10,7 @@ struct WallpaperCollection: Codable, Equatable, Sendable, Identifiable {
 @MainActor
 final class WallpaperCollectionStore {
     static let shared = WallpaperCollectionStore()
-    static let storageKey = "WallpaperMachine.collections"
+    nonisolated static let storageKey = "WallpaperMachine.collections"
     static let didChangeNotification = Notification.Name("WallpaperMachine.collectionsDidChange")
 
     private let defaults: UserDefaults

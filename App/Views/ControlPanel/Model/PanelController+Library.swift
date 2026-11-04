@@ -25,6 +25,15 @@ extension PanelController {
   /// display and loads it afresh (or applies it plainly when the display does not show it).
   func reapply(_ id: String) async throws { try await applyToTarget(id, restarts: true) }
 
+  /// An inspector's Apply wallpaper or Reapply wallpaper, as the offer decided it.
+  func apply(_ offer: ApplyOffer) async throws {
+    if offer.reapplies {
+      try await reapply(offer.wallpaperID)
+    } else {
+      try await activate(offer.wallpaperID)
+    }
+  }
+
   /// `activateAll`: one wallpaper on every enabled independent display. The transfer takes its
   /// own turn in the queue, so it must not run inside `run(.queued)`; it rolls every display back
   /// when one fails, and says so. A failure leaves the wallpaper selected, where its note is.

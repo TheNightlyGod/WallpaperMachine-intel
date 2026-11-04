@@ -118,63 +118,13 @@ struct PixivPageControls: View {
   let isCompact: Bool
 
   @Environment(PanelController.self) private var controller
-  @Environment(\.panelTheme) private var theme
-  @State private var typed = ""
 
   var body: some View {
-    let model = controller.pixivBrowser
-    HStack(spacing: 6) {
-      Button {
-        model.showPage(pager.previousPage)
-      } label: {
-        Image(systemName: "chevron.left")
-      }
-      .buttonStyle(.panelCapsule)
-      .disabled(!pager.canGoBack)
-      .help(L("Previous page"))
-      .accessibilityLabel(L("Previous page"))
-      .accessibilityIdentifier("pixiv-previous-page")
-
-      HStack(spacing: 6) {
-        if !isCompact { Text("Page").foregroundStyle(theme.surface.muted.color) }
-        TextField("Page number", text: $typed)
-          .textFieldStyle(.roundedBorder)
-          .multilineTextAlignment(.center)
-          .frame(width: 52)
-          .disabled(!pager.canJump)
-          .onSubmit(go)
-          .onChange(of: typed) { _, text in
-            let digits = text.filter(\.isNumber)
-            if digits != text { typed = digits }
-          }
-          .help(L("Type a page number and press Return"))
-          .accessibilityLabel(L("Page number"))
-          .accessibilityIdentifier("pixiv-page-field")
-        Text("of \(pager.pages)").foregroundStyle(theme.surface.muted.color)
-        if !isCompact {
-          Button("Go", action: go).disabled(!pager.canJump)
-            .controlSize(.small)
-        }
-      }
-      .font(.system(size: 12).monospacedDigit())
-      .accessibilityElement(children: .contain)
-      .accessibilityLabel(L("Go to page"))
-
-      Button {
-        model.showPage(pager.nextPage)
-      } label: {
-        Image(systemName: "chevron.right")
-      }
-      .buttonStyle(.panelCapsule)
-      .disabled(!pager.canGoForward)
-      .help(L("Next page"))
-      .accessibilityLabel(L("Next page"))
-      .accessibilityIdentifier("pixiv-next-page")
-    }
-    .onChange(of: pager.page, initial: true) { _, page in typed = String(page) }
-  }
-
-  private func go() {
-    typed = String(controller.pixivBrowser.jump(typed: typed))
+    @Bindable var model = controller.pixivBrowser
+    PageJumpControls(
+      pager: pager, text: $model.pageText, style: .bordered, showsLabel: !isCompact,
+      identifierPrefix: "pixiv", showPage: { model.showPage($0) }, jump: { model.jump() }
+    )
+    .onChange(of: pager.page, initial: true) { model.syncPageText() }
   }
 }

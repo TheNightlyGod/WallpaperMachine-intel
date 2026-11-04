@@ -254,9 +254,7 @@ struct DownloadsPopoverRequestRow: View {
       HStack(spacing: 8) {
         if request.isPaused {
           Button {
-            controller.launch(PanelActionCoordinator.key("downloadResume", id: request.id)) {
-              try await controller.resumeDownload(id: request.id)
-            }
+            model.perform(.resume, forItem: request.id)
           } label: {
             Label("Resume download", systemImage: "play.fill")
           }
@@ -346,7 +344,7 @@ struct DownloadsPopoverJobRow: View {
           Label("Resume download", systemImage: "play.fill")
         }
         .buttonStyle(.panelPrimary(size: .compact))
-        .disabled(controller.isBusy(DownloadsModel.key("resume", row: row)))
+        .disabled(controller.isBusy(DownloadsModel.key(.resume, row: row)))
       } else if review && row.canRetry {
         Button {
           model.retry(row)

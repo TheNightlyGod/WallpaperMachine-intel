@@ -101,8 +101,8 @@ final class SettingsBRenderTests: SettingsBTestCase {
       }
       XCTAssertEqual(panel.controller.automationState(for: "2").mode, .appearance)
       model.beginRule(display: "primary")
-      model.ruleEditor?.showsDaysError = true
-      model.ruleEditor?.weekdays = []
+      model.ruleEditing?.draft.showsDaysError = true
+      model.ruleEditing?.draft.weekdays = []
       // A name form takes the keyboard when it opens, and only one is open at a time.
       if language == "ja" || language == "zh-Hant" {
         model.beginSavingPlan(of: "2")

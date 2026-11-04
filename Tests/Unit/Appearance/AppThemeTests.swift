@@ -9,11 +9,11 @@ final class AppThemeTests: XCTestCase {
     defaults.set(true, forKey: "unrelatedPreference")
 
     let store = AppThemeStore(defaults: defaults)
-    try store.set("mode", value: "light")
-    try store.set("accent", value: "#B43271")
-    try store.set("tone", value: "warm")
-    try store.set("icon", value: "night")
-    try store.set("halloween", value: "off")
+    store.setMode(.light)
+    try store.setAccent("#B43271")
+    store.setTone(.warm)
+    store.setIcon(.night)
+    store.setHalloween(.off)
     let restored = AppThemeStore(defaults: defaults)
     XCTAssertEqual(restored.preferences.mode, .light)
     XCTAssertEqual(restored.preferences.accent, "#b43271")
@@ -34,15 +34,12 @@ final class AppThemeTests: XCTestCase {
   func testInvalidThemeChangeCannotOverwriteSavedPreferences() throws {
     let defaults = try TemporaryDefaults.make(for: self).defaults
     let store = AppThemeStore(defaults: defaults)
-    try store.set("mode", value: "dark")
-    try store.set("accent", value: "#aa3366")
-    try store.set("icon", value: "minimal")
+    store.setMode(.dark)
+    try store.setAccent("#aa3366")
+    store.setIcon(.minimal)
     let before = store.preferences
-    for (key, value) in [
-      ("mode", "sepia"), ("accent", "#fff';alert(1)//"), ("tone", "sepia"),
-      ("icon", "../other"), ("background", "#ffffff"), ("halloween", "christmas"),
-    ] {
-      XCTAssertThrowsError(try store.set(key, value: value))
+    for accent in ["#fff';alert(1)//", "#fff", "red", ""] {
+      XCTAssertThrowsError(try store.setAccent(accent))
     }
     XCTAssertEqual(store.preferences, before)
     XCTAssertEqual(AppThemeStore(defaults: defaults).preferences, before)
@@ -91,17 +88,17 @@ final class AppThemeTests: XCTestCase {
     let defaults = try TemporaryDefaults.make(for: self).defaults
     let clock = Clock(.noon(month: 10, day: 27))
     let store = AppThemeStore(defaults: defaults, now: { clock.now })
-    try store.set("icon", value: "minimal")
+    store.setIcon(.minimal)
     XCTAssertEqual(store.preferences.halloween, .automatic, "Halloween week is the default")
     XCTAssertEqual(store.season, .halloween)
     XCTAssertEqual(store.dockIconName, Season.halloween.dockImageName)
 
-    try store.set("halloween", value: "off")
+    store.setHalloween(.off)
     XCTAssertNil(store.season)
     XCTAssertEqual(store.dockIconName, AppThemePreferences.Icon.minimal.imageName)
 
     clock.now = .outsideAnySeason
-    try store.set("halloween", value: "always")
+    store.setHalloween(.always)
     XCTAssertEqual(store.season, .halloween, "Always is on whatever the date")
     XCTAssertEqual(
       AppThemeStore(defaults: defaults, now: { clock.now }).season, .halloween,

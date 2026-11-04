@@ -23,31 +23,12 @@ struct SettingsDisclosure<Content: View>: View {
     if settings.search.shows(item) {
       let isOpen = settings.isOpen(item)
       VStack(spacing: 0) {
-        Button {
+        SettingsDisclosureHeader(
+          title: settings.text(item.title), note: item.note.map(settings.text), isOpen: isOpen,
+          identifier: item.id
+        ) {
           settings.setOpen(!isOpen, for: item)
-        } label: {
-          HStack(spacing: 8) {
-            VStack(alignment: .leading, spacing: 2) {
-              Text(verbatim: settings.text(item.title)).font(.system(size: 13))
-              if let note = item.note {
-                Text(verbatim: settings.text(note))
-                  .font(.system(size: 11.5))
-                  .foregroundStyle(theme.surface.muted.color)
-              }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            Image(systemName: "chevron.right")
-              .font(.system(size: 11, weight: .semibold))
-              .foregroundStyle(theme.surface.faint.color)
-              .rotationEffect(.degrees(isOpen ? 90 : 0))
-          }
-          .padding(.horizontal, 12)
-          .padding(.vertical, 8)
-          .frame(minHeight: 36)
-          .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
-        .accessibilityIdentifier(item.id)
         if isOpen {
           Rectangle().fill(theme.surface.divider.color).frame(height: 0.5)
           DividedRows { content }

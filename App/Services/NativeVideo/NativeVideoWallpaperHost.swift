@@ -135,7 +135,7 @@ final class NativeVideoWallpaperHost {
         switchHold: WallpaperSwitchHold? = nil
     ) {
         self.fetch = fetch
-        self.screens = screens ?? { WebWallpaperHost.systemScreens() }
+        self.screens = screens ?? { SystemDisplays.screens() }
         self.refusal = refusal ?? { url in
             await VideoFormatSupport.refusal(url: url)
         }
@@ -1181,7 +1181,7 @@ final class NativeVideoWallpaperHost {
         guard let layer = notification.object as? CALayer,
             let (displayID, surface) = surfaces.first(where: { $0.value.posterLayer === layer })
         else { return }
-        let context = notification.userInfo?["context"] as? String
+        let context = DesktopPosterNotification.context(in: notification.userInfo)
         Task { @MainActor [weak self] in
             let image = await surface.posterImage()
             guard let self, !self.stopped, let image else { return }

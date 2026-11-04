@@ -18,7 +18,7 @@ enum PanelPreferences {
   /// Whether Library tiles play their animated preview only while the pointer rests on one (or
   /// keyboard focus is on it), instead of every tile on screen playing.
   static let libraryPreviewsOnHoverKey = "WallpaperMachine.libraryPreviewsOnHover"
-  /// How far the tile grids are zoomed: a step of `TileGridLayout.zoomWidths`, 0 the standard size.
+  /// How far the tile grids are zoomed: a step of `TileZoom.steps`, 0 the standard size.
   static let tileZoomKey = "WallpaperMachine.tileZoom"
   /// Earlier builds stored a dragged inspector width here; the width now follows the window
   /// alone, so the key is removed rather than read.
@@ -55,11 +55,11 @@ enum PanelPreferences {
 
   /// The tile zoom step, held to the steps there are; anything unreadable is the standard size.
   static func tileZoom(in defaults: UserDefaults = ClientPreferences.defaults) -> Int {
-    TileGridLayout.clampedZoom(defaults.object(forKey: tileZoomKey) as? Int ?? 0)
+    TileZoom.clamped(defaults.object(forKey: tileZoomKey) as? Int ?? 0)
   }
 
   static func setTileZoom(_ zoom: Int, in defaults: UserDefaults) {
-    let zoom = TileGridLayout.clampedZoom(zoom)
+    let zoom = TileZoom.clamped(zoom)
     if zoom == 0 { defaults.removeObject(forKey: tileZoomKey) } else { defaults.set(zoom, forKey: tileZoomKey) }
   }
 

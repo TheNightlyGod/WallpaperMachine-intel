@@ -351,10 +351,7 @@ final class WallpaperPresentationPolicy {
     static func systemSurfaces() -> [WallpaperSurfaceVisibility] {
         var visibility: [UInt32: Bool] = [:]
         for window in wallpaperWindows() {
-            guard let screen = window.screen,
-                  let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber
-            else { continue }
-            let displayID = number.uint32Value
+            guard let displayID = window.screen.flatMap(SystemDisplays.id(of:)) else { continue }
             let visible = window.occlusionState.contains(.visible)
             visibility[displayID] = (visibility[displayID] ?? false) || visible
         }

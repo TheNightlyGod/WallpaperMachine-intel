@@ -257,7 +257,7 @@ extension PanelController {
     let configuration = options?.displayConfigurations.first { $0.displayId == displayID }
     return LetterboxContext(
       wallpaperID: id, displayID: displayID,
-      eligible: display?.enabled == true && display?.mode == .standalone && options != nil,
+      eligible: display?.isIndependent == true && options != nil,
       scalingMode: configuration?.scalingMode ?? display?.scalingMode,
       scalingFactor: configuration?.scalingFactor ?? display?.scalingFactor,
       draftPending: options?.dirty == true)

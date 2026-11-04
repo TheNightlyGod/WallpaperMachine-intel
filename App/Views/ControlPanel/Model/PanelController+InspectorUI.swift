@@ -50,6 +50,11 @@ extension PanelController {
     row.kind == .scene && !workshop.sceneAssetsReady
   }
 
+  /// The same for a Workshop item of this kind, installed or not.
+  func workshopSceneAssetsAreMissing(for kind: WorkshopKind) -> Bool {
+    kind == .scene && !workshop.sceneAssetsReady
+  }
+
   /// Whether the shared scene resources are on their way: their download is waiting or running,
   /// so the scene notice shows that download instead of asking for it again.
   var sceneResourcesArePending: Bool {

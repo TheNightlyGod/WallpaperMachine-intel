@@ -445,7 +445,7 @@ private final class PosterGrab {
                 self?.finish(nil)
             }
             center.post(name: DesktopPosterNotification.request, object: layer,
-                        userInfo: ["context": "switch-hold:" + UUID().uuidString])
+                        userInfo: [DesktopPosterNotification.Key.context: "switch-hold:" + UUID().uuidString])
         }
     }
 

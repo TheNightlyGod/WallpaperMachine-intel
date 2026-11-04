@@ -59,7 +59,7 @@ struct PixivTileRing: View {
     if showsClose {
       Image(systemName: "xmark").font(.system(size: 13, weight: .bold)).foregroundStyle(.white)
     } else if let glyph = state.glyph {
-      Image(systemName: Self.symbol(for: glyph))
+      Image(systemName: glyph.systemImage)
         .font(.system(size: 14, weight: .semibold))
         .foregroundStyle(state.kind == .queued ? .white.opacity(0.78) : .white)
     } else if !state.text.isEmpty {
@@ -69,15 +69,6 @@ struct PixivTileRing: View {
         .lineLimit(1)
         .minimumScaleFactor(0.6)
         .padding(.horizontal, 6)
-    }
-  }
-
-  static func symbol(for glyph: TileDownloadState.Glyph) -> String {
-    switch glyph {
-    case .play: "play.fill"
-    case .shield: "exclamationmark.shield.fill"
-    case .download: "arrow.down"
-    case .refresh: "arrow.clockwise"
     }
   }
 }

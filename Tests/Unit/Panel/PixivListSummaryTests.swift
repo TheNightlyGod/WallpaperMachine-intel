@@ -323,23 +323,37 @@ final class PixivListSummaryTests: MediaPanelTestCase {
   }
 
   func testApplyReappliesWhatTheTargetShowsAndNeedsADisplayThatCanShowIt() {
+    let idle: (String) -> Bool = { _ in false }
     XCTAssertEqual(
-      PixivApplyOffer(
-        libraryID: "pixiv-301-p0",
-        target: MediaApplyTarget(canShowWallpaper: true, wallpaperID: nil)),
-      PixivApplyOffer(
-        libraryID: "pixiv-301-p0",
-        target: MediaApplyTarget(canShowWallpaper: true, wallpaperID: "other")))
-    let showing = PixivApplyOffer(
-      libraryID: "pixiv-301-p0",
-      target: MediaApplyTarget(canShowWallpaper: true, wallpaperID: "pixiv-301-p0"))
+      ApplyOffer(
+        wallpaperID: "pixiv-301-p0",
+        target: MediaApplyTarget(canShowWallpaper: true, wallpaperID: nil), isBusy: idle),
+      ApplyOffer(
+        wallpaperID: "pixiv-301-p0",
+        target: MediaApplyTarget(canShowWallpaper: true, wallpaperID: "other"), isBusy: idle))
+    let showing = ApplyOffer(
+      wallpaperID: "pixiv-301-p0",
+      target: MediaApplyTarget(canShowWallpaper: true, wallpaperID: "pixiv-301-p0"), isBusy: idle)
     XCTAssertTrue(showing.reapplies)
     XCTAssertTrue(showing.isEnabled)
-    let mirror = PixivApplyOffer(
-      libraryID: "pixiv-301-p0", target: MediaApplyTarget(canShowWallpaper: false, wallpaperID: nil)
-    )
+    let mirror = ApplyOffer(
+      wallpaperID: "pixiv-301-p0",
+      target: MediaApplyTarget(canShowWallpaper: false, wallpaperID: nil), isBusy: idle)
     XCTAssertFalse(mirror.reapplies)
     XCTAssertFalse(mirror.isEnabled, "a mirror or a disabled display cannot take it")
+  }
+
+  func testAReapplyRunsUnderItsOwnKeyAndWaitsForTheOneUnderWay() {
+    let target = MediaApplyTarget(canShowWallpaper: true, wallpaperID: "pixiv-301-p0")
+    let reapply = ApplyOffer(wallpaperID: "pixiv-301-p0", target: target) { _ in false }
+    let apply = ApplyOffer(
+      wallpaperID: "pixiv-301-p0", target: MediaApplyTarget(canShowWallpaper: true, wallpaperID: nil)
+    ) { _ in false }
+    XCTAssertNotEqual(reapply.key, apply.key, "a reapply never waits behind a plain apply")
+    let pending = ApplyOffer(wallpaperID: "pixiv-301-p0", target: target) { $0 == reapply.key }
+    XCTAssertFalse(pending.isEnabled, "the button waits while its reapply is under way")
+    let other = ApplyOffer(wallpaperID: "pixiv-301-p0", target: target) { $0 == apply.key }
+    XCTAssertTrue(other.isEnabled)
   }
 
   // MARK: The ring

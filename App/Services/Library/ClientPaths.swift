@@ -56,8 +56,10 @@ enum ClientPaths {
     static var userAssetsURL: URL { supportURL.appendingPathComponent("UserAssets", isDirectory: true) }
     /// Scene scripts' `localStorage`, one folder per wallpaper ID (user data, never a cache).
     static var sceneStorageURL: URL { supportURL.appendingPathComponent("SceneStorage", isDirectory: true) }
+    /// The defaults key of the assets folder the user picked (`configureAssetsFolder`).
+    static let assetsPathKey = "WallpaperMachineAssetsPath"
     static var assetsURL: URL {
-        if let chosen = ClientPreferences.defaults.string(forKey: "WallpaperMachineAssetsPath"), !chosen.isEmpty {
+        if let chosen = ClientPreferences.defaults.string(forKey: assetsPathKey), !chosen.isEmpty {
             let url = URL(fileURLWithPath: chosen, isDirectory: true)
             if hasSceneAssets(at: url) { return url }
         }
@@ -71,6 +73,17 @@ enum ClientPaths {
     static var managedSteamCMDURL: URL { supportURL.appendingPathComponent("SteamCMD", isDirectory: true) }
     /// Performance data waiting to be sent, kept only while sending is on (docs/features/telemetry.md).
     static var telemetryURL: URL { supportURL.appendingPathComponent("Telemetry", isDirectory: true) }
+    /// The posters installed as the macOS desktop picture and the journal of the originals they
+    /// replaced (docs/features/desktop-picture.md).
+    static var desktopPostersURL: URL { supportURL.appendingPathComponent("DesktopPosters") }
+    /// What running scenes last reported about being drawn, for the Compatibility card.
+    static var sceneDrawVerdictsURL: URL { supportURL.appendingPathComponent("SceneDrawVerdicts.json") }
+    /// Each wallpaper's measured energy use.
+    static var energyRatingsURL: URL { supportURL.appendingPathComponent("EnergyRatings.json") }
+    /// A wallpaper's saved settings file: its properties, framing and engine options.
+    static func wallpaperSettingsURL(wallpaperID: String) -> URL {
+        supportURL.appendingPathComponent("wallpapers", isDirectory: true).appendingPathComponent(wallpaperID + ".json")
+    }
     /// Everything below is rebuilt on demand, so it stays out of Time Machine.
     static var cacheURL: URL { supportURL.appendingPathComponent("Cache", isDirectory: true) }
     static var thumbnailCacheURL: URL { cacheURL.appendingPathComponent("WorkshopThumbnails", isDirectory: true) }
@@ -99,7 +112,7 @@ enum ClientPaths {
         installStarterWallpaper()
         setenv("WALLPAPER_MACHINE_SUPPORT_ROOT", supportURL.path, 1)
         setenv("WALLPAPER_MACHINE_LIBRARY_ROOT", libraryURL.path, 1)
-        setenv("WALLPAPER_MACHINE_ASSETS_ROOT", assetsURL.path, 1)
+        exportAssetsRoot(assetsURL)
         setenv("WALLPAPER_MACHINE_USER_ASSETS_ROOT", userAssetsURL.path, 1)
         setenv("WALLPAPER_MACHINE_BUILD", buildStamp(), 1)
     }
@@ -196,7 +209,12 @@ enum ClientPaths {
         guard hasSceneAssets(at: url) else {
             throw WorkshopFailure(message: String(localized: "This folder does not contain Wallpaper Engine’s shared shaders and materials. Choose its complete assets folder, or install scene assets through Steam."))
         }
-        ClientPreferences.defaults.set(url.path, forKey: "WallpaperMachineAssetsPath")
+        ClientPreferences.defaults.set(url.path, forKey: assetsPathKey)
+        exportAssetsRoot(url)
+    }
+
+    /// Tells the renderer, through its environment, which shared scene resources to load.
+    static func exportAssetsRoot(_ url: URL) {
         setenv("WALLPAPER_MACHINE_ASSETS_ROOT", url.path, 1)
     }
 

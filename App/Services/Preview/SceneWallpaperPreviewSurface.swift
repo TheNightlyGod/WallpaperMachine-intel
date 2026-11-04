@@ -230,7 +230,7 @@ final class SceneWallpaperPreviewSurface: WallpaperPreviewSurface {
     }
 
     private var currentDisplayID: UInt32 {
-        (view.window?.screen?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0
+        view.window?.screen.flatMap(SystemDisplays.id(of:)) ?? 0
     }
 
     private func pixelSize(scale: CGFloat) -> CGSize {

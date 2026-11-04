@@ -53,12 +53,9 @@ enum DesktopPosterEncoder {
     }
 }
 
-struct DesktopPosterFrame: Sendable {
-    var pixels: Data
-    var width: Int
-    var height: Int
-    var bgra: Bool
-
+/// What only the app does with a frame (`Shared/DesktopPosterFrame.swift` declares it and its
+/// notification codec, which the lock-screen extension reads too).
+extension DesktopPosterFrame {
     /// Identifies the pixels, so a frame identical to the current poster is
     /// neither encoded nor written again.
     var digest: Data {
@@ -88,20 +85,7 @@ struct DesktopPosterFrame: Sendable {
 
     @MainActor
     func publish(for layer: CALayer, to center: NotificationCenter, context: String? = nil) {
-        center.post(name: DesktopPosterNotification.ready, object: layer,
-                    userInfo: ["pixels": pixels, "width": width, "height": height, "bgra": bgra, "context": context ?? ""])
-    }
-}
-
-extension DesktopPosterFrame {
-    /// The frame a `DesktopPosterNotification.ready` carries, or nil when any of its four
-    /// values is missing or of another type. An extension, so the memberwise initializer stays.
-    init?(userInfo: [AnyHashable: Any]?) {
-        guard let values = userInfo,
-              let pixels = values["pixels"] as? Data,
-              let width = values["width"] as? Int, let height = values["height"] as? Int,
-              let bgra = values["bgra"] as? Bool else { return nil }
-        self.init(pixels: pixels, width: width, height: height, bgra: bgra)
+        center.post(name: DesktopPosterNotification.ready, object: layer, userInfo: userInfo(context: context))
     }
 
     /// The frame as a picture; nil when its size and pixel count disagree or are beyond what the
@@ -109,11 +93,6 @@ extension DesktopPosterFrame {
     func cgImage() -> CGImage? {
         DesktopPosterEncoder.image(pixels: pixels, width: width, height: height, bgra: bgra)
     }
-}
-
-enum DesktopPosterNotification {
-    static let request = Notification.Name("WallpaperMachine.requestDesktopPoster")
-    static let ready = Notification.Name("WallpaperMachine.desktopPosterReady")
 }
 
 /// `layer` identifies the surface: the renderer's `CAMetalLayer`, or a web
@@ -605,7 +584,7 @@ final class DesktopWallpaperSync {
         noteRequestLook(surface, scope: scope)
         awaitingFrames.insert(ObjectIdentifier(surface.layer))
         frameCenter.post(name: DesktopPosterNotification.request, object: surface.layer,
-                         userInfo: ["context": scope.context ?? ""])
+                         userInfo: [DesktopPosterNotification.Key.context: scope.context ?? ""])
     }
 
     private func performRefresh() {
@@ -720,7 +699,7 @@ final class DesktopWallpaperSync {
               !showsUnsavedLook(surface) else { return }
         let receivedScope = scope(surface.display)
         guard receivedScope != .hold,
-              (values["context"] as? String ?? "") == (receivedScope.context ?? "") else { return }
+              (DesktopPosterNotification.context(in: values) ?? "") == (receivedScope.context ?? "") else { return }
         // A frame kept for the wallpaper's return: asked for, while presenting, under a look that
         // had settled. The look must still be the same when the poster is accepted.
         let keepable: (look: DesktopPosterLook, requested: ContinuousClock.Instant)? = {

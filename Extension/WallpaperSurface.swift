@@ -140,7 +140,7 @@ final class WallpaperSurface: LockScreenSurfaceLifecycle {
     layer = metal
     CATransaction.flush()
     frameObserver = NotificationCenter.default.addObserver(
-      forName: .init("WallpaperMachine.desktopPosterReady"), object: metal, queue: .main
+      forName: DesktopPosterNotification.ready, object: metal, queue: .main
     ) { [weak self] notification in
       MainActor.assumeIsolated { self?.receive(notification) }
     }
@@ -442,18 +442,14 @@ final class WallpaperSurface: LockScreenSurfaceLifecycle {
   private func requestFrame() {
     if let layer {
       NotificationCenter.default.post(
-        name: .init("WallpaperMachine.requestDesktopPoster"), object: layer)
+        name: DesktopPosterNotification.request, object: layer)
     }
   }
 
   private func receive(_ notification: Notification) {
-    guard !stopped, let data = notification.userInfo?["pixels"] as? Data,
-      let width = notification.userInfo?["width"] as? Int,
-      let height = notification.userInfo?["height"] as? Int,
-      let bgra = notification.userInfo?["bgra"] as? Bool
-    else { return }
+    guard !stopped, let frame = DesktopPosterFrame(userInfo: notification.userInfo) else { return }
     do {
-      let snapshot = try Self.snapshot(data, width: width, height: height, bgra: bgra)
+      let snapshot = try Self.snapshot(frame.pixels, width: frame.width, height: frame.height, bgra: frame.bgra)
       try LockScreenFrameBacking.install(snapshot, on: root)
       latestSnapshot = snapshot
       contentFrameReady()

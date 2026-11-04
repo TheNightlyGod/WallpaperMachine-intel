@@ -873,7 +873,7 @@ final class LockScreenWallpaperService {
     try checkExtensionFailure(configuration)
     let expected = expectedExtensionBundle.resolvingSymlinksInPath().standardizedFileURL
     if let other = runningExtensionBundles().first(where: {
-      !LockScreenExtensionDiagnostics.isSameBundle($0, expected)
+      !FileLocation.isSame($0, expected)
     }) {
       AppLog.error(
         "Native extension timeout: running bundle=\(other.path), expected=\(expected.path), "

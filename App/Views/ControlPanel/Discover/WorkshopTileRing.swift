@@ -109,7 +109,7 @@ struct WorkshopTileRing: View {
         }
         .padding(.horizontal, diameter * 0.16)
       } else if let glyph = state.glyph {
-        Image(systemName: Self.symbol(for: glyph))
+        Image(systemName: glyph.systemImage)
           .font(.system(size: diameter * 0.3, weight: .semibold))
       }
     }
@@ -118,16 +118,6 @@ struct WorkshopTileRing: View {
   }
 
   private var accent: Color { theme.accent.accent.color }
-
-  /// The SF Symbol of a glyph in the middle of the ring.
-  static func symbol(for glyph: TileDownloadState.Glyph) -> String {
-    switch glyph {
-    case .play: "play.fill"
-    case .shield: "exclamationmark.shield.fill"
-    case .download: "arrow.down"
-    case .refresh: "arrow.clockwise"
-    }
-  }
 
   /// A soft pulse around a ring that waits for the person. It draws frames only while it is active
   /// and stops entirely otherwise.

@@ -24,7 +24,9 @@ project.yml                        XcodeGen spec: the only source of truth for t
 WallpaperMachine.xcodeproj/        generated from project.yml by xcodegen; committed, never hand-edited
 App/                               WallpaperMachine application target sources only
   WallpaperEngineApp.swift         @main AppKit entry point; no scene/UI logic
-  AppDelegate.swift                lifecycle, menu bar, window and shutdown ordering
+  AppDelegate.swift                lifecycle, window and shutdown ordering
+  AppDelegate+Menus.swift          status item, application menu and their actions
+  AppDelegate+DesktopPosters.swift desktop poster sync, the desktop-picture switch, Spaces posters and pins
   Bridge/                          WallpaperPreviewBridge.h (scene C API for previews)
                                    and Generated/ (uniffi output; not hand-edited)
   Logging/                         AppLog.swift (the only Swift logging entry point) and its router
@@ -38,9 +40,11 @@ App/                               WallpaperMachine application target sources o
                                    system conditions, display refresh and the screen shape of a display id
     Diagnostics/                   runtime diagnostics session, diagnostics report, session ledger, counter sampling, energy readout,
                                    memory-pressure log and per-wallpaper energy ratings
-    GitHub/                        GitHub release client, update models, update store, installer, what's-new records
+    GitHub/                        GitHub release client, update models, update store, installer, what's-new records,
+                                   and the update checks, prompt and window (AppUpdateCoordinator)
     Library/                       ClientPaths (owns the app-support layout), import/deletion, still-image wallpapers,
-                                   collections, presets, history, compatibility checks, the video black-bar check, backup and restore
+                                   collections, presets, history, compatibility checks, the video black-bar check, backup and restore,
+                                   the panel's persisted choices (PanelPreferences, TileZoom) and the playback preflight
     Lifecycle/                     why the app is quitting (QuitReason, the power-off notice), how long each quit stage takes
                                    (QuitTimings), the deadline each stage gets (QuitSupervisor, QuitMode, the exit fuse)
                                    and SIGTERM/SIGHUP as a quit (TerminationSignalRelay);

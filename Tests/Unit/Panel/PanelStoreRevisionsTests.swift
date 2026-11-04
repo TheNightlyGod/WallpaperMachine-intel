@@ -78,9 +78,9 @@ final class PanelStoreRevisionsTests: PanelTestCase {
     let revisions = started(panel)
     defer { revisions.stop() }
     XCTAssertEqual(revisions.theme, 0, "subscribing is not a change")
-    try panel.theme.set("mode", value: "dark")
+    panel.theme.setMode(.dark)
     XCTAssertEqual(revisions.theme, 1)
-    try panel.theme.set("mode", value: "dark")
+    panel.theme.setMode(.dark)
     XCTAssertEqual(revisions.theme, 1, "setting the same value changes nothing")
 
     try panel.controller.appLanguage.set("ja")

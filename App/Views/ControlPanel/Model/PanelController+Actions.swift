@@ -127,7 +127,7 @@ extension PanelController {
     let id = displayID ?? navigation.targetDisplayID
     guard
       store.settingsSnapshot.displays.contains(where: {
-        $0.displayId == id && $0.enabled && $0.mode == .standalone
+        $0.displayId == id && $0.isIndependent
       })
     else { throw InvalidControlValue() }
     return id

@@ -15,8 +15,8 @@ extension PanelController {
   func zoomTiles(_ command: TileZoomCommand) -> Bool {
     let next =
       switch command {
-      case .zoomIn: TileGridLayout.clampedZoom(tileZoom + 1)
-      case .zoomOut: TileGridLayout.clampedZoom(tileZoom - 1)
+      case .zoomIn: TileZoom.clamped(tileZoom + 1)
+      case .zoomOut: TileZoom.clamped(tileZoom - 1)
       case .actualSize: 0
       }
     guard next != tileZoom else { return false }
@@ -27,14 +27,14 @@ extension PanelController {
   /// Whether `command` would change the tiles' size now.
   func canZoomTiles(_ command: TileZoomCommand) -> Bool {
     switch command {
-    case .zoomIn: TileGridLayout.clampedZoom(tileZoom + 1) != tileZoom
-    case .zoomOut: TileGridLayout.clampedZoom(tileZoom - 1) != tileZoom
+    case .zoomIn: TileZoom.clamped(tileZoom + 1) != tileZoom
+    case .zoomOut: TileZoom.clamped(tileZoom - 1) != tileZoom
     case .actualSize: tileZoom != 0
     }
   }
 
   func setTileZoom(_ zoom: Int) {
-    tileZoom = TileGridLayout.clampedZoom(zoom)
+    tileZoom = TileZoom.clamped(zoom)
     PanelPreferences.setTileZoom(tileZoom, in: defaults)
   }
 }

@@ -10,18 +10,14 @@ enum TileGridLayout {
   /// The width a tile is drawn at when there is room for it, at the standard zoom.
   static let preferredTileWidth: CGFloat = 140
   static let minimumColumns = 3
-  /// The preferred widths View › Zoom In and Zoom Out step through; the standard one is step 0.
+  /// The preferred widths View › Zoom In and Zoom Out step through, one per `TileZoom.steps`;
+  /// the standard one is step 0.
   static let zoomWidths: [CGFloat] = [112, 140, 176, 220]
-  static let standardZoomIndex = 1
-
-  /// `zoom` held to the steps there are, counted from the standard size.
-  static func clampedZoom(_ zoom: Int) -> Int {
-    min(max(zoom, -standardZoomIndex), zoomWidths.count - 1 - standardZoomIndex)
-  }
+  static let standardZoomIndex = -TileZoom.steps.lowerBound
 
   /// The preferred tile width at a zoom step.
   static func preferredWidth(zoom: Int) -> CGFloat {
-    zoomWidths[clampedZoom(zoom) + standardZoomIndex]
+    zoomWidths[TileZoom.clamped(zoom) + standardZoomIndex]
   }
 
   /// How many columns fit `width`: as many tiles of the preferred width and gap as fit, and never

@@ -145,7 +145,7 @@ final class WorkshopStore {
   let updates: WorkshopUpdateStore
   @ObservationIgnored private let service: WorkshopService
   @ObservationIgnored private let defaults: UserDefaults
-  static let concurrentDownloadsKey = "WallpaperMachine.concurrentDownloads"
+  nonisolated static let concurrentDownloadsKey = "WallpaperMachine.concurrentDownloads"
   /// The sort and filters of the last search, kept across launches (and so across updates).
   static let browseFiltersKey = "WallpaperMachine.workshopBrowseFilters"
   var username = ""

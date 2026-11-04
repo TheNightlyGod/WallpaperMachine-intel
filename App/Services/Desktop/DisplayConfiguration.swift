@@ -23,9 +23,8 @@ struct DisplayConfiguration: Equatable, Sendable {
     var displays: [Display]
 
     static func current() -> DisplayConfiguration {
-        let key = NSDeviceDescriptionKey("NSScreenNumber")
-        return DisplayConfiguration(displays: NSScreen.screens.map { screen in
-            Display(id: (screen.deviceDescription[key] as? NSNumber)?.uint32Value ?? 0, frame: screen.frame,
+        DisplayConfiguration(displays: NSScreen.screens.map { screen in
+            Display(id: SystemDisplays.id(of: screen) ?? 0, frame: screen.frame,
                     scale: screen.backingScaleFactor, refreshRate: screen.maximumFramesPerSecond)
         })
     }

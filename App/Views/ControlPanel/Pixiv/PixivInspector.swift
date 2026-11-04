@@ -164,16 +164,11 @@ private struct PixivInspectorDetail: View {
   }
 
   private var applyButton: some View {
-    let offer = PixivApplyOffer(libraryID: selection.libraryID, target: controller.mediaApplyTarget)
-    let key = PanelActionCoordinator.key("activate", id: offer.libraryID)
+    let offer = ApplyOffer(
+      wallpaperID: selection.libraryID, target: controller.mediaApplyTarget,
+      isBusy: { controller.isBusy($0) })
     return Button {
-      controller.launch(key) {
-        if offer.reapplies {
-          try await controller.reapply(offer.libraryID)
-        } else {
-          try await controller.activate(offer.libraryID)
-        }
-      }
+      controller.launch(offer.key) { try await controller.apply(offer) }
     } label: {
       if offer.reapplies {
         Label("Reapply wallpaper", systemImage: "play.fill")
@@ -182,7 +177,7 @@ private struct PixivInspectorDetail: View {
       }
     }
     .buttonStyle(.panelPrimary(size: .regular, expands: true))
-    .disabled(!offer.isEnabled || controller.isBusy(key))
+    .disabled(!offer.isEnabled)
     .accessibilityIdentifier("pixiv-apply")
   }
 
@@ -206,9 +201,7 @@ private struct PixivInspectorDetail: View {
 
   private func pauseButton(_ job: PixivDownloadRow) -> some View {
     Button {
-      controller.launch(PanelActionCoordinator.key("pixivPause", id: job.id)) {
-        try await controller.pixivPause(id: job.id)
-      }
+      controller.downloads.pause(DownloadRow(job))
     } label: {
       Label("Pause download", systemImage: "pause.fill").frame(maxWidth: .infinity)
     }
@@ -219,9 +212,7 @@ private struct PixivInspectorDetail: View {
 
   private func resumeButton(_ job: PixivDownloadRow) -> some View {
     Button {
-      controller.launch(PanelActionCoordinator.key("pixivResume", id: job.id)) {
-        try await controller.pixivResume(id: job.id)
-      }
+      controller.downloads.resume(DownloadRow(job))
     } label: {
       Label("Resume download", systemImage: "play.fill")
     }
@@ -231,9 +222,7 @@ private struct PixivInspectorDetail: View {
 
   private func cancelButton(_ job: PixivDownloadRow) -> some View {
     Button {
-      controller.launch(PanelActionCoordinator.key("pixivCancel", id: job.id)) {
-        try await controller.pixivCancel(id: job.id)
-      }
+      controller.downloads.cancel(DownloadRow(job))
     } label: {
       Image(systemName: "xmark").font(.system(size: 12, weight: .semibold))
     }

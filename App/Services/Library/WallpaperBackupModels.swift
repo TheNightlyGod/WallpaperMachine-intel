@@ -97,26 +97,27 @@ struct WallpaperBackupJournal: Codable, Sendable {
 /// diagnostics and caches must never enter a backup through a broad defaults prefix.
 struct WallpaperBackupPreferences: Sendable {
     /// Local transaction recovery may restore these, but backup packages may never supply them.
-    static let localRecoveryKeys: Set<String> = ["WallpaperMachine.automaticWallpaperHandled", "WallpaperMachine.focusWallpaperRestore", "WallpaperMachine.spaceVisits"]
+    static let localRecoveryKeys: Set<String> = [WallpaperAutomationStore.handledKey, WallpaperAutomationStore.focusRestoreKey, WallpaperSpaceMonitor.visitsKey]
+    /// Each key is its owner's constant.
     static let allowedKeys: Set<String> = [
-        "WallpaperMachine.collections", "WallpaperMachine.playlistPlans",
-        "WallpaperMachine.wallpaperPresets", "WallpaperMachine.imagePlacements",
-        "WallpaperMachine.playlists", "WallpaperMachine.playlistNextChange",
-        "WallpaperMachine.automaticWallpapers", "WallpaperMachine.solarLocation",
-        "WallpaperMachine.solarSettings",
-        "WallpaperMachine.displayLayouts",
-        "WallpaperMachine.favoriteWallpaperIDs", "WallpaperMachine.appTheme",
-        "WallpaperMachine.appLanguage", "AppleLanguages", "WallpaperMachine.hotKeys",
-        "WallpaperMachine.displaySleepAction", "WallpaperMachine.otherAudioAction",
-        "WallpaperMachine.otherAppInFrontAction",
-        "WallpaperMachine.desktopCoveredAction", "WallpaperMachine.appRules",
-        "WallpaperMachine.lowPowerModeAction", "WallpaperMachine.thermalAction",
-        "WallpaperMachine.lowBatteryAction", "WallpaperMachine.lowBatteryThreshold",
-        "WallpaperMachine.playOnlyOnActiveDisplay",
-        "WallpaperMachine.hideAfterActivating", "WallpaperMachine.tileZoom",
-        "WallpaperMachine.libraryPreviewsOnHover",
-        "WallpaperMachine.concurrentDownloads",
-        "WallpaperMachine.workshopUpdateChecks", "WallpaperMachineAssetsPath",
+        WallpaperCollectionStore.storageKey, PlaylistStore.plansKey,
+        WallpaperPresetStore.preferenceKey, StillImagePlacementStore.storageKey,
+        PlaylistStore.playlistsKey, PlaylistStore.nextChangeKey,
+        WallpaperAutomationStore.configurationsKey, WallpaperAutomationStore.locationKey,
+        WallpaperAutomationStore.solarKey,
+        WallpaperDisplayLayoutStore.storageKey,
+        PanelPreferences.favoritesKey, AppThemeStore.defaultsKey,
+        AppLanguageStore.defaultsKey, AppLanguageStore.appleLanguagesKey, HotKeyPreferences.bindingsKey,
+        PlaybackPreferences.displaySleepKey, PlaybackPreferences.otherAudioKey,
+        PlaybackPreferences.otherAppInFrontKey,
+        PlaybackPreferences.desktopCoveredKey, PlaybackPreferences.appRulesKey,
+        PlaybackPreferences.lowPowerModeKey, PlaybackPreferences.thermalKey,
+        PlaybackPreferences.lowBatteryActionKey, PlaybackPreferences.lowBatteryThresholdKey,
+        PlaybackPreferences.playOnlyOnActiveDisplayKey,
+        PanelPreferences.hideAfterActivatingKey, PanelPreferences.tileZoomKey,
+        PanelPreferences.libraryPreviewsOnHoverKey,
+        WorkshopStore.concurrentDownloadsKey,
+        WorkshopUpdateStore.automaticKey, ClientPaths.assetsPathKey,
         // No longer read since filters became a popover; still accepted so that backups made
         // by earlier versions, which carry them, keep restoring.
         "WallpaperMachine.workshopFiltersCollapsed", "WallpaperMachine.installedFiltersCollapsed",
@@ -193,20 +194,20 @@ struct WallpaperBackupPreferences: Sendable {
             }
         }
         switch key {
-        case "WallpaperMachine.automaticWallpapers": try WallpaperAutomationStore.validateConfigurations(data())
-        case "WallpaperMachine.displayLayouts": _ = try WallpaperDisplayLayoutStore.decode(data())
-        case "WallpaperMachine.solarLocation":
+        case WallpaperAutomationStore.configurationsKey: try WallpaperAutomationStore.validateConfigurations(data())
+        case WallpaperDisplayLayoutStore.storageKey: _ = try WallpaperDisplayLayoutStore.decode(data())
+        case WallpaperAutomationStore.locationKey:
             let location = try JSONDecoder().decode(WallpaperSolarLocation.self, from: data())
             guard location.isValid else { throw invalid() }
-        case "WallpaperMachine.solarSettings":
+        case WallpaperAutomationStore.solarKey:
             let solar = try JSONDecoder().decode(WallpaperSolarSettings.self, from: data())
             guard solar.isValid else { throw invalid() }
-        case "WallpaperMachine.wallpaperPresets": try WallpaperPresetStore.validateArchiveData(data())
-        case "WallpaperMachine.collections":
+        case WallpaperPresetStore.preferenceKey: try WallpaperPresetStore.validateArchiveData(data())
+        case WallpaperCollectionStore.storageKey:
             let records = try JSONDecoder().decode([WallpaperCollection].self, from: data())
             try identities(records.map(\.id))
             for record in records { try name(record.name); try identities(record.wallpaperIDs) }
-        case "WallpaperMachine.playlistPlans":
+        case PlaylistStore.plansKey:
             let bytes = try data()
             let records = try JSONDecoder().decode([PlaylistPlan].self, from: bytes)
             try identities(records.map(\.id))
@@ -215,33 +216,33 @@ struct WallpaperBackupPreferences: Sendable {
                 try name(record.name)
                 try playlists([record.id: raw[index]["playlist"] as Any])
             }
-        case "WallpaperMachine.playlists":
+        case PlaylistStore.playlistsKey:
             let bytes = try data()
             _ = try JSONDecoder().decode([String: DisplayPlaylist].self, from: bytes)
             try playlists(JSONSerialization.jsonObject(with: bytes))
-        case "WallpaperMachine.imagePlacements":
+        case StillImagePlacementStore.storageKey:
             let record = try JSONDecoder().decode(WallpaperBackupPlacementArchive.self, from: data())
             guard record.version == 1 else { throw invalid() }
             try identities(Array(record.placements.keys))
             for displays in record.placements.values { try identities(Array(displays.keys)) }
-        case "WallpaperMachine.favoriteWallpaperIDs": try identities(JSONDecoder().decode([String].self, from: data()))
-        case "WallpaperMachine.hotKeys":
+        case PanelPreferences.favoritesKey: try identities(JSONDecoder().decode([String].self, from: data()))
+        case HotKeyPreferences.bindingsKey:
             let bindings = try JSONDecoder().decode([String: HotKey].self, from: data())
             guard bindings.keys.allSatisfy({ HotKeyAction(rawValue: $0) != nil }) else { throw invalid() }
             for binding in bindings.values {
                 guard binding.keyCode <= 127, binding.label.count <= 128, !binding.label.contains("\0") else { throw invalid() }
             }
-        case "WallpaperMachine.appRules":
+        case PlaybackPreferences.appRulesKey:
             let rules = try JSONDecoder().decode([AppRule].self, from: data())
             try identities(rules.map { $0.id.uuidString })
             for rule in rules { try identities([rule.bundleIdentifier]); guard !rule.name.contains("\0") else { throw invalid() } }
-        case "WallpaperMachine.playlistNextChange":
+        case PlaylistStore.nextChangeKey:
             guard let records = value as? [String: Any] else { throw invalid() }
             try identities(Array(records.keys))
             for item in records.values {
                 guard let number = item as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(), number.doubleValue.isFinite else { throw invalid() }
             }
-        case "WallpaperMachine.appTheme":
+        case AppThemeStore.defaultsKey:
             guard let record = value as? [String: String], Set(record.keys).isSubset(of: ["mode", "accent", "tone", "icon", "halloween"]) else { throw invalid() }
             for (key, item) in record {
                 switch key {
@@ -252,24 +253,24 @@ struct WallpaperBackupPreferences: Sendable {
                 default: guard AppThemePreferences.validAccent(item) else { throw invalid() }
                 }
             }
-        case "WallpaperMachine.appLanguage": guard let raw = value as? String, raw == "system" || AppLanguage.named(raw) != nil else { throw invalid() }
-        case "AppleLanguages": guard let values = value as? [String], values.count <= 32, values.allSatisfy({ !$0.isEmpty && !$0.contains("\0") && $0.count <= 128 }) else { throw invalid() }
-        case "WallpaperMachine.displaySleepAction": guard let raw = value as? String, DisplaySleepAction(rawValue: raw) != nil else { throw invalid() }
-        case "WallpaperMachine.otherAudioAction": guard let raw = value as? String, OtherAudioAction(rawValue: raw) != nil else { throw invalid() }
-        case "WallpaperMachine.otherAppInFrontAction": guard let raw = value as? String, OtherAppInFrontAction(rawValue: raw) != nil else { throw invalid() }
-        case "WallpaperMachine.desktopCoveredAction": guard let raw = value as? String, DesktopCoveredAction(rawValue: raw) != nil else { throw invalid() }
-        case "WallpaperMachine.lowPowerModeAction", "WallpaperMachine.thermalAction", "WallpaperMachine.lowBatteryAction":
+        case AppLanguageStore.defaultsKey: guard let raw = value as? String, raw == "system" || AppLanguage.named(raw) != nil else { throw invalid() }
+        case AppLanguageStore.appleLanguagesKey: guard let values = value as? [String], values.count <= 32, values.allSatisfy({ !$0.isEmpty && !$0.contains("\0") && $0.count <= 128 }) else { throw invalid() }
+        case PlaybackPreferences.displaySleepKey: guard let raw = value as? String, DisplaySleepAction(rawValue: raw) != nil else { throw invalid() }
+        case PlaybackPreferences.otherAudioKey: guard let raw = value as? String, OtherAudioAction(rawValue: raw) != nil else { throw invalid() }
+        case PlaybackPreferences.otherAppInFrontKey: guard let raw = value as? String, OtherAppInFrontAction(rawValue: raw) != nil else { throw invalid() }
+        case PlaybackPreferences.desktopCoveredKey: guard let raw = value as? String, DesktopCoveredAction(rawValue: raw) != nil else { throw invalid() }
+        case PlaybackPreferences.lowPowerModeKey, PlaybackPreferences.thermalKey, PlaybackPreferences.lowBatteryActionKey:
             guard let raw = value as? String, SystemConditionAction(rawValue: raw) != nil else { throw invalid() }
-        case "WallpaperMachine.lowBatteryThreshold":
+        case PlaybackPreferences.lowBatteryThresholdKey:
             guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(), number.doubleValue == Double(number.intValue),
                   PlaybackPreferences.lowBatteryThresholds.contains(number.intValue) else { throw invalid() }
-        case "WallpaperMachine.concurrentDownloads":
+        case WorkshopStore.concurrentDownloadsKey:
             guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(), number.doubleValue == Double(number.intValue),
                   WorkshopDownloadManager.concurrentDownloadRange.contains(number.intValue) else { throw invalid() }
-        case "WallpaperMachine.tileZoom":
+        case PanelPreferences.tileZoomKey:
             guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(), number.doubleValue == Double(number.intValue),
-                  TileGridLayout.clampedZoom(number.intValue) == number.intValue else { throw invalid() }
-        case "WallpaperMachineAssetsPath": guard let path = value as? String, !path.contains("\0"), path.utf8.count <= 1024 else { throw invalid() }
+                  TileZoom.steps.contains(number.intValue) else { throw invalid() }
+        case ClientPaths.assetsPathKey: guard let path = value as? String, !path.contains("\0"), path.utf8.count <= 1024 else { throw invalid() }
         default: guard let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else { throw invalid() }
         }
     }

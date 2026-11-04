@@ -169,7 +169,7 @@ final class WorkshopInspectorTests: MediaPanelTestCase {
 
   func testEveryGlyphOfARingHasItsOwnSymbol() {
     let glyphs: [TileDownloadState.Glyph] = [.play, .shield, .download, .refresh]
-    let symbols = glyphs.map(WorkshopTileRing.symbol(for:))
+    let symbols = glyphs.map(\.systemImage)
     XCTAssertEqual(Set(symbols).count, glyphs.count)
     XCTAssertTrue(symbols.allSatisfy { !$0.isEmpty })
   }

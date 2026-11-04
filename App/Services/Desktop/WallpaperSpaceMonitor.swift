@@ -28,7 +28,7 @@ struct WallpaperSpaceVisit: Equatable, Sendable {
 /// Read-only Space topology and persistent visit identities for automatic selection.
 @MainActor
 final class WallpaperSpaceMonitor {
-    static let visitsKey = "WallpaperMachine.spaceVisits"
+    nonisolated static let visitsKey = "WallpaperMachine.spaceVisits"
     static let didChangeNotification = Notification.Name("WallpaperMachine.desktopSpacesChanged")
     static let shared = WallpaperSpaceMonitor(defaults: ClientPreferences.defaults,
         provider: { SystemWallpaperSpaceSource.shared?.read() },

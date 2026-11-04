@@ -97,15 +97,17 @@ struct PlaybackAppRuleRow: View {
   }
 }
 
-/// The icon of an app by its bundle identifier, found when the row appears, or a plain stand-in for
-/// an app that is not installed any more.
+/// The icon of an app by its bundle identifier, found when the row appears (`AppIconCache`), or a
+/// plain stand-in for an app that is not installed any more.
 private struct PlaybackAppIcon: View {
   let bundleIdentifier: String
-  @State private var icon: NSImage?
+
+  @Environment(PanelController.self) private var controller
 
   var body: some View {
+    let icons = controller.settings.appIcons
     Group {
-      if let icon {
+      if let icon = icons.icon(for: bundleIdentifier) {
         Image(nsImage: icon).resizable().interpolation(.high)
       } else {
         Image(systemName: "app.dashed").resizable().scaledToFit().foregroundStyle(.tertiary)
@@ -114,10 +116,6 @@ private struct PlaybackAppIcon: View {
     }
     .frame(width: 22, height: 22)
     .accessibilityHidden(true)
-    .task(id: bundleIdentifier) {
-      icon = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier).map {
-        NSWorkspace.shared.icon(forFile: $0.path)
-      }
-    }
+    .task(id: bundleIdentifier) { icons.load(bundleIdentifier) }
   }
 }

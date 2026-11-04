@@ -266,7 +266,7 @@ final class DownloadsModel {
 
   /// **Cancel this download** in the auth stage.
   func cancelFromDialog(_ id: String) {
-    perform(PanelActionCoordinator.key("downloadCancel", id: id)) { [controller] in
+    perform(DownloadRowAction.cancel.key(.steam, id: id)) { [controller] in
       try await controller.cancelDownload(id: id)
     }
   }
@@ -349,30 +349,37 @@ final class DownloadsModel {
     }
   }
 
+  /// The key **Get shared resources** and Settings' Download from Steam… run under, so each of
+  /// them is disabled while either one's request is pending.
+  static var sceneAssetsKey: String {
+    PanelActionCoordinator.key("requestDownload", id: WorkshopStore.sceneAssetsRequestID)
+  }
+
   /// **Get shared resources** and Settings' Download from Steam…: asks for the shared scene
   /// resources, and opens the dialog when a prerequisite is missing.
   @discardableResult
   func requestSceneAssets() -> Task<Void, Never> {
-    controller.launch(PanelActionCoordinator.key("requestDownload", id: "")) { [controller] in
+    controller.launch(Self.sceneAssetsKey) { [controller] in
       try await controller.getSceneResources()
     }
   }
 
-  /// What clicking a download ring does for a Workshop tile or the matching inspector button.
+  /// What clicking a download ring does for a Workshop tile or the matching inspector button, and
+  /// what the controls of a Steam request or job that is not a row of the list do.
   func perform(_ action: TileDownloadState.Action, forItem id: String) {
     switch action {
     case .continueSetup:
       openDialog(for: id)
     case .resume:
-      controller.launch(PanelActionCoordinator.key("downloadResume", id: id)) { [controller] in
+      controller.launch(DownloadRowAction.resume.key(.steam, id: id)) { [controller] in
         try await controller.resumeDownload(id: id)
       }
     case .cancel:
-      controller.launch(PanelActionCoordinator.key("downloadCancel", id: id)) { [controller] in
+      controller.launch(DownloadRowAction.cancel.key(.steam, id: id)) { [controller] in
         try await controller.cancelDownload(id: id)
       }
     case .retry:
-      controller.launch(PanelActionCoordinator.key("downloadRetry", id: id)) { [controller] in
+      controller.launch(DownloadRowAction.retry.key(.steam, id: id)) { [controller] in
         try await controller.retryDownload(id: id)
       }
     }
@@ -381,42 +388,24 @@ final class DownloadsModel {
   // MARK: The Downloads popover
 
   /// The action key of a row's control, so it can disable itself while its action is pending.
-  static func key(_ action: String, row: DownloadRow) -> String {
-    let name: String
-    switch (action, row.source) {
-    case ("pause", .pixiv): name = "pixivPause"
-    case ("cancel", .pixiv): name = "pixivCancel"
-    case ("resume", .pixiv): name = "pixivResume"
-    case ("retry", .pixiv): name = "pixivRetryDownload"
-    case ("pause", .steam): name = "downloadPause"
-    case ("cancel", .steam): name = "downloadCancel"
-    case ("resume", .steam): name = "downloadResume"
-    default: name = "downloadRetry"
-    }
-    return PanelActionCoordinator.key(name, id: row.id)
+  static func key(_ action: DownloadRowAction, row: DownloadRow) -> String {
+    action.key(row.source, id: row.id)
   }
 
-  func pause(_ row: DownloadRow) {
-    controller.launch(Self.key("pause", row: row)) { [controller] in
-      try await controller.pauseDownload(row)
-    }
-  }
+  func pause(_ row: DownloadRow) { launch(.pause, on: row) }
+  func cancel(_ row: DownloadRow) { launch(.cancel, on: row) }
+  func resume(_ row: DownloadRow) { launch(.resume, on: row) }
+  func retry(_ row: DownloadRow) { launch(.retry, on: row) }
 
-  func cancel(_ row: DownloadRow) {
-    controller.launch(Self.key("cancel", row: row)) { [controller] in
-      try await controller.cancelDownload(row)
-    }
-  }
-
-  func resume(_ row: DownloadRow) {
-    controller.launch(Self.key("resume", row: row)) { [controller] in
-      try await controller.resumeDownload(row)
-    }
-  }
-
-  func retry(_ row: DownloadRow) {
-    controller.launch(Self.key("retry", row: row)) { [controller] in
-      try await controller.retryDownload(row)
+  /// Sends a row's action to the queue the row belongs to, under its key.
+  private func launch(_ action: DownloadRowAction, on row: DownloadRow) {
+    controller.launch(Self.key(action, row: row)) { [controller] in
+      switch action {
+      case .pause: try await controller.pauseDownload(row)
+      case .cancel: try await controller.cancelDownload(row)
+      case .resume: try await controller.resumeDownload(row)
+      case .retry: try await controller.retryDownload(row)
+      }
     }
   }
 

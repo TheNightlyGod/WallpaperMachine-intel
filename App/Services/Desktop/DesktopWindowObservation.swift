@@ -122,7 +122,7 @@ enum DesktopWindowReader {
         return DesktopWindowObservation(
             windowNumber: window.windowNumber,
             className: NSStringFromClass(type(of: window)),
-            displayID: screen.flatMap(WallpaperCoverageProbes.displayID(of:)),
+            displayID: screen.flatMap(SystemDisplays.id(of:)),
             frame: window.frame,
             displayFrame: screen?.frame,
             level: window.level.rawValue,

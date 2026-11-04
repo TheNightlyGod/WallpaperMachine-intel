@@ -15,5 +15,8 @@ struct HostWallpaperState: Equatable, Sendable {
     /// The host can retry the current failed surface without rebuilding its assignment.
     var canRetry = false
 
-    var key: String { "\(kind.rawValue):\(displayID)" }
+    var key: String { Self.key(kind: kind, displayID: displayID) }
+
+    /// The key `BridgeStore.hostWallpaperStates` keeps the state of `kind`'s surface on a display by.
+    static func key(kind: Kind, displayID: UInt32) -> String { "\(kind.rawValue):\(displayID)" }
 }

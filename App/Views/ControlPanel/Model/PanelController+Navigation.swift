@@ -109,22 +109,22 @@ extension PanelController {
   }
 
   func setThemeMode(_ mode: AppThemePreferences.Mode) throws {
-    try theme.set("mode", value: mode.rawValue)
+    theme.setMode(mode)
   }
 
   /// `hex` is `#rrggbb`; any other form is refused, as a control never offers one.
-  func setThemeAccent(_ hex: String) throws { try theme.set("accent", value: hex) }
+  func setThemeAccent(_ hex: String) throws { try theme.setAccent(hex) }
 
   func setThemeTone(_ tone: AppThemePreferences.Tone) throws {
-    try theme.set("tone", value: tone.rawValue)
+    theme.setTone(tone)
   }
 
   func setThemeIcon(_ icon: AppThemePreferences.Icon) throws {
-    try theme.set("icon", value: icon.rawValue)
+    theme.setIcon(icon)
   }
 
   func setThemeHalloween(_ halloween: AppThemePreferences.Halloween) throws {
-    try theme.set("halloween", value: halloween.rawValue)
+    theme.setHalloween(halloween)
   }
 
   func resetTheme() { theme.reset() }

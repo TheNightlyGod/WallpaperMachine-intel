@@ -352,7 +352,7 @@ struct SystemPinnableWindow: WallpaperPinnableWindow {
 
     var displayID: UInt32? {
         let screen = window.screen ?? NSScreen.screens.first { $0.frame.intersects(window.frame) }
-        return (screen?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
+        return screen.flatMap(SystemDisplays.id(of:))
     }
 
     var joinsAllSpaces: Bool {

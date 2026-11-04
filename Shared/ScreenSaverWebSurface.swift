@@ -228,7 +228,7 @@ final class ScreenSaverWebSurface: NSObject, WKNavigationDelegate, WKUIDelegate 
 
   private func deliverSilence() async {
     _ = try? await webView.callAsyncJavaScript(
-      "return window.__mweWallpaperHost.deliverAudio(bins)",
+      WebWallpaperProtocol.deliverAudioScript,
       arguments: ["bins": [Double](repeating: 0, count: 128)], in: nil, contentWorld: .page)
   }
 
@@ -306,15 +306,15 @@ final class ScreenSaverWebSurface: NSObject, WKNavigationDelegate, WKUIDelegate 
       if !missing.isEmpty { result[entry.key] = missing }
     }
     _ = try await webView.callAsyncJavaScript("""
-      window.__mweWallpaperHost.applyGeneralProperties(general);
-      window.__mweWallpaperHost.setFrameLimit(limit);
-      window.__mweWallpaperHost.applyUserProperties(properties);
-      window.__mweWallpaperHost.setPaused(paused);
-      window.__mweWallpaperHost.deliverMedia('status', {enabled:false});
+      \(WebWallpaperProtocol.hostCall(.applyGeneralProperties, "general"));
+      \(WebWallpaperProtocol.hostCall(.setFrameLimit, "limit"));
+      \(WebWallpaperProtocol.hostCall(.applyUserProperties, "properties"));
+      \(WebWallpaperProtocol.hostCall(.setPaused, "paused"));
+      \(WebWallpaperProtocol.hostCall(.deliverMedia, "'status'", "{enabled:false}"));
       for (const [property, files] of Object.entries(removed))
-        window.__mweWallpaperHost.userDirectoryFilesRemoved(property, files);
+        \(WebWallpaperProtocol.hostCall(.userDirectoryFilesRemoved, "property", "files"));
       for (const [property, files] of Object.entries(directories))
-        window.__mweWallpaperHost.userDirectoryFilesAddedOrChanged(property, files);
+        \(WebWallpaperProtocol.hostCall(.userDirectoryFilesAddedOrChanged, "property", "files"));
       """, arguments: ["general": ["fps": Int(fps)], "limit": WebWallpaperProtocol.frameLimit(forFPS: fps),
                          "properties": properties,
                          "paused": paused, "directories": currentDirectories, "removed": removed], in: nil, contentWorld: .page)
@@ -471,21 +471,23 @@ final class ScreenSaverWebSurface: NSObject, WKNavigationDelegate, WKUIDelegate 
   func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
                for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? { nil }
 
+  /// What the page posts, once `WebWallpaperProtocol.PageMessage` has checked it.
   private func receive(_ body: Any) {
-    guard !isStopped, let message = body as? [String: Any], let type = message["type"] as? String else { return }
-    switch type {
-    case "audioSubscribed", "audioUnsubscribed":
-      audioSubscribed = type == "audioSubscribed"
+    guard !isStopped, case .success(let message) = WebWallpaperProtocol.PageMessage.parse(body) else { return }
+    switch message {
+    case .audioSubscribed:
+      audioSubscribed = true
       updateSilence()
-    case "randomFileRequest": receiveRandomFileRequest(message)
-    default: return
+    case .audioUnsubscribed:
+      audioSubscribed = false
+      updateSilence()
+    case .randomFileRequest(let id, let property): receiveRandomFileRequest(id: id, property: property)
+    case .mediaSubscribed, .mediaUnsubscribed, .pageDiagnostic: return
     }
   }
 
-  private func receiveRandomFileRequest(_ message: [String: Any]) {
-    guard !isPaused, pendingRandomReplies < 32, let id = message["requestId"] as? String,
-      let property = message["propertyId"] as? String, id.count <= 128, property.count <= 256
-    else { return }
+  private func receiveRandomFileRequest(id: String, property: String) {
+    guard !isPaused, pendingRandomReplies < 32 else { return }
     let path = directories[property]?.randomElement() ?? ""
     pendingRandomReplies += 1
     Task { @MainActor [weak self] in
@@ -494,7 +496,7 @@ final class ScreenSaverWebSurface: NSObject, WKNavigationDelegate, WKUIDelegate 
       guard !self.isStopped, !self.isPaused else { return }
       do {
         _ = try await self.webView.callAsyncJavaScript(
-          "window.__mweWallpaperHost.deliverRandomFile(id, property, path)",
+          WebWallpaperProtocol.hostCall(.deliverRandomFile, "id", "property", "path"),
           arguments: ["id": id, "property": property, "path": path], in: nil, contentWorld: .page)
       } catch { if !self.isStopped { self.fail(error) } }
     }

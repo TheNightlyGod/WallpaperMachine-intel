@@ -124,7 +124,7 @@ extension PanelController {
     let id = navigation.targetDisplayID
     let display = store.settingsSnapshot.displays.first { $0.displayId == id }
     return MediaApplyTarget(
-      canShowWallpaper: display.map { $0.enabled && $0.mode == .standalone } ?? false,
+      canShowWallpaper: display?.isIndependent ?? false,
       wallpaperID: store.monitorInformationSnapshot.rows.first { $0.displayId == id }?.wallpaperId)
   }
 

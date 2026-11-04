@@ -37,15 +37,24 @@ final class WorkshopBrowserModel {
   /// Loads the stills and the animations of the tiles.
   let previews: WorkshopPreviewCoordinator
 
-  /// The selected item's comments, read from Steam's public thread when its inspector shows.
+  /// The selected item's comments, read from Steam's public thread when its inspector shows: whose
+  /// they are, and what is known of them.
   enum Comments: Equatable {
-    case loading
-    case loaded(WorkshopComments)
-    case failed(String)
+    /// No item's comments are held or being read.
+    case idle
+    case loading(itemID: String)
+    case loaded(itemID: String, thread: WorkshopComments)
+    case failed(itemID: String, message: String)
+
+    /// The item these comments belong to; nil when idle.
+    var itemID: String? {
+      switch self {
+      case .idle: nil
+      case .loading(let id), .loaded(let id, _), .failed(let id, _): id
+      }
+    }
   }
-  /// Whose comments `comments` holds, and what is known of them.
-  private(set) var commentsItemID: String?
-  private(set) var comments: Comments = .loading
+  private(set) var comments: Comments = .idle
 
   /// How the timers wait; tests give them a clock they fire by hand.
   @ObservationIgnored var sleep: @Sendable (Duration) async throws -> Void = {
@@ -327,18 +336,17 @@ final class WorkshopBrowserModel {
   /// Reads `item`'s newest comments for its inspector, unless they are held already. A newer
   /// selection while Steam answers wins.
   func loadComments(for item: WorkshopItem) async {
-    if commentsItemID == item.id, case .loaded = comments { return }
-    commentsItemID = item.id
-    comments = .loading
+    if case .loaded(item.id, _) = comments { return }
+    comments = .loading(itemID: item.id)
     do {
       let thread = try await controller.workshop.comments(for: item)
-      guard commentsItemID == item.id else { return }
-      comments = .loaded(thread)
+      guard comments.itemID == item.id else { return }
+      comments = .loaded(itemID: item.id, thread: thread)
     } catch is CancellationError {
-      if commentsItemID == item.id { commentsItemID = nil }
+      if comments.itemID == item.id { comments = .idle }
     } catch {
-      guard commentsItemID == item.id else { return }
-      comments = .failed(error.localizedDescription)
+      guard comments.itemID == item.id else { return }
+      comments = .failed(itemID: item.id, message: error.localizedDescription)
     }
   }
 

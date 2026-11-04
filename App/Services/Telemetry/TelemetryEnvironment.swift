@@ -48,8 +48,7 @@ enum TelemetryEnvironment {
         let main = NSScreen.main
         var result: [UInt32: TelemetryReport.Display] = [:]
         for screen in NSScreen.screens {
-            guard let id = (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
-            else { continue }
+            guard let id = SystemDisplays.id(of: screen) else { continue }
             let scale = screen.backingScaleFactor
             result[id] = TelemetryReport.Display(
                 width: Int((screen.frame.width * scale).rounded()),

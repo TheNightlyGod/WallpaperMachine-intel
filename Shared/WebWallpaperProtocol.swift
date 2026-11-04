@@ -26,6 +26,81 @@ enum WebWallpaperProtocol {
     /// tagged object, so there is exactly one place that has to distrust the page.
     static let messageHandlerName = "mweWallpaper"
 
+    /// A message the page posts on `messageHandlerName`, parsed and checked here, once, for
+    /// every surface that hosts a page. The page is untrusted: `parse` drops anything that is
+    /// not a tagged object with well-formed fields.
+    enum PageMessage {
+        /// The `type` tag of each message, as the host script posts it.
+        enum Kind: String {
+            case audioSubscribed, audioUnsubscribed, mediaSubscribed, mediaUnsubscribed
+            case pageDiagnostic, randomFileRequest
+        }
+
+        /// Why `parse` dropped a message.
+        enum Rejection: Error, Equatable {
+            /// Not an object with a string `type`.
+            case malformed
+            case unknownKind(String)
+            /// A `randomFileRequest` whose ids are missing, empty or too long.
+            case malformedRandomFileRequest
+        }
+
+        /// The page's ids are its own (`r1`, `r2`, …) and its property names come from the
+        /// project, so anything longer is not a request the host script made.
+        static let maximumRequestIDLength = 128
+        static let maximumPropertyIDLength = 256
+
+        case audioSubscribed
+        case audioUnsubscribed
+        case mediaSubscribed
+        case mediaUnsubscribed
+        /// The whole payload; `WebWallpaperPageDiagnostics` reads and bounds its fields.
+        case pageDiagnostic([String: Any])
+        case randomFileRequest(requestID: String, propertyID: String)
+
+        static func parse(_ body: Any) -> Result<PageMessage, Rejection> {
+            guard let payload = body as? [String: Any], let type = payload["type"] as? String else {
+                return .failure(.malformed)
+            }
+            guard let kind = Kind(rawValue: type) else { return .failure(.unknownKind(type)) }
+            switch kind {
+            case .audioSubscribed: return .success(.audioSubscribed)
+            case .audioUnsubscribed: return .success(.audioUnsubscribed)
+            case .mediaSubscribed: return .success(.mediaSubscribed)
+            case .mediaUnsubscribed: return .success(.mediaUnsubscribed)
+            case .pageDiagnostic: return .success(.pageDiagnostic(payload))
+            case .randomFileRequest:
+                guard let requestID = payload["requestId"] as? String, !requestID.isEmpty,
+                      requestID.count <= maximumRequestIDLength,
+                      let propertyID = payload["propertyId"] as? String, !propertyID.isEmpty,
+                      propertyID.count <= maximumPropertyIDLength
+                else { return .failure(.malformedRandomFileRequest) }
+                return .success(.randomFileRequest(requestID: requestID, propertyID: propertyID))
+            }
+        }
+    }
+
+    /// The object the host script puts on the page's `window`; the host calls into the page
+    /// only through its functions.
+    static let hostObject = "window.__mweWallpaperHost"
+
+    /// A function of `hostObject`, named as `hostScriptSource` defines it.
+    enum HostFunction: String, CaseIterable {
+        case applyUserProperties, applyGeneralProperties, setFrameLimit, setRenderScale, setScreenScale
+        case setPaused, deliverAudio, deliverMedia, deliverRandomFile
+        case userDirectoryFilesAddedOrChanged, userDirectoryFilesRemoved
+    }
+
+    /// The script expression calling `function` with `arguments`, each itself an expression,
+    /// usually the name of a `callAsyncJavaScript` argument.
+    static func hostCall(_ function: HostFunction, _ arguments: String...) -> String {
+        "\(hostObject).\(function.rawValue)(\(arguments.joined(separator: ", ")))"
+    }
+
+    /// Hands the page one audio frame, the `callAsyncJavaScript` argument `bins`, and returns
+    /// whether a listener took it. Built once: it runs for every audio frame.
+    static let deliverAudioScript = "return " + hostCall(.deliverAudio, "bins")
+
     /// What a page's document-start script needs to know before any page script
     /// runs. The frame-rate limit has to be known by the page's very first
     /// `requestAnimationFrame` call and the render scale by its very first read
@@ -195,7 +270,7 @@ enum WebWallpaperProtocol {
     /// A function expression taking the seed; `makeHostScript` calls it.
     private static let hostScriptSource = """
     (seed => {
-      if (window.__mweWallpaperHost) return;
+      if (\(hostObject)) return;
       // Frame-rate limit. WebKit gives a page no frame-rate control, so a limit
       // below the ceiling is enforced on requestAnimationFrame itself: callbacks
       // are held back to the limit and run on the native frame that follows, with
@@ -324,7 +399,7 @@ enum WebWallpaperProtocol {
         const line = String(text).split(projectBase).join("").slice(0, 600);
         if (line === lastReport || ++reportsThisSecond > 8) return;
         lastReport = line;
-        post({ type: "pageDiagnostic", kind, text: line });
+        post({ type: "\(PageMessage.Kind.pageDiagnostic.rawValue)", kind, text: line });
       };
       for (const [level, kind] of [["error", "error"], ["warn", "warning"]]) {
         const original = console[level];
@@ -478,7 +553,7 @@ enum WebWallpaperProtocol {
         const next = typeof value === "function" ? value : null;
         const had = audioListener !== null;
         audioListener = next;
-        if ((next !== null) !== had) post({ type: next ? "audioSubscribed" : "audioUnsubscribed" });
+        if ((next !== null) !== had) post({ type: next ? "\(PageMessage.Kind.audioSubscribed.rawValue)" : "\(PageMessage.Kind.audioUnsubscribed.rawValue)" });
       };
 
       const MEDIA_SLOTS = ["status", "properties", "thumbnail", "playback", "timeline"];
@@ -501,8 +576,8 @@ enum WebWallpaperProtocol {
           const before = mediaCount();
           mediaListeners[slot] = next;
           const after = mediaCount();
-          if (before === 0 && after > 0) post({ type: "mediaSubscribed" });
-          else if (before > 0 && after === 0) post({ type: "mediaUnsubscribed" });
+          if (before === 0 && after > 0) post({ type: "\(PageMessage.Kind.mediaSubscribed.rawValue)" });
+          else if (before > 0 && after === 0) post({ type: "\(PageMessage.Kind.mediaUnsubscribed.rawValue)" });
           if (next && mediaValue[slot] !== null) fireMedia(slot, mediaValue[slot]);
         };
       }
@@ -519,10 +594,10 @@ enum WebWallpaperProtocol {
         if (typeof property !== "string" || property === "" || typeof callback !== "function") return;
         const requestId = "r" + (++randomFileSequence);
         randomFileCallbacks.set(requestId, callback);
-        post({ type: "randomFileRequest", requestId, propertyId: property });
+        post({ type: "\(PageMessage.Kind.randomFileRequest.rawValue)", requestId, propertyId: property });
       };
 
-      window.__mweWallpaperHost = Object.freeze({
+      \(hostObject) = Object.freeze({
         applyUserProperties(properties, restaged) { deliverProperties("applyUserProperties", properties, restaged); },
         applyGeneralProperties(properties) { deliverProperties("applyGeneralProperties", properties); },
         // Takes effect on the next frame, and only where the seed asked for pacing.

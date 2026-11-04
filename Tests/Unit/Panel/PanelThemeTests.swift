@@ -91,7 +91,7 @@ final class PanelThemeTests: XCTestCase {
     XCTAssertEqual(seen.theme?.season, .halloween, "Halloween week dresses the window by itself")
     XCTAssertEqual(seen.theme?.surface, SurfacePalette(season: .halloween, appearance: .dark))
 
-    try store.set("halloween", value: "off")
+    store.setHalloween(.off)
     settle(view)
     XCTAssertNil(seen.theme?.season)
     XCTAssertEqual(seen.theme?.surface, SurfacePalette(tone: .neutral, appearance: .dark))
@@ -107,8 +107,8 @@ final class PanelThemeTests: XCTestCase {
     XCTAssertEqual(seen.theme?.accent.base.hex, AccentPalette.defaultAccent)
     XCTAssertEqual(seen.theme?.surface, SurfacePalette(tone: .neutral, appearance: .light))
 
-    try store.set("accent", value: "#FFD60A")
-    try store.set("tone", value: "cool")
+    try store.setAccent("#FFD60A")
+    store.setTone(.cool)
     settle(view)
     XCTAssertEqual(seen.theme?.accent.base.hex, "#ffd60a")
     XCTAssertEqual(seen.theme?.surface, SurfacePalette(tone: .cool, appearance: .light))

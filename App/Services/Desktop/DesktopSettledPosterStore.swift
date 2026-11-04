@@ -156,7 +156,7 @@ extension DesktopPosterLook {
     ) -> DesktopPosterLook? {
         guard !wallpaperID.isEmpty, let screen,
               let row = settings.displays.first(where: { physicalDisplay($0) == display }),
-              row.enabled, row.mode == .standalone,
+              row.isIndependent,
               let monitor = monitors.first(where: { $0.displayId == row.displayId }),
               monitor.wallpaperId == wallpaperID, monitor.mirrorTargetDisplayId == nil else { return nil }
         switch kind {

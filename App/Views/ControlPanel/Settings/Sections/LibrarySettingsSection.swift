@@ -320,21 +320,14 @@ private struct LibrarySceneRows: View {
     case .finishSignIn, .continueSetup:
       controller.downloads.openDialog(for: nil)
     case .cancelQueuedDownload, .cancelDownload:
-      controller.launch(PanelActionCoordinator.key("downloadCancel", id: id)) {
-        try await controller.cancelDownload(id: id)
-      }
+      controller.downloads.perform(.cancel, forItem: id)
     case .removeRequest:
       controller.launch(PanelActionCoordinator.key("removeDownloadRequest", id: id)) {
         try await controller.removeDownloadRequest(id: id)
       }
     case .download:
-      controller.launch(PanelActionCoordinator.key("requestDownload", id: id)) {
-        try await controller.requestSceneAssets()
-        // The dialog opens unless the download is already on its way.
-        if controller.downloadDialogTarget(afterRequesting: nil) != nil {
-          controller.downloads.openDialog(for: nil)
-        }
-      }
+      // The dialog opens unless the download is already on its way.
+      controller.downloads.requestSceneAssets()
     case .locate:
       controller.launch(PanelActionCoordinator.key("locateAssets")) {
         try await controller.locateSceneAssets()

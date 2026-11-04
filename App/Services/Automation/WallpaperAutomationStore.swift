@@ -28,11 +28,11 @@ struct FocusWallpaperRestore: Codable, Equatable, Sendable {
 @MainActor
 final class WallpaperAutomationStore {
     static let shared = WallpaperAutomationStore()
-    static let configurationsKey = "WallpaperMachine.automaticWallpapers"
-    static let locationKey = "WallpaperMachine.solarLocation"
-    static let solarKey = "WallpaperMachine.solarSettings"
-    static let handledKey = "WallpaperMachine.automaticWallpaperHandled"
-    static let focusRestoreKey = "WallpaperMachine.focusWallpaperRestore"
+    nonisolated static let configurationsKey = "WallpaperMachine.automaticWallpapers"
+    nonisolated static let locationKey = "WallpaperMachine.solarLocation"
+    nonisolated static let solarKey = "WallpaperMachine.solarSettings"
+    nonisolated static let handledKey = "WallpaperMachine.automaticWallpaperHandled"
+    nonisolated static let focusRestoreKey = "WallpaperMachine.focusWallpaperRestore"
     static let didChangeNotification = Notification.Name("WallpaperMachine.automationSettingsChanged")
     static let statusChangedNotification = Notification.Name("WallpaperMachine.automationStatusChanged")
     private let defaults: UserDefaults

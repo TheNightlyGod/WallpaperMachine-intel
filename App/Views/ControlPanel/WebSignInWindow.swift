@@ -33,13 +33,6 @@ struct WebSignInSite: Sendable {
     }
 }
 
-/// What a sign-in window took from the page: the session cookie, and the site's companion cookie
-/// when it has one and the page set it.
-struct WebSignInCookies: Equatable, Sendable {
-    let session: String
-    var companion: String?
-}
-
 /// A site's own sign-in page in a window of its own. The page runs in a private website data
 /// store that disappears with the window, and the app reads exactly what the site names from it:
 /// the session cookie, and its companion, once someone has signed in. The password, and anything else typed

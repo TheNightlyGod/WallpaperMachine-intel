@@ -177,8 +177,8 @@ final class WebWallpaperHost {
         self.inspectionEnabled = inspectionEnabled
         self.audioClock = audioClock
         self.contentRevision = contentRevision
-        self.screens = screens ?? { Self.systemScreens() }
-        self.refreshRate = refreshRate ?? { Self.systemRefreshRate(displayID: $0) }
+        self.screens = screens ?? { SystemDisplays.screens() }
+        self.refreshRate = refreshRate ?? { SystemDisplays.refreshRate(of: $0) }
         self.frameCenter = frameCenter
         self.counters = counters ?? .shared
         self.audioPump = audioPump ?? WebWallpaperAudioPump(read: { nil })
@@ -208,19 +208,6 @@ final class WebWallpaperHost {
             mediaProvider: mediaRelay == nil ? AdapterSystemMediaProvider() : nil,
             assetStore: { UserAssetStore(projectURL: $0, wallpaperId: $1) }, contentRevision: contentRevision,
             switchHold: switchHold)
-    }
-
-    static func systemScreens() -> [(id: UInt32, frame: NSRect)] {
-        NSScreen.screens.compactMap { screen in
-            guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { return nil }
-            return (number.uint32Value, screen.frame)
-        }
-    }
-
-    static func systemRefreshRate(displayID: UInt32) -> Int {
-        NSScreen.screens.first {
-            ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == displayID
-        }?.maximumFramesPerSecond ?? 0
     }
 
     /// WebKit offers a page two cadences: near 60 fps, or the display's full
@@ -1266,7 +1253,7 @@ final class WebWallpaperHost {
               let window = windows.values.first(where: { $0.posterLayer === layer }) else { return }
         let webView = window.page.webView
         let center = frameCenter
-        let context = notification.userInfo?["context"] as? String
+        let context = DesktopPosterNotification.context(in: notification.userInfo)
         // A suspended page has left the window tree and WebKit does not promise
         // a snapshot of a detached view, so its own detach poster is the frame.
         // Published a turn later, like a live snapshot, because the requester

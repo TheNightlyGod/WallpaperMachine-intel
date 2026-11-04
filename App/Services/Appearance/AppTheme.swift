@@ -106,7 +106,7 @@ enum Season: String, Sendable {
 @MainActor
 final class AppThemeStore: ObservableObject {
   static let shared = AppThemeStore()
-  static let defaultsKey = "WallpaperMachine.appTheme"
+  nonisolated static let defaultsKey = "WallpaperMachine.appTheme"
   @Published private(set) var preferences: AppThemePreferences
   /// The seasonal look in effect, nil for the person's own: `preferences.halloween` read against
   /// today. It follows the preference, and the date when the day changes.
@@ -161,34 +161,24 @@ final class AppThemeStore: ObservableObject {
     if current != season { season = current }
   }
 
-  func set(_ key: String, value: String) throws {
+  func setMode(_ mode: AppThemePreferences.Mode) { update { $0.mode = mode } }
+
+  /// `hex` is `#rrggbb`; any other form is refused, as a control never offers one.
+  func setAccent(_ hex: String) throws {
+    guard AppThemePreferences.validAccent(hex) else { throw InvalidControlValue() }
+    update { $0.accent = hex.lowercased() }
+  }
+
+  func setTone(_ tone: AppThemePreferences.Tone) { update { $0.tone = tone } }
+
+  func setIcon(_ icon: AppThemePreferences.Icon) { update { $0.icon = icon } }
+
+  func setHalloween(_ halloween: AppThemePreferences.Halloween) { update { $0.halloween = halloween } }
+
+  /// Saves `change` and publishes it, unless it changes nothing.
+  private func update(_ change: (inout AppThemePreferences) -> Void) {
     var next = preferences
-    switch key {
-    case "mode":
-      guard let mode = AppThemePreferences.Mode(rawValue: value) else {
-        throw InvalidControlValue()
-      }
-      next.mode = mode
-    case "accent":
-      guard AppThemePreferences.validAccent(value) else { throw InvalidControlValue() }
-      next.accent = value.lowercased()
-    case "tone":
-      guard let tone = AppThemePreferences.Tone(rawValue: value) else {
-        throw InvalidControlValue()
-      }
-      next.tone = tone
-    case "icon":
-      guard let icon = AppThemePreferences.Icon(rawValue: value) else {
-        throw InvalidControlValue()
-      }
-      next.icon = icon
-    case "halloween":
-      guard let halloween = AppThemePreferences.Halloween(rawValue: value) else {
-        throw InvalidControlValue()
-      }
-      next.halloween = halloween
-    default: throw InvalidControlValue()
-    }
+    change(&next)
     guard next != preferences else { return }
     defaults.set(next.snapshot, forKey: Self.defaultsKey)
     preferences = next

@@ -33,7 +33,7 @@ final class WorkshopUpdateStore {
     private static let installedKey = "WallpaperMachine.workshopInstalledAt"
     private static let availableKey = "WallpaperMachine.workshopUpdates"
     private static let lastCheckedKey = "WallpaperMachine.workshopUpdatesCheckedAt"
-    private static let automaticKey = "WallpaperMachine.workshopUpdateChecks"
+    nonisolated static let automaticKey = "WallpaperMachine.workshopUpdateChecks"
 
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let fetch: @Sendable ([String]) async throws -> [WorkshopItem]

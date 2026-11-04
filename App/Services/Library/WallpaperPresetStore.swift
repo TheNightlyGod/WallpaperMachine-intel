@@ -74,7 +74,7 @@ struct WallpaperPresetMutation {
 @Observable
 final class WallpaperPresetStore {
   static let shared = WallpaperPresetStore()
-  static let preferenceKey = "WallpaperMachine.wallpaperPresets"
+  nonisolated static let preferenceKey = "WallpaperMachine.wallpaperPresets"
   static let didChangeNotification = Notification.Name("WallpaperMachine.wallpaperPresetsChanged")
   nonisolated static let retainedDirectoryName = "PresetAssets"
   nonisolated static let maximumDocumentBytes = 48 * 1024 * 1024

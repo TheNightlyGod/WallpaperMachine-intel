@@ -68,7 +68,7 @@ struct StillImagePlacement: Codable, Equatable, Sendable {
 @MainActor
 final class StillImagePlacementStore {
     static let shared = StillImagePlacementStore()
-    static let storageKey = "WallpaperMachine.imagePlacements"
+    nonisolated static let storageKey = "WallpaperMachine.imagePlacements"
     static let didChangeNotification = Notification.Name("WallpaperMachine.imagePlacementsDidChange")
     private struct Envelope: Codable {
         var version = 1

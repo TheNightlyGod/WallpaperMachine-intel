@@ -47,7 +47,10 @@ installs `AppDelegate` and runs the loop.
 (`ClientPaths.prepare()`), constructs `BridgeStore`, installs the status item, the application
 menu and the screen-parameters observer, opens the control-panel window, and starts the
 long-lived services (lock screen, desktop poster sync, presentation policy, playlist and
-automation schedulers, the web and native-video wallpaper hosts, system media).
+automation schedulers, the web and native-video wallpaper hosts, system media). Its menus
+and their actions are in `AppDelegate+Menus.swift`, the desktop poster sync and the Spaces
+posters and pins in `AppDelegate+DesktopPosters.swift`; the update checks, prompt and window
+belong to the `AppUpdateCoordinator` it owns (`App/Services/GitHub/`).
 
 - **Activation policy.** `.regular` while one of the four ordinary windows (control panel,
   update window, wallpaper preview, web sign-in) is on screen or minimized to the Dock,
@@ -158,10 +161,11 @@ It has no web view, and renderer content is never drawn into it. Coding rules fo
 |---|---|
 | `ControlPanelView.swift` | The root `AppDelegate` builds (six store arguments; `defaults` and `appLanguage` are test seams). Creates the window's `PanelController` in `@State`, starts it on appear and stops it on disappear, reports its window to `PanelPresentation`, and sets the image pipeline in the environment. Also declares `ControlPanelNavigation` (selection, target display, Settings section and reveal token, the last `PanelViewState`), shared with native menu commands, the status item and links |
 | `ControlPanelWindow.swift` | Builds the window, owns its 760×560 size floor, `moveToActiveSpace` and `bringForward` |
+| `BridgeUnavailableView.swift` | What the window shows instead of the panel when the bridge or the library could not start, with **Use This Mac Instead…** when the library's drive is missing |
 | `PanelViewState.swift` | Installed's filters and the grids' scroll offsets as a `Codable` value, kept in memory on `ControlPanelNavigation` for the next window; `normalized()` applies the limits |
-| `Model/` | `PanelController` and its `PanelController+<Group>.swift` extensions (typed actions and derived state), `PanelPresentation`, `PanelStoreRevisions`, `PanelErrorState`, `PanelActionCoordinator`, `PanelDialogs`, `PanelPreferences`, `ExternalLink`, `TransferFormat`, `DisplayOptionsLoader`, `DragStepPump`, and the typed values views read (`LibraryRow`, `UpdatePresentation`, `TileDownloadState`, ...) |
+| `Model/` | `PanelController` and its `PanelController+<Group>.swift` extensions (typed actions and derived state), `PanelPresentation`, `PanelStoreRevisions`, `PanelErrorState`, `PanelActionCoordinator`, `PanelDialogs`, `ExternalLink`, `TransferFormat`, `DisplayOptionsLoader`, `DragStepPump`, and the typed values several areas read (`LibraryRow`, `UpdatePresentation`, `TileDownloadState`, ...) |
 | `Shell/` | `PanelRootView` (theme, language, the page over the Now Playing bar, the guide overlay), `PanelTabs`, `PanelDetail` (page router, banners, the full-width host of the page, its Filters sidebar and its `InspectorColumn`, title, toolbar), `FilterSidebar`, the Now Playing bar, and `ShellModel` (navigation, inspector state, popovers, Escape, Command-F) |
-| `Library/`, `Inspector/`, `Discover/`, `Downloads/`, `Pixiv/`, `Settings/`, `Welcome/` | One area each: its views and its `@Observable` view model, which hangs off the controller as a lazy property (`library`, `inspector`, `workshopBrowser`, `downloads`, `pixivBrowser`, `settings`, `displaysSettings`, `welcome`, `supportPrompt`, and `shell`) |
+| `Library/`, `Inspector/`, `Discover/`, `Downloads/`, `Pixiv/`, `Settings/`, `Welcome/` | One area each: its views and its `@Observable` view model, which hangs off the controller as a lazy property (`library`, `inspector`, `workshopBrowser`, `downloads`, `pixivBrowser`, `settings`, `displaysSettings`, `welcome`, `supportPrompt`, and `shell`). The typed values only one area shows live beside its views (`PixivTile`, `WorkshopTile`, `DownloadQueue`, `InspectorOptions`, `AutomationState`, ...); `Model/` keeps those several areas share |
 | `Components/`, `Theme/`, `Localization/`, `Images/` | Shared views (`TileGrid`, `WallpaperTile`, `ProgressRing`, `Equalizer`, `FilterPanel`, `InspectorCard`, `PanelEmptyState`, `SymbolTile`, the button styles), the palettes, `PanelLocale` and `L()`, the image pipeline |
 | `WebSignInWindow.swift` | Separate sign-in window for pixiv and Steam: a private website data store, of which the app reads only the session cookie; a page that fails to load is covered by its reason and Retry |
 | `WallpaperPreviewWindow.swift`, `UpdateWindow.swift` | AppKit preview window; the update window (SwiftUI in its own `NSWindow`) with the notes of every version since the running one |

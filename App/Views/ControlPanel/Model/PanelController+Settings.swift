@@ -135,7 +135,7 @@ extension PanelController {
       }
       if enabled,
         store.settingsSnapshot.displays.contains(where: {
-          $0.enabled && $0.mode == .standalone
+          $0.isIndependent
             && automations.configuration(for: $0.displayId).mode == .spaces
         })
       {

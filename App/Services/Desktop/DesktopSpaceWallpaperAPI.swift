@@ -247,7 +247,7 @@ final class SystemDesktopPictureWorkspace: DesktopPictureWorkspace {
     }
 
     static func id(_ screen: NSScreen) -> String? {
-        (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.stringValue
+        SystemDisplays.id(of: screen).map { String($0) }
     }
 
     func targets() throws -> [DesktopPictureTarget] {

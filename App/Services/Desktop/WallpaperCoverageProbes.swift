@@ -35,7 +35,7 @@ final class WallpaperCoverageProbes {
     func sync() {
         var seen: Set<UInt32> = []
         for screen in NSScreen.screens {
-            guard let displayID = Self.displayID(of: screen),
+            guard let displayID = SystemDisplays.id(of: screen),
                   let frame = Self.probeFrame(for: screen.visibleFrame) else { continue }
             seen.insert(displayID)
             if let probe = probes[displayID] {
@@ -69,10 +69,6 @@ final class WallpaperCoverageProbes {
     static func probeFrame(for visibleFrame: NSRect, margin: CGFloat = edgeMargin) -> NSRect? {
         let frame = visibleFrame.insetBy(dx: margin, dy: margin)
         return frame.width > 0 && frame.height > 0 ? frame : nil
-    }
-
-    static func displayID(of screen: NSScreen) -> UInt32? {
-        (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
     }
 
     private static func makeProbe(frame: NSRect) -> WallpaperCoverageProbeWindow {

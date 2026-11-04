@@ -375,7 +375,7 @@ final class BridgeStore {
             throw WallpaperActionError(message: String(localized: "No configuration is available for this display. Refresh Displays and retry."))
         }
         try validatePendingWallpaperEdits(id: id, options: options)
-        try await validateWallpaperForPlayback(id: id)
+        try await WallpaperPlaybackPreflight.check(wallpaperID: id, videoFormat: videoFormatCheck)
         try await commitPendingWallpaperEditsAsync(id: id)
         // Validation and async draft commits may outlive a display topology change.
         try validateActivationTarget(displayId)
@@ -454,7 +454,7 @@ final class BridgeStore {
             if let options = wallpaperOptionsSnapshot, options.wallpaperId == id {
                 try validatePendingWallpaperEdits(id: id, options: options)
             }
-            try await validateWallpaperForPlayback(id: id)
+            try await WallpaperPlaybackPreflight.check(wallpaperID: id, videoFormat: videoFormatCheck)
             try await ejectWallpaperFromDisplayAsync(displayId: displayId, wallpaperId: id)
             try await activateWallpaperAsync(id: id, displayId: displayId, origin: .user,
                                              recordsHistory: false, restarting: true)
@@ -546,7 +546,7 @@ final class BridgeStore {
     /// Refuses a display that cannot show its own wallpaper: gone, disabled or mirroring another.
     func validateActivationTarget(_ displayId: String) throws {
         guard let target = settingsSnapshot.displays.first(where: { $0.displayId == displayId }),
-              target.enabled, target.mode == .standalone else {
+              target.isIndependent else {
             throw WallpaperActionError(message: String(localized: "The selected display is unavailable, disabled, or mirroring another display. Choose an enabled independent display in Settings."))
         }
     }
@@ -1214,7 +1214,7 @@ final class BridgeStore {
             $0.wallpaperId == wallpaperId && $0.mirrorTargetDisplayId == nil
         }.map(\.displayId))
         let previousAssignments = independentAssignments()
-        try await validateWallpaperForPlayback(id: wallpaperId)
+        try await WallpaperPlaybackPreflight.check(wallpaperID: wallpaperId, videoFormat: videoFormatCheck)
         try await commitPendingWallpaperEditsAsync(id: wallpaperId)
         do {
             try await applyValidatedWallpaperOptionsAsync(wallpaperId: wallpaperId, userInitiated: userInitiated)
@@ -1256,41 +1256,6 @@ final class BridgeStore {
     private func reportSuccessfulApply(wallpaperID: String) {
         for (display, wallpaper) in independentAssignments() where wallpaper == wallpaperID {
             onWallpaperApplied?(wallpaper, display)
-        }
-    }
-
-    private func validateWallpaperForPlayback(id wallpaperId: String) async throws {
-        let folder = ClientPaths.libraryURL.appendingPathComponent(wallpaperId, isDirectory: true)
-        let manifestData = try Data(contentsOf: folder.appendingPathComponent("project.json"))
-        let manifest = try JSONSerialization.jsonObject(with: manifestData) as? [String: Any] ?? [:]
-        let entry = manifest["file"] as? String ?? ""
-        func failure(_ code: Int, _ message: String) -> NSError {
-            NSError(domain: "WallpaperMachine", code: code, userInfo: [NSLocalizedDescriptionKey: message])
-        }
-        switch (manifest["type"] as? String ?? "").lowercased() {
-        case "video":
-            let file = folder.appendingPathComponent(entry)
-            let values = try? file.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
-            guard !entry.isEmpty, FileManager.default.isReadableFile(atPath: file.path),
-                  values?.isRegularFile == true, (values?.fileSize ?? 0) > 0 else {
-                throw failure(1, String(localized: "This video cannot be decoded. Import a complete, playable video file before applying it."))
-            }
-            // A format nothing can play is refused here, before any display changes.
-            if let message = VideoFormatSupport.message(for: await videoFormatCheck(file)) {
-                throw WallpaperActionError(message: message)
-            }
-        case "scene":
-            let assets = ClientPaths.assetsURL
-            guard ClientPaths.hasSceneAssets(at: assets) else {
-                throw failure(2, String(localized: "This wallpaper is downloaded, but Wallpaper Engine’s shared scene resources are not installed. Choose Get shared resources in the wallpaper’s details, or go to Settings → Library & Steam."))
-            }
-            setenv("WALLPAPER_MACHINE_ASSETS_ROOT", assets.path, 1)
-        case "web":
-            guard !entry.isEmpty, FileManager.default.fileExists(atPath: folder.appendingPathComponent(entry).path) else {
-                throw failure(3, String(localized: "This web wallpaper’s entry page is missing. Import the complete project folder, including its HTML file, before applying it."))
-            }
-        default:
-            break
         }
     }
 

@@ -22,9 +22,9 @@ final class DisplaysSettingsModelTests: SettingsBTestCase {
       model.layoutName = DisplaysNameForm("Work <img src=x>")
       await model.submitLayoutEditor()
       XCTAssertNil(model.layoutEditor, "the form closes once the layout is saved")
-      XCTAssertEqual(model.layoutStatus, "Display layout saved.")
-      XCTAssertNil(model.layoutError)
-      XCTAssertNil(model.transferSource, "a layout's result is not repeated in any Copy or swap disclosure")
+      XCTAssertEqual(model.layoutOutcome?.status, "Display layout saved.")
+      XCTAssertNil(model.layoutOutcome?.failure)
+      XCTAssertNil(model.layoutOutcome?.source, "a layout's result is not repeated in any Copy or swap disclosure")
       XCTAssertEqual(model.layoutFocus, .new, "focus goes back to Save current layout…")
       let layout = try XCTUnwrap(controller.displayLayoutsState.layouts.first)
       XCTAssertEqual(layout.name, "Work <img src=x>", "a name is text")
@@ -35,14 +35,14 @@ final class DisplaysSettingsModelTests: SettingsBTestCase {
       model.layoutName = DisplaysNameForm("Evening")
       await model.submitLayoutEditor()
       XCTAssertEqual(controller.displayLayoutsState.layouts.first?.name, "Evening")
-      XCTAssertEqual(model.layoutStatus, "Layout renamed.")
+      XCTAssertEqual(model.layoutOutcome?.status, "Layout renamed.")
       XCTAssertEqual(model.layoutFocus, .rename(layout.id), "focus goes back to the layout's own button")
 
       bridge.assignments = ["primary": "c", "secondary": "a"]
       try await panel.store.refreshAllAsync()
       await model.applyLayout(layout.id)
       XCTAssertEqual(bridge.assignments, ["primary": "a", "secondary": "b"])
-      XCTAssertEqual(model.layoutStatus, "Wallpaper arrangement applied.")
+      XCTAssertEqual(model.layoutOutcome?.status, "Wallpaper arrangement applied.")
 
       model.askToDelete(layout.id)
       XCTAssertEqual(model.layoutDeleteArmed, layout.id)
@@ -53,7 +53,7 @@ final class DisplaysSettingsModelTests: SettingsBTestCase {
       model.askToDelete(layout.id)
       await model.deleteLayout(layout.id)
       XCTAssertTrue(controller.displayLayoutsState.layouts.isEmpty)
-      XCTAssertEqual(model.layoutStatus, "Layout deleted. Current wallpapers are unchanged.")
+      XCTAssertEqual(model.layoutOutcome?.status, "Layout deleted. Current wallpapers are unchanged.")
       XCTAssertEqual(model.layoutFocus, .new)
       XCTAssertNil(model.layoutDeleteArmed)
       XCTAssertEqual(bridge.assignments, ["primary": "a", "secondary": "b"])
@@ -104,7 +104,7 @@ final class DisplaysSettingsModelTests: SettingsBTestCase {
       await model.submitLayoutEditor()
       XCTAssertEqual(model.layoutEditor, .new, "nothing to save yet")
       XCTAssertTrue(panel.controller.displayLayoutsState.layouts.isEmpty)
-      XCTAssertNil(model.layoutStatus)
+      XCTAssertNil(model.layoutOutcome?.status)
     }
   }
 
@@ -115,18 +115,18 @@ final class DisplaysSettingsModelTests: SettingsBTestCase {
       bridge.failAfterMutation = true
       await model.swapWallpapers("primary", "secondary")
       XCTAssertEqual(bridge.assignments, ["primary": "a", "secondary": "b"], "the displays were put back")
-      let error = try XCTUnwrap(model.layoutError)
+      let error = try XCTUnwrap(model.layoutOutcome?.failure)
       XCTAssertTrue(error.hasPrefix(WallpaperDisplayLayoutError.restored("").errorDescription ?? "?"), error)
-      XCTAssertNil(model.layoutStatus)
+      XCTAssertNil(model.layoutOutcome?.status)
       XCTAssertEqual(model.layoutFocus, .error)
-      XCTAssertEqual(model.transferSource, "primary", "only the display it was started from repeats it")
+      XCTAssertEqual(model.layoutOutcome?.source, "primary", "only the display it was started from repeats it")
       XCTAssertNil(panel.controller.errors.actionError, "the box reports it, not the window's banner")
 
       bridge.failAfterMutation = false
       await model.swapWallpapers("secondary", "primary")
-      XCTAssertNil(model.layoutError, "the next action clears the last one's error")
-      XCTAssertEqual(model.layoutStatus, "Wallpaper arrangement applied.")
-      XCTAssertEqual(model.transferSource, "secondary")
+      XCTAssertNil(model.layoutOutcome?.failure, "the next action clears the last one's error")
+      XCTAssertEqual(model.layoutOutcome?.status, "Wallpaper arrangement applied.")
+      XCTAssertEqual(model.layoutOutcome?.source, "secondary")
       XCTAssertEqual(bridge.assignments, ["primary": "b", "secondary": "a"])
     }
   }
@@ -140,7 +140,7 @@ final class DisplaysSettingsModelTests: SettingsBTestCase {
       XCTAssertEqual(model.peer(of: "primary")?.id, "secondary")
       await model.copyWallpaper(from: "primary", to: "secondary")
       XCTAssertEqual(bridge.assignments, ["primary": "a", "secondary": "a"])
-      XCTAssertEqual(model.layoutStatus, "Wallpaper arrangement applied.")
+      XCTAssertEqual(model.layoutOutcome?.status, "Wallpaper arrangement applied.")
 
       bridge.eligible.remove("secondary")
       try await panel.store.refreshAllAsync()
@@ -161,7 +161,7 @@ final class DisplaysSettingsModelTests: SettingsBTestCase {
       let listed = try XCTUnwrap(controller.displayLayoutsState.layouts.first)
       XCTAssertNotNil(listed.unavailableReason, "which disables Apply and is shown under the layout")
       await model.applyLayout(layout.id)
-      XCTAssertNotNil(model.layoutError)
+      XCTAssertNotNil(model.layoutOutcome?.failure)
       XCTAssertEqual(bridge.assignments, ["primary": "a", "secondary": "b"])
       // Cancelling a rename keeps focus on the layout's button even in a compact language.
       model.beginRenaming(listed)
@@ -480,24 +480,24 @@ final class DisplaysSettingsModelTests: SettingsBTestCase {
     try await controller.setAutomationMode(.schedule)
 
     model.beginRule(display: "primary")
-    XCTAssertNotNil(model.ruleEditor)
+    XCTAssertNotNil(model.ruleEditing)
     XCTAssertEqual(model.automationFocus, .ruleEvent(display: "primary"), "the editor opens on When")
     model.consumeAutomationFocus()
-    model.ruleEditor?.choose(AutomationRuleEdit.weekdaysOnly)
-    model.ruleEditor?.time = try XCTUnwrap(ClockMinute(minutes: 9 * 60 + 15))
-    model.ruleEditor?.target = wallpaper("a")
+    model.ruleEditing?.draft.choose(AutomationRuleEdit.weekdaysOnly)
+    model.ruleEditing?.draft.time = try XCTUnwrap(ClockMinute(minutes: 9 * 60 + 15))
+    model.ruleEditing?.draft.target = wallpaper("a")
     try await model.saveRule()
     let saved = try XCTUnwrap(panel.automations.configuration(for: "primary").rules.first)
     XCTAssertEqual(saved.weekdays, [2, 3, 4, 5, 6])
     XCTAssertEqual(saved.minute, 555)
-    XCTAssertNil(model.ruleEditor, "the form closes")
+    XCTAssertNil(model.ruleEditing, "the form closes")
     XCTAssertEqual(model.automationFocus, .addRule(display: "primary"), "a new rule returns to Add time rule")
 
     model.consumeAutomationFocus()
     model.beginRule(display: "primary", editing: saved)
-    model.ruleEditor?.time = try XCTUnwrap(ClockMinute(minutes: 0))
-    model.ruleEditor?.event = .sunset
-    model.ruleEditor?.offsetText = "-25"
+    model.ruleEditing?.draft.time = try XCTUnwrap(ClockMinute(minutes: 0))
+    model.ruleEditing?.draft.event = .sunset
+    model.ruleEditing?.draft.offsetText = "-25"
     try await model.saveRule()
     let edited = try XCTUnwrap(panel.automations.configuration(for: "primary").rules.first)
     XCTAssertEqual(edited.id, saved.id, "the same rule")
@@ -507,23 +507,23 @@ final class DisplaysSettingsModelTests: SettingsBTestCase {
 
     // Back to a time rule: the stray offset is dropped; cancelling returns to the rule's Edit button.
     model.beginRule(display: "primary", editing: edited)
-    model.ruleEditor?.event = .time
-    model.ruleEditor?.time = try XCTUnwrap(ClockMinute(minutes: 630))
-    model.ruleEditor?.offsetText = "181"
+    model.ruleEditing?.draft.event = .time
+    model.ruleEditing?.draft.time = try XCTUnwrap(ClockMinute(minutes: 630))
+    model.ruleEditing?.draft.offsetText = "181"
     try await model.saveRule()
     XCTAssertEqual(panel.automations.configuration(for: "primary").rules.first?.offset, 0)
     XCTAssertEqual(panel.automations.configuration(for: "primary").rules.first?.minute, 630)
     model.consumeAutomationFocus()
     model.beginRule(display: "primary", editing: edited)
     model.cancelRule()
-    XCTAssertNil(model.ruleEditor)
+    XCTAssertNil(model.ruleEditing)
     XCTAssertEqual(model.automationFocus, .editRule(display: "primary", id: saved.id))
 
     // Removing a rule closes its open editor and returns to Add time rule.
     model.beginRule(display: "primary", editing: edited)
     try await model.removeRule(saved.id, display: "primary")
     XCTAssertTrue(panel.automations.configuration(for: "primary").rules.isEmpty)
-    XCTAssertNil(model.ruleEditor)
+    XCTAssertNil(model.ruleEditing)
     XCTAssertEqual(model.automationFocus, .addRule(display: "primary"))
   }
 
@@ -533,15 +533,15 @@ final class DisplaysSettingsModelTests: SettingsBTestCase {
     let model = panel.controller.displaysSettings
     try await panel.controller.setAutomationMode(.schedule)
     model.beginRule(display: "primary")
-    model.ruleEditor?.weekdays = []
-    model.ruleEditor?.target = wallpaper("a")
+    model.ruleEditing?.draft.weekdays = []
+    model.ruleEditing?.draft.target = wallpaper("a")
     try await model.saveRule()
     XCTAssertTrue(panel.automations.configuration(for: "primary").rules.isEmpty)
-    XCTAssertEqual(model.ruleEditor?.showsDaysError, true, "the inline alert shows")
+    XCTAssertEqual(model.ruleEditing?.draft.showsDaysError, true, "the inline alert shows")
     XCTAssertEqual(model.automationFocus, .firstDay)
-    XCTAssertNotNil(model.ruleEditor, "the form stays open")
-    model.ruleEditor?.toggle(2)
-    XCTAssertEqual(model.ruleEditor?.showsDaysError, false, "a day ends the alert")
+    XCTAssertNotNil(model.ruleEditing, "the form stays open")
+    model.ruleEditing?.draft.toggle(2)
+    XCTAssertEqual(model.ruleEditing?.draft.showsDaysError, false, "a day ends the alert")
     try await model.saveRule()
     XCTAssertEqual(panel.automations.configuration(for: "primary").rules.count, 1)
   }
@@ -554,10 +554,10 @@ final class DisplaysSettingsModelTests: SettingsBTestCase {
     model.beginRule(display: "primary")
     try await model.saveRule()
     XCTAssertTrue(panel.automations.configuration(for: "primary").rules.isEmpty, "no target chosen")
-    XCTAssertNotNil(model.ruleEditor)
-    model.ruleEditor?.target = wallpaper("a")
-    model.ruleEditor?.event = .sunrise
-    model.ruleEditor?.offsetText = "500"
+    XCTAssertNotNil(model.ruleEditing)
+    model.ruleEditing?.draft.target = wallpaper("a")
+    model.ruleEditing?.draft.event = .sunrise
+    model.ruleEditing?.draft.offsetText = "500"
     try await model.saveRule()
     XCTAssertTrue(panel.automations.configuration(for: "primary").rules.isEmpty, "an offset outside three hours")
   }

@@ -325,7 +325,7 @@ final class LockScreenExtensionProcessesTests: XCTestCase {
     let found = try XCTUnwrap(
       live.list().first { $0.pid == child.processIdentifier },
       "The live table must list this user's process running the extension executable")
-    XCTAssertTrue(LockScreenExtensionDiagnostics.isSameBundle(try XCTUnwrap(found.bundle), bundle))
+    XCTAssertTrue(FileLocation.isSame(try XCTUnwrap(found.bundle), bundle))
     XCTAssertEqual(found.startedAt.timeIntervalSinceNow, 0, accuracy: 30)
     func verdicts(of process: LockScreenExtensionProcess, expected: URL) -> [LockScreenExtensionStaleness] {
       LockScreenExtensionProcesses.stale(

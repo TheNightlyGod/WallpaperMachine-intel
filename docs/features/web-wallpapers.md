@@ -311,7 +311,10 @@ across the suspension and replayed in order.
 The wallpaper web view has exactly one `WKScriptMessageHandler`, named
 `mweWallpaper`, carrying listener registration, random-file requests and the page's
 own errors and warnings for the log ([diagnostics](diagnostics.md#inspecting-a-web-wallpaper));
-it is removed when the page stops.
+it is removed when the page stops. The desktop page and the screen-saver surface both read it
+through `WebWallpaperProtocol.PageMessage`, which drops anything but a known tag with
+well-formed fields: a random-file request needs a request id of 1 to 128 characters and a
+property name of 1 to 256.
 
 ## Runtime shape
 

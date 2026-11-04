@@ -113,18 +113,18 @@ final class PlaybackPreferences {
         }
     }
 
-    private static let displaySleepKey = "WallpaperMachine.displaySleepAction"
-    private static let otherAudioKey = "WallpaperMachine.otherAudioAction"
-    private static let otherAppInFrontKey = "WallpaperMachine.otherAppInFrontAction"
-    private static let desktopCoveredKey = "WallpaperMachine.desktopCoveredAction"
-    private static let appRulesKey = "WallpaperMachine.appRules"
-    private static let lowPowerModeKey = "WallpaperMachine.lowPowerModeAction"
-    private static let thermalKey = "WallpaperMachine.thermalAction"
-    private static let lowBatteryActionKey = "WallpaperMachine.lowBatteryAction"
-    private static let lowBatteryThresholdKey = "WallpaperMachine.lowBatteryThreshold"
+    nonisolated static let displaySleepKey = "WallpaperMachine.displaySleepAction"
+    nonisolated static let otherAudioKey = "WallpaperMachine.otherAudioAction"
+    nonisolated static let otherAppInFrontKey = "WallpaperMachine.otherAppInFrontAction"
+    nonisolated static let desktopCoveredKey = "WallpaperMachine.desktopCoveredAction"
+    nonisolated static let appRulesKey = "WallpaperMachine.appRules"
+    nonisolated static let lowPowerModeKey = "WallpaperMachine.lowPowerModeAction"
+    nonisolated static let thermalKey = "WallpaperMachine.thermalAction"
+    nonisolated static let lowBatteryActionKey = "WallpaperMachine.lowBatteryAction"
+    nonisolated static let lowBatteryThresholdKey = "WallpaperMachine.lowBatteryThreshold"
     private static let periodicDesktopPictureKey = "WallpaperMachine.refreshDesktopPicturePeriodically"
     private static let writeDesktopPictureKey = "WallpaperMachine.writeDesktopPicture"
-    private static let playOnlyOnActiveDisplayKey = "WallpaperMachine.playOnlyOnActiveDisplay"
+    nonisolated static let playOnlyOnActiveDisplayKey = "WallpaperMachine.playOnlyOnActiveDisplay"
     private static let wallpapersMutedKey = "WallpaperMachine.wallpapersMuted"
 
     /// The charge levels the user can pick for the low-battery rule, in percent.

@@ -195,7 +195,7 @@ and password always works.
 | Requests and decoding | `App/Services/Pixiv/PixivService.swift`, `PixivTransport.swift` |
 | Browse state, account | `App/Services/Pixiv/PixivStore.swift`, `PixivSessionStore.swift` |
 | Downloads and packaging | `App/Services/Pixiv/PixivDownloadQueue.swift`, `PixivWallpaperPackager.swift` |
-| Panel actions and state | `App/Views/ControlPanel/Model/PanelController+Pixiv.swift`, `PixivBrowseState.swift`, `PixivTile.swift`, `PixivQuery+Panel.swift` |
+| Panel actions and state | `App/Views/ControlPanel/Model/PanelController+Pixiv.swift`; `App/Views/ControlPanel/Pixiv/PixivBrowseState.swift`, `PixivTile.swift`, `PixivQuery+Panel.swift` |
 | Sign-in window | `App/Views/ControlPanel/WebSignInWindow.swift` |
 | Page, inspector and toolbar pill | `App/Views/ControlPanel/Pixiv/` |
 

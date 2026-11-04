@@ -123,23 +123,18 @@ struct InspectorActionRow: View {
 
   var body: some View {
     let target = controller.targetDisplay
-    let reapplies = InspectorPolicy.reapplies(row.id, target: target)
-    let applyKey = PanelActionCoordinator.key(reapplies ? "reapplyWallpaper" : "activate", id: row.id)
-    let canActivate = InspectorPolicy.canActivate(kind: row.kind, target: target)
+    let offer = ApplyOffer(
+      wallpaperID: row.id, shownID: target?.wallpaperID,
+      canApply: InspectorPolicy.canActivate(kind: row.kind, target: target),
+      isBusy: { controller.isBusy($0) })
     let isFavorite = controller.favoriteIDs.contains(row.id)
     let favoriteKey = PanelActionCoordinator.key("favorite", id: row.id)
     HStack(spacing: 8) {
       Button {
-        controller.launch(applyKey) {
-          if reapplies {
-            try await controller.reapply(row.id)
-          } else {
-            try await controller.activate(row.id)
-          }
-        }
+        controller.launch(offer.key) { try await controller.apply(offer) }
       } label: {
         Group {
-          if reapplies {
+          if offer.reapplies {
             Label("Reapply wallpaper", systemImage: "arrow.clockwise")
           } else {
             Label("Apply wallpaper", systemImage: "play.fill")
@@ -149,8 +144,8 @@ struct InspectorActionRow: View {
         .minimumScaleFactor(0.8)
       }
       .buttonStyle(.panelPrimary(size: .regular, expands: true))
-      .disabled(!canActivate || controller.isBusy(applyKey))
-      .help(reapplies ? L("Reapply wallpaper") : L("Apply wallpaper"))
+      .disabled(!offer.isEnabled)
+      .help(offer.reapplies ? L("Reapply wallpaper") : L("Apply wallpaper"))
       .accessibilityIdentifier("inspector.apply")
 
       Button {

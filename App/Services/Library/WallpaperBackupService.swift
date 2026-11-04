@@ -15,8 +15,8 @@ struct WallpaperBackupService: Sendable {
     private var files: WallpaperBackupFiles { .init(limits: limits) }
     /// `SceneStorage` holds each wallpaper's scene-script `localStorage` (one unit per wallpaper).
     private let managedRoots = ["config.toml", "wallpapers", "Library", "UserAssets", "SceneStorage"]
-    private static let solarLocationKey = "WallpaperMachine.solarLocation"
-    private static let solarSettingsKey = "WallpaperMachine.solarSettings"
+    private static let solarLocationKey = WallpaperAutomationStore.locationKey
+    private static let solarSettingsKey = WallpaperAutomationStore.solarKey
     private static let solarKeys: Set<String> = [solarLocationKey, solarSettingsKey]
 
     /// `storageRoot` nil keeps the library in `supportRoot`; the app passes `ClientPaths.storageURL`.
@@ -130,8 +130,8 @@ struct WallpaperBackupService: Sendable {
         let warnings = try diagnose(manifest: manifest, package: package)
         return WallpaperBackupPreview(name: package.lastPathComponent, createdAt: manifest.createdAt,
             wallpaperCount: wallpaperIDs(manifest.entries).count,
-            presetCount: try recordCount(manifest.preferences["WallpaperMachine.wallpaperPresets"], field: "items"),
-            collectionCount: try recordCount(manifest.preferences["WallpaperMachine.collections"], field: nil),
+            presetCount: try recordCount(manifest.preferences[WallpaperPresetStore.preferenceKey], field: "items"),
+            collectionCount: try recordCount(manifest.preferences[WallpaperCollectionStore.storageKey], field: nil),
             includesLibrary: manifest.includesLibrary,
             byteCount: manifest.entries.reduce(0) { $0 + $1.size }, conflicts: conflicts.sorted(),
             warnings: warnings, manifestDigest: digest)
@@ -259,8 +259,8 @@ struct WallpaperBackupService: Sendable {
             try validateRendererConfiguration(root: prepared, entries: manifest.entries.filter { entry in
                 selected.contains(where: { entry.path == $0 || entry.path.hasPrefix($0 + "/") })
             })
-            let resetsAutomation = nextPreferences.values["WallpaperMachine.automaticWallpapers"] != nil
-                || nextPreferences.values["WallpaperMachine.playlists"] != nil
+            let resetsAutomation = nextPreferences.values[WallpaperAutomationStore.configurationsKey] != nil
+                || nextPreferences.values[PlaylistStore.playlistsKey] != nil
                 || selected.contains(where: { $0 == "config.toml" || $0.hasPrefix("wallpapers/") })
             let transientKeys = resetsAutomation ? WallpaperBackupPreferences.localRecoveryKeys : []
             let removedKeys = nextPreferences.removedKeys.union(transientKeys)
@@ -622,27 +622,27 @@ struct WallpaperBackupService: Sendable {
                                    policy: WallpaperBackupConflictPolicy, context: ReferenceContext) throws -> PreferenceChanges {
         let solar = try mergedSolarPreferences(incoming, existing: existing, policy: policy)
         var result = solar.values
-        let existingDisplays = try playlistDisplays(existing["WallpaperMachine.playlists"])
+        let existingDisplays = try playlistDisplays(existing[PlaylistStore.playlistsKey])
         for (key, value) in incoming {
             if Self.solarKeys.contains(key) { continue }
             // Scene asset-directory authority is local. A backup never selects a new
             // external root, even if it names an existing directory on this Mac.
-            if key == "WallpaperMachineAssetsPath" { continue }
-            if policy == .keepExisting, key == "WallpaperMachine.playlistNextChange" { continue }
+            if key == ClientPaths.assetsPathKey { continue }
+            if policy == .keepExisting, key == PlaylistStore.nextChangeKey { continue }
             let decoded = try WallpaperBackupPreferences.decode(value)
             let remapped: Any
-            if key == "WallpaperMachine.wallpaperPresets" { remapped = try remapPresets(decoded, context: context) }
+            if key == WallpaperPresetStore.preferenceKey { remapped = try remapPresets(decoded, context: context) }
             else { remapped = decoded }
             if policy == .keepExisting, let old = existing[key] {
                 let current = try WallpaperBackupPreferences.decode(old)
                 switch key {
-                case "WallpaperMachine.collections", "WallpaperMachine.playlistPlans", "WallpaperMachine.displayLayouts", "WallpaperMachine.favoriteWallpaperIDs",
-                     "WallpaperMachine.wallpaperPresets", "WallpaperMachine.imagePlacements", "WallpaperMachine.playlists", "WallpaperMachine.automaticWallpapers":
+                case WallpaperCollectionStore.storageKey, PlaylistStore.plansKey, WallpaperDisplayLayoutStore.storageKey, PanelPreferences.favoritesKey,
+                     WallpaperPresetStore.preferenceKey, StillImagePlacementStore.storageKey, PlaylistStore.playlistsKey, WallpaperAutomationStore.configurationsKey:
                     guard let oldJSON = current as? Data, let newJSON = remapped as? Data else { throw files.changed() }
                     let oldValue = try JSONSerialization.jsonObject(with: oldJSON)
                     let newValue = try JSONSerialization.jsonObject(with: newJSON)
                     let merged: Any
-                    if key == "WallpaperMachine.playlists" || key == "WallpaperMachine.automaticWallpapers" {
+                    if key == PlaylistStore.playlistsKey || key == WallpaperAutomationStore.configurationsKey {
                         guard let oldMap = oldValue as? [String: Any], let newMap = newValue as? [String: Any] else { throw files.changed() }
                         merged = newMap.merging(oldMap) { _, old in old }
                     } else { merged = mergeJSON(existing: oldValue, incoming: newValue) }
@@ -651,8 +651,8 @@ struct WallpaperBackupService: Sendable {
                 }
             } else { result[key] = try WallpaperBackupPreferences.encode(remapped) }
         }
-        if policy == .keepExisting, incoming["WallpaperMachine.playlists"] != nil || incoming["WallpaperMachine.playlistNextChange"] != nil {
-            let deadlineKey = "WallpaperMachine.playlistNextChange"
+        if policy == .keepExisting, incoming[PlaylistStore.playlistsKey] != nil || incoming[PlaylistStore.nextChangeKey] != nil {
+            let deadlineKey = PlaylistStore.nextChangeKey
             func deadlines(_ encoded: Data?) throws -> [String: Any] {
                 guard let encoded else { return [:] }
                 guard let map = try WallpaperBackupPreferences.decode(encoded) as? [String: Any] else { throw files.changed() }
@@ -660,7 +660,7 @@ struct WallpaperBackupService: Sendable {
             }
             var merged = try deadlines(existing[deadlineKey])
             let new = try deadlines(incoming[deadlineKey])
-            let incomingDisplays = try playlistDisplays(incoming["WallpaperMachine.playlists"])
+            let incomingDisplays = try playlistDisplays(incoming[PlaylistStore.playlistsKey])
             // A deadline belongs to its record: new records take the incoming
             // deadline (including absence), conflicting records retain local state.
             for display in incomingDisplays.subtracting(existingDisplays) { merged[display] = new[display] }
@@ -998,7 +998,7 @@ struct WallpaperBackupService: Sendable {
         for entry in manifest.entries where isReferenceMetadata(entry) {
             _ = try rewrittenMetadata(readObject(root: context.payload, path: entry.path), logicalPath: entry.path, context: context)
         }
-        if let data = manifest.preferences["WallpaperMachine.wallpaperPresets"] {
+        if let data = manifest.preferences[WallpaperPresetStore.preferenceKey] {
             _ = try remapPresets(WallpaperBackupPreferences.decode(data), context: context)
         }
     }
@@ -1043,7 +1043,7 @@ struct WallpaperBackupService: Sendable {
         if hasScene {
             warnings.insert(String(localized: "Shared scene shaders and materials are not included in backups. Install or locate Wallpaper Engine’s complete scene assets if they are unavailable on this Mac."))
         }
-        if manifest.preferences["WallpaperMachineAssetsPath"] != nil {
+        if manifest.preferences[ClientPaths.assetsPathKey] != nil {
             warnings.insert(String(localized: "The scene assets folder remains the one already selected on this Mac. Reselect it in Settings if needed."))
         }
         return warnings.sorted()

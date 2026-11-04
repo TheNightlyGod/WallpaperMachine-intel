@@ -176,7 +176,7 @@ enum StatusMenuModel {
     /// `(id - Role)` suffix of its renderer title.
     static func eligibleDisplays(_ rows: [BridgeDisplaySettingsRow], connected: Set<UInt32>) -> [BridgeDisplaySettingsRow] {
         rows.filter { row in
-            guard row.enabled, row.mode == .standalone,
+            guard row.isIndependent,
                   let physicalID = ResolvedDisplayTitles.liveDisplayID(row.displayId, title: row.title)
             else { return false }
             return connected.contains(physicalID)
