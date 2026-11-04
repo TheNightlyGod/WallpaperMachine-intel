@@ -20,7 +20,8 @@ use crate::cache_key::{ProgramKeyInput, StageKeyInput, program_key};
 use crate::diagnostic::Diagnostic;
 use crate::error::{FailedDiagnostic, ShaderError};
 use crate::legalize::{BlockPlan, LegalizeError, LegalProgram, ProgramInput, legalize};
-use crate::prepare::{PreparedProgram, prepare_program};
+use crate::prepare::{PreparedProgram, prepare_program, prepare_program_with};
+use crate::preprocess::Prelude;
 use crate::reflect::{InputNames, NagaReflector, StageReflector};
 use crate::reflection::{Reflection, ReflectionError};
 use crate::request::{Combo, RequestError, StageKind, ValidRequest};
@@ -96,8 +97,7 @@ impl Pipeline<'_> {
     /// program (section 5).
     pub fn compile(&self, request: &ValidRequest, includes: &dyn IncludeSource) -> Result<CompiledProgram, ShaderError> {
         let name = request.shader_name();
-        let prepared = prepare_program(request, includes)?;
-        let legal = legalize_program(request, &prepared, name)?;
+        let (prepared, legal) = prepare_and_legalize(request, includes, name)?;
 
         let names = InputNames::from_pairs(
             legal.layout.vertex_inputs.iter().map(|i| (i.emitted_name.as_str(), i.name.as_str())),
@@ -178,11 +178,40 @@ fn restore_author_element_counts(reflection: &mut Reflection, plan: &BlockPlan) 
     }
 }
 
-/// Legalizes both stages of the request together (R4).
-fn legalize_program(request: &ValidRequest, prepared: &PreparedProgram, name: &str) -> Result<LegalProgram, ShaderError> {
-    let text_of = |kind: StageKind| -> &str {
-        prepared.stages.iter().find(|s| s.kind == kind).map(|s| s.evaluated.as_str()).unwrap_or_default()
+/// Steps 1 and 2 with Wallpaper Engine's dialect macros. A program refused only because its fragment
+/// varyings exceed the inter-stage component budget (R66) is prepared once more with `GLSL` defined
+/// as well (NOTES 143): an author's `#ifdef GLSL` branch may declare the smaller varying arrays it
+/// wrote for tighter interpolator limits. A program that passes the first time never sees `GLSL`.
+/// When the retry changes no stage text or fails in any way, the first refusal stands.
+fn prepare_and_legalize(
+    request: &ValidRequest,
+    includes: &dyn IncludeSource,
+    name: &str,
+) -> Result<(PreparedProgram, LegalProgram), ShaderError> {
+    let prepared = prepare_program(request, includes)?;
+    let refusal = match legalize_program(request, &prepared) {
+        Ok(legal) => return Ok((prepared, legal)),
+        Err(e) if e.is_over_component_budget() => e,
+        Err(e) => return Err(legalize_failure(e, name, |kind| stage_text(&prepared, kind))),
     };
+    let retried = prepare_program_with(request, includes, Prelude::Direct3DWithGlsl).ok().filter(|retry| {
+        retry.stages.iter().zip(&prepared.stages).any(|(a, b)| a.evaluated != b.evaluated)
+    });
+    if let Some(retry) = retried
+        && let Ok(legal) = legalize_program(request, &retry)
+    {
+        return Ok((retry, legal));
+    }
+    Err(legalize_failure(refusal, name, |kind| stage_text(&prepared, kind)))
+}
+
+fn stage_text(prepared: &PreparedProgram, kind: StageKind) -> &str {
+    prepared.stages.iter().find(|s| s.kind == kind).map(|s| s.evaluated.as_str()).unwrap_or_default()
+}
+
+/// Legalizes both stages of the request together (R4).
+fn legalize_program(request: &ValidRequest, prepared: &PreparedProgram) -> Result<LegalProgram, LegalizeError> {
+    let text_of = |kind: StageKind| stage_text(prepared, kind);
     let planar = request.planar_slots();
     let single_sample = request.single_sample_slots();
     let input = ProgramInput {
@@ -201,7 +230,7 @@ fn legalize_program(request: &ValidRequest, prepared: &PreparedProgram, name: &s
             .and_then(|c| c.value.trim().parse::<i64>().ok())
             .is_some_and(|v| v != 0),
     };
-    legalize(&input).map_err(|e| legalize_failure(e, name, text_of))
+    legalize(&input)
 }
 
 /// A legalization failure with the text its spans refer to, so the failure text can show the

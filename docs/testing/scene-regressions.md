@@ -4002,7 +4002,15 @@ shader sources; the corpus sweeps skip asset-dependent cases with a printed reas
   `base/model_fragment_v1.h`), which coverage now decides instead
   (`pins` `the_alpha_to_coverage_branch_of_generic4_has_no_discard`), and the `floor`/`mod`
   index of `puppettexturechannels`, whose Direct3D form is taken
-  (`puppettexturechannels_takes_the_direct3d_branch`). `HLSL`
+  (`puppettexturechannels_takes_the_direct3d_branch`). The one exception is a program
+  refused because its fragment varyings exceed 124 components: it is compiled once more
+  with `GLSL` defined too, so an author's smaller `#ifdef GLSL` varying array (the audio
+  oscilloscope's `vec4[28]` instead of `vec4[RESOLUTION]`, issue #161) gets it under the
+  limit. A program that compiles the first time never sees `GLSL`
+  (`Renderer/Shader/NOTES.md` note 143; `pipeline` `budget`
+  `a_program_over_the_budget_is_compiled_again_with_glsl_defined`,
+  `a_program_within_the_budget_never_sees_glsl`,
+  `a_program_still_over_the_budget_with_glsl_keeps_the_first_refusal`). `HLSL`
   used to be 0, which `#ifdef HLSL` cannot tell from 1 but `#if HLSL` can: every
   such block was skipped. The first pass of each compositing effect
   (`effectcomposebackground`, and the `COPYBG` and `TEX` paths of the god rays,

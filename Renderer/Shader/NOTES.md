@@ -791,8 +791,8 @@ reading chosen as the most consistent with it:
     the components of the fragment stage's varying inputs after the width reconciliation (scalar 1,
     vector N, matrix columns times rows, arrays multiply, a type it cannot size counts 4). It runs in
     the program numbering and when a fragment stage is legalized alone; a vertex stage alone, and vertex
-    outputs no fragment input names, are free. The failure is a `LegalizeError::Request` (category
-    `InvalidRequest`) naming the total, 124, the stage and the varying whose addition first crossed the
+    outputs no fragment input names, are free. The failure is a `LegalizeError::ComponentBudget` (category
+    `InvalidRequest`, note 143) naming the total, 124, the stage and the varying whose addition first crossed the
     limit. Location numbers of varyings are unbounded (running totals saturate instead of overflowing, so
     a hostile array bound cannot panic a debug build). The location cap of 31 stays for vertex inputs
     and fragment outputs, and reflection still refuses a vertex input above 30 (d R61), the stricter
@@ -1122,6 +1122,25 @@ complete coverage of all remaining builtin names, constructor syntax or builtin 
     every factor finite, under a blend that keeps the destination at alpha 0. Wallpaper
     Engine's `flat.frag` (the solid layer) without `VERTEXCOLOR` is proven. It shares
     revision 10 with note 141.
+143. **One retry with `GLSL` for a program over the component budget** (issue #161). When
+    legalization refuses a program only because its fragment varyings exceed 124 components
+    (`LegalizeError::ComponentBudget`, note 110), `pipeline::prepare_and_legalize` prepares it
+    once more with `Prelude::Direct3DWithGlsl` (`HLSL`, `HLSL_SM40` and `GLSL` all 1) and
+    legalizes that. Workshop effects such as the audio oscilloscopes declare
+    `varying vec4 audioValue[RESOLUTION]` for Windows and a smaller array behind `#ifdef GLSL`
+    for tighter interpolator limits (`vec4[28]` at the default `RESOLUTION` 32: 120 components
+    where the Direct3D branch has 136). Wallpaper Engine's compiler gets under its own limit by
+    removing the unused array elements, which this layer does not do. A program that passes
+    the first time never sees `GLSL`, so note 128 holds for every program that already
+    compiled and their Metal text and cache keys are unchanged, with no revision bump. A refused
+    program was never stored. When the retry changes no stage text, fails to preprocess or is
+    still refused, the first refusal stands (`vec4[60]` at `RESOLUTION` 64 is still 248). The
+    retried program takes every `#if GLSL` branch, including the alpha-to-coverage `discard`
+    of note 128; that only matters for a program that could not compile otherwise. Tests:
+    `pipeline::tests::budget` (`a_program_over_the_budget_is_compiled_again_with_glsl_defined`,
+    `a_program_within_the_budget_never_sees_glsl`,
+    `a_program_still_over_the_budget_with_glsl_keeps_the_first_refusal`) and `preprocess`
+    `the_glsl_prelude_adds_glsl_to_the_direct3d_macros_without_writing_any`.
 
 The shipped sweeps now include `volumetricsfront` (167 programs legalized and compiled, 1 failing
 as before: `shadowcasterfoliage4`'s undeclared `g_Texture1Texel`); every `SHADOW`, `POINTLIGHT`

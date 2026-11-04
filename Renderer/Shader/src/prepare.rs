@@ -30,7 +30,7 @@ use crate::error::ShaderError;
 use crate::items::{BraceMode, scan_items};
 use crate::lexer::lex;
 use crate::metadata::{ExtractMode, extract};
-use crate::preprocess::{MacroFacts, Mode, preprocess_stage};
+use crate::preprocess::{MacroFacts, Mode, Prelude, preprocess_stage_with};
 use crate::request::{Combo, Stage, StageKind, ValidRequest};
 use crate::response::Metadata;
 use crate::source::{CachingSource, IncludeSource};
@@ -67,8 +67,17 @@ fn add_if_absent(list: &mut Vec<Combo>, name: &str, value: &str) {
     }
 }
 
-/// Runs the protocol above for a validated request.
+/// Runs the protocol above for a validated request with Wallpaper Engine's dialect macros.
 pub fn prepare_program(request: &ValidRequest, includes: &dyn IncludeSource) -> Result<PreparedProgram, ShaderError> {
+    prepare_program_with(request, includes, Prelude::Direct3D)
+}
+
+/// [`prepare_program`] with the given dialect macros for every preprocessing run.
+pub fn prepare_program_with(
+    request: &ValidRequest,
+    includes: &dyn IncludeSource,
+    prelude: Prelude,
+) -> Result<PreparedProgram, ShaderError> {
     let name = request.shader_name();
     let cache = CachingSource::new(includes);
     let textures = request.textures();
@@ -89,7 +98,7 @@ pub fn prepare_program(request: &ValidRequest, includes: &dyn IncludeSource) -> 
     let mut reported = Metadata::default();
     let mut compile_combos: Vec<Combo> = request.combos().to_vec();
     for stage in &inputs {
-        let view = preprocess_stage(stage.kind, &stage.source, request.combos(), &cache, Mode::MetadataPreserving)
+        let view = preprocess_stage_with(stage.kind, &stage.source, request.combos(), &cache, Mode::MetadataPreserving, prelude)
             .map_err(|e| e.into_shader_error(name))?;
         let tokens = lex(&view.text);
         let items = scan_items(&tokens, &view.text, BraceMode::Conditional)
@@ -110,7 +119,7 @@ pub fn prepare_program(request: &ValidRequest, includes: &dyn IncludeSource) -> 
     let mut discovered: Vec<(String, String)> = Vec::new();
     let mut first_pass = Vec::new();
     for stage in &inputs {
-        let evaluated = preprocess_stage(stage.kind, &stage.source, &compile_combos, &cache, Mode::Evaluated)
+        let evaluated = preprocess_stage_with(stage.kind, &stage.source, &compile_combos, &cache, Mode::Evaluated, prelude)
             .map_err(|e| e.into_shader_error(name))?;
         let tokens = lex(&evaluated.text);
         let items = scan_items(&tokens, &evaluated.text, BraceMode::Compiled)
@@ -129,7 +138,7 @@ pub fn prepare_program(request: &ValidRequest, includes: &dyn IncludeSource) -> 
     let mut stages = Vec::new();
     for ((stage, view), earlier) in inputs.iter().zip(views).zip(first_pass) {
         let evaluated = if changed {
-            preprocess_stage(stage.kind, &stage.source, &compile_combos, &cache, Mode::Evaluated)
+            preprocess_stage_with(stage.kind, &stage.source, &compile_combos, &cache, Mode::Evaluated, prelude)
                 .map_err(|e| e.into_shader_error(name))?
         } else {
             earlier

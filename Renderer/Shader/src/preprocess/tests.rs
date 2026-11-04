@@ -106,6 +106,17 @@ fn dialect_macros_select_the_direct3d_branches_without_being_written() {
 }
 
 #[test]
+fn the_glsl_prelude_adds_glsl_to_the_direct3d_macros_without_writing_any() {
+    let src = "#ifdef GLSL\ng\n#endif\n#if HLSL && HLSL_SM40 && GLSL\nall\n#endif\n";
+    let out = preprocess_stage_with(StageKind::Fragment, src, &[combo("A", "1")], &NoIncludes, Mode::Evaluated, Prelude::Direct3DWithGlsl)
+        .unwrap()
+        .text;
+    assert_eq!(lines(&out), ["#define A 1", "g", "all"]);
+    let out = preprocess_stage_with(StageKind::Fragment, src, &[], &NoIncludes, Mode::Evaluated, Prelude::Direct3D).unwrap().text;
+    assert_eq!(out, "");
+}
+
+#[test]
 fn a_request_combo_named_shaderversion_wins_like_any_other() {
     let out = eval_with("#if SHADERVERSION < 62\nold\n#else\nnew\n#endif\n", &[combo("SHADERVERSION", "70")]);
     assert!(out.ends_with("new\n"), "{out}");
