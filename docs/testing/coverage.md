@@ -1184,7 +1184,8 @@ never to `.shared`.
   columns, arrow keys held at the ends), `InstalledBrowserModelTests` (the reopen state and its
   cadence, Favorites and collections as views, a 10,000-wallpaper library filtered as the user
   types, covers, the selection's life, clicks, keys, Delete, batch actions and notices, the sweep
-  and edge scrolling, the one animated tile, the import popover and pill) and
+  and edge scrolling, every tile on screen playing its preview and the hover-only setting, the
+  import popover and pill) and
   `InstalledPageRenderTests` (the page, footer, empty states and popovers in every language and
   appearance at the narrowest column, the scroll offset restored).
 - Inspector: `InspectorPolicyTests`, `InspectorWordingTests`, `InspectorInputTests`,

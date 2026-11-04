@@ -25,6 +25,14 @@ and moves whatever falls past ten verbatim into a monthly file under
 [archive/](archive/); promote anything durable before it goes. Editing an
 entry's recorded result is not allowed.
 
+## 2026-11-04 — Library previews play on every tile on screen; hover-only is a setting
+
+- Change: Installed tiles on screen all play their animated preview through LivePreviewScheduler (six loading at once, grid order); Settings › General › Play Library previews only on hover (off by default, WallpaperMachine.libraryPreviewsOnHover) restores the one hovered/focused tile.
+- python3 scripts/test.py --only InstalledBrowserModelTests --only PanelPreferencesTests --only PanelSettingsResetTests --only SettingsEditingModelTests --only LivePreviewSchedulerTests --only LibraryTileRulesTests: 99 passed.
+- python3 scripts/test.py: 4357 passed, 0 failed, 61 skipped of 4418; 2 runtime warnings in the result bundle, not examined.
+- Catalog: two new strings translated into pt-BR, ko, ja, zh-Hans, zh-Hant; localization catalog and panel localization checks pass.
+- Not checked: the grid playing in a real window (scrolling, many GIF tiles at once, Reduce Motion) and its CPU/energy cost; no desktop run, no Release build.
+
 ## 2026-11-04 — Developer ID signing and Apple notarization for releases
 
 - Change: package.py signs every library, framework, the extension and the app with the hardened runtime and a secure timestamp for a Developer ID, has Apple notarize and staple the app and then the signed disk image, and writes the checksum last; build.yml imports the Developer ID certificate and an App Store Connect API key (five secrets, all present in the repository). The bundle contract enforces host entitlements, the runtime flag, no get-task-allow and one signing team.
@@ -111,12 +119,3 @@ Branch t3/optimize-power-usage (PR #156) against the v1.8.2 renderer on an M5 Pr
 - New test ScreenSaverWebSurfaceTests/testTheLivePageStaysInTheLayerTreeItWasAttachedTo fails on the old attach, passes with the fix.
 - python3 scripts/test.py: 4290 passed, 0 failed, 53 skipped. Release build: python3 scripts/build.py --swift-only --configuration Release, OK.
 - Not verified: a real lock with the web wallpaper (the user's next run), and the screen saver on a real idle.
-
-## 2026-11-03 — Web and still wallpapers animate the lock screen (issue 155)
-
-- Change: web projects (and still images, which are web projects) are published for Animate lock screen, take the Desktop selection and follow the lock-screen settle/pause policy in the extension; the 'not applicable' status and compatibility verdict are gone.
-- python3 scripts/test.py --only LockScreenWallpaperServiceTests --only WallpaperCompatibilityTests --only ScreenSaverWebSurfaceTests --only WallpaperPresentationAuthorityTests: 108 passed.
-- python3 scripts/test.py: 4289 passed, 0 failed, 53 skipped; Python stage (localization catalogs, panel localization, doc links) OK.
-- New test: a web wallpaper takes the lock screen and keeps it when the screen saver turns off.
-- Catalogs: five web-surface errors reworded from 'web screen saver' to 'web wallpaper' in both catalogs; compatibility and Settings copy updated; three unused keys removed; all six languages.
-- Not verified: a real lock/unlock with a web wallpaper on the desktop, extension WebKit memory while held, no Release build.

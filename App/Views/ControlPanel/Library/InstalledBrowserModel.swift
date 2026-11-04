@@ -8,7 +8,7 @@ import SwiftUI
 ///
 /// The model reads and acts through `controller`, which owns every store. It is the state the page
 /// keeps for itself: the search text, the tag filters and the sort, the multi-selection with its
-/// press-and-sweep gesture, the one animated tile, the Import popover, and the import pill.
+/// press-and-sweep gesture, the animated previews, the Import popover, and the import pill.
 /// Filters and sort are reported to `controller.storeViewState(_:)` as they change
 /// so a reopened window comes back to them, and restored once when the model is made.
 ///
@@ -59,14 +59,26 @@ final class InstalledBrowserModel {
   }
   @ObservationIgnored private var summaryTask: Task<Void, Never>?
 
-  // MARK: Animated preview
+  // MARK: Animated previews
+  //
+  // Every tile on screen plays its animation, unless Settings › General › Play Library previews
+  // only on hover is on; then only the tile under the pointer or keyboard focus does
+  // (`InstalledBrowserModel+LivePreview.swift`).
 
-  /// The one tile that is playing its animation, with the animation.
+  /// Whether only the hovered or focused tile plays, read from the setting when the model is made
+  /// and when the setting changes (`previewModeChanged()`).
+  var playsPreviewsOnHover: Bool
+
+  /// The one tile that is playing its animation on hover, with the animation.
   struct LivePreview: Equatable {
     let id: String
     let data: Data
   }
   var livePreview: LivePreview?
+
+  /// The animations of the tiles that play while every tile on screen plays, by tile id. A tile
+  /// draws its entry; nothing else of the grid's books is observed.
+  var gridAnimations: [String: Data] = [:]
 
   // MARK: Import
 
@@ -106,6 +118,15 @@ final class InstalledBrowserModel {
 
   @ObservationIgnored fileprivate var sortedCache: (key: SortedKey, rows: [LibraryRow])?
   @ObservationIgnored fileprivate var visibleCache: (key: VisibleKey, result: Visible)?
+  /// Which tiles load their animation while every tile on screen plays, and when.
+  @ObservationIgnored var gridPreviews = LivePreviewScheduler()
+  @ObservationIgnored var gridPreviewTasks: [String: Task<Void, Never>] = [:]
+  /// The tiles inside the grid's visible part, as they report themselves.
+  @ObservationIgnored var tilesOnScreen = Set<String>()
+  @ObservationIgnored var isGridHidden = false
+  /// Each visible id's place in the grid, kept with the ids it was made from, so the previews load
+  /// in grid order without walking a large library at every scroll.
+  @ObservationIgnored var gridOrder: (ids: [String], index: [String: Int])?
   @ObservationIgnored var liveTarget = LivePreviewTarget()
   @ObservationIgnored var liveCandidate: String?
   @ObservationIgnored var liveTask: Task<Void, Never>?
@@ -126,6 +147,7 @@ final class InstalledBrowserModel {
 
   init(controller: PanelController) {
     self.controller = controller
+    playsPreviewsOnHover = PanelPreferences.playsLibraryPreviewsOnHover(in: controller.defaults)
     restore(controller.restoredViewState)
     importPill.observe(controller.importState, popoverOpen: false)
     importLoop = ObservationLoop(
@@ -556,6 +578,7 @@ final class InstalledBrowserModel {
   func leavePage() {
     closeImport()
     windowWentAway()
+    releaseGridPreviews()
   }
 
   /// The window was hidden or lost focus, or the page went: a hold or a sweep ends, the animation

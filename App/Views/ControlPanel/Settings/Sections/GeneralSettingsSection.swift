@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Settings › General: the interface language, what happens at login and after applying a
+/// Settings › General: the interface language, how the Library plays its previews, what happens at login and after applying a
 /// wallpaper, the way back to the welcome guide, and resetting every setting.
 struct GeneralSettingsSection: View {
   private static let interface = SettingsItem.Group("interface", title: "Interface")
@@ -13,6 +13,11 @@ struct GeneralSettingsSection: View {
     note:
       "The interface and import picker switch at once. Quit and reopen the app to switch menus and other dialogs.",
     keywords: ["System (Auto)"])
+  static let libraryPreviewsOnHover = SettingsItem(
+    id: "general.library-previews-on-hover", section: .general, group: interface,
+    title: "Play Library previews only on hover",
+    note:
+      "When this is off, every Library tile on screen plays its animated preview, as in the Steam Workshop. When it is on, a tile plays only while the pointer rests on it.")
   static let launchAtLogin = SettingsItem(
     id: "general.launch-at-login", section: .general, group: startup, title: "Launch at login",
     keywords: [
@@ -34,7 +39,7 @@ struct GeneralSettingsSection: View {
       "Returns every setting to its default. Your library, playlists, collections, displays and sign-ins are kept.",
     keywords: ["Reset…", "Restore defaults"])
 
-  static let items = [language, launchAtLogin, hideAfterApplying, welcomeGuide, resetAll]
+  static let items = [language, libraryPreviewsOnHover, launchAtLogin, hideAfterApplying, welcomeGuide, resetAll]
 
   @Environment(PanelController.self) private var controller
 
@@ -43,6 +48,9 @@ struct GeneralSettingsSection: View {
     SettingsPage(.general) {
       SettingsGroup(Self.interface, in: .general) {
         SettingsRow(Self.language) { languageMenu }
+        SettingsRow(Self.libraryPreviewsOnHover) {
+          SettingsSwitchControl(key: .libraryPreviewsOnHover)
+        }
       }
       SettingsGroup(Self.startup, in: .general) {
         SettingsRow(Self.launchAtLogin, note: login.note) {

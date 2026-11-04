@@ -9,6 +9,15 @@ level.
 These are historical results about the trees they were taken on. They are not
 evidence about the current tree and must never be cited as such.
 
+## 2026-11-03 — Web and still wallpapers animate the lock screen (issue 155)
+
+- Change: web projects (and still images, which are web projects) are published for Animate lock screen, take the Desktop selection and follow the lock-screen settle/pause policy in the extension; the 'not applicable' status and compatibility verdict are gone.
+- python3 scripts/test.py --only LockScreenWallpaperServiceTests --only WallpaperCompatibilityTests --only ScreenSaverWebSurfaceTests --only WallpaperPresentationAuthorityTests: 108 passed.
+- python3 scripts/test.py: 4289 passed, 0 failed, 53 skipped; Python stage (localization catalogs, panel localization, doc links) OK.
+- New test: a web wallpaper takes the lock screen and keeps it when the screen saver turns off.
+- Catalogs: five web-surface errors reworded from 'web screen saver' to 'web wallpaper' in both catalogs; compatibility and Settings copy updated; three unused keys removed; all six languages.
+- Not verified: a real lock/unlock with a web wallpaper on the desktop, extension WebKit memory while held, no Release build.
+
 ## 2026-11-02 — When another app is in front (discussion #91)
 
 - Feature: Settings → Playback & Power gains When another app is in front (Keep running / Mute / Pause), default Keep running.

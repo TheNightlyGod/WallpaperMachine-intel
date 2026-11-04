@@ -11,6 +11,8 @@ struct GeneralSettings: Equatable, Sendable {
   var launchAtLogin: LaunchAtLoginState
   /// Whether applying a wallpaper hides the app so the result is visible. Off until turned on.
   var hidesAfterActivating: Bool
+  /// Whether Library tiles play their animated preview only on hover. Off until turned on.
+  var playsLibraryPreviewsOnHover: Bool
 }
 
 /// Launch at login as the Startup row shows it. The facts are the bridge's: whether the login item

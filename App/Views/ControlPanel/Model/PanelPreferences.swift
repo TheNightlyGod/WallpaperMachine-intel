@@ -15,6 +15,9 @@ enum PanelPreferences {
   static let dragSelectLearnedKey = "WallpaperMachine.dragSelectLearned"
   /// Whether applying a wallpaper hides the app so the result is visible.
   static let hideAfterActivatingKey = "WallpaperMachine.hideAfterActivating"
+  /// Whether Library tiles play their animated preview only while the pointer rests on one (or
+  /// keyboard focus is on it), instead of every tile on screen playing.
+  static let libraryPreviewsOnHoverKey = "WallpaperMachine.libraryPreviewsOnHover"
   /// How far the tile grids are zoomed: a step of `TileGridLayout.zoomWidths`, 0 the standard size.
   static let tileZoomKey = "WallpaperMachine.tileZoom"
   /// Earlier builds stored a dragged inspector width here; the width now follows the window
@@ -40,6 +43,14 @@ enum PanelPreferences {
   /// Off unless turned on, so the panel stays open until the user closes it.
   static func hidesAfterActivating(in defaults: UserDefaults = ClientPreferences.defaults) -> Bool {
     defaults.object(forKey: hideAfterActivatingKey) as? Bool ?? false
+  }
+
+  /// Off unless turned on, so every Library tile on screen plays its animated preview, as the
+  /// Workshop's grid does.
+  static func playsLibraryPreviewsOnHover(
+    in defaults: UserDefaults = ClientPreferences.defaults
+  ) -> Bool {
+    defaults.object(forKey: libraryPreviewsOnHoverKey) as? Bool ?? false
   }
 
   /// The tile zoom step, held to the steps there are; anything unreadable is the standard size.

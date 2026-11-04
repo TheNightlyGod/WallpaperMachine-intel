@@ -87,6 +87,9 @@ struct InstalledTile: View {
       if hovering { model.pointerEntered(row.id) } else { model.pointerLeft(row.id) }
     }
     .onChange(of: isFocused) { model.focusChanged(row.id, isFocused: isFocused) }
+    // While every tile on screen plays, what is on screen decides which do.
+    .onScrollVisibilityChange(threshold: 0.25) { model.tileVisibilityChanged(row.id, isOnScreen: $0) }
+    .onDisappear { model.tileVisibilityChanged(row.id, isOnScreen: false) }
     .onGeometryChange(for: CGSize.self, of: \.size) { model.geometry.cellSize = $0 }
     .accessibilityValue(Text(verbatim: marks.names.joined(separator: ", ")))
     .accessibilityAddTraits(.isButton)
@@ -98,7 +101,7 @@ struct InstalledTile: View {
   // MARK: Artwork
 
   /// The cover once its stamp is known, and the quiet placeholder until then and for a wallpaper
-  /// with no preview; the one tile that plays its animation draws it over the cover.
+  /// with no preview; a tile that plays its animation draws it over the cover.
   private func artwork(_ model: InstalledBrowserModel) -> some View {
     ZStack {
       PanelImage(source: row.coverSource, pointSize: 190)
@@ -109,8 +112,8 @@ struct InstalledTile: View {
           .font(.system(size: 22, weight: .regular))
           .foregroundStyle(theme.surface.faint.color)
       }
-      if let live = model.livePreview, live.id == row.id {
-        AnimatedPreview(data: live.data, isPlaying: true)
+      if let animation = model.playingAnimation(for: row.id) {
+        AnimatedPreview(data: animation, isPlaying: true)
       }
       applyState
     }

@@ -125,16 +125,16 @@ duration is the rate the display showed the wallpaper's frames at (see [Present
 feedback](#present-feedback)).
 
 The app opens its control panel at launch, and animated previews add frame decoding
-in the app and WindowServer work (Discover animates the tiles on screen; Installed
-shows still covers and animates only the tile under the pointer or keyboard focus, see
-[control panel](../features/control-panel.md)). Launch with `--env
+in the app and WindowServer work (Discover and Installed animate the tiles on screen;
+with **Play Library previews only on hover** on, Installed animates only the tile under
+the pointer or keyboard focus, see [control panel](../features/control-panel.md)). Launch with `--env
 WALLPAPER_MACHINE_PANEL_AT_LAUNCH=0` to keep it closed, as a login launch does (read
 once at launch; an unfinished welcome guide or a failed start still opens it), so the
 window measures the wallpaper alone; otherwise say whether the panel was open and on
 which page. With the panel closed the app's own energy recorder samples too (its
-`EnergyRatings.json` in that home is a third readout). The saving from Installed's
-still covers has not been measured: compare a run with the panel open on
-Installed against a build before the change. System power includes every other application,
+`EnergyRatings.json` in that home is a third readout). The cost of Installed's
+animated tiles against the hover-only setting has not been measured: compare a run with
+the panel open on Installed with the setting off and on. System power includes every other application,
 so it is only comparable against a paired baseline taken minutes from the run;
 the app's own CPU and GPU percentages are the steadier signal.
 

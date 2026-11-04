@@ -12,7 +12,8 @@ extension PanelController {
       launchAtLogin: LaunchAtLoginState(
         isOn: settings.launchAtLoginEnabled, isAvailable: settings.launchAtLoginAvailable,
         needsApproval: settings.launchAtLoginNeedsApproval),
-      hidesAfterActivating: hidesAfterActivating)
+      hidesAfterActivating: hidesAfterActivating,
+      playsLibraryPreviewsOnHover: PanelPreferences.playsLibraryPreviewsOnHover(in: defaults))
   }
 
   var desktopSettings: DesktopSettings {

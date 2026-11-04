@@ -34,8 +34,10 @@ struct InstalledPage: View {
     // settles.
     .onChange(of: model.summary) { model.summaryChanged() }
     .onChange(of: model.visibleIDs.count) { model.releaseLivePreviewIfHidden() }
-    // Nothing plays or sweeps in a window that is hidden or not the one being used.
-    .onChange(of: controller.presentation.isVisible) {
+    // Nothing plays in a hidden window; nothing plays on hover or sweeps in one that is not the
+    // one being used.
+    .onChange(of: controller.presentation.isVisible, initial: true) {
+      model.setGridHidden(!controller.presentation.isVisible)
       if !controller.presentation.isVisible { model.windowWentAway() }
     }
     .onChange(of: controller.presentation.isKey) {

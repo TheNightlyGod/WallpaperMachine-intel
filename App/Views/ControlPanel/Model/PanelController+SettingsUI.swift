@@ -4,7 +4,7 @@ import Foundation
 /// name the same key, so both read one saved value, both show one draft and both send through one
 /// typed setter: pressing either moves the other.
 enum SettingsSwitchKey: String, CaseIterable, Sendable {
-  case launchAtLogin, hideAfterActivating
+  case launchAtLogin, hideAfterActivating, libraryPreviewsOnHover
   case writeDesktopPicture, refreshDesktopPicture, keepWindowsOnWallpaperClick, livePropertyEdits
   case lockScreenEnabled, screenSaverEnabled
   case wallpapersMuted, playOnlyOnActiveDisplay
@@ -25,6 +25,7 @@ extension PanelController {
     switch key {
     case .launchAtLogin: generalSettings.launchAtLogin.isOn
     case .hideAfterActivating: generalSettings.hidesAfterActivating
+    case .libraryPreviewsOnHover: generalSettings.playsLibraryPreviewsOnHover
     case .writeDesktopPicture: desktopSettings.writesDesktopPicture
     case .refreshDesktopPicture: desktopSettings.refreshesDesktopPicture
     case .keepWindowsOnWallpaperClick: desktopSettings.keepsWindowsOnWallpaperClick
@@ -74,6 +75,7 @@ extension PanelController {
     switch key {
     case .launchAtLogin: try await setLaunchAtLogin(on)
     case .hideAfterActivating: try await setHidesAfterActivating(on)
+    case .libraryPreviewsOnHover: try await setLibraryPreviewsOnHover(on)
     case .writeDesktopPicture: try await setWritesDesktopPicture(on)
     case .refreshDesktopPicture: try await setRefreshesDesktopPicture(on)
     case .keepWindowsOnWallpaperClick: try await setKeepsWindowsOnWallpaperClick(on)

@@ -20,6 +20,9 @@ final class PanelPreferencesTests: XCTestCase {
     XCTAssertFalse(PanelPreferences.welcomeSeen(in: defaults))
     XCTAssertFalse(PanelPreferences.dragSelectLearned(in: defaults))
     XCTAssertFalse(PanelPreferences.hidesAfterActivating(in: defaults), "the panel stays open unless turned on")
+    XCTAssertFalse(
+      PanelPreferences.playsLibraryPreviewsOnHover(in: defaults),
+      "every Library tile on screen plays unless hover is turned on")
     PanelPreferences.markWelcomeSeen(in: defaults)
     PanelPreferences.markDragSelectLearned(in: defaults)
     XCTAssertTrue(PanelPreferences.welcomeSeen(in: defaults))
@@ -27,6 +30,8 @@ final class PanelPreferencesTests: XCTestCase {
     XCTAssertTrue(defaults.bool(forKey: "WallpaperMachine.welcomeSeen"), "the launch rule reads the same key")
     defaults.set(true, forKey: PanelPreferences.hideAfterActivatingKey)
     XCTAssertTrue(PanelPreferences.hidesAfterActivating(in: defaults))
+    defaults.set(true, forKey: PanelPreferences.libraryPreviewsOnHoverKey)
+    XCTAssertTrue(PanelPreferences.playsLibraryPreviewsOnHover(in: defaults))
   }
 
   func testFavoritesAreTheJSONOfTheSortedArrayAndRoundTrip() throws {

@@ -1064,15 +1064,102 @@ final class InstalledBrowserModelTests: PanelTestCase {
     XCTAssertEqual(scrolled.count, count, "nothing scrolls once the press is over")
   }
 
-  // MARK: The animated preview
+  // MARK: The animated previews
 
-  func testTheOneTilePlayingIsTheOneThePointerRestedOnAndNothingElseAnimates() async throws {
+  /// Turns on Settings › General › Play Library previews only on hover.
+  private func playOnHover(_ panel: PanelFixture) async throws {
+    try await panel.controller.setLibraryPreviewsOnHover(true)
+    XCTAssertTrue(panel.controller.library.playsPreviewsOnHover)
+  }
+
+  private func playing(_ model: InstalledBrowserModel, _ ids: String...) -> Bool {
+    ids.allSatisfy { model.playingAnimation(for: $0) != nil }
+  }
+
+  func testEveryAnimatedTileOnScreenPlaysWithoutAPointerAndOnlyWhileOnScreen() async throws {
+    let panel = try makeController()
+    defer { Task { await panel.shutdown() } }
+    let model = panel.controller.library
+    try panel.installLibrary([
+      LibrarySpec("gif1", "Aurora", preview: .animation),
+      LibrarySpec("gif2", "Breeze", preview: .animation),
+      LibrarySpec("gif3", "Cinder", preview: .animation),
+      LibrarySpec("png", "Dune", preview: .picture(0.3)),
+      LibrarySpec("none", "Ember", preview: .none),
+    ])
+    try await panel.loadLibrary()
+    try await panel.settleLibrary()
+    XCTAssertFalse(model.playsPreviewsOnHover, "every tile plays unless hover is turned on")
+
+    for id in ["gif1", "gif2", "png", "none"] { model.tileVisibilityChanged(id, isOnScreen: true) }
+    try await wait(panel, "both animations on screen") { playing(model, "gif1", "gif2") }
+    XCTAssertNil(model.playingAnimation(for: "gif3"), "a tile off screen loads nothing")
+    XCTAssertNil(model.playingAnimation(for: "png"), "a picture has nothing to animate")
+    XCTAssertNil(model.playingAnimation(for: "none"))
+    XCTAssertNil(model.livePreview, "no pointer is needed")
+
+    model.tileVisibilityChanged("gif1", isOnScreen: false)
+    XCTAssertNil(model.playingAnimation(for: "gif1"), "scrolling away releases it at once")
+    model.tileVisibilityChanged("gif3", isOnScreen: true)
+    try await wait(panel, "the tile scrolled in") { playing(model, "gif2", "gif3") }
+
+    model.setGridHidden(true)
+    XCTAssertTrue(model.gridAnimations.isEmpty, "a hidden window plays nothing")
+    model.setGridHidden(false)
+    try await wait(panel, "the same tiles once shown") { playing(model, "gif2", "gif3") }
+    model.windowWentAway()
+    XCTAssertTrue(playing(model, "gif2", "gif3"), "a window that is only not key keeps playing")
+
+    model.setText("Breeze")
+    model.releaseLivePreviewIfHidden()
+    XCTAssertNil(model.playingAnimation(for: "gif3"), "a tile filtered away stops playing")
+    XCTAssertTrue(playing(model, "gif2"))
+
+    model.leavePage()
+    XCTAssertTrue(model.gridAnimations.isEmpty, "leaving the page releases every animation")
+  }
+
+  func testTurningHoverOnStopsTheGridAndTurningItOffPlaysTheTilesOnScreenAgain() async throws {
     let panel = try makeController()
     defer { Task { await panel.shutdown() } }
     let model = panel.controller.library
     let clock = ManualSleeper()
     model.sleep = clock.closure
     model.isMouseButtonDown = { false }
+    try panel.installLibrary([
+      LibrarySpec("gif1", "A", preview: .animation), LibrarySpec("gif2", "B", preview: .animation),
+    ])
+    try await panel.loadLibrary()
+    try await panel.settleLibrary()
+    model.tileVisibilityChanged("gif1", isOnScreen: true)
+    model.tileVisibilityChanged("gif2", isOnScreen: true)
+    try await wait(panel, "both animations") { playing(model, "gif1", "gif2") }
+
+    try await playOnHover(panel)
+    XCTAssertTrue(model.gridAnimations.isEmpty, "only the hovered tile plays now")
+    XCTAssertNil(model.playingAnimation(for: "gif1"))
+    model.pointerEntered("gif1")
+    try await timerRequested(clock)
+    clock.fireNext()
+    try await wait(panel, "the hovered tile") { model.livePreview?.id == "gif1" }
+    XCTAssertTrue(playing(model, "gif1"))
+    XCTAssertNil(model.playingAnimation(for: "gif2"))
+
+    try await panel.controller.setLibraryPreviewsOnHover(false)
+    XCTAssertNil(model.livePreview, "the hovered tile gives way to the grid")
+    try await wait(panel, "the tiles still on screen, without being reported again") {
+      playing(model, "gif1", "gif2")
+    }
+  }
+
+  func testOnHoverTheOneTilePlayingIsTheOneThePointerRestedOnAndNothingElseAnimates() async throws {
+    let panel = try makeController()
+    defer { Task { await panel.shutdown() } }
+    let model = panel.controller.library
+    let clock = ManualSleeper()
+    model.sleep = clock.closure
+    model.isMouseButtonDown = { false }
+    try await playOnHover(panel)
     try panel.installLibrary([
       LibrarySpec("gif1", "Moving", preview: .animation),
       LibrarySpec("gif2", "Moving too", preview: .animation),
@@ -1115,6 +1202,7 @@ final class InstalledBrowserModelTests: PanelTestCase {
     let clock = ManualSleeper()
     model.sleep = clock.closure
     model.isMouseButtonDown = { false }
+    try await playOnHover(panel)
     try panel.installLibrary([
       LibrarySpec("gif1", "A", preview: .animation), LibrarySpec("gif2", "B", preview: .animation),
     ])
@@ -1142,6 +1230,7 @@ final class InstalledBrowserModelTests: PanelTestCase {
     let clock = ManualSleeper()
     model.sleep = clock.closure
     model.isMouseButtonDown = { false }
+    try await playOnHover(panel)
     try panel.installLibrary([
       LibrarySpec("gif1", "A", preview: .animation), LibrarySpec("gif2", "B", preview: .animation),
     ])
@@ -1177,6 +1266,7 @@ final class InstalledBrowserModelTests: PanelTestCase {
     let clock = ManualSleeper()
     model.sleep = clock.closure
     model.isMouseButtonDown = { false }
+    try await playOnHover(panel)
     try panel.installLibrary([
       LibrarySpec("gif1", "Moving", preview: .animation), LibrarySpec("other", "Other", preview: .none),
     ])

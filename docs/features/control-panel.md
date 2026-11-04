@@ -82,7 +82,7 @@ open (`TileGridLayout.zoomWidths`). The step is saved as `WallpaperMachine.tileZ
 settings returns it to Actual Size. **Help → WallpaperMachine Guides** opens the website's
 guides, in Chinese for either Chinese and in English otherwise. The grids are lazy:
 only the rows near the screen are built. While a trackpad or wheel scroll (and its glide)
-is under way, tiles ignore the pointer: no lift, no hover controls, no live preview; they
+is under way, tiles ignore the pointer: no lift, no hover controls, no hover preview; they
 come back under the pointer when the scroll stops, so content moving under a still pointer
 does not cost frames. On Installed, the target display's tile wears an
 accent **Active** capsule with a small equalizer that moves only while playback runs
@@ -95,10 +95,9 @@ panel never reads animation pixels back, are in
 [Workshop downloads](workshop-downloads.md#tile-thumbnails). An installed copy of
 the same wallpaper shows its library cover on Discover.
 
-Installed tiles are stills as well, so a library of animated GIF previews costs
-nothing at rest. Each wallpaper's own preview file becomes a 512 px JPEG cover,
-made once by a `WorkshopThumbnailCache` of its own (`Cache/LibraryThumbnails`,
-128 MiB, four at a time, no animation kept) through `LibraryPreviewFetcher`, which
+Installed tiles start from stills as well. Each wallpaper's own preview file
+becomes a 512 px JPEG cover, made once by a `WorkshopThumbnailCache` of its own
+(`Cache/LibraryThumbnails`, 128 MiB, four at a time, no animation kept) through `LibraryPreviewFetcher`, which
 reads only an image inside the library up to 32 MiB and follows no symlink out of it,
 and `PanelImagePipeline` decodes it at the size the tile draws. A cover is keyed by
 the file's path, modification time and size, and the tile asks for it with a stamp of
@@ -112,14 +111,28 @@ copy of the preview file, and tries the cover again when the preview changes.
 Building the rows touches no file: a tile is offered an animation by its preview's
 extension alone (`gif`, `webp`, `apng`).
 
-An animated preview plays on one Installed tile at a time: the tile the pointer
+By default every Installed tile on screen plays its animated preview, as the Steam
+Workshop's grid does, with no pointer needed. `InstalledBrowserModel` reports each
+tile's visibility to the same `LivePreviewScheduler` that Discover uses: at most six
+animations load at once, in grid order, and a tile that scrolls away, a hidden window
+(not merely one that lost focus), filtering the tile away or leaving the page releases
+its animation. A preview that is a single picture or over the animation budget keeps
+its cover and is not asked again by scrolling. Only the tiles on screen and those still
+holding an animation are looked at, so a scroll through a large library never walks
+all of it.
+
+**Settings → General → Play Library previews only on hover** (off by default, stored as
+`WallpaperMachine.libraryPreviewsOnHover`, kept by a [backup](backup-restore.md) and
+cleared by Reset all settings) plays one tile at a time instead: the tile the pointer
 has rested on for 160 ms, or the tile keyboard focus is on (a mouse click alone
 does not count). Sweeping across the grid, dragging a selection and a preview
 that is a single picture start nothing, and moving between one tile's own buttons
-keeps it playing. Leaving the tile, hiding the window, filtering the tile away or
-changing page releases the animation. The inspector's artwork is the preview file
-itself, so the selected wallpaper still animates there while the window is on
-screen; hiding the window releases it, and showing the window reads the file again.
+keeps it playing. Leaving the tile, hiding the window or making it inactive,
+filtering the tile away or changing page releases the animation. Switching the
+setting applies to the grid at once.
+
+The inspector's artwork is the preview file itself, so the selected wallpaper still
+animates there while the window is on screen; hiding the window releases it, and showing the window reads the file again.
 
 The window never shrinks below a 760×560 content area (capped by the visible
 screen on small displays). `ControlPanelWindow.minimumContentSize` owns that

@@ -63,6 +63,16 @@ extension PanelController {
     }
   }
 
+  /// `libraryPreviewsOnHover`: whether Library tiles play their animated preview only while the
+  /// pointer rests on one, instead of every tile on screen playing. Applies to the grid at once.
+  func setLibraryPreviewsOnHover(_ onHover: Bool) async throws {
+    try await change {
+      defaults.set(onHover, forKey: PanelPreferences.libraryPreviewsOnHoverKey)
+      refreshSystemReadings()
+      library.previewModeChanged()
+    }
+  }
+
   /// Takes the readings nothing notifies the app about again: the battery charge and the preferences
   /// that live outside the stores. Views call it when the panel appears and when the window becomes key,
   /// and the setters that write those preferences call it themselves.
