@@ -419,7 +419,8 @@ before it changes anything and lists their SHA-1s; pass one of them as
 Apple's log: each issue names the file and the reason. A submission Apple has not
 finished within the 50 minutes packaging waits stops it with the submission's id;
 `xcrun notarytool history --keychain-profile "WallpaperMachine Notary"` lists them all.
-Stapling downloads the ticket from Apple's CloudKit service, so a dropped connection
+`stapler staple` and `stapler validate` (including the check of the app inside the
+mounted image) both ask Apple's CloudKit ticket service, so a dropped connection
 (`The network connection was lost`, stapler error 68) or a ticket the service does not
 serve yet is retried three times, after 15, 30 and 60 seconds, before packaging fails.
 A new team's first submissions are held for hours (the team's first ones, on

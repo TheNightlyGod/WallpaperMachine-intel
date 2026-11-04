@@ -160,10 +160,17 @@ class StapledCopyTests(unittest.TestCase):
     def test_a_copy_with_its_ticket_passes(self):
         notary.check_stapled(Path("/Volumes/x/WallpaperMachine.app"), Tools())
 
-    def test_a_copy_without_a_ticket_fails(self):
-        tools = Tools(validate=(65, "WallpaperMachine.app does not have a ticket stapled to it.", ""))
+    def test_a_copy_without_a_ticket_fails_after_the_retries(self):
+        tools, waits = Tools(validate=(65, "WallpaperMachine.app does not have a ticket stapled to it.", "")), []
         with self.assertRaisesRegex(notary.NotarizationError, "no valid notarization ticket"):
-            notary.check_stapled(Path("/Volumes/x/WallpaperMachine.app"), tools)
+            notary.check_stapled(Path("/Volumes/x/WallpaperMachine.app"), tools, sleep=waits.append)
+        self.assertEqual(waits, list(notary.STAPLE_RETRY_DELAYS))
+
+    def test_a_lost_connection_while_validating_the_copy_is_retried(self):
+        tools, waits = Tools(validate=[LOST, (0, "The validate action worked!", "")]), []
+        notary.check_stapled(Path("/Volumes/x/WallpaperMachine.app"), tools, sleep=waits.append)
+        self.assertEqual(len(tools.named("validate")), 2)
+        self.assertEqual(waits, [notary.STAPLE_RETRY_DELAYS[0]])
 
 
 if __name__ == "__main__":

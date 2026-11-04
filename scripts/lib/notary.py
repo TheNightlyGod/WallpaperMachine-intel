@@ -16,9 +16,10 @@ no secure timestamp); a submission Apple has not finished with its id, so
 `xcrun notarytool info <id>` can follow it. A new team's first submissions can stay
 `In Progress` for hours. After stapling, `stapler validate` and a Gatekeeper assessment must both
 pass: Gatekeeper has to call the source `Notarized Developer ID`, which is what lets a
-downloaded copy open without **Open Anyway**, offline included. Stapling fetches the
-ticket from Apple's CloudKit service, which can drop a connection or not serve a fresh
-ticket yet, so a failed staple is retried after `STAPLE_RETRY_DELAYS` before it fails.
+downloaded copy open without **Open Anyway**, offline included. `stapler staple` and
+`stapler validate` both ask Apple's CloudKit ticket service, which can drop a connection
+or not serve a fresh ticket yet, so a failed stapler step is retried after
+`STAPLE_RETRY_DELAYS` before it fails.
 
 The tool runner is a parameter, so the flow is tested without Apple's service.
 """
@@ -35,10 +36,10 @@ from typing import NamedTuple
 # team can be held for analysis much longer. The build job's own timeout still applies.
 WAIT = "50m"
 NOTARIZED = "source=Notarized Developer ID"
-# Seconds to wait before each new stapling attempt. The ticket lookup is a network call
-# (a release once failed on "The network connection was lost", stapler error 68) and a
-# just-accepted ticket can take a moment to reach the service; a real refusal still
-# fails, about two minutes later.
+# Seconds to wait before each new stapler attempt. Stapling and validating both look the
+# ticket up over the network (releases failed on "The network connection was lost",
+# stapler error 68, in either step) and a just-accepted ticket can take a moment to reach
+# the service; a real refusal or a missing ticket still fails, about two minutes later.
 STAPLE_RETRY_DELAYS = (15, 30, 60)
 
 
@@ -108,25 +109,36 @@ def submit(path, credentials, run=_run):
                             + _issues(log.stdout if log.returncode == 0 else log.stderr))
 
 
-def _staple_once(path, run):
-    for action in ("staple", "validate"):
-        completed = run(["xcrun", "stapler", action, path])
-        if completed.returncode != 0:
-            return f"stapler could not {action} {Path(path).name}: {(completed.stdout + completed.stderr).strip()}"
-    return None
+def _stapler(actions, path, run, sleep):
+    """Runs `xcrun stapler` with each action in turn, the sequence again after each delay
+    while one fails; returns None once all pass, else the last failure's output."""
+    def attempt():
+        for action in actions:
+            completed = run(["xcrun", "stapler", action, path])
+            if completed.returncode != 0:
+                return action, (completed.stdout + completed.stderr).strip()
+        return None
+
+    failure = attempt()
+    for delay in STAPLE_RETRY_DELAYS:
+        if failure is None:
+            break
+        print(f"stapler {failure[0]} failed for {Path(path).name}, retrying in {delay}s: {failure[1]}", flush=True)
+        sleep(delay)
+        failure = attempt()
+    return failure
+
+
+def _attempts():
+    return f"after {len(STAPLE_RETRY_DELAYS) + 1} attempts"
 
 
 def staple(path, run=_run, sleep=time.sleep):
     """Attaches the ticket to `path` and validates it, so Gatekeeper needs no network to accept it."""
-    failure = _staple_once(path, run)
-    for delay in STAPLE_RETRY_DELAYS:
-        if failure is None:
-            return
-        print(f"{failure}\nRetrying in {delay}s.", flush=True)
-        sleep(delay)
-        failure = _staple_once(path, run)
+    failure = _stapler(("staple", "validate"), path, run, sleep)
     if failure is not None:
-        raise NotarizationError(f"{failure} (after {len(STAPLE_RETRY_DELAYS) + 1} attempts)")
+        action, detail = failure
+        raise NotarizationError(f"stapler could not {action} {Path(path).name} ({_attempts()}): {detail}")
 
 
 def assess(path, run=_run):
@@ -155,8 +167,8 @@ def notarize(path, credentials, run=_run, sleep=time.sleep):
     assess(path, run)
 
 
-def check_stapled(app, run=_run):
+def check_stapled(app, run=_run, sleep=time.sleep):
     """A copy of a notarized app (the one inside the disk image) still carries its ticket."""
-    completed = run(["xcrun", "stapler", "validate", app])
-    if completed.returncode != 0:
-        raise NotarizationError(f"{Path(app).name} carries no valid notarization ticket: {(completed.stdout + completed.stderr).strip()}")
+    failure = _stapler(("validate",), app, run, sleep)
+    if failure is not None:
+        raise NotarizationError(f"{Path(app).name} carries no valid notarization ticket ({_attempts()}): {failure[1]}")
