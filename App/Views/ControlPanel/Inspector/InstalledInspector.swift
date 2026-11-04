@@ -70,10 +70,10 @@ private struct InspectorContent: View {
             }
           }
           GeneralConfigurationCard(options: options)
+          PropertiesCards(options: options)
           DisplaysCard(options: options)
           CollectionsCard(wallpaperID: id)
           EngineOptionsCard(options: options)
-          PropertiesCards(options: options)
         } else {
           LoadingOptions()
           CollectionsCard(wallpaperID: id)

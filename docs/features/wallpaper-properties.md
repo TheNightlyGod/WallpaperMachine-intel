@@ -125,13 +125,12 @@ shows those. Apply changes is unchanged: it reloads the wallpaper from the saved
 
 The inspector's compact **General configuration** section holds mute, volume,
 [Audio response](audio-response.md), and media integration. **Audio and media
-status** expands to show their explanations and delivery status. **Displays**
-follows with per-display playback configuration, open when the wallpaper is on a
-display and collapsed otherwise, then **Collections** and, for a scene or a video,
-[**Wallpaper Engine options**](#wallpaper-engine-options).
-**Wallpaper properties** comes last, with the wallpaper's authored controls in their
-original order, so a long property list never pushes the shorter sections out of
-reach. General, display and property disclosures keep their state while the same
+status** expands to show their explanations and delivery status. The presets and
+**Wallpaper properties** follow, with the wallpaper's authored controls in their
+original order. **Displays** comes next with per-display playback configuration,
+open when the wallpaper is on a display and collapsed otherwise, then **Collections**
+and, for a scene or a video, [**Wallpaper Engine options**](#wallpaper-engine-options).
+General, display and property disclosures keep their state while the same
 wallpaper stays selected; another wallpaper starts at the top with its sections at their
 defaults.
 
@@ -257,7 +256,7 @@ placeholder while no picture fills it.
 
 ### Wallpaper Engine options
 
-**Wallpaper Engine options**, above the presets and **Wallpaper properties**, holds the
+**Wallpaper Engine options**, the inspector's last card, holds the
 options Wallpaper Engine adds to every scene and video wallpaper itself
 (`wallpaper64.exe` `sub_140104B60`; `artifacts/we-parity/decompiles/H-P0-2.md`,
 `H-P0-3.md`), saved per wallpaper under `engine_options` in its configuration file:
