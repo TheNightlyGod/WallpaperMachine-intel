@@ -69,8 +69,8 @@ Download. Symbols are SF Symbols. Light/dark mode, surface tone and custom accen
 preferences continue to apply ([appearance](appearance.md)).
 
 Wallpapers appear as square, image-first tiles with the title (12 pt semibold) and the
-kind (11 pt) beneath. A tile lifts 2 points with a shadow on hover (not under Reduce
-Motion) and draws a focus ring under keyboard focus; selection is an accent ring with a
+kind (11 pt) beneath. A tile stays still on hover and draws a focus ring under
+keyboard focus; selection is an accent ring with a
 surface-coloured gap so blue artwork does not hide it. Each grid fills its width with as
 many columns as fit at a preferred tile size (140 points, 14-point gaps) that shrinks
 with the column, and never fewer than three, so a narrower window shows smaller tiles
@@ -82,7 +82,7 @@ open (`TileGridLayout.zoomWidths`). The step is saved as `WallpaperMachine.tileZ
 settings returns it to Actual Size. **Help → WallpaperMachine Guides** opens the website's
 guides, in Chinese for either Chinese and in English otherwise. The grids are lazy:
 only the rows near the screen are built. While a trackpad or wheel scroll (and its glide)
-is under way, tiles ignore the pointer: no lift, no hover controls, no hover preview; they
+is under way, tiles ignore the pointer: no hover controls, no hover preview; they
 come back under the pointer when the scroll stops, so content moving under a still pointer
 does not cost frames. On Installed, the target display's tile wears an
 accent **Active** capsule with a small equalizer that moves only while playback runs
