@@ -496,7 +496,11 @@ and offered while it is on whatever is playing, so it can always be turned off),
 **Unmute Wallpapers** and **Mute or Unmute Wallpapers** actions in the Shortcuts app,
 and a shortcut key ([automation](automation.md)); all of them set
 `PlaybackPreferences.wallpapersMuted`. It never rewrites a wallpaper's saved **Mute
-audio** and volume or a display's. It is one more reason, in
+this wallpaper** and volume or a display's. The two name each other instead of
+disagreeing: while Mute all is on, the inspector's **Mute this wallpaper** shows on and
+locked, with a note that Mute All is on; while it is off, the Quick Settings tile reads
+**Off · N muted separately** when N installed wallpapers are muted on their own (the
+bridge's `muted_wallpaper_count`). It is one more reason, in
 `WallpaperPresentationPolicy`, for the bridge's single audio-suppression flag, which
 the engine combines with each wallpaper's own mute, so a wallpaper plays only if
 neither says mute. It therefore composes with the mute app rules, the Focus filter and

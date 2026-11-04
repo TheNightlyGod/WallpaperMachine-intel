@@ -46,6 +46,7 @@ extension PanelController {
     let focus = FocusFilterState.shared
     return PlaybackSettings(
       wallpapersMuted: playback.wallpapersMuted,
+      mutedWallpaperCount: Int(settings.mutedWallpaperCount),
       desktopCoveredAction: playback.desktopCoveredAction,
       playsOnlyOnActiveDisplay: playback.playsOnlyOnActiveDisplay,
       otherAudioAction: playback.otherAudioAction,

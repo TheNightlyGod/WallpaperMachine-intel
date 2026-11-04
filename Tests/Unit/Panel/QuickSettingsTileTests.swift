@@ -59,6 +59,41 @@ final class QuickSettingsTileTests: PanelTestCase {
     }
   }
 
+  /// Mute All and the inspector's Mute this wallpaper are two settings, one on top of the other,
+  /// so each names the other instead of contradicting it.
+  func testMuteAllAndTheInspectorsMuteSwitchNameEachOther() async throws {
+    try pinPanelLanguageToEnglish()
+    try await withRecordingPanel { panel, _ in
+      panel.store.snapshotRevision = 1
+      let controller = panel.controller
+      XCTAssertEqual(try tile(.wallpapersMuted, in: tiles(panel)).state, "Off")
+
+      // Off, Mute All counts the wallpapers silent on their own.
+      panel.store.settingsSnapshot.mutedWallpaperCount = 2
+      XCTAssertEqual(try tile(.wallpapersMuted, in: tiles(panel)).state, "Off · 2 muted separately")
+
+      let loud = InspectorOptions.make(BridgeSnapshotFixtures.options(wallpaperId: "wp", muted: false))
+      let quiet = InspectorOptions.make(BridgeSnapshotFixtures.options(wallpaperId: "wp", muted: true))
+      XCTAssertEqual(
+        controller.inspectorMuteSwitch(loud), InspectorMuteSwitch(isOn: false, isMutedByMuteAll: false))
+      XCTAssertEqual(
+        controller.inspectorMuteSwitch(quiet), InspectorMuteSwitch(isOn: true, isMutedByMuteAll: false))
+
+      // On, every wallpaper is silent: the inspector shows it so and waits for Mute All.
+      controller.playback.wallpapersMuted = true
+      XCTAssertEqual(try tile(.wallpapersMuted, in: tiles(panel)).state, "On")
+      XCTAssertEqual(
+        controller.inspectorMuteSwitch(loud), InspectorMuteSwitch(isOn: true, isMutedByMuteAll: true))
+      XCTAssertEqual(
+        controller.inspectorMuteSwitch(quiet), InspectorMuteSwitch(isOn: true, isMutedByMuteAll: true))
+
+      // Mute All off again gives the wallpaper its own setting back, which it never touched.
+      controller.playback.wallpapersMuted = false
+      XCTAssertEqual(
+        controller.inspectorMuteSwitch(loud), InspectorMuteSwitch(isOn: false, isMutedByMuteAll: false))
+    }
+  }
+
   // MARK: Wallpaper per Desktop
 
   /// One display, `primary`, whose renderer title names display 1, with two desktops.

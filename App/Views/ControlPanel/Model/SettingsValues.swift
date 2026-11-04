@@ -151,6 +151,9 @@ struct LockScreenState: Equatable, Sendable {
 /// reports "in effect now" beside the choices.
 struct PlaybackSettings: Equatable {
   var wallpapersMuted: Bool
+  /// Installed wallpapers muted in their own saved sound settings (the inspector's Mute this
+  /// wallpaper). Mute All is layered on top of them and never written into them.
+  var mutedWallpaperCount: Int = 0
   var desktopCoveredAction: DesktopCoveredAction
   var playsOnlyOnActiveDisplay: Bool
   var otherAudioAction: OtherAudioAction

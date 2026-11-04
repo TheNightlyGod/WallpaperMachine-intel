@@ -15,19 +15,27 @@ struct GeneralConfigurationCard: View {
     let volumeKey = InspectorAction.wallpaperSetting(id, "volume")
     let audioKey = InspectorAction.wallpaperSetting(id, "audioResponseEnabled")
     let mediaKey = InspectorAction.wallpaperSetting(id, "mediaIntegrationEnabled")
+    let mute = controller.inspectorMuteSwitch(options)
     InspectorSection("General configuration") {
-      InspectorToggleRow(
-        title: "Mute wallpaper audio", isOn: options.isMuted,
-        isDisabled: controller.isInspectorControlDisabled(options, key: mutedKey)
-      ) { muted in
-        controller.launch(mutedKey, policy: .latestWins) { try await controller.setMuted(muted, for: id) }
+      VStack(alignment: .leading, spacing: 0) {
+        InspectorToggleRow(
+          title: "Mute this wallpaper", isOn: mute.isOn,
+          isDisabled: mute.isMutedByMuteAll || controller.isInspectorControlDisabled(options, key: mutedKey)
+        ) { muted in
+          controller.launch(mutedKey, policy: .latestWins) { try await controller.setMuted(muted, for: id) }
+        }
+        if mute.isMutedByMuteAll {
+          InspectorNote("Mute All is on, so every wallpaper is silent.")
+            .padding(.horizontal, 12)
+            .padding(.bottom, 8)
+        }
       }
       InspectorSliderRow(
         title: "Volume", value: options.volume * 100, range: 0...100, step: 1,
         accessibilityLabel: L("Volume"), format: { InspectorWording.percent($0 / 100) },
         onRelease: { setVolume($0 / 100) }, onStep: { setVolume($0 / 100) }
       )
-      .disabled(controller.isInspectorControlDisabled(options, key: volumeKey) || options.isMuted)
+      .disabled(controller.isInspectorControlDisabled(options, key: volumeKey) || mute.isOn)
       InspectorToggleRow(
         title: "Audio response", isOn: options.audioResponseEnabled,
         isDisabled: controller.isInspectorControlDisabled(options, key: audioKey)

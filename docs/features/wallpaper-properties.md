@@ -123,7 +123,9 @@ shows those. Apply changes is unchanged: it reloads the wallpaper from the saved
 
 ## Properties
 
-The inspector's compact **General configuration** section holds mute, volume,
+The inspector's compact **General configuration** section holds **Mute this
+wallpaper** (shown on and locked while [Mute all wallpapers](performance.md#playback)
+is on), volume,
 [Audio response](audio-response.md), and media integration. **Audio and media
 status** expands to show their explanations and delivery status. The presets and
 **Wallpaper properties** follow, with the wallpaper's authored controls in their

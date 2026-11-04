@@ -959,6 +959,10 @@ pub struct BridgeSettingsSnapshot {
     /// False when nothing running can honour an internal render scale, so the
     /// control describes a preference that changes nothing on screen today.
     pub render_scale_supported: bool,
+    /// How many installed wallpapers are muted in their own saved sound
+    /// settings. The host's mute of every wallpaper is layered on top and
+    /// never written into them, so the panel names these beside it.
+    pub muted_wallpaper_count: u32,
 }
 
 /// Everything the panel shows, in one answer.

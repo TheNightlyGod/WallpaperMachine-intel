@@ -4546,8 +4546,14 @@
     "General configuration" : {
       "localizations" : {"pt-BR" : {"stringUnit" : {"state" : "translated", "value" : "Configuração geral"}}, "ko" : {"stringUnit" : {"state" : "translated", "value" : "일반 설정"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "一般設定"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "常规配置"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "一般設定"}}}
     },
-    "Mute wallpaper audio" : {
-      "localizations" : {"pt-BR" : {"stringUnit" : {"state" : "translated", "value" : "Silenciar áudio do papel de parede"}}, "ko" : {"stringUnit" : {"state" : "translated", "value" : "배경화면 오디오 음소거"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "壁紙のオーディオを消音"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "壁纸静音"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "將桌布音訊靜音"}}}
+    "Mute this wallpaper" : {
+      "localizations" : {"pt-BR" : {"stringUnit" : {"state" : "translated", "value" : "Silenciar este papel de parede"}}, "ko" : {"stringUnit" : {"state" : "translated", "value" : "이 배경화면 음소거"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "この壁紙を消音"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "将此壁纸静音"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "將此桌布靜音"}}}
+    },
+    "Mute All is on, so every wallpaper is silent." : {
+      "localizations" : {"pt-BR" : {"stringUnit" : {"state" : "translated", "value" : "Silenciar Tudo está ativado, então todos os papéis de parede estão sem som."}}, "ko" : {"stringUnit" : {"state" : "translated", "value" : "모두 음소거가 켜져 있어 모든 배경화면이 무음입니다."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "「すべて消音」がオンのため、すべての壁紙が消音されています。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "“全部静音”已开启，所有壁纸均已静音。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "「全部靜音」已開啟，所有桌布均已靜音。"}}}
+    },
+    "%lld muted separately" : {
+      "localizations" : {"pt-BR" : {"stringUnit" : {"state" : "translated", "value" : "%lld silenciados à parte"}}, "ko" : {"stringUnit" : {"state" : "translated", "value" : "%lld개 개별 음소거"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "%lld件を個別に消音"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "%lld 个单独静音"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "%lld 個單獨靜音"}}}
     },
     "Volume" : {
       "localizations" : {"pt-BR" : {"stringUnit" : {"state" : "translated", "value" : "Volume"}}, "ko" : {"stringUnit" : {"state" : "translated", "value" : "음량"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "音量"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "音量"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "音量"}}}

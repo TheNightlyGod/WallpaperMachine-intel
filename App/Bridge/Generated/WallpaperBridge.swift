@@ -8275,6 +8275,12 @@ public struct BridgeSettingsSnapshot {
      * control describes a preference that changes nothing on screen today.
      */
     public var renderScaleSupported: Bool
+    /**
+     * How many installed wallpapers are muted in their own saved sound
+     * settings. The host's mute of every wallpaper is layered on top and
+     * never written into them, so the panel names these beside it.
+     */
+    public var mutedWallpaperCount: UInt32
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -8362,7 +8368,12 @@ public struct BridgeSettingsSnapshot {
         /**
          * False when nothing running can honour an internal render scale, so the
          * control describes a preference that changes nothing on screen today.
-         */renderScaleSupported: Bool) {
+         */renderScaleSupported: Bool, 
+        /**
+         * How many installed wallpapers are muted in their own saved sound
+         * settings. The host's mute of every wallpaper is layered on top and
+         * never written into them, so the panel names these beside it.
+         */mutedWallpaperCount: UInt32) {
         self.displays = displays
         self.launchAtLoginAvailable = launchAtLoginAvailable
         self.launchAtLoginEnabled = launchAtLoginEnabled
@@ -8394,6 +8405,7 @@ public struct BridgeSettingsSnapshot {
         self.qualityThrottle = qualityThrottle
         self.effectiveFrameRateCap = effectiveFrameRateCap
         self.renderScaleSupported = renderScaleSupported
+        self.mutedWallpaperCount = mutedWallpaperCount
     }
 }
 
@@ -8494,6 +8506,9 @@ extension BridgeSettingsSnapshot: Equatable, Hashable {
         if lhs.renderScaleSupported != rhs.renderScaleSupported {
             return false
         }
+        if lhs.mutedWallpaperCount != rhs.mutedWallpaperCount {
+            return false
+        }
         return true
     }
 
@@ -8529,6 +8544,7 @@ extension BridgeSettingsSnapshot: Equatable, Hashable {
         hasher.combine(qualityThrottle)
         hasher.combine(effectiveFrameRateCap)
         hasher.combine(renderScaleSupported)
+        hasher.combine(mutedWallpaperCount)
     }
 }
 
@@ -8570,7 +8586,8 @@ public struct FfiConverterTypeBridgeSettingsSnapshot: FfiConverterRustBuffer {
                 onBatteryPower: FfiConverterBool.read(from: &buf), 
                 qualityThrottle: FfiConverterSequenceTypeBridgeQualityThrottleCause.read(from: &buf), 
                 effectiveFrameRateCap: FfiConverterOptionUInt32.read(from: &buf), 
-                renderScaleSupported: FfiConverterBool.read(from: &buf)
+                renderScaleSupported: FfiConverterBool.read(from: &buf), 
+                mutedWallpaperCount: FfiConverterUInt32.read(from: &buf)
         )
     }
 
@@ -8606,6 +8623,7 @@ public struct FfiConverterTypeBridgeSettingsSnapshot: FfiConverterRustBuffer {
         FfiConverterSequenceTypeBridgeQualityThrottleCause.write(value.qualityThrottle, into: &buf)
         FfiConverterOptionUInt32.write(value.effectiveFrameRateCap, into: &buf)
         FfiConverterBool.write(value.renderScaleSupported, into: &buf)
+        FfiConverterUInt32.write(value.mutedWallpaperCount, into: &buf)
     }
 }
 

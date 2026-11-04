@@ -550,6 +550,17 @@ impl BridgeActorState {
             quality_throttle: self.quality_throttle.iter().copied().collect(),
             effective_frame_rate_cap: self.active_target_fps_cap_for_app(candidate),
             render_scale_supported: backends.render_scale_supported,
+            muted_wallpaper_count: u32::try_from(
+                self.library
+                    .iter()
+                    .filter(|entry| {
+                        self.wallpaper_configs
+                            .get(&entry.id)
+                            .is_some_and(|config| config.audio.muted)
+                    })
+                    .count(),
+            )
+            .unwrap_or(u32::MAX),
         }
     }
 }
@@ -653,5 +664,39 @@ mod tests {
             snapshot.scene_update_modes.is_empty() && snapshot.scene_renderers.is_empty(),
             "nothing was observed, so nothing may be reported as running"
         );
+    }
+
+    #[test]
+    fn settings_snapshot_counts_installed_wallpapers_muted_on_their_own() {
+        use crate::api::{BridgeWallpaperEntry, BridgeWallpaperKind};
+        use crate::config::WallpaperConfig;
+
+        let root = tempfile::tempdir().unwrap();
+        let paths = BridgePaths::for_home(root.path());
+        let mut state = crate::actor::state::BridgeActorState::default();
+        state.replace_library(
+            ["quiet", "loud", "unsaved"]
+                .into_iter()
+                .map(|id| BridgeWallpaperEntry {
+                    id: id.to_owned(),
+                    title: id.to_owned(),
+                    kind: BridgeWallpaperKind::ProjectScene,
+                    supported: true,
+                    active: false,
+                    selected: false,
+                    preview_path: None,
+                })
+                .collect(),
+        );
+        // A muted config left behind by a wallpaper that is no longer installed.
+        for (id, muted) in [("quiet", true), ("loud", false), ("removed", true)] {
+            let mut config = WallpaperConfig::new_for(id, "scene");
+            config.audio.muted = muted;
+            state.wallpaper_configs.insert(id.to_owned(), config);
+        }
+
+        let snapshot = state.settings(&[], LaunchAtLoginStatus::Unavailable, &paths, &[]);
+
+        assert_eq!(snapshot.muted_wallpaper_count, 1);
     }
 }

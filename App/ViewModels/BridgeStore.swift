@@ -1513,7 +1513,8 @@ final class BridgeStore {
             sceneQuality: .wallpaperEngineDefault, sceneUpdateModes: [],
             sceneRenderers: [], userAssetsPath: "", renderScale: 1, preferredRenderScale: 1,
             frameRateCap: nil, batteryRenderScale: 0.75, batteryTargetFps: 30, onBatteryPower: false,
-            qualityThrottle: [], effectiveFrameRateCap: nil, renderScaleSupported: false)
+            qualityThrottle: [], effectiveFrameRateCap: nil, renderScaleSupported: false,
+            mutedWallpaperCount: 0)
         return Snapshots(app: app, library: library, wallpaperOptions: nil, monitorInformation: monitor, settings: settings)
     }
 

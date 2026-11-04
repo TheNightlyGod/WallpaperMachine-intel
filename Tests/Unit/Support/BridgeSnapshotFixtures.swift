@@ -141,7 +141,8 @@ enum BridgeSnapshotFixtures {
     onBatteryPower: Bool = false,
     qualityThrottle: [BridgeQualityThrottleCause] = [],
     effectiveFrameRateCap: UInt32? = nil,
-    renderScaleSupported: Bool = true
+    renderScaleSupported: Bool = true,
+    mutedWallpaperCount: UInt32 = 0
   ) -> BridgeSettingsSnapshot {
     BridgeSettingsSnapshot(
       displays: displays,
@@ -174,6 +175,7 @@ enum BridgeSnapshotFixtures {
       onBatteryPower: onBatteryPower,
       qualityThrottle: qualityThrottle,
       effectiveFrameRateCap: effectiveFrameRateCap,
-      renderScaleSupported: renderScaleSupported)
+      renderScaleSupported: renderScaleSupported,
+      mutedWallpaperCount: mutedWallpaperCount)
   }
 }
