@@ -1,21 +1,28 @@
 # Everything a macOS job needs before scripts/build.py can run: Xcode 26 with its Metal
 # Toolchain, the Homebrew packages, and the two caches that keep a release from compiling
 # the world. Shared by
-# Build's build job, the Test workflow's jobs and Warm caches, so all of them read and
-# write the same cache entries.
+# Build's build job, the Test workflow's jobs, CodeQL's Swift job and Warm caches, so all
+# of them read the same cache entries.
 #
 # Caches (docs/release.md, "Build (build.yml)"), all scoped to main, which every ref can read.
 # Only runs on main save them: a cache saved under a pull request, branch or tag can be
 # read by no other ref, and those entries pushed the repository past GitHub's 10 GB
 # limit, evicting the main entries releases restore. Other refs restore and never save.
-# - ccache: the C++ scene engine's objects, hashed by content, so the fresh mtimes of a
-#   checkout (which force CMake to recompile everything) cost cache lookups, not builds.
-#   Saved under a new key every run and restored by prefix. Test's parallel jobs
-#   share a run's key, so only the one that compiles the most (`renderer`) saves it;
-#   the others pass `save-object-cache: "false"`.
+# Every entry is saved under a new key and restored by prefix, newest first, so only the
+# callers that opt in save: each save is a new entry counted against that limit.
+# - ccache: the C++ scene engine's objects, hashed by content. `save-object-cache`
+#   (default on) saves it; Test's parallel jobs share a run's key, so only the one that
+#   compiles the most (`renderer`) saves it, and CodeQL, which runs on every push, and the
+#   release build, which must not spend its time uploading, only restore it.
 # - renderer: cargo's registry and target directory, keyed on the toolchain file, then
 #   the lock file and the vendored revision. It is restored only from entries built by
 #   the same toolchain, whose target directories are the only ones cargo can reuse.
+#   `save-renderer-cache` (default off) saves it: Warm caches does, once a day.
+# - `reuse-renderer-build` keeps that restored build current: a checkout gives every
+#   file a new time, which made cargo and CMake rebuild every workspace crate and the
+#   C++ engine. scripts/source_times.py gives the files unchanged since the cached build
+#   their old time back. Only jobs that build exactly `scripts/build.py`'s renderer stage
+#   may pass it; every other job drops the cached build's record of its sources.
 name: Prepare build
 description: Select Xcode 26 and its Metal Toolchain, install the build dependencies and restore the build caches.
 
@@ -24,6 +31,14 @@ inputs:
     description: "Save the C++ object cache when the job ends (runs on main only)."
     required: false
     default: "true"
+  save-renderer-cache:
+    description: "Save the renderer build when the job ends (runs on main only)."
+    required: false
+    default: "false"
+  reuse-renderer-build:
+    description: "Rebuild only the renderer sources that changed since the restored build; only for jobs whose cargo build is scripts/build.py's."
+    required: false
+    default: "false"
 
 runs:
   using: composite
@@ -64,6 +79,7 @@ runs:
       shell: bash
       env:
         SAVE_OBJECT_CACHE: ${{ inputs.save-object-cache }}
+        SAVE_RENDERER_CACHE: ${{ inputs.save-renderer-cache }}
         REF: ${{ github.ref }}
       run: |
         set -euo pipefail
@@ -71,8 +87,10 @@ runs:
         if [ "${REF}" = "refs/heads/main" ]; then main=true; fi
         objects=false
         if [ "${main}" = true ] && [ "${SAVE_OBJECT_CACHE}" = true ]; then objects=true; fi
+        renderer=false
+        if [ "${main}" = true ] && [ "${SAVE_RENDERER_CACHE}" = true ]; then renderer=true; fi
         {
-          echo "renderer=${main}"
+          echo "renderer=${renderer}"
           echo "objects=${objects}"
         } >> "$GITHUB_OUTPUT"
 
@@ -114,6 +132,9 @@ runs:
       shell: bash
       run: ccache --zero-stats
 
+    # A new key per run, restored newest first: the closer the restored build is to these
+    # sources, the less `reuse-renderer-build` has to rebuild. The second prefix also
+    # matches the one fixed-key entry each lock file had before keys carried the run.
     - name: Restore the renderer build
       if: steps.save.outputs.renderer == 'true'
       uses: actions/cache@v4
@@ -122,8 +143,10 @@ runs:
           ~/.cargo/registry
           ~/.cargo/git
           Renderer/target
-        key: renderer-ccache-${{ steps.brew.outputs.os }}-${{ hashFiles('Renderer/rust-toolchain.toml') }}-${{ hashFiles('Renderer/Cargo.lock', 'ThirdParty/provenance.json') }}
-        restore-keys: renderer-ccache-${{ steps.brew.outputs.os }}-${{ hashFiles('Renderer/rust-toolchain.toml') }}-
+        key: renderer-ccache-${{ steps.brew.outputs.os }}-${{ hashFiles('Renderer/rust-toolchain.toml') }}-${{ hashFiles('Renderer/Cargo.lock', 'ThirdParty/provenance.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
+        restore-keys: |
+          renderer-ccache-${{ steps.brew.outputs.os }}-${{ hashFiles('Renderer/rust-toolchain.toml') }}-${{ hashFiles('Renderer/Cargo.lock', 'ThirdParty/provenance.json') }}-
+          renderer-ccache-${{ steps.brew.outputs.os }}-${{ hashFiles('Renderer/rust-toolchain.toml') }}-
 
     - name: Restore the renderer build without saving it
       if: steps.save.outputs.renderer != 'true'
@@ -133,5 +156,23 @@ runs:
           ~/.cargo/registry
           ~/.cargo/git
           Renderer/target
-        key: renderer-ccache-${{ steps.brew.outputs.os }}-${{ hashFiles('Renderer/rust-toolchain.toml') }}-${{ hashFiles('Renderer/Cargo.lock', 'ThirdParty/provenance.json') }}
-        restore-keys: renderer-ccache-${{ steps.brew.outputs.os }}-${{ hashFiles('Renderer/rust-toolchain.toml') }}-
+        key: renderer-ccache-${{ steps.brew.outputs.os }}-${{ hashFiles('Renderer/rust-toolchain.toml') }}-${{ hashFiles('Renderer/Cargo.lock', 'ThirdParty/provenance.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
+        restore-keys: |
+          renderer-ccache-${{ steps.brew.outputs.os }}-${{ hashFiles('Renderer/rust-toolchain.toml') }}-${{ hashFiles('Renderer/Cargo.lock', 'ThirdParty/provenance.json') }}-
+          renderer-ccache-${{ steps.brew.outputs.os }}-${{ hashFiles('Renderer/rust-toolchain.toml') }}-
+
+    - name: Keep the restored renderer build current
+      # After every step that changes what the fingerprint reads (Xcode, Homebrew, the
+      # compiler launchers). A job that builds anything else drops the record instead, so
+      # a cache it saves is never trusted to describe its target directory.
+      shell: bash
+      env:
+        REUSE: ${{ inputs.reuse-renderer-build }}
+      run: |
+        set -euo pipefail
+        if [ "${REUSE}" = true ]; then
+          python3 scripts/source_times.py restore
+          python3 scripts/source_times.py record
+        else
+          python3 scripts/source_times.py forget
+        fi

@@ -23,6 +23,7 @@ import subprocess
 import sys
 
 from lib.glyphs import markers
+from lib.homebrew import RENDERER_PACKAGES
 from lib.paths import APP, BUILD, BUILD_ARTIFACTS, GENERATED_BRIDGE, PRODUCTS, RENDERER, ROOT, XCODEPROJ, app_bundle
 from lib.xcode import run_quiet
 
@@ -57,8 +58,7 @@ def repository_commit(root=ROOT):
 def build_environment():
     result = os.environ.copy()
     prefix = subprocess.check_output(["brew", "--prefix"], text=True).strip()
-    packages = ["quickjs-ng", "libpng", "brotli", "lz4", "nlohmann-json", "argparse"]
-    roots = [str(Path(prefix) / "opt" / name) for name in packages]
+    roots = [str(Path(prefix) / "opt" / name) for name in RENDERER_PACKAGES]
     result["PATH"] = f"{prefix}/bin:" + result.get("PATH", "")
     result["CMAKE_PREFIX_PATH"] = ";".join(roots + [prefix])
     result["PKG_CONFIG_PATH"] = ":".join(str(Path(p) / "lib/pkgconfig") for p in roots)

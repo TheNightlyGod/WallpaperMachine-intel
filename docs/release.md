@@ -663,10 +663,10 @@ XcodeGen/CMake/renderer package set with `ccache`, and restores two
 `macos-15` or `macos-26`), because bottles and compiled objects
 differ between releases; `build` and the Test workflow therefore keep separate entries.
 
-| Cache | Path | Key | What a hit saves |
-|---|---|---|---|
-| C++ objects | `~/.ccache` | `ccache-<os>-<run>`, restored by the `ccache-<os>-` prefix | recompiling the scene engine. A checkout gives every file a new mtime, so CMake rebuilds the whole engine even from a restored build tree; ccache hashes content and returns the previous objects. Test's three jobs share a run's key, so only `renderer`, which compiles the engine and its C++ tests, saves it; `rust` and `native` pass `save-object-cache: "false"` and only restore it |
-| Renderer | `~/.cargo/registry`, `~/.cargo/git`, `Renderer/target` | `renderer-ccache-<os>-<hash of rust-toolchain.toml>-<hash of Cargo.lock, provenance.json>`, restored only from entries with the same toolchain hash | crate downloads, and Rust compilation |
+| Cache | Path | Key | Saved by | What a hit saves |
+|---|---|---|---|---|
+| C++ objects | `~/.ccache` | `ccache-<os>-<run>`, restored by the `ccache-<os>-` prefix | `save-object-cache` (default on): Warm caches and Test's `renderer` job. Test's three jobs share a run's key, so `rust` and `native` pass `"false"`; so do CodeQL, which runs on every push and saved 147 MB each time, and Build, whose release would wait for the upload | compiling a C++ file the build tree has to rebuild: ccache hashes content and returns the previous object |
+| Renderer | `~/.cargo/registry`, `~/.cargo/git`, `Renderer/target` | `renderer-ccache-<os>-<hash of rust-toolchain.toml>-<hash of Cargo.lock, provenance.json>-<run>`, restored by the prefix without the run, then by the toolchain prefix alone | `save-renderer-cache` (default off): Warm caches, daily | crate downloads, and, with `reuse-renderer-build`, every Rust crate and C++ file unchanged since the restored build |
 
 The `CMAKE_<LANG>_COMPILER_LAUNCHER=ccache` variables only take effect on a build
 tree's first CMake configure, so change the renderer key's prefix whenever the
@@ -676,13 +676,39 @@ the evidence the cache worked. The toolchain is a pinned stable release
 (`Renderer/rust-toolchain.toml`); raising the pin changes the renderer key's
 toolchain hash, so the next build compiles every crate once and starts a new entry.
 
-Only runs on `main` save either cache; every other ref (pull requests, branches,
-hand-pushed tags) restores and never saves. An entry saved under another ref is
-readable by that ref alone, and those entries pushed the repository past GitHub's
-10 GB cache limit, which evicts the `main` entries releases need. Version calls Build
-directly for each tag it creates, so a release cut by a `release:` push to `main`
-still saves; a Version run dispatched by hand from another branch builds its tag
-without saving.
+Only runs on `main` save either cache, and only the callers that opt in; every other
+ref (pull requests, branches, hand-pushed tags) restores and never saves. An entry saved
+under another ref is readable by that ref alone, and those entries pushed the repository
+past GitHub's 10 GB cache limit, which evicts the `main` entries releases need; on
+2026-11-04 CodeQL's per-push C++ object caches did the same (10.5 GB in 108 entries,
+most of them CodeQL's). A release only restores: [Warm caches](#warm-caches-warm-cachesyml)
+writes the entries it reads, once a day, so they are at most a day behind `main`.
+
+**Reusing the renderer build.** A checkout gives every file the current time, and cargo
+and CMake decide what to rebuild by comparing times, so a restored `Renderer/target`
+looked older than all its sources: every release recompiled the four workspace crates
+(vendored naga, `wm-shader`, `wallpaper-core`, `wallpaper-bridge`), reran the core
+crate's build script and recompiled the C++ engine through ccache (214 compiler calls,
+54 misses, for 1.9.1), 3m30s of the macOS 15 runner although the cache held them
+built. With `reuse-renderer-build: "true"`, `prepare-build` runs
+`python3 scripts/source_times.py restore` and then `record` after the cache restore.
+`record` writes `Renderer/target/source-times.json`, which travels with the build in
+the cache: the blob id of every tracked file under `Renderer/` and `ThirdParty/`, the
+entries of every directory there, and the toolchain (the `rustc`, Apple clang, SDK,
+CMake and Homebrew library versions, the cargo manifests and the compiler flags in the
+environment). `restore` gives every file whose blob id is unchanged, and every directory
+whose entries are unchanged, a time older than any build output, but only when the
+toolchain is the recorded one; changed, added and removed files keep the checkout's time.
+Cargo and CMake then rebuild exactly what changed: a release whose renderer sources are
+unchanged rebuilds only `wallpaper-bridge`, which `GIT_SHORT_COMMIT` stamps with the new
+revision (about half the old time), and one C++ file changed compiles that one file.
+Removing or adding a file changes its directory's entries, so a build script watching the
+directory (and CMake's `file(GLOB)`) runs again. The record vouches for the whole target
+directory only while every job that keeps it builds the same thing, `scripts/build.py`'s
+renderer stage (`cargo build --workspace --release`): Build, Warm caches and CodeQL pass
+the input. Every other job (Test's, which also build test profiles) runs
+`source_times.py forget`, so a cache it saved would never be trusted. The first run
+after a change of toolchain, or without a record, rebuilds everything once, as before.
 
 **What the attestation does and does not say.** Its SLSA predicate is built from
 the run's OIDC claims: `resolvedDependencies[0]` is `git+<repo>@<claims.ref>` with
@@ -755,13 +781,17 @@ days.
 
 ### Warm caches (`warm-caches.yml`)
 
-GitHub evicts a cache entry nobody has read for seven days. Twice a week (and on
-demand from **Actions -> Warm caches -> Run workflow**) this runs `prepare-build`
-and `python3 scripts/build.py --renderer-only` on `main`, once on `macos-15` and
-once on `macos-26`, which reads every entry Build and Test use and saves a fresh C++
-object cache for each, so a release or a Test run after a quiet week still starts warm. Caches saved on
-`main` are readable from every ref, including the tags Release builds. It
-publishes nothing.
+Every day at 03:17 UTC (and on demand from **Actions -> Warm caches -> Run workflow**)
+this runs `prepare-build` with `save-renderer-cache` and `reuse-renderer-build` and
+then `python3 scripts/build.py --renderer-only` on `main`, once on `macos-15` and once
+on `macos-26`, and saves a new renderer build and C++ object cache for each. They are
+the entries a release restores (Build saves none, so a release never waits for an
+upload), so its renderer build is at most a day behind `main` and it rebuilds only
+what changed since. Reading every entry also keeps GitHub from evicting one nobody
+read for seven days. Caches saved on `main` are readable from every ref, including
+the tags Release builds. It publishes nothing. After a change to the caches or to
+`scripts/source_times.py` reaches `main`, run it once by hand, so the next release
+does not rebuild the renderer from an entry without a record.
 
 ### Supporters (`supporters.yml`)
 
@@ -789,7 +819,8 @@ findings were mostly false positives, so new alerts surface after the merge inst
 It replaces GitHub's default setup, which can only autobuild Swift and
 fails at the extension's link because the renderer library and the Homebrew
 libraries do not exist yet. Actions, Python and Rust are analyzed without a build
-on Linux. Swift runs on `macos-26`: `prepare-build` and
+on Linux. Swift runs on `macos-26`: `prepare-build` (restoring the caches without
+saving the C++ object cache, and reusing the renderer build) and
 `python3 scripts/build.py --renderer-only` first, untraced, then CodeQL traces
 `scripts/build.py --swift-only` with the `--xcode-setting` overrides CodeQL's own
 Swift autobuild uses (no signing, no compilation cache, no integrated driver), so

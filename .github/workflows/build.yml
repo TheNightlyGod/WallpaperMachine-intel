@@ -92,6 +92,12 @@ jobs:
           cat "${RUNNER_TEMP}/release/notes.md" >> "$GITHUB_STEP_SUMMARY"
 
       - uses: ./.github/actions/prepare-build
+        with:
+          # Restore only: an upload here would hold up the release. Warm caches saves
+          # them every day, and the renderer build is reused for every source this
+          # release has not changed since.
+          save-object-cache: "false"
+          reuse-renderer-build: "true"
 
       - uses: actions/download-artifact@v4
         with:

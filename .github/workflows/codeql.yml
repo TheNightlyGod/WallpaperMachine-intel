@@ -59,6 +59,12 @@ jobs:
 
       - if: matrix.language == 'swift'
         uses: ./.github/actions/prepare-build
+        with:
+          # Every push to main runs this, and a C++ object cache saved each time filled
+          # the repository's 10 GB cache limit and evicted the entries releases read.
+          save-object-cache: "false"
+          # Its cargo build is scripts/build.py's, so it may rebuild only what changed.
+          reuse-renderer-build: "true"
 
       - name: Build the renderer and bridge
         # Before init, so CodeQL neither traces nor slows the Rust and C++ build.
