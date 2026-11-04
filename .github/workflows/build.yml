@@ -3,7 +3,9 @@
 #
 # Called by Version right after it pushes a bump tag, and by Release for hand-pushed
 # tags. Version has to call it directly: a tag pushed with GITHUB_TOKEN never starts
-# another workflow, so Release alone would never run for CI-produced tags.
+# another workflow, so Release alone would never run for CI-produced tags. Rehearsal
+# calls it with `rehearsal: true`, which builds a branch as the version `tag` names and
+# signs, notarizes and verifies its image, without a tag, notes or publication.
 #
 # Three jobs. `app-icon` compiles the Icon Composer icon on macOS 26, because Xcode 26's
 # actool crashes on most attempts to compile an .icon on macOS 15. `build` makes the
@@ -25,8 +27,18 @@ on:
   workflow_call:
     inputs:
       tag:
-        description: "Version tag to build and publish."
+        description: "Version tag to build and publish (in a rehearsal, the version to build as)."
         required: true
+        type: string
+      rehearsal:
+        description: "Build, sign, notarize and verify `ref` as `tag`, and publish nothing."
+        required: false
+        default: false
+        type: boolean
+      ref:
+        description: "What a rehearsal builds; a release always builds its tag."
+        required: false
+        default: ""
         type: string
 
 permissions:
@@ -44,7 +56,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag }}
+          ref: ${{ inputs.rehearsal && inputs.ref || inputs.tag }}
 
       - name: Compile the app icon
         run: |
@@ -76,11 +88,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag }}
+          ref: ${{ inputs.rehearsal && inputs.ref || inputs.tag }}
           # Release notes read the commits between this tag and the previous one.
           fetch-depth: 0
 
+      - name: Build as the rehearsed version
+        if: inputs.rehearsal
+        # The tree as the bump commit would leave it: what a release of this ref builds.
+        env:
+          TAG: ${{ inputs.tag }}
+        run: python3 scripts/bump_version.py --spec "${TAG#v}" --apply
+
       - name: Write the release notes
+        if: ${{ !inputs.rehearsal }}
         # Before the long build, so a notes problem fails in seconds. A translated
         # CHANGELOG.md section is reused. A hand-pushed tag without one asks the model
         # once and writes that exact section into the working tree, and the copy handed
@@ -232,6 +252,7 @@ jobs:
           set -euo pipefail
           directory="build/Build/Products/Release"
           name="WallpaperMachine-${TAG#v}-arm64.dmg"
+          mkdir -p "${RUNNER_TEMP}/release"
           if [ ! -f "${directory}/${name}" ]; then
             echo "::error::No ${name} in ${directory}. scripts/package.py names the image from the built bundle's CFBundleShortVersionString, so the version bump never reached this build."
             ls -1 "${directory}"/*.dmg 2>/dev/null || true
@@ -262,18 +283,20 @@ jobs:
           retention-days: 14
 
       - name: Hand the image to publish
+        # A rehearsal's image is kept for a few days to try out, and published nowhere.
         uses: actions/upload-artifact@v4
         with:
-          name: release-${{ inputs.tag }}
+          name: ${{ inputs.rehearsal && 'rehearsal' || 'release' }}-${{ inputs.tag }}
           path: ${{ runner.temp }}/release/
           if-no-files-found: error
           # A disk image is already compressed.
           compression-level: 0
-          retention-days: 7
+          retention-days: ${{ inputs.rehearsal && 3 || 7 }}
 
   publish:
     name: Publish the release
     needs: build
+    if: ${{ !inputs.rehearsal }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     # Builds remain per-tag and parallel; publication is repository-wide so the

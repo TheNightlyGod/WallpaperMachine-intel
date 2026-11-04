@@ -497,8 +497,8 @@ on the hotfix branch rather than `main`.
 
 ## Workflows
 
-Version, Build, Release, Warm caches and Supporters are the release workflows in
-`.github/workflows/`; Supporters shares only `main` with the others.
+Version, Build, Release, Rehearsal, Warm caches and Supporters are the release workflows
+in `.github/workflows/`; Supporters shares only `main` with the others.
 `claude.yml` and `claude-code-review.yml` are pull-request automation, described
 in [CONTRIBUTING.md](../CONTRIBUTING.md#automated-review). `checks.yml` runs
 `python3 scripts/test.py --python-only` on Linux for every pull request into `main` or a
@@ -507,9 +507,10 @@ described [below](#codeql-codeqlyml).
 
 Version, Build and Release grant `contents: write`; Build's publish job also needs
 `id-token: write` and `attestations: write` for its provenance attestation, and its
-build job `actions: read` to find the app icon among the run's jobs and artifacts. Both
-callers pass those through, together with the repository's secrets (`secrets:
-inherit`). Warm caches only reads. Supporters writes only `README.md`,
+build job `actions: read` to find the app icon among the run's jobs and artifacts. All
+three callers (Version, Release, Rehearsal) pass those through, together with the
+repository's secrets (`secrets: inherit`); Rehearsal must grant what the skipped publish
+job declares. Warm caches only reads. Supporters writes only `README.md`,
 `README.zh-CN.md`, `README.pt-BR.md` and `README.ko.md`, with `contents: write`, and reads Version's runs with
 `actions: read`. The macOS setup Build and Warm caches share lives in one
 composite action,
@@ -574,7 +575,8 @@ protection must allow GitHub Actions.
 
 `workflow_call` only, with a required `tag` input. It is the single place a
 publishable artifact is produced, called by Version for CI-produced tags and by
-Release for hand-pushed ones. It runs three jobs. `app-icon` ("App icon (macOS 26)")
+Release for hand-pushed ones; [Rehearsal](#rehearsal-rehearsalyml) calls it with
+`rehearsal: true` and a `ref`. It runs three jobs. `app-icon` ("App icon (macOS 26)")
 compiles the app icon on a `macos-26` runner. `build` ("Build, sign and notarize
 (macOS 15)") starts at the same time on `macos-15` (the oldest runner that carries
 Xcode 26, whose Homebrew bottles set the published app's minimum macOS), with a
@@ -596,7 +598,9 @@ artifact.
 
 **`build`**
 
-1. checks out the tag with full history, which the notes need;
+1. checks out the tag with full history, which the notes need (a rehearsal checks out
+   its `ref` and applies the rehearsed version with `scripts/bump_version.py --spec
+   <version> --apply`, as the bump commit would);
 2. writes the release body with `scripts/release_notes.py --release-body --ai
    --built-from "$(git rev-parse HEAD)"` before anything is built. The current
    section must already have every required language and is reused without
@@ -604,7 +608,7 @@ artifact.
    the working-tree `CHANGELOG.md`. A copy of that `CHANGELOG.md` goes to `publish`
    with the notes, so the update manifest carries every translation of the new
    section. Missing translations or malformed source history fail here, in seconds,
-   rather than after the macOS build;
+   rather than after the macOS build. A rehearsal writes no notes;
 3. imports the Developer ID certificate and the notary API key from the signing
    secrets into a temporary keychain ([build.md](build.md#release-signing)), also
    before anything is built: a missing secret, a certificate that does not import
@@ -645,7 +649,8 @@ artifact.
    `WallpaperMachine-<tag without v>-arm64.dmg`, and its checksum is echoed into the
    job summary;
 9. hands the image, its sidecar, the notes and that `CHANGELOG.md` to `publish` as
-   the `release-<tag>` artifact.
+   the `release-<tag>` artifact (a rehearsal keeps its image three days as
+   `rehearsal-<tag>`, and skips `publish`).
 
 Step 8 is the guard that the bump actually reached the build:
 `scripts/package.py` names the image from the bundle's
@@ -858,6 +863,29 @@ keeping.
 Default setup must stay off under **Settings -> Code security -> CodeQL
 analysis**; while it is on, GitHub rejects this workflow's results.
 
+### Rehearsal (`rehearsal.yml`)
+
+A release is tagged before it is built, and a tag is never taken back
+([Recovering a failed release](#recovering-a-failed-release)), so a build or packaging
+failure burns the version: 1.7.0 (a bundled library packaging could not relocate) and
+1.9.0 (the Developer ID certificate's import) were each replaced by the next patch,
+with the changelog and banners moved by hand. Rehearsal runs the release path without
+a version to lose. Dispatched on any branch (**Actions -> Rehearsal -> Run workflow**,
+or `gh workflow run rehearsal.yml --ref <branch> -f spec=patch`), its `plan` job turns
+the `spec` input into the version a release of that branch would get, with
+`scripts/bump_version.py --spec` and nothing written, and calls Build with
+`rehearsal: true`, the branch's commit as `ref` and that version as `tag`. Build then
+runs its usual jobs, runners, caches and signing secrets: it applies the version to the
+checkout as the bump commit would, imports the certificate and the notary key, builds,
+adds the icon, signs, notarizes and staples the app and the image, and verifies the
+mounted image. It writes no notes and skips `publish`, and keeps the disk image for three
+days as the run's `rehearsal-<tag>` artifact, to try before releasing. A newer rehearsal
+of the same branch cancels a running one.
+
+Rehearse before landing a change to the release path (the workflows, `prepare-build`,
+`scripts/build.py`, `scripts/package.py` and `scripts/lib/`, `project.yml`'s bundle or
+signing settings, the Homebrew libraries), and before a release that must not slip.
+
 ### Release (`release.yml`)
 
 Triggered by pushing a `v*.*.*` tag by hand. It only calls Build with
@@ -936,6 +964,13 @@ image.
 
 ## Recovering a failed release
 
+A failure the tag's code did not cause (Apple's notary or ticket service, a runner, a
+secret replaced since) is retried with **Re-run failed jobs** in the same run: only
+`build` and `publish` run again, and they publish the same version. A failure that needs
+a change to the code costs the version, as below; a
+[rehearsal](#rehearsal-rehearsalyml) of the branch before releasing it finds that kind
+without taking one.
+
 A tag the Version workflow pushed stays when its Build run fails; only Build's
 `publish` job makes a release public. If a tag was created but its release never
 passed the publication gate, preserve that tag and fix the failed checks on
@@ -964,8 +999,11 @@ carries `CHANGELOG.md` as it is at the patch's tag, and that copy is not rewritt
 
 ## Checklist for a release
 
-1. Land the change on `main` with a `release:` spec line, or run the Version
-   workflow with a spec. An urgent fix goes on a `hotfix/<x.y.z>` branch from the
+1. When the release includes a change to the release path (the workflows,
+   `prepare-build`, `scripts/build.py`, `scripts/package.py`, `scripts/lib/`, signing,
+   bundled libraries), [rehearse](#rehearsal-rehearsalyml) it first and wait for a
+   green run. Then land the change on `main` with a `release:` spec line, or run the
+   Version workflow with a spec. An urgent fix goes on a `hotfix/<x.y.z>` branch from the
    newest tag instead ([Hotfix releases](#hotfix-releases)); afterwards also confirm
    `chore: merge hotfix x.y.z into main` reached `main`, or that its issue is handled.
 2. Confirm the Version run committed `chore: bump version to x.y.z` with the new
