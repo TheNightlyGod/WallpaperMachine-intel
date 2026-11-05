@@ -69,6 +69,7 @@ final class WallpaperPresentationPolicy {
     private let otherAudioAction: @MainActor () -> OtherAudioAction
     private let userMuted: @MainActor () -> Bool
     private let desktopCoveredAction: @MainActor () -> DesktopCoveredAction
+    private let keepsCoverageProbes: @MainActor () -> Bool
     private let coveredDisplays: @MainActor () -> Set<UInt32>
     private let inactiveDisplays: @MainActor (Set<UInt32>) -> Set<UInt32>
     private let screenLayout: @MainActor () -> [NSRect]
@@ -183,6 +184,7 @@ final class WallpaperPresentationPolicy {
         otherAudioAction: (@MainActor () -> OtherAudioAction)? = nil,
         userMuted: (@MainActor () -> Bool)? = nil,
         desktopCoveredAction: (@MainActor () -> DesktopCoveredAction)? = nil,
+        keepsCoverageProbes: (@MainActor () -> Bool)? = nil,
         coveredDisplays: (@MainActor () -> Set<UInt32>)? = nil,
         inactiveDisplays: (@MainActor (Set<UInt32>) -> Set<UInt32>)? = nil,
         screenLayout: (@MainActor () -> [NSRect])? = nil,
@@ -205,6 +207,7 @@ final class WallpaperPresentationPolicy {
         self.otherAudioAction = otherAudioAction ?? { .keepRunning }
         self.userMuted = userMuted ?? { false }
         self.desktopCoveredAction = desktopCoveredAction ?? { .keepRunning }
+        self.keepsCoverageProbes = keepsCoverageProbes ?? { false }
         if let coveredDisplays {
             self.coveredDisplays = coveredDisplays
             probes = nil
@@ -408,11 +411,13 @@ final class WallpaperPresentationPolicy {
         return unusedDisplays(in: current, hidden: hidden).subtracting(hidden)
     }
 
-    /// Probes exist only while a covered desktop pauses, so keeping the
-    /// wallpaper running costs no extra windows.
+    /// Probes exist only while a covered desktop pauses, or while `keepsCoverageProbes` asks for
+    /// their occlusion changes (the sign `AppRuleMonitor` takes that the app in front lost or
+    /// regained its windows), so keeping the wallpaper running costs no extra windows otherwise.
+    /// Kept for that alone, a covered probe pauses nothing.
     private func syncProbes() {
         guard let probes, !observers.isEmpty else { return }
-        if desktopCoveredAction() == .pause {
+        if desktopCoveredAction() == .pause || keepsCoverageProbes() {
             probes.sync()
         } else {
             probes.removeAll()

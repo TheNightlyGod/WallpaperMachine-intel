@@ -6,6 +6,10 @@ final class AppRuleMonitorTests: XCTestCase {
     private var defaults: UserDefaults!
     private var preferences: PlaybackPreferences!
     private var workspaceCenter: NotificationCenter!
+    private var windowCenter: NotificationCenter!
+    /// Whether the app in front shows a window on screen, and how many times the monitor asked.
+    private var showsWindow = true
+    private var windowReads = 0
     private var running: Set<String> = []
     private var frontmost: String?
     private var onBattery = false
@@ -17,6 +21,9 @@ final class AppRuleMonitorTests: XCTestCase {
         defaults = try TemporaryDefaults.make(for: self).defaults
         preferences = PlaybackPreferences(defaults: defaults)
         workspaceCenter = NotificationCenter()
+        windowCenter = NotificationCenter()
+        showsWindow = true
+        windowReads = 0
         running = []
         frontmost = nil
         onBattery = false
@@ -27,6 +34,7 @@ final class AppRuleMonitorTests: XCTestCase {
         defaults = nil
         preferences = nil
         workspaceCenter = nil
+        windowCenter = nil
         super.tearDown()
     }
 
@@ -34,11 +42,16 @@ final class AppRuleMonitorTests: XCTestCase {
         AppRuleMonitor(
             preferences: preferences,
             workspaceCenter: workspaceCenter,
+            windowCenter: windowCenter,
             runningBundleIDs: { self.running },
             frontmostBundleID: { self.frontmost },
             onBattery: {
                 self.batteryReads += 1
                 return self.onBattery
+            },
+            frontmostShowsWindow: {
+                self.windowReads += 1
+                return self.showsWindow
             },
             desktopBundleIDs: ["com.apple.finder", "com.example.Self"])
     }
@@ -145,6 +158,68 @@ final class AppRuleMonitorTests: XCTestCase {
         preferences.otherAppInFrontAction = .mute
         XCTAssertEqual(monitor.actions, [.mute])
         XCTAssertEqual(batteryReads, 0, "Only Pause on battery asks for the power source")
+    }
+
+    private func windowsChanged() {
+        windowCenter.post(name: NSWindow.didChangeOcclusionStateNotification, object: nil)
+    }
+
+    /// An app stays in front after its last window is minimized: the window change that follows
+    /// finds it without a window and the wallpaper plays, until a window shows again or an app is
+    /// activated. An activation counts at once, before its first window has opened.
+    func testAnAppInFrontWithoutAWindowOnScreenIsNotInTheWay() {
+        preferences.otherAppInFrontAction = .pauseOnBattery
+        onBattery = true
+        frontmost = "com.example.Editor"
+        let monitor = makeMonitor()
+        monitor.start()
+        defer { monitor.stop() }
+        XCTAssertEqual(monitor.actions, [.pause])
+
+        showsWindow = false
+        windowsChanged()
+        XCTAssertTrue(monitor.actions.isEmpty, "Minimizing the last window plays the wallpaper")
+        monitor.refresh()
+        XCTAssertTrue(monitor.actions.isEmpty, "A power refresh keeps what the window change found")
+
+        showsWindow = true
+        windowsChanged()
+        XCTAssertEqual(monitor.actions, [.pause], "Restoring the window pauses again")
+
+        showsWindow = false
+        windowsChanged()
+        activate("com.example.Browser")
+        XCTAssertEqual(monitor.actions, [.pause], "A newly activated app counts before its window opens")
+
+        onBattery = false
+        windowsChanged()
+        showsWindow = true
+        windowsChanged()
+        onBattery = true
+        monitor.refresh()
+        XCTAssertEqual(monitor.actions, [.pause], "A window restored on mains power is known at the unplug")
+    }
+
+    /// The window server is asked only while another app is in front and the choice watches it.
+    func testWindowChangesAskOnlyWhileAnotherAppIsInFront() {
+        preferences.otherAppInFrontAction = .pause
+        frontmost = "com.apple.finder"
+        let monitor = makeMonitor()
+        monitor.start()
+        windowsChanged()
+        XCTAssertEqual(windowReads, 0, "The desktop in front is never asked about")
+
+        activate("com.example.Editor")
+        windowsChanged()
+        XCTAssertEqual(windowReads, 1)
+
+        preferences.otherAppInFrontAction = .keepRunning
+        windowsChanged()
+        XCTAssertEqual(windowReads, 1, "Keep running stops watching window changes")
+        preferences.otherAppInFrontAction = .pause
+        monitor.stop()
+        windowsChanged()
+        XCTAssertEqual(windowReads, 1, "A stopped monitor stops watching window changes")
     }
 
     func testAnotherAppInFrontComposesWithAnAppRule() {

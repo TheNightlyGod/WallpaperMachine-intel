@@ -472,6 +472,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 // written into any wallpaper's saved sound settings.
                 userMuted: { preferences.wallpapersMuted },
                 desktopCoveredAction: { preferences.desktopCoveredAction },
+                // "When another app is in front" learns from the probes' occlusion that the app in
+                // front minimized or closed the window over the desktop.
+                keepsCoverageProbes: { preferences.otherAppInFrontAction.watchesFrontmostApp },
                 // Another display than the one the pointer is on, for those who chose to play only there.
                 inactiveDisplays: { known in
                     preferences.playsOnlyOnActiveDisplay ? activeDisplay.inactive(among: known) : []

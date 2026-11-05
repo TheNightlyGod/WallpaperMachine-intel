@@ -286,7 +286,10 @@ picture shows between a window closing and the web page's window opening.
   an injected power source, is worked out again at once by a power change, reads the
   source only when another app is in front, is watched on mains power too, resets to Keep
   running, and suspends the policy on battery and presents again on plugging in without
-  touching sound), and the
+  touching sound; an app in front that a window change finds without a window on screen stops
+  counting until a window shows again or an app is activated, an activation counts before its
+  first window, and the window server is asked only while another app is in front and the
+  choice watches it), and the
   other-audio settle and the system feedback services (alerts, the volume click, Siri
   listening) it ignores by their system path. The quality channel is one more delivery beside presentation and audio:
   a reduction reaches the bridge on its own without suspending anything, an unchanged set is

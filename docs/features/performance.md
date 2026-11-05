@@ -595,6 +595,20 @@ replacing them. Workspace activation notifications are observed only while it or
 rule can do something; there is no polling. A full-screen app needs no choice: its
 display already pauses because the wallpaper cannot be seen.
 
+An app stays in front after its last window is minimized or closed, and macOS posts no
+activation for that, so the app in front counts only until a window change shows it has no
+window left on screen. The change is the occlusion of this app's own windows: the
+coverage probes (`WallpaperCoverageProbes`, above) over each working area, which the policy keeps while this
+choice is not **Keep running** even when a covered desktop keeps running (kept for that alone,
+they pause nothing), and the wallpaper windows. On each change, while another app is in front,
+`AppRuleMonitor.showsWindow(processID:)` asks the window server once whether that app has a
+window on screen in the current Space (normal windows up to floating panels, visible, larger
+than one point); one that has none stops counting until it is activated again or a later
+change finds a window. Minimizing a window that covered the working area, a zoomed one, plays
+the wallpaper at once. Minimizing a smaller window changes no occlusion, so that wallpaper
+plays again only at the next activation (clicking the desktop), as before. An activation always
+counts at once, so an app launching is in front before its first window opens.
+
 **Pause on battery** is **Pause** limited to battery power, for the case the covered-desktop
 pause leaves alone: a wallpaper animating in the gaps between windows that do not cover the
 working area while you work in other apps. While the Mac runs on battery and another app is

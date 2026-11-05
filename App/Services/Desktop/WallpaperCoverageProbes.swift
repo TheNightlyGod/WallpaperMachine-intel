@@ -22,7 +22,8 @@ final class WallpaperCoverageProbeWindow: NSWindow {
 /// probe occluded. The probe is fully transparent and ignores the mouse, so a
 /// click on the desktop still reaches Finder. Its occlusion changes post
 /// `NSWindow.didChangeOcclusionStateNotification`, which the presentation
-/// policy already observes, so nothing polls.
+/// policy already observes, so nothing polls. `AppRuleMonitor` observes the same
+/// changes to notice the app in front minimizing or closing the window over the desktop.
 @MainActor
 final class WallpaperCoverageProbes {
     /// Wide enough for the rounded corners of a zoomed window and the margins

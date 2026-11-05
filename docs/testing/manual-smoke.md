@@ -84,7 +84,9 @@ was run.
       wallpaper keeps animating in the gaps; unplug: it holds its frame at once; click the
       desktop: it plays; click the other app: it holds again; plug in: it plays without a
       click. The menu bar's **On Battery** submenu shows **Pause While Using Other Apps**
-      ticked, and unticking it there turns the row back to Keep running.
+      ticked, and unticking it there turns the row back to Keep running. On battery, zoom a
+      window of another app to fill the screen (not full screen) and minimize it: the
+      wallpaper plays without a click; restore it from the Dock: it holds again.
 - [ ] On a laptop that never answered it, with both battery choices on Keep running, unplug
       while a wallpaper plays and open the panel: **Save battery when your Mac is unplugged?**
       appears once (not on the same day as another prompt). Each of its three choices sets only

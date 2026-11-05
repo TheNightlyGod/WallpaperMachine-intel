@@ -422,7 +422,8 @@ per-Space getter and setter through optional private CoreGraphics and HIServices
   to change when the Mac is unlocked ([playlists](features/playlists.md#each-time-the-mac-is-unlocked)).
   `AppRuleMonitor` (the app rules and "When another app is in front", whose Pause on battery
   reads the source `PowerSourceMonitor` last reported and is refreshed from the app delegate's
-  power-source change) and `OtherAudioMonitor` feed those conditions, and wallpaper audio is
+  power-source change, and which stops counting an app left in front without a window on screen
+  once the occlusion of the coverage probes, kept for it, or the wallpaper windows changes) and `OtherAudioMonitor` feed those conditions, and wallpaper audio is
   suppressed separately (`setAudioSuppressed`) for a mute rule, other-app audio set to mute or the
   user's own mute of every wallpaper (`PlaybackPreferences.wallpapersMuted`). The bridge ORs that one
   flag with each wallpaper's saved mute, so the user's mute never rewrites a saved sound setting.
