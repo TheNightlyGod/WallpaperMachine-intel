@@ -22,8 +22,15 @@ enum VideoPoster {
     }
 
     /// The poster of `video`, no larger than `maxPixelSize` on either side. Throws when the
-    /// system cannot decode a frame of it.
-    static func jpeg(of video: URL, maxPixelSize: Int) async throws -> Data {
+    /// system cannot decode a frame of it. An HEVC clip tagged `hev1` is read from its corrected
+    /// copy (`DerivedVideoCache`), as it plays; a copy made only for the poster goes after it.
+    static func jpeg(
+        of video: URL, maxPixelSize: Int, derived: DerivedVideoCache = .shared
+    ) async throws -> Data {
+        try await derived.reading(video, keepingCopy: false) { try await frame(of: $0, maxPixelSize: maxPixelSize) }
+    }
+
+    private static func frame(of video: URL, maxPixelSize: Int) async throws -> Data {
         let asset = AVURLAsset(url: video)
         let duration = (try? await asset.load(.duration)) ?? .invalid
         let generator = AVAssetImageGenerator(asset: asset)

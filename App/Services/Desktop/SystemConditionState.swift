@@ -2,18 +2,22 @@ import Foundation
 
 /// A condition of the whole Mac that a Playback & Power rule answers. Declared in the order the
 /// panel names them when several hold: heat first, then Low Power Mode, then a low battery, as
-/// `QualityReduction` does.
+/// `QualityReduction` does, and an inactive Mac last.
 enum SystemCondition: String, CaseIterable, Comparable, Sendable {
     case heat
     case lowPowerMode
     case lowBattery
+    /// No keyboard, mouse or trackpad input for the time the user chose (`UserInactivityMonitor`).
+    case inactivity
 
-    /// The reduction this condition asks for when its rule chose Reduced quality.
-    var qualityReduction: QualityReduction {
+    /// The reduction this condition asks for when its rule chose Reduced quality; nil for an
+    /// inactive Mac, whose rule offers no Reduced quality.
+    var qualityReduction: QualityReduction? {
         switch self {
         case .heat: .heat
         case .lowPowerMode: .lowPowerMode
         case .lowBattery: .lowBattery
+        case .inactivity: nil
         }
     }
 

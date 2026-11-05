@@ -3,7 +3,7 @@ use std::{
     path::PathBuf,
     sync::Arc,
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 #[cfg(test)]
@@ -22,7 +22,8 @@ use wallpaper_core::{
     SceneResolution, SceneUpdateMode, WallpaperAssignment, WallpaperEngine,
     media::audio::{
         AudioCaptureBackend, AudioCaptureController, AudioVolume, PlatformAudioCaptureBackend,
-        RESTART_RETRY_DELAYS, RestartOutcome, device_watch::OutputDeviceWatcher,
+        RESTART_RETRY_DELAYS, RestartOutcome, TAP_STALL_REBUILD_LIMIT, TAP_STALL_TIMEOUT,
+        TapStallCheck, device_watch::OutputDeviceWatcher,
     },
     project::{ScalingMode, SceneDesc, SceneFraming, SceneHandle, SceneResult},
     render::RendererSurfaceCounters,
@@ -1006,6 +1007,38 @@ pub(crate) fn handle_output_device_change<B: AudioCaptureBackend>(
     attempt_audio_restart(controller, generation, 0)
 }
 
+/// The lane's once-a-second stall check came due at `now`: rebuild a tap that
+/// stopped calling back, through the same rebuild and retries as a device
+/// change. The rebuild starts a generation of its own, so a later device change
+/// supersedes its pending retries.
+pub(crate) fn handle_tap_stall_check<B: AudioCaptureBackend>(
+    controller: &mut AudioCaptureController<B>,
+    state: &mut AudioRestartState,
+    now: Instant,
+) -> RestartAction {
+    match controller.check_tap_stall(now) {
+        TapStallCheck::Stalled => {
+            log::warn!(
+                "[wallpaper-core audio] system audio tap stalled (no callbacks for {} s while the output device is running); rebuilding it",
+                TAP_STALL_TIMEOUT.as_secs()
+            );
+            let generation = state.begin();
+            attempt_audio_restart(controller, generation, 0)
+        }
+        TapStallCheck::GaveUp => {
+            log::warn!(
+                "[wallpaper-core audio] system audio tap stalled again after {TAP_STALL_REBUILD_LIMIT} rebuilds within a minute; it is left alone until the next scene or demand change"
+            );
+            RestartAction::Done
+        }
+        TapStallCheck::Recovered => {
+            log::info!("[wallpaper-core audio] system audio tap is delivering again after a stall");
+            RestartAction::Done
+        }
+        TapStallCheck::Healthy | TapStallCheck::Idle => RestartAction::Done,
+    }
+}
+
 /// A retry scheduled by an earlier [`RestartAction::RetryIn`] came due.
 ///
 /// It does nothing when a newer device change has started, or when capture is
@@ -1219,6 +1252,15 @@ impl CaptureAssembly for PlatformCaptureAssembly {
         events: &CaptureEvents,
     ) {
         let action = handle_audio_restart_retry(controller, &self.restart, generation, attempt);
+        schedule_audio_restart(action, events);
+    }
+
+    fn check_tap_stall(
+        &mut self,
+        controller: &mut AudioCaptureController<Self::Backend>,
+        events: &CaptureEvents,
+    ) {
+        let action = handle_tap_stall_check(controller, &mut self.restart, Instant::now());
         schedule_audio_restart(action, events);
     }
 

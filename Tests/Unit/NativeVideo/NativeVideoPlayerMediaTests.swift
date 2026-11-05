@@ -208,6 +208,57 @@ final class NativeVideoPlayerMediaTests: XCTestCase {
         print("[media] loop: wraps=\(wraps) queued items=\(player.queuedItemCount)")
     }
 
+    /// The looper's own count tells a watch the clip started over: not at the first play, once
+    /// at the end of the pass, and not again unless asked; a watch cancelled or set on a paused
+    /// clip is never told.
+    func testAWatchOnTheNextLoopIsToldOnceWhenTheLooperStartsTheClipOver() async throws {
+        let url = try await makeClip(name: "loop-watch")
+        let player = makePlayer(url: url)
+        var told: [Duration] = []
+        let armed = ContinuousClock.now
+        XCTAssertTrue(player.watchNextLoop { told.append(ContinuousClock.now - armed) })
+        let itemReady = await wait { player.itemStatusForTest == .readyToPlay }
+        XCTAssertTrue(itemReady, "the item never became readyToPlay")
+        let reached = await wait(upTo: .seconds(6)) { !told.isEmpty }
+        XCTAssertTrue(reached, "the watch was never told: \(player.stateSummary)")
+        XCTAssertGreaterThanOrEqual(told.first ?? .zero, .milliseconds(800), "not before a whole pass of the one-second clip")
+        try await Task.sleep(for: .seconds(1.5))
+        XCTAssertEqual(told.count, 1, "told once, not at every pass")
+
+        var cancelled = 0
+        XCTAssertTrue(player.watchNextLoop { cancelled += 1 })
+        player.cancelLoopWatch()
+        player.setUserPaused(true)
+        var paused = 0
+        XCTAssertTrue(player.watchNextLoop { paused += 1 })
+        try await Task.sleep(for: .seconds(1.5))
+        XCTAssertEqual(cancelled, 0)
+        XCTAssertEqual(paused, 0, "a paused clip does not start over")
+        player.stop()
+        XCTAssertFalse(player.watchNextLoop {}, "a stopped player has nothing to watch")
+    }
+
+    /// A colour option rebuilds the item and its looper; the watch follows the new looper, whose
+    /// count starts again from zero.
+    func testAWatchCarriesOverToTheLooperARebuildMakes() async throws {
+        let url = try await makeClip(name: "loop-watch-rebuild", frames: 60)
+        let player = makePlayer(url: url)
+        let itemReady = await wait { player.itemStatusForTest == .readyToPlay }
+        XCTAssertTrue(itemReady, "the item never became readyToPlay")
+        var told = 0
+        XCTAssertTrue(player.watchNextLoop { told += 1 })
+        var options = WallpaperEngineOptions.identity
+        options.colorEnabled = true
+        options.brightness = 0
+        player.setEngineOptions(options, lut: nil, borderColor: nil)
+        let rebuilt = await wait { player.hasColorCompositionForTest }
+        XCTAssertTrue(rebuilt, "the item was not rebuilt with its composition")
+        let reached = await wait(upTo: .seconds(6)) { told > 0 }
+        XCTAssertTrue(reached, "the rebuilt looper never told the watch: \(player.stateSummary)")
+        try await Task.sleep(for: .seconds(2.5))
+        XCTAssertEqual(told, 1)
+    }
+
     func testAPosterIsProducedFromTheItemPlayingAfterTwoLoops() async throws {
         let url = try await makeClip(name: "poster-loop")
         let player = makePlayer(url: url)
@@ -1071,6 +1122,28 @@ final class NativeVideoPlayerMediaTests: XCTestCase {
         let refusal = await NativeVideoAdmission.evaluate(url: url)
         XCTAssertNotNil(refusal)
         print("[media] corrupt -> \(refusal?.reason ?? "ACCEPTED")")
+    }
+
+    func testAnHev1ClipReachesAFirstFrameFromItsRetaggedCopy() async throws {
+        // The clip the stall cases below use, through the host's own route: the format check
+        // makes the copy and the player is given it.
+        let url = try Hev1Fixture.write(name: "hev1-retag", into: directory)
+        let folder = directory.appendingPathComponent("DerivedVideos", isDirectory: true)
+        let derived = DerivedVideoCache(folder: { folder })
+        let refusal = await VideoFormatSupport.refusal(url: url, derived: derived)
+        XCTAssertNil(refusal, "\(refusal?.reason ?? "")")
+        guard case let .copy(lease) = derived.playableFile(for: url) else {
+            throw XCTSkip("this macOS plays hev1 itself, so nothing needs a copy")
+        }
+        defer { lease.release() }
+        let player = makePlayer(url: lease.url)
+        var failures: [String] = []
+        player.onPreparationFailure = { _, detail, _ in failures.append(detail) }
+        let shown = await wait { player.layerIsReadyForDisplayForTest }
+        XCTAssertTrue(shown, "no first frame: \(player.stateSummary)")
+        XCTAssertNotEqual(player.presentationSizeForTest ?? .zero, .zero, "the picture has a size")
+        XCTAssertTrue(failures.isEmpty, "\(failures)")
+        print("[media] hev1 retagged copy: first frame, state: \(player.stateSummary)")
     }
 
     // MARK: Restart

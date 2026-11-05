@@ -374,6 +374,9 @@ final class PanelFixture {
   let pickers = PanelPickers()
   /// Whether the scene assets are installed, as the Workshop store's readiness check sees it.
   let sceneAssets = PanelSceneAssets()
+  /// Stands in for this Mac's Translation framework in every controller the fixture builds: every
+  /// language downloaded, no answers until a test gives some.
+  let translation = FakeTranslation()
   /// The controller under test, built over the stores above on first use.
   lazy var controller: PanelController = buildController()
   let executable: URL
@@ -478,6 +481,7 @@ final class PanelFixture {
   func buildController() -> PanelController {
     let library = self.library
     let image = self.image
+    let language = AppLanguageStore.english()
     let controller = PanelController(
       store: store, navigation: navigation, workshop: workshop, pixiv: pixiv,
       presentation: presentation, theme: theme, displayTitles: displayTitles, defaults: defaults,
@@ -491,11 +495,12 @@ final class PanelFixture {
           keepsAnimation: false),
         libraryRoot: { library }),
       dialogs: dialogs,
-      appLanguage: .english(), playback: PlaybackPreferences(defaults: defaults), playlists: playlists,
+      appLanguage: language, playback: PlaybackPreferences(defaults: defaults), playlists: playlists,
       hotKeys: HotKeyPreferences(defaults: defaults), collections: collections, presets: presets,
       backup: backup, imagePlacement: imagePlacement, compatibility: compatibility, letterbox: letterbox,
       automations: automations, solarLocationTracker: solarLocationTracker,
-      spaces: self.spaces, systemConditions: systemConditions)
+      spaces: self.spaces, systemConditions: systemConditions,
+      searchTranslation: .fake(defaults: defaults, backend: translation, language: language))
     controller.signInToPixiv = { nil }
     return controller
   }

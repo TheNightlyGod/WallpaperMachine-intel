@@ -11,6 +11,7 @@ final class SystemConditionMonitorTests: XCTestCase {
     private var thermal = ProcessInfo.ThermalState.nominal
     private var battery: FakeBatteryLevel!
     private var state: SystemConditionState!
+    private var input: ManualInactivityInput!
 
     override func setUpWithError() throws {
         try super.setUpWithError()
@@ -22,6 +23,7 @@ final class SystemConditionMonitorTests: XCTestCase {
         thermal = .nominal
         battery = FakeBatteryLevel()
         state = SystemConditionState()
+        input = ManualInactivityInput()
     }
 
     override func tearDown() {
@@ -31,6 +33,7 @@ final class SystemConditionMonitorTests: XCTestCase {
         systemCenter = nil
         battery = nil
         state = nil
+        input = nil
         super.tearDown()
     }
 
@@ -38,7 +41,7 @@ final class SystemConditionMonitorTests: XCTestCase {
         SystemConditionMonitor(
             preferences: preferences, focus: focus, systemCenter: systemCenter,
             isLowPowerModeEnabled: { self.lowPower }, thermalState: { self.thermal }, battery: battery,
-            state: state)
+            state: state, inactivity: input.makeMonitor())
     }
 
     func testLowPowerModeActsOnlyOnceTheUserChoseAnAction() {
@@ -436,6 +439,83 @@ final class SystemConditionMonitorTests: XCTestCase {
         XCTAssertEqual(changes, 1, "The policy is not asked again for the same pause")
         XCTAssertEqual(state.engaged, engaged((.heat, .pause), (.lowPowerMode, .pause)))
         XCTAssertEqual(state.engaged.strongestRuleAction?.condition, .heat, "Among equals, heat is named first")
+    }
+
+    // MARK: An inactive Mac
+
+    func testInactivityIsNotWatchedUntilAnActionIsChosenAndEndsAtTheNextInput() {
+        let monitor = makeMonitor()
+        var changes = 0
+        monitor.onChange = { changes += 1 }
+        monitor.start()
+        defer { monitor.stop() }
+        input.secondsSinceInput = 3600
+        XCTAssertTrue(input.timers.isEmpty, "Keep running is the default, and watches nothing")
+        XCTAssertTrue(monitor.actions.isEmpty)
+
+        input.secondsSinceInput = 0
+        preferences.inactivityAction = .pause
+        XCTAssertEqual(input.liveTimers.map(\.delay), [.seconds(600)], "Ten minutes unless another time is chosen")
+        XCTAssertTrue(monitor.actions.isEmpty)
+
+        input.secondsSinceInput = 600
+        input.fireTimer()
+        XCTAssertEqual(monitor.actions, [.pause])
+        XCTAssertEqual(state.engaged, engaged((.inactivity, .pause)))
+        XCTAssertEqual(changes, 1)
+
+        input.movePointer()
+        XCTAssertTrue(monitor.actions.isEmpty, "The first input resumes")
+        XCTAssertTrue(state.engaged.isEmpty)
+        XCTAssertEqual(changes, 2)
+    }
+
+    func testInactivityFollowsTheChosenActionAndTime() {
+        preferences.inactivityAction = .stop
+        preferences.inactivityMinutes = 5
+        let monitor = makeMonitor()
+        monitor.start()
+        defer { monitor.stop() }
+        XCTAssertEqual(input.liveTimers.map(\.delay), [.seconds(300)])
+        input.secondsSinceInput = 400
+        input.fireTimer()
+        XCTAssertEqual(monitor.actions, [.stop])
+        XCTAssertEqual(state.engaged.strongestRuleAction, EngagedSystemCondition(condition: .inactivity, effect: .stop))
+
+        preferences.inactivityMinutes = 30
+        XCTAssertTrue(monitor.actions.isEmpty, "400 seconds is not yet thirty minutes")
+        XCTAssertEqual(input.liveTimers.map(\.delay), [.seconds(1400)])
+
+        preferences.inactivityAction = .keepRunning
+        XCTAssertTrue(input.liveTimers.isEmpty, "Keep running leaves nothing armed")
+        XCTAssertFalse(input.isWatchingThePointer)
+    }
+
+    /// Being inactive is named last among equals, and joins what the other conditions ask.
+    func testInactivityJoinsTheOtherConditions() {
+        preferences.lowPowerModeAction = .pause
+        preferences.inactivityAction = .pause
+        lowPower = true
+        input.secondsSinceInput = 900
+        let monitor = makeMonitor()
+        monitor.start()
+        defer { monitor.stop() }
+        XCTAssertEqual(state.engaged, engaged((.lowPowerMode, .pause), (.inactivity, .pause)))
+        XCTAssertEqual(state.engaged.strongestRuleAction?.condition, .lowPowerMode)
+        XCTAssertTrue(monitor.qualityReductions.isEmpty)
+    }
+
+    func testStoppingLeavesNoInactivityWatchBehind() {
+        preferences.inactivityAction = .pause
+        input.secondsSinceInput = 900
+        let monitor = makeMonitor()
+        monitor.start()
+        XCTAssertEqual(monitor.actions, [.pause])
+        XCTAssertTrue(input.isWatchingThePointer)
+        monitor.stop()
+        XCTAssertTrue(monitor.actions.isEmpty)
+        XCTAssertTrue(input.liveTimers.isEmpty)
+        XCTAssertFalse(input.isWatchingThePointer)
     }
 
     func testStoppingClearsTheState() {

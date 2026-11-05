@@ -32,6 +32,8 @@ enum StatusMenuModel {
         case remove(display: String)
         case startAgain(wallpaper: String, display: String)
         case openInPanel(display: String)
+        /// Hides Finder's desktop icons, or shows them again; see `FinderDesktopIcons`.
+        case toggleDesktopIcons
         case lockScreen
     }
 
@@ -107,6 +109,9 @@ enum StatusMenuModel {
         /// the app starts or quits.
         var displays: [Display]
         var canLockScreen: Bool
+        /// Whether Finder hides its desktop icons, read each time the menu is built; nil leaves the
+        /// item out, as while the app quits.
+        var desktopIconsHidden: Bool? = nil
     }
 
     /// What the On Battery submenu shows: the battery choice, and whether "When another app is in
@@ -165,6 +170,10 @@ enum StatusMenuModel {
             actions += input.displays.map { .submenu(title: $0.title, entries: submenu(for: $0)) }
         } else if let display = input.displays.first {
             actions += navigation(for: display)
+        }
+        // Ticked while the icons are hidden, as Mute Wallpapers is while muted.
+        if let hidden = input.desktopIconsHidden {
+            actions.append(.command(.toggleDesktopIcons, title: String(localized: "Hide Desktop Icons"), checked: hidden))
         }
         if input.canLockScreen {
             actions.append(.command(.lockScreen, title: String(localized: "Lock Screen"), checked: false))
@@ -302,5 +311,24 @@ enum StatusMenuModel {
             entries += group
         }
         return entries
+    }
+}
+
+extension StatusMenuModel.Command {
+    /// What the item runs through `AppAutomation`, the path a link or a keyboard shortcut takes
+    /// too; nil for the items that open a window or lock the screen. The menu bar panel's buttons
+    /// carry the same commands, so they act as these items do.
+    var automation: AutomationCommand? {
+        switch self {
+        case .playPause: .togglePlayback
+        case .toggleMute: .toggleMute
+        case .previous(let display): .previous(display: display)
+        case .next(let display): .next(display: display)
+        case .random(let display): .random(display: display, pool: .all)
+        case .apply(let id, let display), .startAgain(let id, let display): .apply(wallpaperID: id, display: display)
+        case .remove(let display): .removeWallpaper(display: display)
+        case .openControlPanel, .openDownloads, .openInPanel, .lockScreen, .toggleDesktopIcons, .batteryMode,
+             .otherAppInFront: nil
+        }
     }
 }

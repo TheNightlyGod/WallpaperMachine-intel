@@ -81,6 +81,16 @@ extension PanelController {
     try await run(.immediate) { try libraryLocation.cancelPending() }
   }
 
+  /// The banner line while the library's drive is disconnected and its wallpapers are stopped; nil
+  /// while it is connected.
+  var libraryDriveMessage: String? {
+    libraryLocation.disconnectedRoot.map { root in
+      L(
+        "Wallpaper library unavailable: the drive that holds “\(root.path)” was disconnected, so its wallpapers stopped. They come back when you connect it again."
+      )
+    }
+  }
+
   // MARK: Clearing
 
   /// Asks, then queues `operation`. Returns whether the user agreed.
@@ -110,8 +120,9 @@ extension PanelController {
     ) { try store.clearLogsAsync() }
   }
 
-  /// `purgeUnreferencedUserAssets`: removes the caches no manifest lists, after a confirmation, and
-  /// remembers how much that released.
+  /// `purgeUnreferencedUserAssets`: removes the caches no manifest lists and the playable video
+  /// copies nothing is reading now (`DerivedVideoCache`), after a confirmation, and remembers
+  /// how much that released.
   ///
   /// Named for what it does: the manifest's files are user-imported originals that nothing can
   /// regenerate, so the confirmation says what is kept, not only what goes.
@@ -122,7 +133,8 @@ extension PanelController {
         "Only caches that can be rebuilt are removed. Files you chose in wallpaper settings are kept."),
       button: L("Clear Caches")
     ) {
-      let released = try await UserAssetStorage.purgeUnreferencedDerivedCaches()
+      let copies = await Task.detached { DerivedVideoCache.shared.removeUnused() }.value
+      let released = try await UserAssetStorage.purgeUnreferencedDerivedCaches() + copies
       // A negative figure would be a bug in the accounting, not a real amount, so it is reported as
       // nothing released rather than wrapped.
       userAssetsReleasedBytes = UInt64(max(0, released))

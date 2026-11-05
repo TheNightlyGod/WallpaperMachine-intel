@@ -483,6 +483,7 @@ wins. There is no timer and no per-frame check (bridge `tests::playback_reconcil
 | When another app plays sound | **Keep running**, **Mute**, **Pause** | Keep running |
 | When another app is in front | **Keep running**, **Mute**, **Pause**, **Pause on battery** | Keep running |
 | When displays sleep | **Pause**, **Stop (free memory)** | Pause |
+| When the Mac is inactive | **Keep running**, **Pause**, **Stop (free memory)**; inactive after **5**, **10**, **15** or **30 minutes** or **1 hour** without input | Keep running, 10 minutes |
 | Only play on the display I’m using | On, Off; shown with two or more displays | Off |
 | On battery | **Keep running**, **Reduced quality**, **Pause** | Keep running |
 | When the battery is low | **Keep running**, **Reduced quality**, **Pause**, **Stop (free memory)**; the level is **10%**, **20%** or **30%** | Keep running, 20% |
@@ -620,6 +621,49 @@ that keeps depends on the wallpaper and on how much of the time other apps are i
 **Stop** on display sleep frees renderer memory. The wallpaper is reloaded when the
 display wakes. **Pause** keeps it loaded.
 
+**When the Mac is inactive** pauses or stops every wallpaper once the Mac has had no
+keyboard, mouse or trackpad input for the time chosen under **Inactive after**, and
+resumes them at the next input. It covers the time between walking away and the
+displays going to sleep, which many people set long or never. The time row appears
+once an action other than **Keep running** is chosen. Input is what macOS counts for
+the whole login session (`CGEventSource.secondsSinceLastEventType` with the combined
+session state): typing, the pointer, clicks and scrolling, and the events other apps
+post into the session too. Reading it needs no permission. **Pause** keeps the last frame; **Stop (free memory)** unloads
+the wallpapers and reloads them at the next input, as the other Stop choices do. Like
+the other conditions of the Mac it never changes your own Play/Pause, a playlist
+change that falls due meanwhile waits for the wallpapers to play again
+([Playlists](playlists.md#when-a-change-happens)), and an inactive Mac does not count
+as nobody being at it, so an automatic update still waits for the displays to sleep or
+the session to lock ([Updates](updates.md#automatic-updates)). The row adds `In effect
+now. Wallpapers are paused.` (or stopped) while the rule holds, and Quick Settings' **On
+battery** module names it as it names the other conditions below.
+
+`UserInactivityMonitor` watches only while an action other than **Keep running** is
+chosen. While the Mac is in use its only work is one one-shot timer, armed for the
+moment the time runs out if no input comes; when it fires the count is read again,
+and input since then arms it again for the time left. Once the Mac is inactive it
+waits for the first input with one global and one local event monitor for the
+pointer, clicks and scrolling, which need no Accessibility or Input Monitoring grant,
+and a read of the count every two seconds on a timer that tolerates a second's delay,
+which is what notices typing alone: a global keyboard monitor would need
+Accessibility, so there is none. That read waits while the displays sleep or another
+user's session has the screens, since no input can reach this session then. Both are
+asked of the system, not remembered from the last notice: the displays
+(`DisplayPowerProbe`) each time the read would be armed, and the session's console
+state, a window-server round trip, only when a run of reads begins (watching starting,
+the deadline, a pointer event, the read after a notice), since the session cannot
+leave or return without a notice. So an app relaunched by an automatic update while
+the displays sleep arms no read at all. The displays sleeping or waking, the session
+leaving or returning, the Mac's wake and an unlock read the count at once and arm one
+read whatever the system says then, because a notice can come before the state it
+announces has settled; that read asks both again, so a real sleep stops it after one
+turn and a wake or return the system had not yet shown still lets typing end the
+inactivity. The first input removes the monitors and the timer and arms the deadline
+again. While this app is the
+active one the global monitor sees no pointer events and the local one only those its
+own windows receive, so a pointer moved over the desktop then is noticed by the
+two-second read.
+
 A display with a [different wallpaper for each desktop](spaces.md#keeping-each-desktops-wallpaper)
 keeps the wallpaper of each desktop the person visited loaded and paused, so coming back runs it
 on instead of loading it again. A kept wallpaper draws nothing; its cost is the memory it holds,
@@ -716,7 +760,8 @@ condition holds and what its rule does (`EngagedSystemConditions`) to
 `SystemConditionState`, which the control panel reads; the panel never works the
 conditions out again. While the Mac runs on battery, Quick Settings' **On battery**
 module names the strongest of them that pauses or stops wallpapers: a stop before a
-pause, and heat, then Low Power Mode, then a low battery among equals, for example
+pause, and heat, then Low Power Mode, then a low battery, then an inactive Mac among
+equals, for example
 `Low Power Mode is on. Wallpapers are stopped.` What the choice already does is not an
 override, so **Pause** beside a rule that pauses says nothing, while one that stops is
 named. Plugged in, the choice does nothing and nothing is said. Heat on Reduced quality
@@ -808,7 +853,9 @@ and scale ([architecture](../architecture.md)). Heat is the one exception, since
 critical thermal state also contributes a pause.
 It only observes notifications (`NSProcessInfoPowerStateDidChange`,
 `ProcessInfo.thermalStateDidChangeNotification`, the preferences and the Focus
-filter); nothing is polled. The battery adds IOKit's power-source notification
+filter); nothing is polled. An inactive Mac is reported by `UserInactivityMonitor`
+(above), which runs only while its rule is chosen.
+The battery adds IOKit's power-source notification
 (`IOPSNotificationCreateRunLoopSource`, wrapped by `SystemBatteryLevel`), registered
 only while a low-battery action is chosen and removed when it is not, and read again
 when the Mac wakes in case a plug or unplug during sleep was never reported. The
@@ -924,7 +971,9 @@ take on. Matroska and WebM, which AVFoundation never opens, are opened with the 
 reader and played by the WebM player (below) when it plays them (H.264, HEVC and VP9 in them,
 and AV1 on a Mac with hardware AV1 decoding); every other codec in them (VP8, an encrypted
 track, 4:2:2 or 4:4:4 pictures) and a damaged file are refused with the container and codec
-named ("WebM (VP8)"). A file that could not be read at that moment (a busy volume, a file
+named ("WebM (VP8)"). An MP4 or MOV whose HEVC is tagged `hev1` is not refused when its sample
+descriptions carry the parameter sets: it plays from a copy retagged `hvc1` ([below](#hevc-tagged-hev1)).
+A file that could not be read at that moment (a busy volume, a file
 still being written) says nothing about its format, so the apply goes on and the host tries
 it. Importing never checks the format: an `avi` or a VP8 file is imported and refused only
 when it is applied. Decoder failures after this check still go through the engine's apply
@@ -936,6 +985,55 @@ config) is refused the same way. The display keeps the picture it
 had, no window covers it, and the wallpaper's state in the panel reads **Wallpaper
 could not load** with the same message. The verdict is kept under the file's key, so
 the file is not read again until it changes, and a replaced file is judged afresh.
+
+<a id="hevc-tagged-hev1"></a>**HEVC tagged `hev1`.** macOS decodes HEVC in an MP4 or MOV only when
+its sample entry is tagged `hvc1`; for `hev1`, which says the parameter sets (VPS, SPS, PPS) may
+also come inside the stream, AVFoundation calls the track not playable. Encoders such as FFmpeg
+write `hev1` files that still carry all three in the `hvcC` record, so the four characters of the
+tag are all that stand in the way. When AVFoundation refuses the `hev1` track of an MP4 or MOV, the
+format check reads the file's sample descriptions (`HevcSampleEntryRetag`: box headers and `stsd`
+only, wherever `moov` lies) and, when every `hev1` entry's record carries a VPS, an SPS and a PPS,
+the wallpaper plays from a copy whose entries say `hvc1`; nothing is decoded or re-encoded. A clip
+whose `hev1` entries lack one of them has its parameter sets only in the stream, and is refused
+with the usual message as before. The file in the library is never written (a Workshop update
+would undo it, and its hash, its backup and the update check would see another file). The copy
+(`DerivedVideoCache`, in `Cache/DerivedVideos` in the app's support folder) is an APFS clone of
+the clip, which costs the one block that differs and is made at once. When the library is on
+another drive than this Mac's startup disk (where the app keeps its caches), or on a volume that
+cannot clone, it is a full copy. That copy is made in the background, outside the metadata read's
+time limit and outside the pass that opens the displays: meanwhile the wallpaper's state reads
+**Loading wallpaper content…** with a message that the corrected copy is being made, and the clip
+opens when the copy is done. A copy that fails (a read error on the library's drive, a file that
+changed while it was copied) is logged, and the wallpaper fails with that reason as a read that did
+not finish: it is copied again on the next offer of the clip (from any apply or reconcile, which
+carries a newer startup revision), never on its own. A full copy is made only while the full copies
+stay within 2 GB together and the startup disk keeps 5 GB free, both checked before any other copy
+is removed to make room. A clip larger than 2 GB is refused for good, with a message that it is too
+large for a full copy; one that does not fit now (the copies of clips playing on other displays fill
+the 2 GB, or the startup disk is nearly full) fails with a message that there is no room for it now,
+and opens by itself when copies are let go or cleared. It is asked again whenever copies change, and
+an answer that has not changed is not logged or counted again. Both messages suggest moving the
+library to this Mac. The copy is kept only after AVFoundation says it plays (one that does not is
+refused with the usual message, and is not copied again for the same file). It is named after the
+file's path, size, modification date and identity, so a replaced file gets a new copy and the old
+one goes when the new one is made.
+
+A copy is held for as long as something reads it: a desktop window (a rebuild or a poster opens
+the file again), the wallpaper preview, the library's poster of an imported clip and the
+inspector's black-bar check. Only deleting its wallpaper removes a copy that is held, which stays
+even while its file cannot be read (a library drive that was ejected). Any other copy may go:
+**Clear unused caches…** in Settings → Storage removes every copy nothing holds, a
+full copy makes room for itself by removing the least recently used full copies nothing holds,
+and beyond eight copies the least recently used go first. A clip that played from a copy is never
+played from its file: when its copy has gone (cleared, made room for, removed with its wallpaper
+that was then put back from the Trash, or its file changed), the next time it opens it is judged
+again and the copy made again. The desktop, the preview, the poster and the black-bar check read
+the copy (the poster and the check only when AVFoundation refuses the file as it is, as the
+format check decides); the lock screen and the screen saver play the same
+retag, written on the project's copy in their exchange folder
+([lock screen](lock-screen.md#plain-video-wallpapers)). A diagnostic recording counts each desktop
+surface opened from such a copy as `nativeVideoHev1Retagged`, and the log says when a copy was
+made and whether it is a clone or a full copy.
 
 **WebM and Matroska.** AVFoundation does not open them, so the desktop plays them with
 `WebMPlayer` (`Shared/WebMPlayer.swift`) in a window of its own (`WebMVideoWallpaperWindow`,
@@ -974,6 +1072,17 @@ range (`NativeVideoPlayer.loopRange`, also used by the preview window), so each 
 with the last frame. Left unbounded, a pass ends where the item ends, which for a clip
 with sound is only once its audio has drained: even muted, and with both tracks the same
 length, a 4K clip held its last frame for about a quarter of a second at every seam.
+
+The end of a pass is reported only to a playlist that
+[waits for the video to finish](playlists.md#waiting-for-a-video-to-finish), and only while
+its change waits: `NativeVideoWallpaperHost.watchClipEnd` asks the display's own surface
+(`watchNextLoop`), never a mirror's copy. The AVFoundation player observes the looper's
+`loopCount`, which rises each time it starts the item again, and observes the looper of a
+rebuilt item afresh; the WebM player puts one boundary observer on its synchronizer at the end
+of the pass the clock is in, which a held clock never reaches. Each is told once and removed.
+A clip that fails, or leaves the display for another wallpaper or desktop, ends the wait as
+well, so a broken clip cannot hold a playlist. Nothing is sampled, and without a waiting
+change nothing is observed.
 
 Playback honours the wallpaper's scaling mode and scale factor by the renderer's own
 layout rule, so a clip sits where the scene engine used to put it: **Fill**,
@@ -1018,9 +1127,10 @@ stuck file never holds more than one blocked call. A diagnostic recording counts
 share or a cloud file it may only be slow. The same bound applies to a read that fails and is retried: each of the
 three attempts gets the whole limit.
 
-A clip that never shows a picture is reported as failed too. A file the platform calls
-playable can reach ready with its clock running and still produce no frame (an HEVC
-clip tagged `hev1` does this on macOS 27), and nothing reports a failure, so the
+A clip that never shows a picture is reported as failed too. A player can reach ready with
+its clock running and still produce no frame (an HEVC clip tagged `hev1`, handed to the player
+as it is, does this on macOS 27; the app plays such a clip from its [retagged copy](#hevc-tagged-hev1)),
+and nothing reports a failure, so the
 display would stay black and the wallpaper's startup never finish. Playback therefore waits
 for the first picture: 10 seconds on the internal drive, 30 seconds on an external drive or
 when the volume cannot be identified, and 90 seconds on a network volume or a cloud-backed
@@ -1278,6 +1388,12 @@ nothing could see or hear.
   nothing and writes nothing. The system-wide device-change listener is registered the
   first time a watcher starts and stays registered; between watchers it finds nobody to
   wake.
+- **Tap stall check.** While a tap runs and capture is wanted, the audio worker wakes
+  once a second to read the tap's callback count, one atomic load; the tap's own
+  callback adds one atomic increment per call. It asks whether the output device is
+  running only while calls are missing. Without a running tap, while suspended, or once
+  the check has given up, the worker sleeps without a timer
+  ([audio response](audio-response.md#output-device-changes)).
 - **Pointer sampling.** Scenes receive the cursor from a sampler that runs when
   macOS reports pointer motion or a button, when an interactive scene appears or
   resumes, or when its pointer delivery is reset, at most once per 16 ms, with a
@@ -1307,6 +1423,15 @@ nothing could see or hear.
   change instead of being dropped. The app can also ask it to read again when the Mac
   wakes ([Playback](#playback)), which wakes the thread once before it sleeps again.
   No power saving is claimed.
+- **Inactivity watch.** Nothing runs while **When the Mac is inactive** keeps running.
+  Chosen, it costs one one-shot timer while the Mac is in use, armed again only when it
+  fires and finds that input came meanwhile; the pointer monitors and the two-second read of the
+  input count exist only while the Mac counts as inactive, and that read waits while
+  the displays sleep or another session has the screens. Each turn asks whether the
+  displays sleep (`CGGetOnlineDisplayList` and `CGDisplayIsAsleep`); the session's
+  console state (`CGSessionCopyCurrentDictionary`) is asked only when a run of reads
+  begins, including the one read a sleep, wake, session or unlock notice arms
+  ([Playback](#playback)). No power saving is claimed.
 - **Renderer counters.** They count only inside a bounded window: a
   [diagnostic window](../testing/power-benchmark.md#runtime-counters) asked for
   through the environment, or, when **Send performance data** is on, one 60 s

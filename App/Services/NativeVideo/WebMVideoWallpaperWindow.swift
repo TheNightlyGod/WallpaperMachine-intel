@@ -237,6 +237,13 @@ extension WebMVideoWallpaperWindow: NativeVideoSurface {
 
     func verifyPlayback(reason: String) { player?.verifyPlayback(reason: reason) }
 
+    /// A file still being opened has no clip playing yet, so nothing to wait for.
+    func watchNextLoop(_ handler: @escaping @MainActor () -> Void) -> Bool {
+        player?.watchNextLoop(handler) ?? false
+    }
+
+    func cancelLoopWatch() { player?.cancelLoopWatch() }
+
     func present() { orderFrontRegardless() }
 
     func stop() {

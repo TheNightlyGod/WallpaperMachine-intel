@@ -17,10 +17,13 @@ final class StorageLocationStore {
     /// Why the last move failed: now, or at the launch that was to finish it.
     private(set) var error: String?
     @ObservationIgnored private let service: StorageMoveService
+    @ObservationIgnored private let drive: LibraryDriveStatus
     @ObservationIgnored private var cancelCopy: (() -> Void)?
 
-    init(service: StorageMoveService = .init(), resolution: StorageLocation.Resolution = ClientPaths.storageResolution) {
+    init(service: StorageMoveService = .init(), resolution: StorageLocation.Resolution = ClientPaths.storageResolution,
+         drive: LibraryDriveStatus? = nil) {
         self.service = service
+        self.drive = drive ?? .shared
         switch resolution {
         case .support:
             current = service.support
@@ -39,6 +42,10 @@ final class StorageLocationStore {
     }
 
     var isCopying: Bool { copiedBytes != nil }
+
+    /// The library's folder while its drive is disconnected and its wallpapers are stopped
+    /// (`StorageVolumeMonitor`); nil while it is connected.
+    var disconnectedRoot: URL? { drive.disconnectedRoot }
 
     /// Checks a move into `parent` (nil: back to this Mac) without changing anything.
     func plan(moveTo parent: URL?) async throws -> StorageMoveService.Plan {

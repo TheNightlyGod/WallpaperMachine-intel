@@ -117,6 +117,13 @@ final class NativeVideoPlayer {
     /// that is always heard plays exactly as it did; becoming audible switches
     /// back on only these.
     private var silencedCopies: Set<ObjectIdentifier> = []
+    /// Who waits for the clip to start over (`watchNextLoop`), and the observation of the
+    /// looper's count that tells it. Both exist only while someone waits; the observation is
+    /// made again on the looper of a rebuilt item, whose count starts from zero.
+    private var loopWatch: (@MainActor () -> Void)?
+    private var loopCountObservation: NSKeyValueObservation?
+    /// Tells a report on its way to the main actor for a watch that was replaced meanwhile.
+    private var loopWatchSerial: UInt64 = 0
     /// Reported when the clip keeps playing without its audio, with the
     /// failure that caused it, so the host can log it against its load.
     var onAudioDropped: (@MainActor (String) -> Void)?
@@ -314,6 +321,12 @@ final class NativeVideoPlayer {
     var layerBackgroundForTest: CGColor? { layer.backgroundColor }
     var hasColorCompositionForTest: Bool { player.currentItem?.videoComposition != nil }
 
+    /// Fails without loading anything, unsettled: for a file the player must not be given (an
+    /// `hev1` clip whose corrected copy has gone). Delivered like any preparation failure.
+    func refuse(_ detail: String) {
+        reportPreparationFailure(detail, settled: false)
+    }
+
     func load(url: URL) {
         mediaURL = url
         let item = AVPlayerItem(url: url)
@@ -369,7 +382,47 @@ final class NativeVideoPlayer {
         counters.record(.nativeVideoItemCreated, for: surface)
         observeFailures(looper: looper)
         followLoopCopies()
+        observeLoopCount()
         applyPlaybackState()
+    }
+
+    /// Calls `handler` once, when the looper next starts the clip over: the end of the pass
+    /// playing now, or, for a clip still loading or being rebuilt, the end of its first pass.
+    /// False for a player that is stopped, has failed or was never loaded.
+    func watchNextLoop(_ handler: @escaping @MainActor () -> Void) -> Bool {
+        guard !stopped, !failureReported, mediaURL != nil else { return false }
+        loopWatchSerial &+= 1
+        loopWatch = handler
+        observeLoopCount()
+        return true
+    }
+
+    func cancelLoopWatch() {
+        loopWatch = nil
+        loopCountObservation = nil
+    }
+
+    /// Follows the count of the looper playing now, for the watch. `AVPlayerLooper` raises it
+    /// each time it starts the item again, and says so through key-value observing, so nothing
+    /// is sampled.
+    private func observeLoopCount() {
+        loopCountObservation = nil
+        guard loopWatch != nil, let looper else { return }
+        let start = looper.loopCount
+        let identity = ObjectIdentifier(looper)
+        let serial = loopWatchSerial
+        loopCountObservation = looper.observe(\.loopCount, options: [.new]) { [weak self] looper, _ in
+            guard looper.loopCount > start else { return }
+            Task { @MainActor [weak self] in self?.loopStartedOver(identity, serial: serial) }
+        }
+    }
+
+    private func loopStartedOver(_ identity: ObjectIdentifier, serial: UInt64) {
+        guard !stopped, serial == loopWatchSerial, let looper, ObjectIdentifier(looper) == identity,
+            let handler = loopWatch
+        else { return }
+        cancelLoopWatch()
+        handler()
     }
 
     /// Takes the looper and its queued copies down, leaving the player and
@@ -382,6 +435,8 @@ final class NativeVideoPlayer {
         currentItemObservation = nil
         sizeObservation = nil
         observedItem = nil
+        // A watch for the next loop carries over to the looper that replaces this one.
+        loopCountObservation = nil
         // A check in flight describes the item that is going away, unless it is
         // the check that is replacing it.
         if cancellingCheck { supervisor.cancel() }
@@ -895,6 +950,7 @@ final class NativeVideoPlayer {
         onReadyForDisplay = nil
         onAudioDropped = nil
         onHealthEvent = nil
+        cancelLoopWatch()
         player.pause()
         releaseItem()
         layer.player = nil

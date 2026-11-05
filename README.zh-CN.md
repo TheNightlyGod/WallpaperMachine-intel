@@ -87,7 +87,7 @@
 | [**备份你的设置**](docs/features/backup-restore.md#local-backup-and-restore) | 导出设置和保留的文件，还可以包含整个壁纸库；在下次启动时执行可撤回的恢复之前，先预览冲突。登录信息和密码只留在这台 Mac 上。 |
 | [**外置硬盘**](docs/features/library-location.md) | 把壁纸库和下载放在外置硬盘或其他文件夹中，随时都能移回这台 Mac。设置和 Steam 登录信息仍留在这台 Mac 上。 |
 | [**图片摆放**](docs/features/wallpaper-properties.md#image-placement) | 在每台显示器上分别拖动、定位和缩放导入的图片和保存的 pixiv 页面，不改动原图。 |
-| [**看不见就暂停**](docs/architecture.md#desktop-wallpaper-windows-and-private-api-handling) | 被遮住的显示器会停止播放自己的壁纸，睡眠或锁屏时所有壁纸都会暂停。[播放规则](docs/features/performance.md#playback)还能在其他应用播放声音时、其他应用或你选择的应用位于前台时、你选择的应用正在运行时、电池电量低时、低电量模式下、Mac 过热时或专注模式期间暂停或静音壁纸。有多台显示器时，还可以只让你正在使用的那台继续播放。你自己按下的暂停，始终由你决定。 |
+| [**看不见就暂停**](docs/architecture.md#desktop-wallpaper-windows-and-private-api-handling) | 被遮住的显示器会停止播放自己的壁纸，睡眠或锁屏时所有壁纸都会暂停。[播放规则](docs/features/performance.md#playback)还能在其他应用播放声音时、其他应用或你选择的应用位于前台时、你选择的应用正在运行时、电池电量低时、低电量模式下、Mac 过热时、专注模式期间或一段时间没有键盘、鼠标或触控板输入后暂停或静音壁纸。有多台显示器时，还可以只让你正在使用的那台继续播放。你自己按下的暂停，始终由你决定。 |
 | [**自动化**](docs/features/automation.md) | 按星期和时间的计划、根据本地日出日落计算、按浅色或深色外观选择、[每个桌面使用不同壁纸](docs/features/spaces.md)，以及临时的专注模式壁纸或播放列表。键盘快捷键、“快捷指令”、Siri、“聚焦”和链接都能控制播放、让所有壁纸静音、随机选一张壁纸，并应用壁纸、已存播放列表或属性预设。 |
 | [**锁定屏幕**](docs/features/lock-screen.md) | 场景、视频、网页和静态壁纸也能让锁屏动起来。实验性功能，默认关闭。 |
 | [**屏幕保护程序**](docs/features/lock-screen.md#use-wallpaper-as-screen-saver) | 把每台显示器当前应用的场景、视频、网页或静态壁纸用作它的屏幕保护程序。与锁屏动画相互独立；在 macOS 26 及更高版本上为实验性功能。 |

@@ -72,6 +72,10 @@ final class UserCommandQueue {
 
     func hasWaiting(slot: String) -> Bool { waiters.contains { $0.slot == slot } }
 
+    /// Whether a command for `slot` runs now or waits its turn: the menu bar panel says a display
+    /// is changing wallpaper while one does.
+    func isActive(slot: String) -> Bool { running?.covers(slot) == true || hasWaiting(slot: slot) }
+
     /// Runs `operation` once every earlier command has finished. Returns false without
     /// running it when a newer command in the same `slot` replaced it while it waited, or,
     /// for a command that is not the user's, when the user already has a choice waiting or

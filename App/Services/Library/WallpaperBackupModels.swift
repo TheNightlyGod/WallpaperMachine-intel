@@ -113,9 +113,11 @@ struct WallpaperBackupPreferences: Sendable {
         PlaybackPreferences.desktopCoveredKey, PlaybackPreferences.appRulesKey,
         PlaybackPreferences.lowPowerModeKey, PlaybackPreferences.thermalKey,
         PlaybackPreferences.lowBatteryActionKey, PlaybackPreferences.lowBatteryThresholdKey,
+        PlaybackPreferences.inactivityActionKey, PlaybackPreferences.inactivityMinutesKey,
         PlaybackPreferences.playOnlyOnActiveDisplayKey,
         PanelPreferences.hideAfterActivatingKey, PanelPreferences.tileZoomKey,
-        PanelPreferences.libraryPreviewsOnHoverKey,
+        PanelPreferences.libraryPreviewsOnHoverKey, StatusItemClick.defaultsKey,
+        WorkshopSearchTranslator.enabledKey,
         WorkshopStore.concurrentDownloadsKey,
         WorkshopUpdateStore.automaticKey, ClientPaths.assetsPathKey,
         // No longer read since filters became a popover; still accepted so that backups made
@@ -173,7 +175,7 @@ struct WallpaperBackupPreferences: Sendable {
             for (display, record) in records {
                 try identities([display])
                 guard let record = record as? [String: Any] else { throw invalid() }
-                let allowed: Set<String> = ["mode", "source", "order", "trigger", "interval", "wallpaperIDs", "collectionID", "planID", "dayWallpaperID", "nightWallpaperID", "dayStart", "nightStart"]
+                let allowed: Set<String> = ["mode", "source", "order", "trigger", "interval", "waitsForClipEnd", "wallpaperIDs", "collectionID", "planID", "dayWallpaperID", "nightWallpaperID", "dayStart", "nightStart"]
                 guard Set(record.keys).isSubset(of: allowed) else { throw invalid() }
                 for (key, item) in record {
                     switch key {
@@ -181,6 +183,8 @@ struct WallpaperBackupPreferences: Sendable {
                     case "source": guard let raw = item as? String, PlaylistSource(rawValue: raw) != nil else { throw invalid() }
                     case "order": guard let raw = item as? String, PlaylistOrder(rawValue: raw) != nil else { throw invalid() }
                     case "trigger": guard let raw = item as? String, PlaylistTrigger(rawValue: raw) != nil else { throw invalid() }
+                    case "waitsForClipEnd":
+                        guard let flag = item as? NSNumber, CFGetTypeID(flag) == CFBooleanGetTypeID() else { throw invalid() }
                     case "interval", "dayStart", "nightStart":
                         guard let number = item as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
                               number.doubleValue == Double(number.intValue),
@@ -264,12 +268,17 @@ struct WallpaperBackupPreferences: Sendable {
         case PlaybackPreferences.lowBatteryThresholdKey:
             guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(), number.doubleValue == Double(number.intValue),
                   PlaybackPreferences.lowBatteryThresholds.contains(number.intValue) else { throw invalid() }
+        case PlaybackPreferences.inactivityActionKey: guard let raw = value as? String, InactivityAction(rawValue: raw) != nil else { throw invalid() }
+        case PlaybackPreferences.inactivityMinutesKey:
+            guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(), number.doubleValue == Double(number.intValue),
+                  PlaybackPreferences.inactivityMinuteChoices.contains(number.intValue) else { throw invalid() }
         case WorkshopStore.concurrentDownloadsKey:
             guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(), number.doubleValue == Double(number.intValue),
                   WorkshopDownloadManager.concurrentDownloadRange.contains(number.intValue) else { throw invalid() }
         case PanelPreferences.tileZoomKey:
             guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(), number.doubleValue == Double(number.intValue),
                   TileZoom.steps.contains(number.intValue) else { throw invalid() }
+        case StatusItemClick.defaultsKey: guard let raw = value as? String, StatusItemClick(rawValue: raw) != nil else { throw invalid() }
         case ClientPaths.assetsPathKey: guard let path = value as? String, !path.contains("\0"), path.utf8.count <= 1024 else { throw invalid() }
         default: guard let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else { throw invalid() }
         }

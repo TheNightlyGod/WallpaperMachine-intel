@@ -142,4 +142,16 @@ final class PlaylistPlannerTests: XCTestCase {
         XCTAssertEqual(decoded.dayStart, DisplayPlaylist().dayStart)
         XCTAssertEqual(decoded.source, .all)
     }
+
+    func testAPlaylistSavedBeforeTheVideoOptionDoesNotWaitForVideos() throws {
+        let old = try JSONDecoder().decode(DisplayPlaylist.self, from: Data(#"{"mode":"rotate","interval":60}"#.utf8))
+        XCTAssertFalse(old.waitsForClipEnd)
+        let unreadable = try JSONDecoder().decode(
+            DisplayPlaylist.self, from: Data(#"{"mode":"rotate","waitsForClipEnd":"yes"}"#.utf8))
+        XCTAssertFalse(unreadable.waitsForClipEnd)
+        var playlist = DisplayPlaylist()
+        playlist.mode = .rotate
+        playlist.waitsForClipEnd = true
+        XCTAssertEqual(try JSONDecoder().decode(DisplayPlaylist.self, from: JSONEncoder().encode(playlist)), playlist)
+    }
 }

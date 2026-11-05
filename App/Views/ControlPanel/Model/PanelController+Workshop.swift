@@ -13,7 +13,9 @@ extension PanelController {
   // MARK: State
 
   /// The page's list-level state: tiles, source, paging, the last load's outcome.
-  var workshopBrowse: WorkshopBrowseState { WorkshopBrowseState(workshop) }
+  var workshopBrowse: WorkshopBrowseState {
+    WorkshopBrowseState(workshop, isTranslatingSearch: searchTranslation.isTranslating)
+  }
 
   /// Everything one Discover tile wears. A tile calls this itself, so a progress tick re-renders
   /// only the tile whose job moved.
@@ -84,6 +86,10 @@ extension PanelController {
   /// Searches Steam: stores the query and starts it afresh from the first page. A repeat while a
   /// search is pending should use `.latestWins`, so the newest search is the one on show.
   ///
+  /// Text typed in another of the app's languages is searched in English when it can be
+  /// translated on this Mac (`WorkshopSearchTranslator`); the field keeps what was typed, and a
+  /// text the person chose to search as typed stays so until another text is searched.
+  ///
   /// `kind` is every type unless a caller narrows it; the panel narrows by tags alone. The limits
   /// are those the controls keep: 32 required and 64 excluded tags of at most 128 characters.
   func searchWorkshop(
@@ -93,8 +99,15 @@ extension PanelController {
     guard text.count <= Self.maxTextLength, tags.count <= 32, tags.allSatisfy({ $0.count <= 128 }),
       excludedTags.count <= 64, excludedTags.allSatisfy({ $0.count <= 128 })
     else { throw InvalidControlValue() }
+    let typed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    let translation: WorkshopSearchTranslation? =
+      if typed == workshop.declinedTranslationText { nil } else {
+        await searchTranslation.translation(for: text)
+      }
     try await run(.immediate) {
       workshop.searchText = text
+      workshop.searchTranslation = translation
+      if workshop.declinedTranslationText != typed { workshop.declinedTranslationText = nil }
       workshop.kind = kind
       workshop.sort = sort
       workshop.tags = tags
@@ -130,6 +143,23 @@ extension PanelController {
       throw InvalidControlValue()
     }
     try await run(.immediate) { workshop.open(.collection(id: id, title: title)) }
+  }
+
+  /// Installed's **Show in Steam Workshop**, for a Workshop link or id that is not installed:
+  /// Discover with the wallpapers list showing that one item, as pasting its link into the search
+  /// field does. The sort and the filters stay as they were; an item asked for by name ignores
+  /// them. `id` is a Workshop id that names its item alone (`WorkshopLink.isBareItemID(_:)`),
+  /// since the search field it is put in looks up nothing shorter; Installed offers no other.
+  func lookUpWorkshopItem(id: String) async throws {
+    guard WorkshopLink.isBareItemID(id) else { throw InvalidControlValue() }
+    try await run(.immediate) {
+      workshop.searchText = id
+      workshop.searchTranslation = nil
+      workshop.kind = .all
+      workshop.open(.browse)
+    }
+    // Opened after the search has started, so a first visit does not load the browse list too.
+    try await navigate(.workshop)
   }
 
   /// Returns to the source the shown one was opened from; nothing when it was not opened from one.

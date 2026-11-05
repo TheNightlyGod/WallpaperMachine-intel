@@ -23,6 +23,12 @@ final class InstalledBrowserModel {
 
   /// The search text, tag filters and collection on show.
   private(set) var filter = LibraryFilter()
+  /// Whether the search text arrived whole: pasted or dropped in one edit
+  /// (`WorkshopSearchTrigger.isPasteOrDrop(from:to:)`), confirmed with Return, or restored from
+  /// the last window. Only then may a bare number be the Workshop item that is not installed
+  /// (`LibraryEmptyState`); typed, it is a prefix of one until its last digit. Not part of
+  /// `filter`, since it changes nothing the grid shows.
+  private(set) var isTextWhole = false
   private(set) var sort = LibrarySort.title
   /// Whether the sort runs against its natural direction.
   private(set) var descending = false
@@ -239,8 +245,16 @@ final class InstalledBrowserModel {
 
   func setText(_ text: String) {
     guard text != filter.text else { return }
+    isTextWhole = WorkshopSearchTrigger.isPasteOrDrop(from: filter.text, to: text)
     filter.text = text
     filtersChanged(immediately: false)
+  }
+
+  /// Return in the search field: the text is complete, as a bare id typed into Discover's field
+  /// is looked up on Return. The grid already shows what it finds.
+  func submitSearch() {
+    guard !filter.text.isEmpty else { return }
+    isTextWhole = true
   }
 
   /// Chooses a sort key, which also puts the list in that key's natural direction.
@@ -338,12 +352,14 @@ final class InstalledBrowserModel {
   func clearSearch() {
     guard !filter.text.isEmpty else { return }
     filter.text = ""
+    isTextWhole = false
     filtersChanged(immediately: true)
   }
 
   /// Clear search and filters: the text goes first, then everything Clear takes away.
   func clearSearchAndFilters() {
     filter = LibraryFilter()
+    isTextWhole = false
     filtersChanged(immediately: true)
   }
 
@@ -370,6 +386,8 @@ final class InstalledBrowserModel {
     var sort: LibrarySort
     var descending: Bool
     var favorites: Set<String>?
+    /// The history's revision, while the list is sorted by last use.
+    var history: UInt64?
     var language: String
   }
 
@@ -378,6 +396,8 @@ final class InstalledBrowserModel {
     var filter: LibraryFilter
     var favorites: Set<String>?
     var members: [String]?
+    /// The wallpapers of the collections the search text names.
+    var named: Set<String>
   }
 
   fileprivate struct Visible {
@@ -386,8 +406,9 @@ final class InstalledBrowserModel {
   }
 
   /// Every installed wallpaper the filters let through, in the chosen order. Kept until an input
-  /// moves: a typed letter filters the sorted library again, and only a new library or sort
-  /// sorts it, so a 10,000-wallpaper library is sorted once however long the user types.
+  /// moves: a typed letter filters the sorted library again, and only a new library or sort (or,
+  /// under Last used, a wallpaper put on a display) sorts it, so a 10,000-wallpaper library is
+  /// sorted once however long the user types.
   var visibleRows: [LibraryRow] { visible.rows }
 
   /// The ids of `visibleRows`, in order.
@@ -402,11 +423,14 @@ final class InstalledBrowserModel {
       || filter.excludedTags.contains { $0.lowercased() == "favorite" }
     let sortedKey = SortedKey(
       rows: controller.libraryRowsCache.rebuilds, sort: sort, descending: descending,
-      favorites: sort == .favorites ? favorites : nil, language: PanelLocale.shared.tag)
+      favorites: sort == .favorites ? favorites : nil,
+      history: sort == .lastUsed ? controller.historyRevision : nil,
+      language: PanelLocale.shared.tag)
     let members = shownCollection?.wallpaperIDs
+    let named = filter.text.isEmpty ? [] : filter.membersOfCollectionsNamed(in: controller.collectionRows)
     let key = VisibleKey(
       sorted: sortedKey, filter: filter, favorites: usesFavorites ? favorites : nil,
-      members: members)
+      members: members, named: named)
     if let visibleCache, visibleCache.key == key { return visibleCache.result }
 
     let sorted: [LibraryRow]
@@ -414,11 +438,13 @@ final class InstalledBrowserModel {
       sorted = sortedCache.rows
     } else {
       sorted = sort.sorted(
-        rows, descending: descending, favorites: favorites, locale: PanelLocale.shared.locale)
+        rows, descending: descending, favorites: favorites,
+        lastUsed: sort == .lastUsed ? controller.lastUsedDates : [:],
+        locale: PanelLocale.shared.locale)
       sortedCache = (sortedKey, sorted)
     }
     let narrowed = filter.apply(
-      to: sorted, favorites: favorites, members: members.map(Set.init))
+      to: sorted, favorites: favorites, members: members.map(Set.init), named: named)
     let result = Visible(rows: narrowed, ids: narrowed.map(\.id))
     visibleCache = (key, result)
     return result
@@ -432,7 +458,8 @@ final class InstalledBrowserModel {
     return LibraryEmptyState.make(
       rowCount: rowCount, isLoading: controller.isLibraryLoading,
       libraryIsEmpty: controller.libraryRows.isEmpty,
-      collection: collection.map { ($0.name, $0.count) }, filter: effectiveFilter)
+      collection: collection.map { ($0.name, $0.count) }, filter: effectiveFilter,
+      isInstalled: { controller.libraryRow(id: $0) != nil }, textIsWhole: isTextWhole)
   }
 
   /// The wallpapers that enabled displays other than the target show, for the Other display pill.
@@ -499,6 +526,7 @@ final class InstalledBrowserModel {
   private func restore(_ saved: PanelViewState?) {
     guard let saved else { return }
     filter.text = saved.installed.text
+    isTextWhole = !filter.text.isEmpty
     if let sort = LibrarySort(rawValue: saved.installed.sort) { self.sort = sort }
     descending = saved.installed.descending
     filter.requiredTags = Self.unique(saved.installed.tags)

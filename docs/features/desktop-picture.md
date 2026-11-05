@@ -78,6 +78,47 @@ refresh, so a [settings backup](backup-restore.md) neither exports nor restores 
   away). When the provider hands the desktop back with the switch off, nothing starts and
   a poster the handback left is put back.
 
+## Desktop icons and the notch
+
+Two more Desktop switches clear what sits over the wallpaper. Neither touches the posters.
+
+**Hide desktop icons** (Settings › Desktop & Lock Screen › Desktop, and **Hide Desktop
+Icons** in the menu bar menu and the Wallpaper menu, ticked while hidden) is Finder's own
+choice, `com.apple.finder CreateDesktop`, the one `defaults write com.apple.finder
+CreateDesktop -bool false` sets: off, Finder shows no files, folders or disks on the
+desktop, and they stay in the Desktop folder. `FinderDesktopIcons` (`App/Services/Desktop/`)
+reads it afresh every time the switch is drawn or the menu is built, so a change made in
+Terminal shows too, and reads a Boolean, a number or a string (`true`/`yes`, `false`/`no`, a
+number) as a Cocoa app reads a switch; nothing stored means shown. Finder reads the choice
+only when it starts, so changing it writes the preference and restarts Finder: a `SIGTERM`,
+as `killall Finder` sends, after which macOS starts Finder again; if no Finder runs 5 seconds
+later the app opens it without bringing it forward. A Finder the user had quit is not
+started: the choice applies when they next open it. Because the restart interrupts whatever
+Finder is doing, both places ask first (**Restart Finder** or Cancel), every time, and a
+choice Finder already has asks and restarts nothing. A preference macOS refuses is reported
+and Finder is left running. A Finder that cannot be ended is reported too (the panel's
+banner, or an alert from the menu): the choice stays stored, the switch and the menu tick
+show it, and Finder applies it the next time it starts. The app never changes it on its own, and **Reset all settings**
+leaves it as it is, as it leaves macOS's "Click wallpaper to reveal desktop". Every read,
+write and restart goes through `DesktopActions`, so the unit tests use a stand-in Finder.
+
+**Hide the notch** (Settings › Desktop & Lock Screen › Desktop, off by default,
+`WallpaperMachine.hideNotch`) puts an opaque black window behind the menu bar of every
+display with a camera notch (`NSScreen.safeAreaInsets.top` above 0 or an
+`auxiliaryTopLeftArea`), so the menu bar, which shows what lies beneath it, turns black and
+the notch disappears into it. `NotchMaskController` (`App/Services/Desktop/`) keeps one strip
+per notched display: the display's whole width from its top edge down to the top of its
+working area (`visibleFrame`), so a menu bar that hides itself leaves no strip, and a display
+without a notch keeps its own menu bar. The strip sits one level above the wallpaper windows,
+like the [coverage probes](../architecture.md#desktop-wallpaper-windows-and-private-api-handling),
+and below Finder's icons, joins every Space, ignores the mouse and is never hidden with the
+app. Its class (`MWENotchMaskWindow`) is not a wallpaper window class, so occlusion tracking,
+the window audit and the posters never look at it, and it lies outside the working area the
+coverage probes watch, so it never makes a display count as covered. The switch takes effect
+at once; while it is off the controller keeps no window and watches only its preference, and
+while it is on it moves the strips on a screen change that moves a display or its working
+area and touches no window for one that moves neither. Reset all settings turns it off.
+
 ## When a poster is taken
 
 A poster is requested from the surface that draws the wallpaper, which answers with

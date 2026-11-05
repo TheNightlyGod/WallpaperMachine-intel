@@ -191,6 +191,32 @@ final class PanelWorkshopActionsTests: MediaPanelTestCase {
     XCTAssertNil(controller.errors.message)
   }
 
+  /// Installed's **Show in Steam Workshop** for an item that is not installed: Discover's wallpapers
+  /// list with that item, whatever list was on show, and its id in the search field.
+  func testInstalledShowsAnItemThatIsNotInstalledOnTheWallpapersList() async throws {
+    let panel = try makePanel()
+    let controller = panel.controller
+    for id in ["12345", "0\(OfflineProtocol.itemID)", "https://steamcommunity.com/sharedfiles/filedetails/?id=1"] {
+      do {
+        try await controller.lookUpWorkshopItem(id: id)
+        XCTFail("\(id) is not a Workshop id as Steam writes it")
+      } catch is InvalidControlValue {}
+    }
+    try await controller.openWorkshopAuthor(id: "76561198000000001", name: "Fixture Author")
+    controller.workshopBrowser.edit(text: "night")
+
+    await controller.workshopBrowser.lookUp(itemID: OfflineProtocol.itemID).value
+    try await waitFor { !panel.workshop.isLoading && panel.workshop.hasLoaded }
+    XCTAssertEqual(controller.navigation.selection, .workshop)
+    let browse = controller.workshopBrowse
+    XCTAssertEqual(browse.source.source, .browse, "the item is looked up on the wallpapers list")
+    XCTAssertFalse(browse.source.canGoBack)
+    XCTAssertTrue(browse.isLookup)
+    XCTAssertEqual(browse.items.map(\.id), [OfflineProtocol.itemID])
+    XCTAssertEqual(controller.workshopBrowser.text, OfflineProtocol.itemID, "the field shows what is on show")
+    XCTAssertFalse(controller.workshopBrowser.hasPendingSearch, "the typing that waited is superseded")
+  }
+
   /// The page says a list may be incomplete only while the grid shows one found from the links of a
   /// page whose markup changed, and not once another list has taken its place.
   func testTheStateFlagsAListFoundFromAPageSteamChanged() async throws {

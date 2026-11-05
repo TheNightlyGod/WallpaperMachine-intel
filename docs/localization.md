@@ -35,6 +35,13 @@ The helper runs before `AppDelegate`, never starts the renderer or library
 services, and returns the selected URLs to the parent as JSON. Other native
 dialogs and menus change after quit/reopen.
 
+The app's languages other than English are also the ones a Steam Workshop search is
+read in, so it can be sent to Steam in English, translated on this Mac
+(`WorkshopSearchLanguage.candidates(app:)`; Portuguese only while the app is in
+Portuguese). That translation is the system's Translation framework, never a catalog,
+and only text the person typed goes through it; how it works:
+[Searching in another language](features/workshop-downloads.md#searching-in-another-language).
+
 ## Layers
 
 | Layer | Strings | Mechanism |

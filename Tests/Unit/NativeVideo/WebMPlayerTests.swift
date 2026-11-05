@@ -146,6 +146,63 @@ final class WebMPlayerTests: XCTestCase {
     XCTAssertGreaterThan(player.videoSamplesFed, 30)
   }
 
+  func testAPassEndsWhereTheClipStartsOverOnTheClockThatRunsOn() throws {
+    let clip = try file(WebMFixture.vp9)
+    let first = clip.firstPresentationTime.seconds
+    let length = clip.duration.seconds
+    let end = { (seconds: Double) in
+      WebMFeeder.endOfPass(containing: CMTime(seconds: seconds, preferredTimescale: 90_000), in: clip)?.seconds
+    }
+    XCTAssertEqual(try XCTUnwrap(end(first)), first + length, accuracy: 1e-6)
+    XCTAssertEqual(try XCTUnwrap(end(first + length * 0.5)), first + length, accuracy: 1e-6)
+    XCTAssertEqual(try XCTUnwrap(end(first + length * 1.25)), first + 2 * length, accuracy: 1e-6, "the second pass ends a length later")
+  }
+
+  func testAWatchOnTheNextLoopIsToldOnceWhenTheClipStartsOver() async throws {
+    let clip = try file(WebMFixture.vp9)
+    let player = WebMPlayer(file: clip, withAudio: false, paused: false)
+    let root = CALayer()
+    root.frame = CGRect(x: 0, y: 0, width: 320, height: 200)
+    player.attach(to: root)
+    XCTAssertFalse(player.watchNextLoop {}, "a player that has not started has no pass to end")
+    player.start()
+    defer { player.stop() }
+    let running = await waitUntil { player.currentTime.seconds > 0.1 }
+    XCTAssertTrue(running, player.stateSummary)
+    let end = try XCTUnwrap(WebMFeeder.endOfPass(containing: player.currentTime, in: clip)).seconds
+    var told: [Double] = []
+    XCTAssertTrue(player.watchNextLoop { told.append(player.currentTime.seconds) })
+    let reached = await waitUntil(10) { !told.isEmpty }
+    XCTAssertTrue(reached, player.stateSummary)
+    XCTAssertGreaterThanOrEqual(told.first ?? 0, end - 0.05, "not before the clip starts over")
+    let nextPass = await waitUntil(5) { player.currentTime.seconds > end + clip.duration.seconds + 0.2 }
+    XCTAssertTrue(nextPass, player.stateSummary)
+    XCTAssertEqual(told.count, 1, "told once, not at every pass")
+  }
+
+  func testACancelledOrPausedWatchIsNotTold() async throws {
+    let clip = try file(WebMFixture.vp9)
+    let player = WebMPlayer(file: clip, withAudio: false, paused: false)
+    let root = CALayer()
+    root.frame = CGRect(x: 0, y: 0, width: 320, height: 200)
+    player.attach(to: root)
+    player.start()
+    defer { player.stop() }
+    let running = await waitUntil { player.currentTime.seconds > 0.1 }
+    XCTAssertTrue(running, player.stateSummary)
+    var told = 0
+    XCTAssertTrue(player.watchNextLoop { told += 1 })
+    player.cancelLoopWatch()
+    let passed = await waitUntil(5) { player.currentTime.seconds > clip.duration.seconds + 0.3 }
+    XCTAssertTrue(passed, player.stateSummary)
+    XCTAssertEqual(told, 0, "a cancelled watch is not told")
+
+    XCTAssertTrue(player.watchNextLoop { told += 1 })
+    player.setPaused(true)
+    try await Task.sleep(for: .seconds(1.5))
+    XCTAssertEqual(told, 0, "a held clock never reaches the end of its pass")
+  }
+
   func testPausingStopsTheClockAndResumingRunsItAgain() async throws {
     let player = WebMPlayer(file: try file(WebMFixture.vp9), withAudio: false, paused: false)
     let root = CALayer()

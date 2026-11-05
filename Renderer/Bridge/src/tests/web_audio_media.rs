@@ -1198,6 +1198,7 @@ mod output_device_change {
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
+    use std::time::{Duration, Instant};
 
     use wallpaper_core::media::audio::{
         AudioCaptureBackend, AudioCaptureController, AudioCaptureError, AudioFrameConsumer,
@@ -1208,6 +1209,7 @@ mod output_device_change {
     use crate::engine::{
         AudioCaptureDemand, AudioRestartState, OutputWatchGate, RestartAction,
         apply_audio_capture_demand, handle_audio_restart_retry, handle_output_device_change,
+        handle_tap_stall_check,
     };
 
     struct NullConsumer;
@@ -1224,7 +1226,8 @@ mod output_device_change {
     /// A tap that always has permission and whose next `failing_starts` start
     /// attempts fail, as a start does while the new device is still settling.
     /// The count is shared so a test can change it while the controller owns
-    /// the backend.
+    /// the backend. With `silent_taps`, every tap it starts is counted but
+    /// never called back while the output device runs: a stalled tap.
     #[derive(Default)]
     struct ScriptedBackend {
         running: bool,
@@ -1232,6 +1235,7 @@ mod output_device_change {
         stops: usize,
         start_attempts: usize,
         failing_starts: Arc<AtomicUsize>,
+        silent_taps: bool,
     }
 
     impl AudioCaptureBackend for ScriptedBackend {
@@ -1262,6 +1266,12 @@ mod output_device_change {
         }
         fn is_running(&self) -> bool {
             self.running
+        }
+        fn io_callback_count(&self) -> Option<u64> {
+            (self.silent_taps && self.running).then_some(0)
+        }
+        fn output_device_is_running(&self) -> bool {
+            self.silent_taps
         }
     }
 
@@ -1449,6 +1459,84 @@ mod output_device_change {
             "a healthy tap is left alone"
         );
     }
+
+    /// A web-only session whose taps never call back while the output runs.
+    fn silent_web_only_controller() -> (Controller, Arc<AtomicUsize>) {
+        let backend = ScriptedBackend { silent_taps: true, ..ScriptedBackend::default() };
+        let failing_starts = Arc::clone(&backend.failing_starts);
+        let mut controller = AudioCaptureController::new(Arc::new(NullConsumer), backend);
+        apply_audio_capture_demand(&mut controller, web_demand(false)).unwrap();
+        assert!(controller.watches_tap_stall());
+        (controller, failing_starts)
+    }
+
+    /// The worker's once-a-second checks before the tap has been silent for
+    /// three seconds: none of them rebuilds anything.
+    fn check_first_three_seconds(
+        controller: &mut Controller,
+        state: &mut AudioRestartState,
+        base: Instant,
+    ) {
+        for second in 0..3 {
+            let now = base + Duration::from_secs(second);
+            assert_eq!(handle_tap_stall_check(controller, state, now), RestartAction::Done);
+        }
+        assert_eq!((controller.backend().stops, controller.backend().starts), (0, 1));
+    }
+
+    #[test]
+    fn a_tap_that_stops_calling_back_is_rebuilt() {
+        let (mut controller, _) = silent_web_only_controller();
+        let mut state = AudioRestartState::default();
+        let base = Instant::now();
+        check_first_three_seconds(&mut controller, &mut state, base);
+
+        let action = handle_tap_stall_check(&mut controller, &mut state, base + Duration::from_secs(3));
+
+        assert_eq!(action, RestartAction::Done);
+        assert!(controller.is_capturing());
+        assert_eq!(
+            (controller.backend().stops, controller.backend().starts),
+            (1, 2),
+            "the silent tap is released and a new one started"
+        );
+    }
+
+    #[test]
+    fn a_newer_device_change_supersedes_a_failed_stall_rebuild() {
+        let (mut controller, failing_starts) = silent_web_only_controller();
+        failing_starts.store(2, Ordering::SeqCst);
+        let mut state = AudioRestartState::default();
+        let base = Instant::now();
+        check_first_three_seconds(&mut controller, &mut state, base);
+
+        let RestartAction::RetryIn { delay, generation: stall, attempt } =
+            handle_tap_stall_check(&mut controller, &mut state, base + Duration::from_secs(3))
+        else {
+            panic!("the stall rebuild fails and asks for a retry");
+        };
+        assert_eq!(delay, RESTART_RETRY_DELAYS[0], "it retries on the device-change ladder");
+        // The output device changes before that retry is due, and fails too.
+        let RestartAction::RetryIn { generation: device, .. } =
+            handle_output_device_change(&mut controller, &mut state)
+        else {
+            panic!("the device-change rebuild also fails and asks for a retry");
+        };
+        let attempts = controller.backend().start_attempts;
+
+        assert_eq!(
+            handle_audio_restart_retry(&mut controller, &state, stall, attempt),
+            RestartAction::Done,
+            "the stall rebuild's retry is superseded"
+        );
+        assert_eq!(controller.backend().start_attempts, attempts, "it started nothing");
+        assert_eq!(
+            handle_audio_restart_retry(&mut controller, &state, device, 1),
+            RestartAction::Done
+        );
+        assert!(controller.is_capturing(), "the device change's retry brings the tap back");
+    }
+
     /// A stand-in for the real watcher that counts how many are alive.
     struct LiveWatcher(Arc<AtomicUsize>);
 

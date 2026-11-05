@@ -73,6 +73,12 @@ was run.
       battery is low row adds "In effect now. Wallpapers are paused.". Set On battery to
       Pause: the module's line goes away; set the rule to Stop: it reads "… Wallpapers are
       stopped." again. Plug in: the line and the row's In effect now go away.
+- [ ] Set **When the Mac is inactive** to Pause and **Inactive after** to 5 minutes, with
+      display sleep set longer, and leave the Mac alone: after five minutes every wallpaper
+      holds its last frame and the log reads "the Mac counts as inactive". Move the mouse:
+      they play again at once. Wait again and press only a key: they play again within about
+      two seconds. Repeat with Stop (free memory): the wallpapers reload at the first input.
+      Your own Pause from the menu bar stays as you left it throughout.
 - [ ] On a laptop, set **When another app is in front** to Pause on battery and leave a
       non-maximized window of another app in front of an animated wallpaper. Plugged in, the
       wallpaper keeps animating in the gaps; unplug: it holds its frame at once; click the
@@ -690,6 +696,27 @@ closed lid has not been seen on a desktop
 - [ ] Play a 4K native clip and sleep and wake the displays: no visible hitch around the
       check after the wake. If there is one, measure it with the power harness before
       changing anything; the cost of the check's video output on a 4K clip is unmeasured.
+
+### HEVC tagged hev1
+
+- [ ] Apply an MP4 whose HEVC is tagged `hev1` with its parameter sets in `hvcC` (FFmpeg's
+      `-tag:v hev1` writes one): it plays on the desktop, in the preview and on the lock screen,
+      and the log says it plays from a clone retagged `hvc1`; the file in the library keeps its
+      size, date and bytes. If the Windows VM is available, compare a frame with Wallpaper
+      Engine's (`scripts/we_reference.py`).
+- [ ] With the library on an external drive, apply it again: the inspector reads **Loading
+      wallpaper content…** with the message that the corrected copy is being made, the clip opens
+      when the log says a full copy was made (a clip over 2 GB fails saying it is too large for
+      one), and other displays open meanwhile without waiting for it. Import the same clip from
+      that drive: its library tile gets a picture, and the inspector's black-bar check reads it.
+- [ ] Rotate a playlist of `hev1` clips from that drive past 2 GB in total: each one plays, the
+      copies of clips no longer shown making room for it. Eject the drive while one plays, press
+      **Clear unused caches…**, reconnect: the clip plays again (from a copy made again, never
+      stalling on its file).
+- [ ] Eject that drive while a full copy is being made: the log says the copy was not made, the
+      inspector shows the wallpaper failed with the read error, and the log shows no new copy
+      until a wallpaper is applied again. Delete an `hev1` wallpaper, put it back from the
+      Trash and apply it: it plays from a copy made again.
 
 ## Audio responsiveness
 

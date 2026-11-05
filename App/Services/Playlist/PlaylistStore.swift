@@ -2,11 +2,13 @@ import Foundation
 
 /// Every display's playlist, saved in UserDefaults, and when each display that rotates or
 /// follows the day changes next. Mutations post `didChangeNotification` once; the scheduler
-/// and the panel follow it.
+/// and the panel follow it. The scheduler's note of a change waiting for a video (`clipWaits`)
+/// posts `clipWaitsDidChangeNotification` instead, which only the panel follows.
 @MainActor
 final class PlaylistStore {
     static let shared = PlaylistStore()
     static let didChangeNotification = Notification.Name("WallpaperMachine.playlistsDidChange")
+    static let clipWaitsDidChangeNotification = Notification.Name("WallpaperMachine.playlistClipWaitsDidChange")
     nonisolated static let playlistsKey = "WallpaperMachine.playlists"
     nonisolated static let nextChangeKey = "WallpaperMachine.playlistNextChange"
     nonisolated static let plansKey = "WallpaperMachine.playlistPlans"
@@ -47,6 +49,11 @@ final class PlaylistStore {
     }
     /// Failures belong to this run only. An app update or relaunch starts with a fresh attempt.
     private(set) var skipped: [String: [String: SkippedWallpaper]] = [:]
+    /// The displays whose due change waits for the video on screen to finish
+    /// (`DisplayPlaylist.waitsForClipEnd`), and when each is made anyway. The scheduler notes it
+    /// for the panel, whose Next change would otherwise show a deadline that has passed. Run
+    /// state, kept only while the wait lasts and never saved.
+    private(set) var clipWaits: [String: Date] = [:]
     /// Changes a rotating display to its next wallpaper now, answering false when it does not
     /// rotate. The app delegate points it at the scheduler; the panel's Change now calls it.
     var skipHandler: (@MainActor (String) -> Bool)?
@@ -194,6 +201,15 @@ final class PlaylistStore {
         guard nextChange[display] != date else { return }
         nextChange[display] = date
         persist()
+    }
+
+    /// Notes that `display`'s due change waits for its video until `until`, or no longer (nil).
+    /// It posts `clipWaitsDidChangeNotification`, not `didChangeNotification`, so the evaluation
+    /// that starts or ends a wait is not run again from inside itself.
+    func setClipWait(_ until: Date?, on display: String) {
+        guard clipWaits[display] != until else { return }
+        clipWaits[display] = until
+        NotificationCenter.default.post(name: Self.clipWaitsDidChangeNotification, object: self)
     }
 
     /// Makes a display's playlist wait (`hold`) or lets it carry on (nil). Setting what it

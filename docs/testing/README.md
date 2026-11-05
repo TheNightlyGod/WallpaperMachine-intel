@@ -240,7 +240,11 @@ bundle runs inside the real app as its test host, so `UserDefaults.standard`
 `PanelController` (or other store) built without `defaults:` writes there —
 the first-run welcome's `welcomeSeen` flag, the learned drag-select hint, favorites — and
 silently changes what the app does at the next launch. Pass the test's own
-suite everywhere; `PanelFixture` does.
+suite everywhere; `PanelFixture` does. The panel fixtures (`PanelFixture`,
+`makeDiscoverPanel`, `makeBrowsingPanel`, `ShellHost`) also give the controller
+`WorkshopSearchTranslator.fake` over a `FakeTranslation`, so a Settings › General
+render or a search typed in another language never asks this Mac's Translation
+framework or depends on the languages it has downloaded.
 
 A named suite also outlives its test: `removePersistentDomain(forName:)` still
 leaves an empty `~/Library/Preferences/<suite>.plist`, because cfprefsd flushes

@@ -90,6 +90,13 @@ extension PanelController {
       previousID: store.previousWallpaperID(displayId: target))
   }
 
+  /// When each wallpaper was last put on a display, the newest use across displays, for
+  /// Installed's Last used sort.
+  var lastUsedDates: [String: Date] { store.history.lastUsedDates() }
+
+  /// Moves whenever the history does, so a list sorted by last use knows to sort again.
+  var historyRevision: UInt64 { store.history.revision }
+
   private var supportedWallpaperIDs: Set<String> {
     Set(store.librarySnapshot.wallpapers.lazy.filter(\.supported).map(\.id))
   }

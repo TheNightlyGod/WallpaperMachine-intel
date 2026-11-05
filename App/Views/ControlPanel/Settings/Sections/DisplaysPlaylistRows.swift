@@ -201,6 +201,25 @@ private struct DisplaysRotateRows: View {
       .announcesChanges(of: refused ? accepted : nil)
     }
 
+    // Only a timed change can wait: the unlock's change comes as you sit down to the Mac.
+    if playlist.trigger == .interval {
+      DisplaysRow(
+        item: DisplaysSettingsSection.playlistClipEnd, forced: forced, identity: display.id,
+        controlLabel: name(DisplaysSettingsSection.playlistClipEnd.title)
+      ) {
+        Toggle(
+          noLabel,
+          isOn: model.binding(
+            PanelActionCoordinator.key("playlistSetting", id: display.id, detail: "waitsForClipEnd"),
+            current: playlist.waitsForClipEnd
+          ) { waits in try await controller.editPlaylist(.waitsForClipEnd(waits), display: display.id) }
+        )
+        .toggleStyle(.switch)
+        .labelsHidden()
+        .disabled(off)
+      }
+    }
+
     if playlist.source == .list {
       DisplaysOrderEditor(display: display, state: state, off: off, card: card)
     }

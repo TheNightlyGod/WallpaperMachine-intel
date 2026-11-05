@@ -38,7 +38,8 @@ final class PanelRootRenderTests: PanelTestCase {
         rootView: ControlPanelView(
           store: store, navigation: navigation, workshop: workshop, pixiv: PixivStore(),
           updater: AppUpdateStore(currentVersion: "0.1.0", client: DisabledAppUpdateClient()),
-          imports: LibraryImportStore(), defaults: defaults, appLanguage: languages))
+          imports: LibraryImportStore(), defaults: defaults, appLanguage: languages,
+          searchTranslation: .fake(defaults: defaults, language: languages)))
       hosting.sizingOptions = []
       hosting.sceneBridgingOptions = [.toolbars, .title]
       window = ControlPanelWindow.make(contentViewController: hosting, delegate: nil)

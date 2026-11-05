@@ -70,6 +70,21 @@ alert is shown. These steps are written to the application log with the
 `[wallpaper-core audio]` prefix. While the tap is down, the analysis treats the
 input as stale after 250 ms and the spectrum falls to zero.
 
+A tap that stops delivering is rebuilt too. A tap can stop calling back without
+any device change, for example after sleep or a hiccup of the system audio
+service. While a tap runs, the audio worker checks once a second how many times
+it has called back. A healthy tap keeps calling back with silence when nothing
+plays, so only missing calls count, never quiet samples. After 3 seconds without
+a call while the default output device is running, the tap is rebuilt the same
+way as for a device change, with the same retries; a device change that arrives
+in the meantime replaces them. While the output device is idle no call is expected,
+so nothing is rebuilt. At most 3 of these rebuilds happen within a minute: a
+fourth stall leaves the tap alone until the next scene or demand change, and the
+log says so once. The log also records each stall rebuild and the first call
+after one. The check runs only while capture is wanted and a tap is running, so a
+paused or suspended display, a stopped tap or a Mac whose wallpapers never read
+audio has none, and a rebuild never asks for permission.
+
 Healthy capture and unfinished teardown are tracked separately. A failed callback,
 aggregate-device or tap release retains its resources for retry but does not report
 usable capture. Disabling demand retries remaining cleanup; reactivation or a rebuild
@@ -131,7 +146,11 @@ Synthetic offscreen checks cover the analysis against tone measurements
 shader color and SceneScript scale. Device-free controller and bridge tests cover web-only
 capture startup, permission, shared ownership, suspension and shutdown, and the
 [output device rebuild](#output-device-changes): the debounce, the controller restart,
-the retry delays and superseded retries. Offscreen WebKit tests cover listener
+the retry delays and superseded retries. They also drive the stall watch through the
+real I/O callback with an injected clock: silence, an idle output device and
+suspension never rebuild, a tap without calls is rebuilt once after 3 seconds and at
+most 3 times a minute, a device change supersedes a stall rebuild's retries, and the
+worker checks only while a counted tap is wanted. Offscreen WebKit tests cover listener
 delivery. Live capture and desktop behavior require a separately authorized manual
-check; that includes the CoreAudio listener itself and a real device switch, which no
-unit test can exercise.
+check; that includes the CoreAudio listener itself, a real device switch and a tap
+that really stops calling back, which no unit test can exercise.

@@ -1,8 +1,8 @@
 import SwiftUI
 
-/// The strip above a page that reports what needs the person's attention: the error line, and the
-/// wallpapers WallpaperMachine held back after crashing. Nothing is drawn, and no room is kept,
-/// while there is nothing to report.
+/// The strip above a page that reports what needs the person's attention: the error line, the
+/// library's drive while it is disconnected, and the wallpapers WallpaperMachine held back after
+/// crashing. Nothing is drawn, and no room is kept, while there is nothing to report.
 struct PanelBanners: View {
   @Environment(PanelController.self) private var controller
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -10,11 +10,15 @@ struct PanelBanners: View {
   var body: some View {
     // The download failure shares the banner: the page showed one line, the first of the two.
     let message = controller.errors.message ?? controller.errors.downloadMessage
+    let drive = controller.libraryDriveMessage
     let held = controller.heldWallpapers
-    let hasContent = message != nil || !held.isEmpty
+    let hasContent = message != nil || drive != nil || !held.isEmpty
     VStack(spacing: 8) {
       if let message {
         ErrorBanner(message: message) { controller.dismissError() }
+      }
+      if let drive {
+        LibraryDriveBanner(message: drive)
       }
       HeldWallpaperRows(rows: held)
     }
@@ -59,6 +63,27 @@ private struct ErrorBanner: View {
   /// A failure that appears while VoiceOver is elsewhere is spoken, as an `alert` role was.
   private func announce() {
     AccessibilityNotification.Announcement(message).post()
+  }
+}
+
+/// The library's drive was ejected or unplugged while the app ran. A warning with nothing to press:
+/// connecting the drive is the remedy, and the row goes once its wallpapers play again. It is
+/// spoken once when it appears.
+private struct LibraryDriveBanner: View {
+  let message: String
+
+  @Environment(PanelController.self) private var controller
+  @Environment(\.panelTheme) private var theme
+
+  var body: some View {
+    BannerRow(
+      systemImage: "externaldrive.badge.exclamationmark", tint: theme.surface.warning.color,
+      message: message
+    ) {
+      EmptyView()
+    }
+    .accessibilityIdentifier("library-drive-banner")
+    .onAppear { controller.shell.announce(message) }
   }
 }
 

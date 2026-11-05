@@ -4,11 +4,11 @@ pub mod device_watch;
 
 use std::{
     borrow::Cow,
-    collections::HashSet,
+    collections::{HashSet, VecDeque},
     error::Error,
     fmt::{Display, Formatter},
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 pub use capture::{DefaultAudioResponseController, PlatformAudioCaptureBackend};
@@ -437,6 +437,21 @@ pub trait AudioCaptureBackend {
     fn has_pending_cleanup(&self) -> bool {
         false
     }
+    /// How many times the running tap's I/O callback has been called since
+    /// that tap started, or `None` when no healthy tap runs or the backend
+    /// cannot count them. Every call counts, whether it carries sound or
+    /// silence. Only a counting backend is checked for a stalled tap.
+    #[must_use]
+    fn io_callback_count(&self) -> Option<u64> {
+        None
+    }
+    /// Whether the default output device is running for any client. A tap is
+    /// expected to call back only then, so missing callbacks count as a stall
+    /// only while this is true. A backend that cannot tell reports `false`.
+    #[must_use]
+    fn output_device_is_running(&self) -> bool {
+        false
+    }
 }
 
 /// How long to wait before each further attempt to bring the tap back after a
@@ -459,6 +474,127 @@ pub enum RestartOutcome {
     Restarted,
 }
 
+/// How often the capture worker checks a running tap for missing callbacks.
+pub const TAP_STALL_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+/// How long a running tap may go without one I/O callback, while the output
+/// device runs, before it counts as stalled and is rebuilt.
+pub const TAP_STALL_TIMEOUT: Duration = Duration::from_secs(3);
+/// At most this many stall rebuilds within [`TAP_STALL_REBUILD_WINDOW`]. The
+/// next stall inside that window ends the watch until a scene or demand
+/// change, so a device that keeps stalling cannot loop.
+pub const TAP_STALL_REBUILD_LIMIT: usize = 3;
+/// The sliding window [`TAP_STALL_REBUILD_LIMIT`] counts stall rebuilds in.
+pub const TAP_STALL_REBUILD_WINDOW: Duration = Duration::from_secs(60);
+
+/// What one [`AudioCaptureController::check_tap_stall`] found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TapStallCheck {
+    /// Nothing is watched: capture is not wanted or not healthy, the backend
+    /// cannot count callbacks, or the watch gave up.
+    Idle,
+    /// The tap called back recently, or the output device is not running and
+    /// no callback is expected.
+    Healthy,
+    /// The first callback after a stall rebuild arrived.
+    Recovered,
+    /// No callback for [`TAP_STALL_TIMEOUT`] while the output device runs.
+    /// The caller rebuilds the tap now; the rebuild counts against the limit.
+    Stalled,
+    /// Stalled again after [`TAP_STALL_REBUILD_LIMIT`] rebuilds within
+    /// [`TAP_STALL_REBUILD_WINDOW`]: the watch stops until a scene or demand
+    /// change.
+    GaveUp,
+}
+
+/// Notices a running tap whose I/O callback is no longer called.
+///
+/// It keys off the backend's callback count, never off the samples: a healthy
+/// tap keeps calling back with zeros while nothing plays.
+#[derive(Debug, Default)]
+struct TapStallWatch {
+    /// The callback count last seen and when it was first seen at that value.
+    /// `None` until the current tap's first check.
+    last: Option<(u64, Instant)>,
+    /// When each stall rebuild inside the window was asked for, oldest first.
+    rebuilds: VecDeque<Instant>,
+    gave_up: bool,
+    /// A stall rebuild was asked for and no callback has been seen since.
+    awaiting_recovery: bool,
+    /// The previous check saw a callback or found the output device running,
+    /// so the wait since `last` is time the device ran.
+    output_ran_since_last: bool,
+}
+
+impl TapStallWatch {
+    /// A new tap started. Its count starts at zero and its wait at its first
+    /// check.
+    fn tap_started(&mut self) {
+        self.last = None;
+        self.output_ran_since_last = false;
+    }
+
+    /// A scene or demand change gives a watch that gave up a fresh budget.
+    fn rearm(&mut self) {
+        self.gave_up = false;
+        self.rebuilds.clear();
+    }
+
+    /// One check at `now` of a tap that has called back `count` times since
+    /// it started.
+    fn observe(
+        &mut self,
+        now: Instant,
+        count: u64,
+        output_running: impl FnOnce() -> bool,
+    ) -> TapStallCheck {
+        // A tap's count starts at zero, so at its first check any call counts.
+        let delivered = self.last.map_or(count > 0, |(seen, _)| count != seen);
+        if delivered || self.last.is_none() {
+            self.last = Some((count, now));
+        }
+        if delivered {
+            self.output_ran_since_last = true;
+            return if std::mem::take(&mut self.awaiting_recovery) {
+                TapStallCheck::Recovered
+            } else {
+                TapStallCheck::Healthy
+            };
+        }
+        // The device is asked only while callbacks are missing. While it is
+        // idle no callback is expected, so the wait starts again.
+        if !output_running() {
+            self.last = Some((count, now));
+            self.output_ran_since_last = false;
+            return TapStallCheck::Healthy;
+        }
+        // The device was idle at the previous check: only from now does a
+        // missing callback count.
+        if !std::mem::replace(&mut self.output_ran_since_last, true) {
+            self.last = Some((count, now));
+            return TapStallCheck::Healthy;
+        }
+        let waited = self
+            .last
+            .map_or(Duration::ZERO, |(_, since)| now.saturating_duration_since(since));
+        if waited < TAP_STALL_TIMEOUT {
+            return TapStallCheck::Healthy;
+        }
+        while self.rebuilds.front().is_some_and(|&asked| {
+            now.saturating_duration_since(asked) >= TAP_STALL_REBUILD_WINDOW
+        }) {
+            self.rebuilds.pop_front();
+        }
+        if self.rebuilds.len() >= TAP_STALL_REBUILD_LIMIT {
+            self.gave_up = true;
+            self.awaiting_recovery = false;
+            return TapStallCheck::GaveUp;
+        }
+        self.rebuilds.push_back(now);
+        self.awaiting_recovery = true;
+        TapStallCheck::Stalled
+    }
+}
+
 pub struct AudioCaptureController<B: AudioCaptureBackend> {
     consumer: Arc<dyn AudioFrameConsumer>,
     backend: B,
@@ -469,6 +605,7 @@ pub struct AudioCaptureController<B: AudioCaptureBackend> {
     /// still wanted, so the next [`AudioCaptureController::restart_capture`]
     /// retries it without requiring another device change.
     restart_pending: bool,
+    stall: TapStallWatch,
 }
 
 impl<B: AudioCaptureBackend> AudioCaptureController<B> {
@@ -481,6 +618,7 @@ impl<B: AudioCaptureBackend> AudioCaptureController<B> {
             suspended: false,
             external_consumers: false,
             restart_pending: false,
+            stall: TapStallWatch::default(),
         }
     }
 
@@ -523,6 +661,9 @@ impl<B: AudioCaptureBackend> AudioCaptureController<B> {
     ) -> Result<(), AudioCaptureError> {
         if enabled {
             let newly_added = self.enabled_handles.insert(handle);
+            if newly_added {
+                self.stall.rearm();
+            }
             if let Err(error) = self.sync_capture_state() {
                 if newly_added {
                     self.enabled_handles.remove(&handle);
@@ -531,7 +672,9 @@ impl<B: AudioCaptureBackend> AudioCaptureController<B> {
             }
             Ok(())
         } else {
-            self.enabled_handles.remove(&handle);
+            if self.enabled_handles.remove(&handle) {
+                self.stall.rearm();
+            }
             self.sync_capture_state()
         }
     }
@@ -545,8 +688,12 @@ impl<B: AudioCaptureBackend> AudioCaptureController<B> {
     ///
     /// Returns [`AudioCaptureError`] when starting or stopping capture fails.
     pub fn retain_scenes(&mut self, handles: &[SceneHandle]) -> Result<(), AudioCaptureError> {
+        let before = self.enabled_handles.len();
         self.enabled_handles
             .retain(|handle| handles.contains(handle));
+        if self.enabled_handles.len() != before {
+            self.stall.rearm();
+        }
         self.sync_capture_state()
     }
 
@@ -565,6 +712,9 @@ impl<B: AudioCaptureBackend> AudioCaptureController<B> {
         let previous = (self.suspended, self.external_consumers);
         self.suspended = suspended;
         self.external_consumers = external_consumers;
+        if previous != (suspended, external_consumers) {
+            self.stall.rearm();
+        }
         if let Err(error) = self.sync_capture_state() {
             (self.suspended, self.external_consumers) = previous;
             if let Err(rollback) = self.sync_capture_state() {
@@ -625,7 +775,7 @@ impl<B: AudioCaptureBackend> AudioCaptureController<B> {
         if !self.backend.has_permission()? {
             return Ok(RestartOutcome::NotRunning);
         }
-        self.backend.start(Arc::clone(&self.consumer))?;
+        self.start_backend()?;
         if self.is_capturing() {
             self.restart_pending = false;
         }
@@ -640,13 +790,50 @@ impl<B: AudioCaptureBackend> AudioCaptureController<B> {
         !self.suspended && (self.external_consumers || !self.enabled_handles.is_empty())
     }
 
+    /// Whether [`Self::check_tap_stall`] has anything to check: capture is
+    /// wanted, a tap whose callbacks the backend counts is running, and the
+    /// watch has not given up. A caller schedules the check only while this
+    /// holds, so a stopped, suspended or uncounted tap costs nothing.
+    #[must_use]
+    pub fn watches_tap_stall(&self) -> bool {
+        !self.stall.gave_up && self.wants_capture() && self.backend.io_callback_count().is_some()
+    }
+
+    /// Checks the running tap for missing I/O callbacks, once per
+    /// [`TAP_STALL_CHECK_INTERVAL`] at `now`.
+    ///
+    /// Only the absence of callbacks counts, never silent samples, and only
+    /// while the default output device runs. On [`TapStallCheck::Stalled`]
+    /// the caller rebuilds the tap the way it rebuilds one for a device
+    /// change, through [`Self::restart_capture`], which never asks for
+    /// permission again.
+    #[must_use]
+    pub fn check_tap_stall(&mut self, now: Instant) -> TapStallCheck {
+        if self.stall.gave_up || !self.wants_capture() || !self.is_capturing() {
+            return TapStallCheck::Idle;
+        }
+        let Some(count) = self.backend.io_callback_count() else {
+            return TapStallCheck::Idle;
+        };
+        let backend = &self.backend;
+        self.stall
+            .observe(now, count, || backend.output_device_is_running())
+    }
+
+    fn start_backend(&mut self) -> Result<(), AudioCaptureError> {
+        self.backend.start(Arc::clone(&self.consumer))?;
+        // A new tap waits its own timeout before it can count as stalled.
+        self.stall.tap_started();
+        Ok(())
+    }
+
     fn sync_capture_state(&mut self) -> Result<(), AudioCaptureError> {
         let wanted = self.wants_capture();
         let running = self.backend.is_running();
         let cleanup = self.backend.has_pending_cleanup();
         let outcome = if wanted && (!running || cleanup) {
             match self.backend.has_permission() {
-                Ok(true) => self.backend.start(Arc::clone(&self.consumer)),
+                Ok(true) => self.start_backend(),
                 Ok(false) => Ok(()),
                 Err(error) => Err(error),
             }

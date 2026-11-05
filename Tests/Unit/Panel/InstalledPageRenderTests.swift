@@ -178,6 +178,7 @@ final class InstalledPageRenderTests: PanelTestCase {
     let model = panel.controller.library
     PanelLocale.shared.bind(to: panel.controller.appLanguage)
     let states: [() -> Void] = [
+      { model.setText("https://steamcommunity.com/sharedfiles/filedetails/?id=3632513108") },
       { model.setText("zzz") }, { model.setRequired("Customizable", true) },
       { model.setRequired("Customizable", false); model.setText("") },
     ]

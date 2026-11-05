@@ -2,8 +2,9 @@ import Foundation
 
 /// Per-wallpaper facts the renderer's library snapshot does not carry: how much a
 /// wallpaper's folder weighs, when it entered the library, whether Wallpaper Engine
-/// staff approved it, and the Workshop-style tags its manifest implies. Installed sorts
-/// on the first two, marks the third and filters on the last.
+/// staff approved it, the Workshop-style tags its manifest implies, and the manifest's
+/// words its search reads. Installed sorts on the first two, marks the third, filters on
+/// the fourth and searches the last.
 ///
 /// All come from the file system. Summing a folder is a directory walk, and the panel
 /// builds a snapshot many times a second, so nothing is measured on the snapshot path:
@@ -30,6 +31,9 @@ final class LibraryMetricsService {
     /// wallpaper declares audio processing and `Customizable` when it ships user properties
     /// beyond the stock scheme colour. Resolution is not in a manifest, so it never appears.
     var tags: [String] = []
+    /// The manifest's words as Installed's search reads them, folded (`searchText(project:tags:)`).
+    /// Never shown: the author and description are the manifest's own, untrusted text.
+    var searchText = ""
     /// The folder's content modification date when it was measured.
     var stamp: Date?
   }
@@ -155,18 +159,37 @@ final class LibraryMetricsService {
     let manifest = manifest(at: folder.appendingPathComponent("project.json"))
     return Metrics(
       size: size, addedAt: values.addedToDirectoryDate ?? values.creationDate,
-      approved: manifest.approved, tags: manifest.tags, stamp: values.contentModificationDate)
+      approved: manifest.approved, tags: manifest.tags, searchText: manifest.searchText,
+      stamp: values.contentModificationDate)
   }
 
-  /// The manifest's Steam-facing facts. A missing, oversized or unreadable manifest is
-  /// simply not approved and carries no tags.
-  nonisolated static func manifest(at url: URL) -> (approved: Bool, tags: [String]) {
+  /// The manifest's Steam-facing facts and the words its search reads. A missing, oversized
+  /// or unreadable manifest is simply not approved and carries no tags or words.
+  nonisolated static func manifest(at url: URL) -> (approved: Bool, tags: [String], searchText: String) {
     guard let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize, size < 16_000_000,
       let data = try? Data(contentsOf: url),
       let project = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-    else { return (false, []) }
+    else { return (false, [], "") }
     let approved = approved(project: project)
-    return (approved, tags(project: project, approved: approved))
+    let tags = tags(project: project, approved: approved)
+    return (approved, tags, searchText(project: project, tags: tags))
+  }
+
+  /// How many characters of a description the search reads, which bounds what one runaway
+  /// manifest can make the panel keep.
+  nonisolated static let searchedDescriptionLength = 8_000
+
+  /// The words beside the title that Installed's search reads, folded (`LibrarySearchText`):
+  /// the tags joined by spaces, then on lines of their own the author the manifest names (its
+  /// `author`, or that of the `pixiv` block a pixiv save records; a Workshop manifest names
+  /// none) and the start of its `description`. A typed query holds no line break, so it never
+  /// spans two of them.
+  nonisolated static func searchText(project: [String: Any], tags: [String]) -> String {
+    let pixiv = project["pixiv"] as? [String: Any]
+    let author = project["author"] as? String ?? pixiv?["author"] as? String ?? ""
+    let description = (project["description"] as? String).map { String($0.prefix(searchedDescriptionLength)) }
+    return [tags.joined(separator: " "), author, description ?? ""].map(LibrarySearchText.fold)
+      .joined(separator: "\n")
   }
 
   /// Wallpaper Engine writes `"approved": true` into the manifest of a staff-approved

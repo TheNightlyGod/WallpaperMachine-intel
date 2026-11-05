@@ -150,6 +150,8 @@ final class PanelStoreRevisions {
     observe(PlaybackPreferences.didChangeNotification, playbackStore, .playback)
     observe(HotKeyPreferences.didChangeNotification, hotKeyStore, .hotKeys)
     observe(PlaylistStore.didChangeNotification, playlistStore, .playlists)
+    // A change waiting for a video changes what Next change says, and only the panel follows it.
+    observe(PlaylistStore.clipWaitsDidChangeNotification, playlistStore, .playlists)
     observe(WallpaperCollectionStore.didChangeNotification, collectionStore, .collections)
     observe(WallpaperPresetStore.didChangeNotification, presetStore, .presets)
     observe(StillImagePlacementStore.didChangeNotification, imagePlacementStore, .imagePlacement)

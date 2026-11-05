@@ -105,4 +105,16 @@ final class VideoLetterboxProbeMediaTests: XCTestCase {
     let report = try await VideoLetterboxProbe().check(try await clip("black", black: true))
     XCTAssertEqual(report.verdict, .indeterminate(.tooDark))
   }
+
+  func testAnHev1ClipIsCheckedOnItsCorrectedCopy() async throws {
+    // AVFoundation refuses the embedded clip as it is; the check reads the copy the desktop plays.
+    let url = try Hev1Fixture.write(name: "hev1", into: directory)
+    let folder = directory.appendingPathComponent("DerivedVideos", isDirectory: true)
+    let derived = DerivedVideoCache(folder: { folder })
+    let probe = VideoLetterboxProbe(frames: { try await VideoLetterboxProbe.decodedFrames(of: $0, derived: derived) })
+    let report = try await probe.check(url)
+    XCTAssertEqual(report.stamp, try VideoFileStamp(url: url), "the stamp is the library file's")
+    XCTAssertGreaterThanOrEqual(report.sampled, 1)
+    XCTAssertEqual(report.aspect, 1, accuracy: 0.01)
+  }
 }

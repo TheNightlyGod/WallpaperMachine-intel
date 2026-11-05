@@ -157,4 +157,17 @@ final class VideoPosterMediaTests: XCTestCase {
         context.draw(image, in: CGRect(x: 0, y: 0, width: 4, height: 4))
         XCTAssertGreaterThan(gray.map(Int.init).reduce(0, +) / gray.count, 150)
     }
+
+    func testAnHev1ClipHasAPosterFromACopyThatGoesAfterIt() async throws {
+        // AVFoundation refuses the embedded clip as it is; the poster is taken from a retagged copy.
+        let clip = try Hev1Fixture.write(name: "hev1", into: directory)
+        let folder = directory.appendingPathComponent("DerivedVideos", isDirectory: true)
+        let data = try await VideoPoster.jpeg(of: clip, maxPixelSize: 32, derived: DerivedVideoCache(folder: { folder }))
+        let source = try XCTUnwrap(CGImageSourceCreateWithData(data as CFData, nil))
+        let image = try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil))
+        XCTAssertEqual(image.width, 32)
+        XCTAssertEqual(
+            (try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? [], [],
+            "the copy made for the poster alone is gone")
+    }
 }

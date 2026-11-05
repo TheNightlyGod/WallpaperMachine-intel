@@ -25,6 +25,18 @@ and moves whatever falls past ten verbatim into a monthly file under
 [archive/](archive/); promote anything durable before it goes. Editing an
 entry's recorded result is not allowed.
 
+## 2026-11-05 — Nine features adopted from rival Mac wallpaper apps
+
+Menu bar Now Playing panel, inactivity pause, playlist wait for a clip's end, hev1 HEVC from a retagged copy, broader Installed search and Last used, library-drive follow, Workshop search translation, Hide Desktop Icons and the notch strip, and the stalled audio-tap rebuild. Each was reviewed independently, plus once across all nine, and fixed in two verified rounds.
+
+- `python3 scripts/test.py` — exit 0; 4653 tests: 4587 passed, 66 skipped
+- `python3 scripts/check_rust.py` — exit 0; desktop/media/network opt-ins off
+- `python3 scripts/check_renderer.py` — exit 0; generated probes pixel-equal, corpus and local-energy cases skipped
+- `python3 scripts/build.py --configuration Release` — exit 0
+- Offscreen captures (light and dark) of the menu bar panel and of Settings › General, Playback & Power and Desktop & Lock Screen; hover, popover attachment and active control colours unverified
+- Not run on the desktop: status-item click routing, real idle detection, Finder restart and the notch strip's look, a real drive eject and remount, the Translation framework with real language packs (macOS 15 hand-off untested), a real hev1 Workshop clip, a real stalled audio tap
+- Not compared with Wallpaper Engine: no change to how a scene is drawn
+
 ## 2026-11-05 — Battery: scene pass merge and opt-in battery choices
 
 Scene draws that only their object order or depth attachment kept apart share one render pass (WALLPAPER_MACHINE_SCENE_PASS_MERGE); When another app is in front gains Pause on battery, the menu bar an On Battery submenu, and the panel a one-time battery question. M5 Pro, macOS 27.
@@ -117,11 +129,3 @@ Branch t3/optimize-power-usage (PR #156) against the v1.8.2 renderer on an M5 Pr
 - New tests testASubscribedPageHearsSilenceWhilePlayingAndAgainAfterAResume and testSwitchingWallpapersIsNotCountedAsTheRendererFailing fail with the fixes removed and pass with them.
 - python3 scripts/test.py: 4298 passed, 0 failed, 53 skipped. Release build OK.
 - Gap: real lock behaviour not checked by the agent; ZZZ's earlier memory-limit stall is unchanged.
-
-## 2026-11-03 — Web lock screen: page paused state follows the surface (issue 155)
-
-- Cause: the extension created a web page paused before its first frame while WallpaperSurface tracked it as playing; applyPolicy never resumed it, so the settling desktop and any lock within ~15 s kept the readiness frame (black/grey for 音域回响 and 阿洛娜指纹识别2.0). Evidence: unified log showed WebPageProxy::suspend 60 ms after load and no resume at the following lock.
-- Fix: Extension/WallpaperSurface.swift creates and updates the page with rendererPaused, like scenes and clips; docs/features/lock-screen.md updated.
-- python3 scripts/test.py: 4296 passed, 0 failed, 53 skipped.
-- python3 scripts/build.py --swift-only --configuration Release: OK.
-- Gap: WallpaperSurface is extension-only and has no unit-test harness, so no regression test; real lock behaviour not checked by the agent.

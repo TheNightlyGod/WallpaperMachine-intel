@@ -585,6 +585,7 @@ final class WallpaperBackupTests: XCTestCase {
             $0.collectionID = collection.id
             $0.interval = 45
             $0.trigger = .unlock
+            $0.waitsForClipEnd = true
         }
         let plan = try playlists.savePlan(from: "display-one", name: "Night plan")
         let placement = try StillImagePlacement(x: 0.2, y: 0.7, zoom: 1.5)
@@ -608,6 +609,7 @@ final class WallpaperBackupTests: XCTestCase {
         XCTAssertEqual(restoredPlaylists.playlist(for: "display-one").collectionID, collection.id)
         XCTAssertEqual(restoredPlaylists.playlist(for: "display-one").trigger, .unlock, "a playlist that changes on unlock restores as one")
         XCTAssertEqual(restoredPlaylists.plan(id: plan.id)?.playlist.trigger, .unlock)
+        XCTAssertTrue(restoredPlaylists.playlist(for: "display-one").waitsForClipEnd, "it still waits for videos to finish")
         XCTAssertEqual(StillImagePlacementStore(defaults: targetDefaults, library: destination.appendingPathComponent("Library"))
             .placement(wallpaperID: "image-test", displayID: "display-one"), placement)
     }
@@ -745,6 +747,49 @@ final class WallpaperBackupTests: XCTestCase {
         }
     }
 
+    func testInactivityChoicesAreBackedUpAndOnlyOfferedValuesRestore() throws {
+        let preferences = try defaults()
+        let playback = PlaybackPreferences(defaults: preferences)
+        playback.inactivityAction = .stop
+        playback.inactivityMinutes = 30
+        let export = try WallpaperBackupPreferences(defaults: preferences, domainName: domainName(for: preferences))
+        for (key, expected) in [(PlaybackPreferences.inactivityActionKey, "stop"), (PlaybackPreferences.inactivityMinutesKey, "30")] {
+            let stored = try WallpaperBackupPreferences.decode(XCTUnwrap(export.values[key], key))
+            try WallpaperBackupPreferences.validate(stored, forKey: key)
+            XCTAssertEqual("\(stored)", expected)
+        }
+        for action in ["keepRunning", "pause", "stop"] {
+            XCTAssertNoThrow(try WallpaperBackupPreferences.validate(action, forKey: PlaybackPreferences.inactivityActionKey))
+        }
+        for action: Any in ["reduceQuality", "nap", "", 1, true] {
+            XCTAssertThrowsError(try WallpaperBackupPreferences.validate(action, forKey: PlaybackPreferences.inactivityActionKey), "\(action)")
+        }
+        for minutes in [5, 10, 15, 30, 60] {
+            XCTAssertNoThrow(try WallpaperBackupPreferences.validate(NSNumber(value: minutes), forKey: PlaybackPreferences.inactivityMinutesKey))
+        }
+        for minutes: Any in [0, 7, 20, 61, -5, 10.5, "10", true, NSNumber(value: 1e30)] {
+            XCTAssertThrowsError(try WallpaperBackupPreferences.validate(minutes, forKey: PlaybackPreferences.inactivityMinutesKey), "\(minutes)")
+        }
+    }
+
+    func testWhatAClickOnTheMenuBarIconOpensIsBackedUpAndOnlyAChoiceRestores() throws {
+        let preferences = try defaults()
+        // A center of its own: the running app's status item must not follow the test's choice.
+        StatusItemClick.save(.menu, in: preferences, center: NotificationCenter())
+        let export = try WallpaperBackupPreferences(defaults: preferences, domainName: domainName(for: preferences))
+        let key = StatusItemClick.defaultsKey
+
+        let stored = try WallpaperBackupPreferences.decode(XCTUnwrap(export.values[key], key))
+        try WallpaperBackupPreferences.validate(stored, forKey: key)
+        XCTAssertEqual(stored as? String, "menu")
+        for click in StatusItemClick.allCases {
+            XCTAssertNoThrow(try WallpaperBackupPreferences.validate(click.rawValue, forKey: key), click.rawValue)
+        }
+        for value: Any in ["popover", "", "Menu", true, 1, NSNull(), ["menu"]] {
+            XCTAssertThrowsError(try WallpaperBackupPreferences.validate(value, forKey: key), "\(value)")
+        }
+    }
+
     func testTileZoomIsBackedUpAndOnlyAZoomStepRestores() throws {
         let preferences = try defaults()
         PanelPreferences.setTileZoom(2, in: preferences)
@@ -835,6 +880,7 @@ final class WallpaperBackupTests: XCTestCase {
             ("WallpaperMachine.playlists", Data(#"{"screen":{"wallpaperIDs":["a"],"interval":0}}"#.utf8)),
             ("WallpaperMachine.playlists", Data(#"{"screen":{"mode":"rotate","trigger":"weekly"}}"#.utf8)),
             ("WallpaperMachine.playlists", Data(#"{"screen":{"mode":"rotate","trigger":5}}"#.utf8)),
+            ("WallpaperMachine.playlists", Data(#"{"screen":{"mode":"rotate","waitsForClipEnd":1}}"#.utf8)),
             ("WallpaperMachine.playlistPlans", Data(#"[{"id":"p","name":"Bad","playlist":{"mode":"rotate","trigger":"weekly"}}]"#.utf8)),
             ("WallpaperMachine.imagePlacements", Data(#"{"version":1,"placements":{"w":{"screen":{"x":2,"y":0.5,"zoom":1}}}}"#.utf8)),
             ("WallpaperMachine.imagePlacements", Data(#"{"version":2,"placements":{}}"#.utf8)),

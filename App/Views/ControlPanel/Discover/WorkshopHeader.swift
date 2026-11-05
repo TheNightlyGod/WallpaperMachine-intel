@@ -2,6 +2,7 @@ import SwiftUI
 
 /// What sits above the Workshop grid: one row with the three lists, the Filter button, the sort menu
 /// and Refresh; under it, while an author's or a collection's wallpapers are open, the way back out;
+/// for a search typed in another language, the English it was sent as (`WorkshopTranslationBar`);
 /// and, for Your subscriptions, who is signed in and the download of what is missing. The search
 /// bar above it is the detail column's (`PageSearchBar`).
 ///
@@ -32,6 +33,9 @@ struct WorkshopHeader: View {
       }
       if source.list == nil {
         WorkshopSourceBar(source: source, isLoading: browse.isLoading)
+      }
+      if let translation = browse.translation {
+        WorkshopTranslationBar(translation: translation)
       }
       if source.source == .subscriptions, browse.isSignedInToSteam {
         WorkshopSubscriptionBar(browse: browse)

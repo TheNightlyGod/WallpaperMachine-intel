@@ -55,7 +55,12 @@ googletest; add `-DWM_MEDIA_SANITIZE=address,undefined` for a sanitizer build.
 ## ISO-BMFF (MP4, MOV)
 
 `IsoBmffReader::Open(source, &error)` reads the first enabled video track of a
-progressive file. The `mdat` may precede or follow `moov`; 64-bit and
+progressive file. It serves the scene engine's video textures; a plain MP4 or MOV wallpaper is
+played by AVFoundation, and one whose HEVC is tagged `hev1` from a copy retagged `hvc1`, which a
+small Swift walker of the sample descriptions plans (`HevcSampleEntryRetag`, see
+[performance](features/performance.md#hevc-tagged-hev1)). A clip whose parameter sets are only in
+the stream is not played that way: this reader and `FormatDescription`, which can take it, are not
+used by the plain-video players. The `mdat` may precede or follow `moov`; 64-bit and
 to-end-of-file box sizes are understood. It returns a flat sample table (offset,
 size, dts, pts, duration, sync, in decode order) and a `VideoStreamInfo`.
 

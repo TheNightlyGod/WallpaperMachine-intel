@@ -13,6 +13,8 @@ struct WorkshopQuery: Equatable, Sendable {
   var source: WorkshopSource = .browse
   /// The order of the favorites list; no other source reads it.
   var favoritesOrder: WorkshopFavoritesOrder = .dateFavorited
+  /// The words as typed when `text` is their English translation; Steam never sees it.
+  var translation: WorkshopSearchTranslation? = nil
 
   /// The Workshop item a pasted link or id names. Only the wallpapers list takes it: the
   /// other sources read `text` as words to search for.
@@ -65,6 +67,13 @@ struct ApplyOnArrival: Equatable, Sendable {
 @Observable
 final class WorkshopStore {
   var searchText = ""
+  /// The English words a search typed in another language was translated into. The search
+  /// sends them instead of `searchText` while that text is the one they translate.
+  var searchTranslation: WorkshopSearchTranslation?
+  /// The text whose translation the person turned down (**Search “…” instead**): it is searched
+  /// as typed until another text is searched. Kept here, with the app's search, so a reopened
+  /// panel keeps it too.
+  var declinedTranslationText: String?
   var kind: WorkshopKind = .all
   var sort: WorkshopSort = .trendingYear
   var tags: [String] = []
@@ -794,9 +803,12 @@ final class WorkshopStore {
   @ObservationIgnored var onPreviewsAvailable: (@MainActor ([URL]) -> Void)?
 
   private var draftQuery: WorkshopQuery {
-    WorkshopQuery(
-      text: searchText.trimmingCharacters(in: .whitespacesAndNewlines), kind: kind, sort: sort,
-      tags: tags, excludedTags: excludedTags, source: source, favoritesOrder: favoritesOrder)
+    let typed = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+    let translation = searchTranslation?.original == typed ? searchTranslation : nil
+    return WorkshopQuery(
+      text: translation?.english ?? typed, kind: kind, sort: sort,
+      tags: tags, excludedTags: excludedTags, source: source, favoritesOrder: favoritesOrder,
+      translation: translation)
   }
 
   /// The Steam page showing the current page's tiles.

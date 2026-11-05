@@ -70,8 +70,23 @@ enum PanelPreferences {
         ?? [])
   }
 
+  /// Posted after the favorites are saved, so the control panel and the menu bar panel, which
+  /// can each change them, show what the other saved.
+  static let favoritesDidChangeNotification = Notification.Name("WallpaperMachine.favoritesDidChange")
+
   static func saveFavorites(_ ids: Set<String>, in defaults: UserDefaults) throws {
     defaults.set(try JSONEncoder().encode(ids.sorted()), forKey: favoritesKey)
+    NotificationCenter.default.post(name: favoritesDidChangeNotification, object: nil)
+  }
+
+  /// Adds `id` to the favorites, or takes it out when it is one; returns whether it is one now.
+  @discardableResult
+  static func toggleFavorite(_ id: String, in defaults: UserDefaults) throws -> Bool {
+    var ids = favorites(in: defaults)
+    let added = ids.insert(id).inserted
+    if !added { ids.remove(id) }
+    try saveFavorites(ids, in: defaults)
+    return added
   }
 
   /// The one-time cleanup of keys earlier builds left behind; harmless to run on every start.

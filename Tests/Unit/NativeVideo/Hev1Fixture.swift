@@ -14,6 +14,10 @@ import Foundation
 /// Whether a future macOS decodes `hev1` is not this repository's to promise, so
 /// the test that uses it skips itself when the layer does become ready.
 ///
+/// Its `hvcC` record carries the VPS, SPS and PPS, so the app plays it from a
+/// copy retagged `hvc1` (`DerivedVideoCache`); the stall cases hand the file to
+/// the player as it is.
+///
 /// Embedded rather than generated so the tests do not depend on an FFmpeg CLI.
 /// Generated with: ffmpeg -f lavfi -i testsrc=size=64x64:rate=30 -t 0.4
 /// -c:v libx265 -preset ultrafast

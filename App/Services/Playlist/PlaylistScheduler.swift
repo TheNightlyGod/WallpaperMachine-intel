@@ -14,12 +14,26 @@ import Foundation
 ///
 /// A rotation set to change each time the Mac is unlocked has no timer. `noteUnlock()` opens a
 /// short window, and every such display changes once in it, as soon as it can play.
+///
+/// A rotation that waits for videos to finish (`DisplayPlaylist.waitsForClipEnd`) does not cut
+/// a clip: a timed change that falls due while one plays on the display waits until the clip
+/// reaches its end and starts over, which the video host reports, so nothing is polled either.
+/// It waits for as long as the display keeps playing that clip, and never longer than
+/// `clipEndLimit(minutes:)`; the store notes the wait (`PlaylistStore.clipWaits`) for the panel.
 @MainActor
 final class PlaylistScheduler {
     /// Runs one switch on `display` through its command slot. `choose` names the wallpaper when
     /// the switch's turn comes, or nil to skip it. Answers the wallpaper applied, or nil when
     /// nothing was: a newer request replaced this one, or there was nothing to choose.
     typealias Activate = @MainActor (_ display: String, _ choose: @MainActor () -> String?) async throws -> String?
+    /// Watches the video `wallpaper` playing on `display` for the end of the pass it is in, and
+    /// calls `ended` once, later, when the clip starts over or stops playing there first (it
+    /// failed, or the display moved on). Answers nil, and never calls `ended`, when the display
+    /// does not play that wallpaper as a video with an end to wait for; otherwise a closure that
+    /// ends the watch without calling it.
+    typealias WatchClipEnd = @MainActor (
+        _ display: String, _ wallpaper: String, _ ended: @escaping @MainActor () -> Void
+    ) -> (@MainActor () -> Void)?
 
     private let store: PlaylistStore
     private let collections: WallpaperCollectionStore
@@ -29,6 +43,7 @@ final class PlaylistScheduler {
     private let current: @MainActor (String) -> String?
     private let isRunning: @MainActor (String) -> Bool
     private let isUnseen: @MainActor (String) -> Bool
+    private let watchClipEnd: WatchClipEnd
     private let activate: Activate
     private let commandRevision: @MainActor (String) -> UInt64
     private let now: @MainActor () -> Date
@@ -60,6 +75,23 @@ final class PlaylistScheduler {
     /// The unlock each display has been dealt with for, so it changes once per unlock.
     private var handledUnlock: [String: UInt64] = [:]
     private var lastUnlock: Date?
+    /// A timed change that fell due while a video played on the display, waiting for the clip to
+    /// reach its end. It belongs to one deadline, one playlist revision and the wallpaper that was
+    /// playing, and lasts only while the display plays: an evaluation that does not find it still
+    /// waiting ends it, so pausing, covering, a new deadline or an edit each drop it.
+    private struct ClipWait {
+        let serial: UInt64
+        let due: Date
+        let revision: UInt64
+        let wallpaper: String
+        /// When the change is made anyway.
+        let until: Date
+        var cancel: (@MainActor () -> Void)?
+        /// The clip reached its end, or stopped playing: the change can be made.
+        var ended = false
+    }
+    private var clipWaits: [String: ClipWait] = [:]
+    private var clipWaitSerial: UInt64 = 0
     private var random = SystemRandomNumberGenerator()
     /// Two unlocks closer than this are one: the session reports the lock clearing, and the
     /// unlock notification of a screen saver or a lock screen can follow it.
@@ -69,6 +101,15 @@ final class PlaylistScheduler {
     static let failureCooldown: TimeInterval = 15 * 60
     /// A broken library must not monopolize the command queue in one automatic change.
     static let maximumAttempts = 5
+    /// The shortest and the longest a due change waits for a video to finish.
+    static let clipEndLimits: ClosedRange<TimeInterval> = (10 * 60)...(60 * 60)
+
+    /// How long a due change of a rotation every `minutes` waits for the video on screen to
+    /// finish: the interval, within `clipEndLimits`. A clip longer than that, or one that stopped
+    /// advancing without failing, is cut then rather than holding the rotation.
+    static func clipEndLimit(minutes: Int) -> TimeInterval {
+        min(max(seconds(minutes), clipEndLimits.lowerBound), clipEndLimits.upperBound)
+    }
 
     init(
         store: PlaylistStore,
@@ -80,6 +121,7 @@ final class PlaylistScheduler {
         isRunning: @escaping @MainActor (String) -> Bool,
         // Wallpapers play on the display but it is paused only because nobody can see it there.
         isUnseen: @escaping @MainActor (String) -> Bool = { _ in false },
+        watchClipEnd: @escaping WatchClipEnd = { _, _, _ in nil },
         activate: @escaping Activate,
         commandRevision: @escaping @MainActor (String) -> UInt64 = { _ in 0 },
         now: (@MainActor () -> Date)? = nil,
@@ -99,6 +141,7 @@ final class PlaylistScheduler {
         self.current = current
         self.isRunning = isRunning
         self.isUnseen = isUnseen
+        self.watchClipEnd = watchClipEnd
         self.activate = activate
         self.commandRevision = commandRevision
         self.now = now ?? { Date() }
@@ -138,6 +181,7 @@ final class PlaylistScheduler {
         handledUnlock.removeAll()
         lastUnlock = nil
         changedUnseen.removeAll()
+        for display in Array(clipWaits.keys) { endClipWait(display) }
     }
 
     /// The Mac was unlocked. Every display whose rotation waits for that changes to its next
@@ -176,6 +220,9 @@ final class PlaylistScheduler {
     /// back too, so it does not swap the moment playback resumes. Day and night already keeps a
     /// hand-picked wallpaper until its next boundary, and an Off display has nothing to hold.
     func noteManualChoice(_ display: String) {
+        // The clip a due change waited for is not on screen any more, and the change itself is
+        // held back below.
+        endClipWait(display)
         let playlist = store.playlist(for: display)
         if playlist.mode == .rotate, playlist.trigger == .unlock {
             answerUnlock(display)
@@ -205,6 +252,8 @@ final class PlaylistScheduler {
             handledUnlock.removeAll()
         }
         var earliest: Date?
+        // The displays whose due change still waits for their video after this pass.
+        var waitingForClip = Set<String>()
         for display in displays() {
             let playlist = store.playlist(for: display)
             let running = isRunning(display)
@@ -265,7 +314,12 @@ final class PlaylistScheduler {
                     store.schedule(display, at: next)
                     earliest = min(earliest ?? next, next)
                 } else if running {
-                    rotate(display, playlist: playlist)
+                    if let until = clipWait(on: display, playlist: playlist, due: due, revision: revision, at: date) {
+                        waitingForClip.insert(display)
+                        earliest = min(earliest ?? until, until)
+                    } else {
+                        rotate(display, playlist: playlist)
+                    }
                 } else if !changedOutOfSight, isUnseen(display) {
                     changedUnseen[display] = revision
                     AppLog.info("playlist: display \(display) is out of sight, so it changes behind the windows")
@@ -282,7 +336,59 @@ final class PlaylistScheduler {
                 follow(display, phase: phase, period: until, playlist: playlist)
             }
         }
+        // A wait this pass did not keep is over: the display stopped playing, is out of sight,
+        // got a new deadline or another playlist, or its change is being made.
+        for display in Array(clipWaits.keys) where !waitingForClip.contains(display) { endClipWait(display) }
         arm(earliest)
+    }
+
+    /// Until when the change due on `display` waits for the video on screen to finish, or nil
+    /// when it is made now: the playlist does not wait for videos, what plays there is not a video
+    /// with an end to wait for, the clip has reached it, or it has been waited for as long as
+    /// `clipEndLimit(minutes:)` allows. Called only while the display plays.
+    private func clipWait(
+        on display: String, playlist: DisplayPlaylist, due: Date, revision: UInt64, at date: Date
+    ) -> Date? {
+        guard playlist.waitsForClipEnd, let shown = current(display) else { return nil }
+        if let wait = clipWaits[display], wait.due == due, wait.revision == revision, wait.wallpaper == shown {
+            if wait.ended { return nil }
+            guard date < wait.until else {
+                AppLog.info("playlist: the video on display \(display) did not finish within "
+                    + "\(Int(Self.clipEndLimit(minutes: playlist.interval) / 60)) min, so it changes now")
+                return nil
+            }
+            return wait.until
+        }
+        endClipWait(display)
+        clipWaitSerial &+= 1
+        let serial = clipWaitSerial
+        guard let cancel = watchClipEnd(display, shown, { [weak self] in self?.clipEnded(on: display, serial: serial) })
+        else { return nil }
+        let until = date.addingTimeInterval(Self.clipEndLimit(minutes: playlist.interval))
+        clipWaits[display] = ClipWait(
+            serial: serial, due: due, revision: revision, wallpaper: shown, until: until, cancel: cancel)
+        // The panel says the change waits for the video instead of naming a deadline that passed.
+        store.setClipWait(until, on: display)
+        AppLog.info("playlist: display \(display) waits for its video to finish before it changes")
+        return until
+    }
+
+    /// The clip a due change waits for reached its end, or stopped playing on the display. The
+    /// change is made at once if the display still plays, through the usual evaluation; a second
+    /// report of the same end changes nothing.
+    private func clipEnded(on display: String, serial: UInt64) {
+        guard var wait = clipWaits[display], wait.serial == serial, !wait.ended else { return }
+        wait.ended = true
+        wait.cancel = nil
+        clipWaits[display] = wait
+        AppLog.info("playlist: the video on display \(display) reached its end or stopped playing, so it changes now")
+        evaluate()
+    }
+
+    private func endClipWait(_ display: String) {
+        guard let wait = clipWaits.removeValue(forKey: display) else { return }
+        wait.cancel?()
+        store.setClipWait(nil, on: display)
     }
 
     /// Whether `skip(_:)` has a playlist wallpaper to change `display` to.
@@ -335,6 +441,8 @@ final class PlaylistScheduler {
     /// change is for, when it is for one: that one waits until the display shows.
     private func rotate(_ display: String, playlist: DisplayPlaylist, requested: Bool = false, answering unlockID: UInt64? = nil) {
         let revision = store.revisions[display] ?? 0
+        // This is the change a wait for the video was holding back, or one asked for instead.
+        endClipWait(display)
         inFlight.insert(display)
         Task {
             var attempted = false

@@ -115,6 +115,12 @@ final class WebMPlayer {
   private var feedEpoch = 0
   private var repositioning = 0
   private var restartAfterReposition = false
+  /// Who waits for the clip to start over (`watchNextLoop`), and the synchronizer's boundary
+  /// observer at the end of the pass the clock is in. Both exist only while someone waits.
+  private var loopWatch: (@MainActor () -> Void)?
+  private var loopBoundary: Any?
+  /// Tells a crossing already on its way to the main queue for a watch that was replaced meanwhile.
+  private var loopWatchSerial: UInt64 = 0
 
   // Placement.
   private var mode: NativeVideoScalingMode = .fill
@@ -428,8 +434,40 @@ final class WebMPlayer {
     }
   }
 
+  /// Calls `handler` once, when the clock reaches the end of the pass it is in and the clip
+  /// starts over. The synchronizer reports that crossing itself, so nothing is sampled, and a
+  /// held clock crosses nothing. False for a still picture and for a player that has not
+  /// started, has stopped or has failed. A later call replaces the earlier watch.
+  func watchNextLoop(_ handler: @escaping @MainActor () -> Void) -> Bool {
+    guard started, !stopped, !failureLatched,
+      let end = WebMFeeder.endOfPass(containing: synchronizer.currentTime(), in: file)
+    else { return false }
+    cancelLoopWatch()
+    loopWatchSerial &+= 1
+    let serial = loopWatchSerial
+    loopWatch = handler
+    loopBoundary = synchronizer.addBoundaryTimeObserver(forTimes: [NSValue(time: end)], queue: .main) {
+      [weak self] in
+      MainActor.assumeIsolated { self?.loopBoundaryCrossed(serial: serial) }
+    }
+    return true
+  }
+
+  func cancelLoopWatch() {
+    if let loopBoundary { synchronizer.removeTimeObserver(loopBoundary) }
+    loopBoundary = nil
+    loopWatch = nil
+  }
+
+  private func loopBoundaryCrossed(serial: UInt64) {
+    guard !stopped, serial == loopWatchSerial, let handler = loopWatch else { return }
+    cancelLoopWatch()
+    handler()
+  }
+
   func stop() {
     guard !stopped else { return }
+    cancelLoopWatch()
     stopped = true
     healthTask?.cancel()
     healthTask = nil
@@ -801,9 +839,23 @@ final class WebMFeeder: @unchecked Sendable {
     self.audio = audio
     first = file.firstPresentationTime
     length = file.duration
-    // One frame is a still picture: it is shown and held, not looped.
-    loops = file.frameCount > 1 && length.isNumeric && length.seconds > 0
+    loops = Self.loops(file)
     audio?.rewind(withTimeOffset: .zero, limit: loops ? length : .invalid)
+  }
+
+  /// Whether `file` is played round and round. One frame is a still picture: it is shown and
+  /// held, not looped.
+  static func loops(_ file: WebMFile) -> Bool {
+    file.frameCount > 1 && file.duration.isNumeric && file.duration.seconds > 0
+  }
+
+  /// Where the pass of `file` that the clock time `time` falls in ends, which is where the clip
+  /// starts over; nil for a file that does not loop. Reads only the file's fixed facts, so any
+  /// thread may ask.
+  static func endOfPass(containing time: CMTime, in file: WebMFile) -> CMTime? {
+    guard loops(file) else { return nil }
+    let pass = passIndex(of: time, first: file.firstPresentationTime, length: file.duration)
+    return CMTimeAdd(file.firstPresentationTime, CMTimeMultiplyByFloat64(file.duration, multiplier: Double(pass + 1)))
   }
 
   var videoSamplesEnqueued: UInt64 { counters.withLock { $0 } }
@@ -921,7 +973,12 @@ final class WebMFeeder: @unchecked Sendable {
   }
 
   private func passIndex(of time: CMTime) -> Int {
-    guard loops, time.isNumeric, time >= first else { return 0 }
+    guard loops else { return 0 }
+    return Self.passIndex(of: time, first: first, length: length)
+  }
+
+  private static func passIndex(of time: CMTime, first: CMTime, length: CMTime) -> Int {
+    guard time.isNumeric, time >= first else { return 0 }
     return max(0, Int(floor((time - first).seconds / length.seconds)))
   }
 }

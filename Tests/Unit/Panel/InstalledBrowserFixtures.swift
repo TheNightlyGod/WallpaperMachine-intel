@@ -23,11 +23,13 @@ struct LibrarySpec {
   var approved = false
   var preview = Preview.picture(0.6)
   var supported = true
+  /// The manifest's `description`, which the search reads.
+  var description: String?
 
   init(
     _ id: String, _ title: String? = nil, kind: BridgeWallpaperKind = .video,
     tags: [String] = [], approved: Bool = false, preview: Preview = .picture(0.6),
-    supported: Bool = true
+    supported: Bool = true, description: String? = nil
   ) {
     self.id = id
     self.title = title ?? id
@@ -36,13 +38,14 @@ struct LibrarySpec {
     self.approved = approved
     self.preview = preview
     self.supported = supported
+    self.description = description
   }
 }
 
 extension PanelFixture {
   /// Writes a folder for each spec under this fixture's library (a preview picture, and a
-  /// manifest when it has tags or approval) and hands the renderer's listing of them to the
-  /// store. Nothing is measured yet: `settleLibrary` waits for the background services.
+  /// manifest when it has tags, approval or a description) and hands the renderer's listing of
+  /// them to the store. Nothing is measured yet: `settleLibrary` waits for the background services.
   @discardableResult
   func installLibrary(_ specs: [LibrarySpec]) throws -> [BridgeWallpaperEntry] {
     var entries: [BridgeWallpaperEntry] = []
@@ -61,9 +64,10 @@ extension PanelFixture {
         try PanelTestCase.gif(frames: 3, brightness: 0.55).write(to: file)
         previewPath = file.path
       }
-      if !spec.tags.isEmpty || spec.approved {
+      if !spec.tags.isEmpty || spec.approved || spec.description != nil {
         var manifest: [String: Any] = ["tags": spec.tags, "title": spec.title]
         if spec.approved { manifest["approved"] = true }
+        if let description = spec.description { manifest["description"] = description }
         try JSONSerialization.data(withJSONObject: manifest)
           .write(to: folder.appendingPathComponent("project.json"))
       }
@@ -202,15 +206,17 @@ enum LibraryRows {
     _ id: String, _ title: String? = nil, kind: LibraryRow.Kind = .video, size: Int64? = nil,
     added: TimeInterval? = nil, tags: [String] = [], approved: Bool = false, active: Bool = false,
     update: Bool = false, supported: Bool = true, preview: URL? = nil,
-    cover: LibraryRow.Cover = .none
+    cover: LibraryRow.Cover = .none, manifest: [String: Any] = [:]
   ) -> LibraryRow {
     LibraryRow(
       id: id, title: title ?? id, kind: kind, previewFile: preview, cover: cover,
       canAnimate: preview.map { LibraryRow.animatedPreviewExtensions.contains($0.pathExtension) }
         ?? false,
-      isActive: active, isSupported: supported, tags: tags, isApproved: approved, size: size,
-      addedAt: added.map { Date(timeIntervalSince1970: $0) }, energy: nil,
-      isUpdateAvailable: update, updatedAt: nil)
+      isActive: active, isSupported: supported, tags: tags,
+      searchText: LibraryRow.searchText(
+        title: title ?? id, words: LibraryMetricsService.searchText(project: manifest, tags: tags)),
+      isApproved: approved, size: size, addedAt: added.map { Date(timeIntervalSince1970: $0) },
+      energy: nil, isUpdateAvailable: update, updatedAt: nil)
   }
 
   static func titles(_ rows: [LibraryRow]) -> [String] { rows.map(\.title) }

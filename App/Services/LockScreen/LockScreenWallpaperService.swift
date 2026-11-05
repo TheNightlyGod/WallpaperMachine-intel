@@ -1009,7 +1009,10 @@ private enum LockScreenAssetPublisher {
       } else {
         webEntry = nil
       }
-      var projectRevision = try snapshot(source: source, exchange: exchange, reused: &sources)
+      let isVideo = type.lowercased() == "video"
+      let nativeVideoFile = isVideo ? nativeVideoMedia(in: source, metadata: metadata) : nil
+      var projectRevision = try snapshot(
+        source: source, exchange: exchange, reused: &sources, retagging: nativeVideoFile)
       var assetsRevision: String
       if type.lowercased() == "scene" {
         assetsRevision = try snapshot(
@@ -1026,8 +1029,6 @@ private enum LockScreenAssetPublisher {
           projectRevision: projectRevision, properties: properties, exchange: exchange, reused: &sources)
         assetsRevision = projectRevision
       }
-      let isVideo = type.lowercased() == "video"
-      let nativeVideoFile = isVideo ? nativeVideoMedia(in: source, metadata: metadata) : nil
       // A scene's saved script storage is copied as it is now; the lock screen never writes it
       // and is not republished when a script writes (plan decision I3).
       var storagePath: String?
@@ -1274,13 +1275,23 @@ private enum LockScreenAssetPublisher {
     }
   }
 
-  private static func snapshot(source: URL, exchange: URL, reused: inout [String: String]) throws
-    -> String
-  {
+  /// `media` names the clip of a video project. When it is HEVC tagged `hev1` that a retag makes
+  /// playable (`HevcSampleEntryRetag`), its copy in the revision is retagged `hvc1`, as the desktop
+  /// plays it from a retagged copy: the extension plays the revision, and the file in the library is
+  /// never written. Such a revision has a fingerprint of its own, so one staged before is not reused.
+  private static func snapshot(
+    source: URL, exchange: URL, reused: inout [String: String], retagging media: String? = nil
+  ) throws -> String {
     let source = source.standardizedFileURL
     if let existing = reused[source.path] { return existing }
     let items = try inventory(source)
-    let fingerprint = digest(source: source, items: items)
+    var retag: (file: String, plan: HevcSampleEntryRetag.Plan)?
+    if let media,
+      case let .retag(plan)? = try? HevcSampleEntryRetag.inspect(url: source.appendingPathComponent(media))
+    {
+      retag = (media, plan)
+    }
+    let fingerprint = digest(source: source, items: items, retagged: retag != nil)
     let relative = "revisions/\(fingerprint)"
     let destination = exchange.appendingPathComponent(relative, isDirectory: true)
     let manager = FileManager.default
@@ -1304,7 +1315,18 @@ private enum LockScreenAssetPublisher {
           try copyFile(from: source.appendingPathComponent(item.relative), to: target)
         }
       }
-      guard digest(source: source, items: try inventory(source)) == fingerprint else {
+      if let retag {
+        do {
+          try HevcSampleEntryRetag.apply(retag.plan, to: pending.appendingPathComponent(retag.file))
+        } catch {
+          // The plan was read from the project's file, so a copy it does not fit is a changed file.
+          throw LockScreenWallpaperFailure(
+            message:
+              String(localized: "Wallpaper assets changed while preparing native playback. Retry after the download or edit finishes.")
+          )
+        }
+      }
+      guard digest(source: source, items: try inventory(source), retagged: retag != nil) == fingerprint else {
         throw LockScreenWallpaperFailure(
           message:
             String(localized: "Wallpaper assets changed while preparing native playback. Retry after the download or edit finishes.")
@@ -1371,9 +1393,10 @@ private enum LockScreenAssetPublisher {
     return result.sorted { $0.relative < $1.relative }
   }
 
-  private static func digest(source: URL, items: [Item]) -> String {
+  private static func digest(source: URL, items: [Item], retagged: Bool = false) -> String {
     var hash = SHA256()
     hash.update(data: Data(source.path.utf8))
+    if retagged { hash.update(data: Data("\u{0}hvc1-retag".utf8)) }
     for item in items {
       hash.update(
         data: Data(

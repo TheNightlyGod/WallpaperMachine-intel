@@ -116,6 +116,33 @@ extension PanelController {
     }
   }
 
+  /// `hideDesktopIcons`. Writes Finder's own "show icons on the desktop" the other way round and
+  /// restarts Finder so the desktop follows, after asking, since a restart interrupts whatever
+  /// Finder is doing: Cancel, or no window to ask in, changes nothing, and so does a choice Finder
+  /// already has. Finder tells nobody when the choice changes elsewhere, so the switch reads it
+  /// again afterwards.
+  func setHidesDesktopIcons(_ hides: Bool) async throws {
+    defer { refreshSystemReadings() }
+    let icons = FinderDesktopIcons()
+    guard icons.areShown == hides else { return }
+    guard
+      await dialogs.confirm(
+        hides ? L("Hide desktop icons?") : L("Show desktop icons?"),
+        detail: L("Finder restarts to apply this. Let any copy or move in Finder finish first."),
+        button: L("Restart Finder"))
+    else { return }
+    try await change { try icons.setShown(!hides) }
+  }
+
+  /// `hideNotch`: the black strip behind the menu bar of displays with a camera notch, which the
+  /// app delegate's `NotchMaskController` puts up or takes down as soon as the choice is written.
+  func setHidesNotch(_ hides: Bool) async throws {
+    try await change {
+      NotchMaskController.setEnabled(hides, defaults: defaults)
+      refreshSystemReadings()
+    }
+  }
+
   /// `livePropertyEdits`. Turning it off also puts the saved look back on what the displays were
   /// shown; the edits stay pending in the inspector.
   func setLivePropertyEdits(_ enabled: Bool) async throws {
@@ -236,6 +263,19 @@ extension PanelController {
       throw InvalidControlValue()
     }
     try await change { playback.lowBatteryThreshold = percent }
+  }
+
+  /// `inactivityAction`.
+  func setInactivityAction(_ action: InactivityAction) async throws {
+    try await change { playback.inactivityAction = action }
+  }
+
+  /// `inactivityMinutes`: only a time the menu offers (`PlaybackPreferences.inactivityMinuteChoices`).
+  func setInactivityMinutes(_ minutes: Int) async throws {
+    guard PlaybackPreferences.inactivityMinuteChoices.contains(minutes) else {
+      throw InvalidControlValue()
+    }
+    try await change { playback.inactivityMinutes = minutes }
   }
 
   /// `batteryRenderScale`. The engine owns the battery scale and frame rate as one value, so this

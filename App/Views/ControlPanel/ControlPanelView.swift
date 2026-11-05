@@ -43,9 +43,9 @@ final class ControlPanelNavigation: ObservableObject {
 }
 
 /// The panel's root: creates the controller for the window's lifetime and shows the panel. The six
-/// store arguments are what `AppDelegate` builds it with; `defaults` and `appLanguage` are the
-/// seams a test passes so the panel never touches the installed app's preferences and can be
-/// rendered in any language.
+/// store arguments are what `AppDelegate` builds it with; `defaults`, `appLanguage` and
+/// `searchTranslation` are the seams a test passes so the panel never touches the installed app's
+/// preferences or this Mac's Translation framework and can be rendered in any language.
 ///
 /// The window gives the controller its life: it starts when the view appears and stops when the
 /// window closes. Everything the panel draws is `PanelRootView` and what it hosts.
@@ -55,13 +55,14 @@ struct ControlPanelView: View {
   init(
     store: BridgeStore, navigation: ControlPanelNavigation, workshop: WorkshopStore,
     pixiv: PixivStore, updater: AppUpdateStore, imports: LibraryImportStore,
-    defaults: UserDefaults = ClientPreferences.defaults, appLanguage: AppLanguageStore? = nil
+    defaults: UserDefaults = ClientPreferences.defaults, appLanguage: AppLanguageStore? = nil,
+    searchTranslation: WorkshopSearchTranslator? = nil
   ) {
     let controller = PanelController(
       store: store, navigation: navigation, workshop: workshop, pixiv: pixiv, updater: updater,
       imports: imports, defaults: defaults, appLanguage: appLanguage, automations: .shared,
       solarLocationTracker: .shared,
-      displayLayouts: .shared, spaces: .shared)
+      displayLayouts: .shared, spaces: .shared, searchTranslation: searchTranslation)
     // The panel's strings follow the language of the store the controller was built over.
     PanelLocale.shared.bind(to: controller.appLanguage)
     _controller = State(initialValue: controller)

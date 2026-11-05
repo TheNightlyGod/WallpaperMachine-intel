@@ -23,7 +23,8 @@ class InspectorTestCase: PanelTestCase {
   ) -> LibraryRow {
     LibraryRow(
       id: id, title: title, kind: kind, previewFile: nil, cover: .none, canAnimate: false,
-      isActive: false, isSupported: supported, tags: [], isApproved: false, size: size,
+      isActive: false, isSupported: supported, tags: [],
+      searchText: LibraryRow.searchText(title: title, words: ""), isApproved: false, size: size,
       addedAt: nil, energy: energy, isUpdateAvailable: false, updatedAt: nil)
   }
 

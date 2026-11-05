@@ -701,18 +701,22 @@ final class BridgeStore {
         apply(bundle)
     }
 
-    func setVolumeAsync(wallpaperId: String, volume: Float) async throws {
+    /// `keepingOpenOptions` is for an edit made outside the inspector (the menu bar panel): the
+    /// options the inspector has open stay when they are another wallpaper's, instead of giving way
+    /// to the edited one's (see `apply(_:keepingOpenOptions:)`).
+    func setVolumeAsync(wallpaperId: String, volume: Float, keepingOpenOptions: Bool = false) async throws {
         beginWallpaperEdit(wallpaperId)
         defer { endWallpaperEdit(wallpaperId) }
         let bundle = try await bridge.setVolume(wallpaperId: wallpaperId, volume: volume)
-        apply(bundle)
+        apply(bundle, keepingOpenOptions: keepingOpenOptions)
     }
 
-    func setMutedAsync(wallpaperId: String, muted: Bool) async throws {
+    /// `keepingOpenOptions` as for `setVolumeAsync`.
+    func setMutedAsync(wallpaperId: String, muted: Bool, keepingOpenOptions: Bool = false) async throws {
         beginWallpaperEdit(wallpaperId)
         defer { endWallpaperEdit(wallpaperId) }
         let bundle = try await bridge.setMuted(wallpaperId: wallpaperId, muted: muted)
-        apply(bundle)
+        apply(bundle, keepingOpenOptions: keepingOpenOptions)
     }
 
     func setAudioResponseEnabledAsync(wallpaperId: String, enabled: Bool) async throws {
@@ -1495,10 +1499,16 @@ final class BridgeStore {
         finishSnapshotApply()
     }
 
-    private func apply(_ bundle: BridgeWallpaperMutationBundle) {
+    /// A wallpaper edit's bundle carries the edited wallpaper's options, which take the place of the
+    /// open ones. With `keepingOpenOptions` they do only when the open ones are that wallpaper's, or
+    /// none are open: the inspector keeps showing its own wallpaper, and a drag on it goes on.
+    private func apply(_ bundle: BridgeWallpaperMutationBundle, keepingOpenOptions: Bool = false) {
         self.appSnapshot = bundle.app
         self.librarySnapshot = bundle.library
-        self.wallpaperOptionsSnapshot = bundle.wallpaperOptions
+        let open = wallpaperOptionsSnapshot?.wallpaperId
+        if !keepingOpenOptions || open == nil || open == bundle.wallpaperOptions.wallpaperId {
+            self.wallpaperOptionsSnapshot = bundle.wallpaperOptions
+        }
         self.monitorInformationSnapshot = bundle.monitorInformation
         self.settingsSnapshot = bundle.settings
         finishSnapshotApply()

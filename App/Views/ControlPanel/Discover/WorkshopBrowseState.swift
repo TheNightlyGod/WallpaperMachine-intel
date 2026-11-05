@@ -57,6 +57,8 @@ struct WorkshopBrowseState: Equatable {
   /// What Steam counted for the query, and how much of it its 1,000 pages can serve.
   let totalCount: Int
   let reachableCount: Int
+  /// A search is under way: Steam is asked, or the words are still being translated into English
+  /// before it is.
   let isLoading: Bool
   /// A page has arrived for the query on show; before that the page is not empty, it is loading.
   let hasLoaded: Bool
@@ -64,6 +66,8 @@ struct WorkshopBrowseState: Equatable {
   let errorMessage: String?
   /// The grid shows the one item a pasted link or id named, to which no filter applies.
   let isLookup: Bool
+  /// The search on show was typed in another language and sent to Steam in English.
+  let translation: WorkshopSearchTranslation?
   /// The list was found from the links of a Steam page whose markup changed: it may be incomplete
   /// and its page count is an estimate.
   let isDegraded: Bool
@@ -83,8 +87,11 @@ struct WorkshopBrowseState: Equatable {
     let excludedTags: [String]
   }
 
+  /// - Parameter isTranslatingSearch: A search typed in another language waits for its English,
+  ///   so it shows as searching before Steam is asked.
   @MainActor
-  init(_ workshop: WorkshopStore) {
+  init(_ workshop: WorkshopStore, isTranslatingSearch: Bool = false) {
+    let isLoading = workshop.isLoading || isTranslatingSearch
     items = workshop.items
     selectedID = workshop.selectedItem?.id
     let shown = workshop.source
@@ -92,14 +99,15 @@ struct WorkshopBrowseState: Equatable {
     source = WorkshopSourceState(
       source: shown, name: named ?? shown.name, canGoBack: !workshop.sourceHistory.isEmpty)
     pager = ResultPager(
-      page: workshop.page, totalPages: workshop.totalPages, isLoading: workshop.isLoading,
+      page: workshop.page, totalPages: workshop.totalPages, isLoading: isLoading,
       maxPages: WorkshopStore.maxPages)
     totalCount = workshop.totalCount
     reachableCount = workshop.reachableCount
-    isLoading = workshop.isLoading
+    self.isLoading = isLoading
     hasLoaded = workshop.hasLoaded
     errorMessage = workshop.errorMessage
     isLookup = workshop.committedQuery?.itemID != nil
+    translation = workshop.committedQuery.flatMap { $0.source.isSearchable ? $0.translation : nil }
     isDegraded = workshop.isDegraded
     steamURL = workshop.browseURL
     isSignedInToSteam = workshop.steamWebSession != nil

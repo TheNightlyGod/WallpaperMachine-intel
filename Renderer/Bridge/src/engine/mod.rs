@@ -20,7 +20,7 @@ pub use facade::{AudioCaptureDemand, EngineFacade, RealEngineFacade, SceneProbeR
 #[cfg(test)]
 pub(crate) use facade::{
     AudioRestartState, OutputWatchGate, RestartAction, apply_audio_capture_demand,
-    handle_audio_restart_retry, handle_output_device_change,
+    handle_audio_restart_retry, handle_output_device_change, handle_tap_stall_check,
 };
 
 #[cfg(test)]

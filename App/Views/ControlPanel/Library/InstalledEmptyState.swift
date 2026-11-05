@@ -55,10 +55,24 @@ struct InstalledEmptyState: View {
         }
         .textSelectable()
         .seasonalArt(.noResults)
+      case .notInstalled(let id):
+        PanelEmptyState(
+          "Not in your library", systemImage: "arrow.down.circle",
+          description: "Workshop item \(id) is not installed."
+        ) {
+          HStack(spacing: 8) {
+            Button("Clear search") { model.clearSearch() }
+              .buttonStyle(.panelCapsule)
+            Button("Show in Steam Workshop") { controller.workshopBrowser.lookUp(itemID: id) }
+              .buttonStyle(.panelPrimary)
+          }
+        }
+        .textSelectable()
+        .seasonalArt(.noResults)
       case .search(let text):
         PanelEmptyState(
           "No matching wallpapers", systemImage: "magnifyingglass",
-          description: "No wallpaper title or tag contains “\(text)”."
+          description: "No wallpaper matches “\(text)”."
         ) {
           Button("Clear search") { model.clearSearch() }
             .buttonStyle(.panelCapsule)

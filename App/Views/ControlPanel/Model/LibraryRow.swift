@@ -55,6 +55,9 @@ struct LibraryRow: Identifiable, Equatable, Sendable {
   var isSupported: Bool
   /// The manifest's tags, content rating and Workshop-style facts. Empty until measured.
   var tags: [String]
+  /// What the search reads, folded (`searchText(title:words:)`): the title and, once measured,
+  /// the manifest's tags, author and description. Never shown.
+  var searchText: String
   var isApproved: Bool
   /// Bytes of the folder, nil until measured. Unmeasured rows sort last either way.
   var size: Int64?
@@ -105,9 +108,18 @@ extension LibraryRow {
       canAnimate: file.map { animatedPreviewExtensions.contains($0.pathExtension.lowercased()) }
         ?? false,
       isActive: isActive, isSupported: entry.supported, tags: metrics?.tags ?? [],
+      searchText: searchText(title: entry.title, words: metrics?.searchText ?? ""),
       isApproved: metrics?.approved ?? false, size: metrics?.size, addedAt: metrics?.addedAt,
       energy: energy.flatMap(LibraryEnergyRating.init(snapshot:)),
       isUpdateAvailable: update != nil, updatedAt: update?.timeUpdated)
+  }
+
+  /// The folded title, then a space and the manifest's folded `words`
+  /// (`LibraryMetricsService.searchText(project:tags:)`), which start with its tags: a search
+  /// spans the title and the tags as one text. Folded here, as the row is built, so typing folds
+  /// only the query.
+  static func searchText(title: String, words: String) -> String {
+    LibrarySearchText.fold(title) + " " + words
   }
 }
 

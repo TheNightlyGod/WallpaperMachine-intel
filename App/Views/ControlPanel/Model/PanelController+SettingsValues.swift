@@ -24,6 +24,8 @@ extension PanelController {
       desktopPictureLocked: store.lockScreenWallpaper?.locksDesktopPictureChoice ?? false,
       refreshesDesktopPicture: playback.refreshesDesktopPicturePeriodically,
       keepsWindowsOnWallpaperClick: !DesktopClickRevealPreference.isEnabled,
+      hidesDesktopIcons: !FinderDesktopIcons().areShown,
+      hidesNotch: NotchMaskController.isEnabled(defaults: defaults),
       livePropertyEdits: LivePropertyEditing.isEnabled(defaults: defaults))
   }
 
@@ -57,6 +59,7 @@ extension PanelController {
       lowBatteryAction: playback.lowBatteryAction,
       lowBatteryThreshold: playback.lowBatteryThreshold,
       lowPowerModeAction: playback.lowPowerModeAction, thermalAction: playback.thermalAction,
+      inactivityAction: playback.inactivityAction, inactivityMinutes: playback.inactivityMinutes,
       batteryPercent: batteryPercent,
       lowPowerModeIsOn: ProcessInfo.processInfo.isLowPowerModeEnabled,
       thermalLevel: ThermalLevel(ProcessInfo.processInfo.thermalState),

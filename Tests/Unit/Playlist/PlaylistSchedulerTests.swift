@@ -30,6 +30,7 @@ final class PlaylistSchedulerTests: XCTestCase {
         displayIDs = ["primary"]
         clock = calendar.date(from: DateComponents(year: 2027, month: 1, day: 15, hour: 12))!
         applied = []
+        watcher = ClipWatcher()
     }
 
     override func tearDown() {
@@ -42,11 +43,14 @@ final class PlaylistSchedulerTests: XCTestCase {
     private func makeScheduler(
         library: [String] = ["a", "b", "c"], favorites: Set<String> = [],
         commandRevision: @escaping @MainActor (String) -> UInt64 = { _ in 0 },
-        activate: PlaylistScheduler.Activate? = nil
+        watchClipEnd: @escaping PlaylistScheduler.WatchClipEnd = { _, _, _ in nil },
+        activate: PlaylistScheduler.Activate? = nil,
+        sleep: @escaping @Sendable (TimeInterval) async throws -> Void = { _ in try await Task.sleep(for: .seconds(3600)) }
     ) -> PlaylistScheduler {
         PlaylistScheduler(
             store: store, collections: collections, displays: { self.displayIDs }, library: { library }, favorites: { favorites },
             current: { self.shown[$0] }, isRunning: { _ in self.running }, isUnseen: { _ in self.unseen },
+            watchClipEnd: watchClipEnd,
             activate: activate ?? { display, choose in
                 guard let id = choose() else { return nil }
                 self.shown[display] = id
@@ -54,7 +58,7 @@ final class PlaylistSchedulerTests: XCTestCase {
                 return id
             },
             commandRevision: commandRevision, now: { self.clock }, calendar: calendar, center: .default,
-            sleep: { _ in try await Task.sleep(for: .seconds(3600)) })
+            sleep: sleep)
     }
 
     /// Lets the switch a scheduler started on the main actor run to its end.
@@ -1284,5 +1288,242 @@ final class PlaylistSchedulerTests: XCTestCase {
         await settle()
         XCTAssertNil(store.nextChange["second"], "an unlock plan is not due the moment it is applied")
         XCTAssertTrue(applied.isEmpty)
+    }
+
+    // MARK: Waiting for the video to finish
+
+    /// Stands in for the video host: the wallpapers in `videos` are clips with an end, and each
+    /// watch stays until the test says its clip started over.
+    @MainActor
+    private final class ClipWatcher {
+        var videos: Set<String> = []
+        private(set) var watches: [String: (wallpaper: String, ended: @MainActor () -> Void)] = [:]
+        private(set) var started = 0
+        private(set) var cancelled = 0
+
+        func watch(
+            _ display: String, _ wallpaper: String, _ ended: @escaping @MainActor () -> Void
+        ) -> (@MainActor () -> Void)? {
+            guard videos.contains(wallpaper) else { return nil }
+            started += 1
+            watches[display] = (wallpaper, ended)
+            return { [weak self] in
+                self?.cancelled += 1
+                self?.watches[display] = nil
+            }
+        }
+
+        /// The clip on `display` starts over.
+        func finish(_ display: String) {
+            watches.removeValue(forKey: display)?.ended()
+        }
+    }
+
+    private var watcher: ClipWatcher!
+
+    /// A rotation every 30 minutes that waits for videos, on a display playing the video "a".
+    private func makeWaitingScheduler(
+        sleep: @escaping @Sendable (TimeInterval) async throws -> Void = { _ in try await Task.sleep(for: .seconds(3600)) }
+    ) -> PlaylistScheduler {
+        store.update("primary") {
+            $0.mode = .rotate
+            $0.interval = 30
+            $0.waitsForClipEnd = true
+        }
+        watcher.videos = ["a"]
+        return makeScheduler(watchClipEnd: watcher.watch, sleep: sleep)
+    }
+
+    /// Waits, five seconds at most, for `condition`: the scheduler's timer sleeps off the main
+    /// actor, so yielding alone does not let it run.
+    private func waitUntil(_ condition: () -> Bool, file: StaticString = #filePath, line: UInt = #line) async throws {
+        let deadline = Date().addingTimeInterval(5)
+        while !condition() {
+            guard Date() < deadline else { return XCTFail("Timed out", file: file, line: line) }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+    }
+
+    func testADueChangeWaitsForTheVideoToStartOverAndTheNextIntervalCountsFromThen() async {
+        let scheduler = makeWaitingScheduler()
+        scheduler.start()
+        defer { scheduler.stop() }
+        clock.addTimeInterval(30 * 60)
+        scheduler.evaluate()
+        await settle()
+        XCTAssertTrue(applied.isEmpty, "the clip playing is not cut")
+        XCTAssertEqual(watcher.watches["primary"]?.wallpaper, "a")
+        let limit = clock.addingTimeInterval(PlaylistScheduler.clipEndLimit(minutes: 30))
+        XCTAssertEqual(store.clipWaits["primary"], limit, "the panel is told the change waits, and until when")
+
+        clock.addTimeInterval(40)
+        scheduler.evaluate()
+        await settle()
+        XCTAssertTrue(applied.isEmpty)
+        XCTAssertEqual(watcher.started, 1, "one watch for the wait, not one per evaluation")
+        XCTAssertEqual(store.clipWaits["primary"], limit)
+
+        watcher.finish("primary")
+        await settle()
+        XCTAssertEqual(applied, ["b"], "the change happens as the clip ends")
+        XCTAssertEqual(store.nextChange["primary"], clock.addingTimeInterval(30 * 60))
+        XCTAssertNil(store.clipWaits["primary"])
+
+        clock.addTimeInterval(30 * 60)
+        scheduler.evaluate()
+        await settle()
+        XCTAssertEqual(applied, ["b", "c"], "a wallpaper that is not a video changes on time")
+        XCTAssertEqual(watcher.started, 1)
+    }
+
+    func testWithoutTheOptionAVideoChangesOnTime() async {
+        store.update("primary") { $0.mode = .rotate; $0.interval = 30 }
+        watcher.videos = ["a"]
+        let scheduler = makeScheduler(watchClipEnd: watcher.watch)
+        scheduler.start()
+        defer { scheduler.stop() }
+        clock.addTimeInterval(30 * 60)
+        scheduler.evaluate()
+        await settle()
+        XCTAssertEqual(applied, ["b"])
+        XCTAssertEqual(watcher.started, 0, "nothing is watched while the option is off")
+    }
+
+    /// The deadline and the limit both arrive through the scheduler's own timer, which the test
+    /// fires by hand, so the change at the limit is one the scheduler woke itself for.
+    func testAClipThatDoesNotFinishIsChangedOnceTheWaitReachesItsLimit() async throws {
+        XCTAssertEqual(PlaylistScheduler.clipEndLimit(minutes: 5), 10 * 60, "a short interval still waits ten minutes")
+        XCTAssertEqual(PlaylistScheduler.clipEndLimit(minutes: 30), 30 * 60)
+        XCTAssertEqual(PlaylistScheduler.clipEndLimit(minutes: 1440), 60 * 60, "never longer than an hour")
+        let timer = ManualSleeper()
+        let scheduler = makeWaitingScheduler(sleep: { try await timer.sleep(.seconds($0)) })
+        store.update("primary") { $0.interval = 5 }
+        scheduler.start()
+        defer { scheduler.stop() }
+        try await waitUntil { timer.pendingCount == 1 }
+        clock.addTimeInterval(5 * 60)
+        XCTAssertTrue(timer.fireNext())
+        try await waitUntil { timer.pendingCount == 1 }
+        XCTAssertTrue(applied.isEmpty, "the clip playing is not cut")
+        XCTAssertEqual(timer.requested, [.seconds(5 * 60), .seconds(10 * 60)], "the timer is armed for the wait's limit")
+
+        clock.addTimeInterval(10 * 60 - 1)
+        scheduler.evaluate()
+        await settle()
+        XCTAssertTrue(applied.isEmpty, "up to the limit the clip may still finish")
+        clock.addTimeInterval(1)
+        XCTAssertTrue(timer.fireNext())
+        try await waitUntil { applied == ["b"] }
+        XCTAssertEqual(applied, ["b"], "a long or stalled clip cannot hold the rotation")
+        XCTAssertEqual(watcher.cancelled, 1, "and is no longer watched")
+        XCTAssertNil(store.clipWaits["primary"])
+    }
+
+    func testAPauseEndsTheWaitAndPlayingAgainWaitsForTheClipOnceMore() async {
+        let scheduler = makeWaitingScheduler()
+        scheduler.start()
+        defer { scheduler.stop() }
+        clock.addTimeInterval(30 * 60)
+        scheduler.evaluate()
+        await settle()
+        running = false
+        clock.addTimeInterval(2 * 60 * 60)
+        scheduler.evaluate()
+        await settle()
+        XCTAssertTrue(applied.isEmpty, "nothing changes while wallpapers are paused, as before")
+        XCTAssertNil(watcher.watches["primary"], "a paused clip is not watched")
+        XCTAssertNil(store.clipWaits["primary"], "nor said to be waited for")
+
+        running = true
+        scheduler.evaluate()
+        await settle()
+        XCTAssertTrue(applied.isEmpty, "playing again does not cut the clip either")
+        XCTAssertEqual(watcher.started, 2)
+        watcher.finish("primary")
+        await settle()
+        XCTAssertEqual(applied, ["b"])
+    }
+
+    func testAVideoOutOfSightChangesBehindTheWindowsWithoutWaiting() async {
+        let scheduler = makeWaitingScheduler()
+        scheduler.start()
+        defer { scheduler.stop() }
+        running = false
+        unseen = true
+        clock.addTimeInterval(30 * 60)
+        scheduler.evaluate()
+        await settle()
+        XCTAssertEqual(applied, ["b"], "nobody sees the clip cut")
+        XCTAssertEqual(watcher.started, 0)
+    }
+
+    func testAWallpaperChosenByHandEndsTheWait() async throws {
+        let scheduler = makeWaitingScheduler()
+        scheduler.start()
+        defer { scheduler.stop() }
+        clock.addTimeInterval(30 * 60)
+        scheduler.evaluate()
+        await settle()
+        let ended = try XCTUnwrap(watcher.watches["primary"]?.ended)
+        shown["primary"] = "c"
+        scheduler.noteManualChoice("primary")
+        await settle()
+        XCTAssertEqual(watcher.cancelled, 1)
+        ended()
+        await settle()
+        XCTAssertTrue(applied.isEmpty, "the end of a clip that is gone changes nothing")
+        XCTAssertEqual(store.nextChange["primary"], clock.addingTimeInterval(PlaylistScheduler.manualGrace))
+    }
+
+    func testChangeNowWhileTheChangeWaitsChangesAtOnce() async {
+        let scheduler = makeWaitingScheduler()
+        scheduler.start()
+        defer { scheduler.stop() }
+        clock.addTimeInterval(30 * 60)
+        scheduler.evaluate()
+        await settle()
+        XCTAssertTrue(scheduler.skip("primary"))
+        await settle()
+        XCTAssertEqual(applied, ["b"])
+        XCTAssertEqual(watcher.cancelled, 1)
+    }
+
+    func testTurningTheOptionOffWhileTheChangeWaitsChangesAtOnce() async {
+        let scheduler = makeWaitingScheduler()
+        scheduler.start()
+        defer { scheduler.stop() }
+        clock.addTimeInterval(30 * 60)
+        scheduler.evaluate()
+        await settle()
+        store.update("primary") { $0.waitsForClipEnd = false }
+        scheduler.evaluate()
+        await settle()
+        XCTAssertEqual(applied, ["b"])
+        XCTAssertNil(watcher.watches["primary"])
+    }
+
+    /// The video host reports the end of one display's own clip; a second report of it, or the end
+    /// of another display's clip, changes nothing more.
+    func testEachDisplayChangesOnceForTheEndOfItsOwnClip() async throws {
+        displayIDs = ["primary", "second"]
+        shown["second"] = "a"
+        let scheduler = makeWaitingScheduler()
+        store.update("second") {
+            $0.mode = .rotate
+            $0.interval = 30
+            $0.waitsForClipEnd = true
+        }
+        scheduler.start()
+        defer { scheduler.stop() }
+        clock.addTimeInterval(30 * 60)
+        scheduler.evaluate()
+        await settle()
+        let ended = try XCTUnwrap(watcher.watches["primary"]?.ended)
+        ended()
+        ended()
+        await settle()
+        XCTAssertEqual(applied, ["b"], "one change for one end")
+        XCTAssertEqual(shown["second"], "a", "the other display still waits for its clip")
+        XCTAssertNotNil(watcher.watches["second"])
     }
 }

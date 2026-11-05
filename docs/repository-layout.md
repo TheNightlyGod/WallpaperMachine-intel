@@ -27,6 +27,7 @@ App/                               WallpaperMachine application target sources o
   AppDelegate.swift                lifecycle, window and shutdown ordering
   AppDelegate+Menus.swift          status item, application menu and their actions
   AppDelegate+DesktopPosters.swift desktop poster sync, the desktop-picture switch, Spaces posters and pins
+  AppDelegate+StatusPanel.swift    what a click on the status item opens, and the menu bar panel's input and commands
   Bridge/                          WallpaperPreviewBridge.h (scene C API for previews)
                                    and Generated/ (uniffi output; not hand-edited)
   Logging/                         AppLog.swift (the only Swift logging entry point) and its router
@@ -34,28 +35,35 @@ App/                               WallpaperMachine application target sources o
     Appearance/                    AppTheme.swift: theme preference model and store
     Automation/                    keyboard shortcuts, App Intents, links, weekday/solar/appearance selection rules,
                                    temporary Focus choices with restoration, and the menu bar menu's layout
-                                   (StatusMenuModel: flat for one display, a submenu per display for more)
+                                   (StatusMenuModel: flat for one display, a submenu per display for more),
+                                   the menu bar panel's (StatusPanelModel, its quick-switcher draw) and what a
+                                   click on the icon opens (StatusItemClick)
     Desktop/                       multi-display copy/swap and recovery, desktop picture APIs, original-wallpaper ledger,
                                    scoped poster sync, read-only Space topology, presentation policy, playback rules,
-                                   system conditions, display refresh and the screen shape of a display id
+                                   system conditions, display refresh and the screen shape of a display id,
+                                   Finder's desktop icons (FinderDesktopIcons) and the notch strip (NotchMaskController)
     Diagnostics/                   runtime diagnostics session, diagnostics report, session ledger, counter sampling, energy readout,
                                    memory-pressure log and per-wallpaper energy ratings
     GitHub/                        GitHub release client, update models, update store, installer, what's-new records,
                                    and the update checks, prompt and window (AppUpdateCoordinator)
     Library/                       ClientPaths (owns the app-support layout), import/deletion, still-image wallpapers,
                                    collections, presets, history, compatibility checks, the video black-bar check, backup and restore,
-                                   the panel's persisted choices (PanelPreferences, TileZoom) and the playback preflight
+                                   the search's text folding (LibrarySearchText),
+                                   the panel's persisted choices (PanelPreferences, TileZoom), the playback preflight
+                                   and the drive of a library moved to another disk (StorageVolumeMonitor)
     Lifecycle/                     why the app is quitting (QuitReason, the power-off notice), how long each quit stage takes
                                    (QuitTimings), the deadline each stage gets (QuitSupervisor, QuitMode, the exit fuse)
                                    and SIGTERM/SIGHUP as a quit (TerminationSignalRelay);
                                    ProcessSignals makes a broken pipe a write error;
                                    the one-copy-per-library lock and the second launch's hand-over
                                    (InstanceLock, SingleInstance)
-    Localization/                  AppLanguage.swift: shipped-language registry and the language preference store
+    Localization/                  AppLanguage.swift: shipped-language registry and the language preference store;
+                                   on-device translation (OnDeviceTranslating, SystemTranslation, TranslationSessionHost)
     LockScreen/                    lock-screen selection overrides, extension registration and configuration publishing
     NativeVideo/                   native video backend: the AVFoundation player and the WebM player's window, the
-                                   host, and the format check Apply uses (the admission rule, the layout rules
-                                   and the WebM player itself are in Shared/)
+                                   host, the format check Apply uses (the admission rule, the layout rules
+                                   and the WebM player itself are in Shared/), and the hev1 retag with its
+                                   cache of corrected copies (HevcSampleEntryRetag, DerivedVideoCache)
     Network/                       ConnectionInterrupted: a connection the network cut off or refused (TLS handshake,
                                    reset, refused, timed out, unresolved name), explained as a proxy routing problem
                                    for pixiv, the Workshop and the sign-in windows
@@ -74,18 +82,22 @@ App/                               WallpaperMachine application target sources o
                                    owns the app's copies under <support>/UserAssets/ and the derived,
                                    regenerable <project>/.mwe-user-assets/ bridge a page can read
     WebWallpaper/                  WKWebView host windows and page protocol for web wallpapers
-    Workshop/                      Workshop query model and sources, browse store, downloader and queue
+    Workshop/                      Workshop query model and sources, browse store, downloader and queue,
+                                   searches typed in another language sent in English (WorkshopSearchTranslator,
+                                   WorkshopSearchLanguage)
   ViewModels/                      BridgeStore and editor draft state; observable, no view code
   Views/ControlPanel/              the SwiftUI control panel: root view, navigation types, window factory and
                                    reopen state, and the AppKit sign-in, preview and what's-new windows
     Model/                         PanelController, its typed actions and derived state (PanelController+<Group>.swift),
                                    presentation, store revisions, error banner, action coordinator, dialogs, links
-    Shell/                         root view, tabs, detail column (router, toolbar, banners, Filters sidebar, inspector), Now Playing bar
+    Shell/                         root view, tabs, detail column (router, toolbar, banners, Filters sidebar, inspector), Now Playing bar,
+                                   the .translationTask that lends translation sessions (TranslationTaskHost)
     Library/ Inspector/            the Installed page and the installed wallpaper's inspector
     Discover/ Downloads/           the Steam Workshop page and its inspector; the downloads button, list and dialog
     Pixiv/                         the pixiv page, its inspector and toolbar pill
     Settings/                      Settings infrastructure (rows, groups, search) and the eleven sections
     Welcome/                       the first-run guide and the support prompt
+    MenuBar/                       the menu bar panel: its popover, controller and view
     Components/ Theme/             shared views; accent and surface palettes
     Localization/ Images/          PanelLocale and L(); the image pipeline and animated preview
   Resources/                       Info.plist, string catalogs, Assets.xcassets (tray icon, Dock icon image sets),

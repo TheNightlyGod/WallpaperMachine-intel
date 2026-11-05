@@ -78,11 +78,17 @@ struct DisplaysSettingsSection: View {
     id: "displays.playlist-custom", section: .displays, inside: playlist,
     title: "Minutes between changes", note: "Any whole number of minutes, up to \(10080).",
     keywords: ["min"])
+  static let playlistClipEnd = SettingsItem(
+    id: "displays.playlist-clip-end", section: .displays, inside: playlist,
+    title: "Wait for the video to finish",
+    note:
+      "A change that falls due while a video wallpaper plays waits until the video reaches its end, for up to an hour. Other wallpapers change on time.")
   static let playlistNext = SettingsItem(
     id: "displays.playlist-next", section: .displays, inside: playlist, title: "Next change",
     keywords: [
       "Change now", "Changes when you unlock the Mac, while wallpapers are playing.",
       "Around \("12:00"), if wallpapers are playing then.",
+      "When the video finishes, by \("12:00") at the latest.",
       "Starts counting once wallpapers play.",
     ])
   static let playlistList = SettingsItem(
@@ -231,7 +237,7 @@ struct DisplaysSettingsSection: View {
   static let items: [SettingsItem] = [
     refresh, enable, mode, mirrorSource, wallpaper, desktops,
     playlist, playlistMode, playlistHeld, playlistSource, playlistOrder, playlistInterval,
-    playlistCustom, playlistNext, playlistList, playlistSkipped, playlistDay, playlistDayStart,
+    playlistCustom, playlistClipEnd, playlistNext, playlistList, playlistSkipped, playlistDay, playlistDayStart,
     playlistNight, playlistNightStart, playlistSwitch, playlistPlan,
     transfer, transferPeer,
     automation, automationMode, automationLight, automationDark,

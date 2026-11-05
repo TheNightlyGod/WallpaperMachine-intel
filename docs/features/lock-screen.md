@@ -115,7 +115,11 @@ video project as `plainVideo` and, when it finds the clip, its file as `nativeVi
 inside the project, only for a regular file that lies in it; a scene, a web page, a missing file
 or a configuration an older app wrote has none, and a copy of the extension that predates the
 keys ignores them). The extension plays the clip in an AVFoundation layer in its own layer
-tree, decoded in hardware. The configuration version is unchanged.
+tree, decoded in hardware. The configuration version is unchanged. An HEVC clip tagged `hev1`
+whose sample descriptions carry the parameter sets is staged retagged `hvc1`, the same repair the
+desktop plays ([performance](performance.md#hevc-tagged-hev1)): the tag is written on the
+project's copy in the exchange folder, never on the library's file, and such a revision has a
+fingerprint of its own, so one staged before the repair is not reused.
 
 The players take a clip only where the desktop's do: it is judged by the same
 admission rule (`NativeVideoAdmission`, compiled into both targets), which is about the file

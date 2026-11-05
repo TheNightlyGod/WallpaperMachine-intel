@@ -5,8 +5,8 @@ import Foundation
 ///
 /// What is the user's content rather than a setting stays: the library, favorites, playlists,
 /// collections, presets, the display arrangement and per-display wallpapers, the storage location
-/// and the Steam and pixiv sign-ins. macOS's own "Click wallpaper to reveal desktop", which a
-/// Desktop switch only mirrors, is the system's and stays too.
+/// and the Steam and pixiv sign-ins. macOS's own "Click wallpaper to reveal desktop" and Finder's
+/// desktop icons, which Desktop switches only mirror, are the system's and stay too.
 extension PanelController {
   /// The engine's defaults for the settings it owns, as `AppConfig::default()` in
   /// `Renderer/Bridge/src/config/app.rs` writes them.
@@ -61,7 +61,9 @@ extension PanelController {
     }
     defaults.removeObject(forKey: PanelPreferences.hideAfterActivatingKey)
     defaults.removeObject(forKey: PanelPreferences.libraryPreviewsOnHoverKey)
+    StatusItemClick.save(.panel, in: defaults)
     library.previewModeChanged()
+    searchTranslation.resetPreference()
     setTileZoom(0)
     if appLanguage.preference != AppLanguageStore.systemChoice {
       await attempt { try await setLanguage(nil) }
@@ -77,6 +79,7 @@ extension PanelController {
       if lock.isRequested { lock.setEnabled(false) }
       if lock.screenSaverRequested { lock.setScreenSaverEnabled(false) }
     }
+    NotchMaskController.setEnabled(false, defaults: defaults)
     let wasShowingLiveEdits = LivePropertyEditing.isEnabled(defaults: defaults)
     LivePropertyEditing.setEnabled(LivePropertyEditing.buildDefault, defaults: defaults)
     if wasShowingLiveEdits && !LivePropertyEditing.buildDefault {

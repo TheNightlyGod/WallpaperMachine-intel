@@ -2,7 +2,8 @@ use super::*;
 use crate::engine::facade::{
     AudioRestartState, OutputWatchGate, OwnedCaptureLane, RestartAction,
     apply_audio_capture_demand, handle_audio_restart_retry, handle_output_device_change,
-    mutate_audio, mutate_scenes_and_prune, retain_capture_live, schedule_audio_restart,
+    handle_tap_stall_check, mutate_audio, mutate_scenes_and_prune, retain_capture_live,
+    schedule_audio_restart,
 };
 use wallpaper_core::{DisplayDesc, DisplayIdentity, DisplaySnapshotEntry, EngineError};
 
@@ -175,6 +176,18 @@ impl CaptureAssembly for PolicyAssembly {
         let _operation = shared.enter("retry");
         shared.record(Mark::Retry(generation, attempt));
         let action = handle_audio_restart_retry(controller, &self.restart, generation, attempt);
+        self.io.actions.lock().unwrap().push(action);
+        shared.capture(controller);
+    }
+
+    fn check_tap_stall(
+        &mut self,
+        controller: &mut AudioCaptureController<TestBackend>,
+        _: &CaptureEvents,
+    ) {
+        let shared = &self.base.shared;
+        let _operation = shared.enter("stall");
+        let action = handle_tap_stall_check(controller, &mut self.restart, Instant::now());
         self.io.actions.lock().unwrap().push(action);
         shared.capture(controller);
     }

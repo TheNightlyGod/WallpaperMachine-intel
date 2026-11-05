@@ -275,10 +275,11 @@ actor WallpaperCompatibilityService {
   }
 
   /// What the app's players say about the file: AVFoundation for most, the WebM reader for Matroska
-  /// and WebM. Expressed as the admission probe the check already reads.
+  /// and WebM, and AVFoundation on a copy retagged `hvc1` for HEVC tagged `hev1`. Expressed as the
+  /// admission probe the check already reads.
   static func playbackProbe(url: URL) async -> NativeVideoProbeOutcome {
     switch await VideoFormatSupport.inspect(url: url) {
-    case .supported, .supportedWebM:
+    case .supported, .supportedWebM, .playableAfterRetag:
       return .probed(NativeVideoTrackProbe(isPlayable: true, hasVideoTrack: true))
     case let .unsupported(format, reason):
       return .refused(.unsupportedFormat(VideoFormatSupport.message(for: format, reason: reason)))

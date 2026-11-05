@@ -839,6 +839,19 @@ device.
   stops being wanted, and that a failed start is not retried on every command. The
   CoreAudio listener registration is not
   covered; see [audio response](../features/audio-response.md#output-device-changes).
+- **Tap stall rebuild** — `wallpaper-core`
+  `media::audio::capture::lifecycle_tests::recovery_tests` (`a_tap_that_stops_calling_back_*`,
+  `silence_an_idle_output_or_suspension_never_rebuild_the_tap`, `stall_rebuilds_stop_*`,
+  `the_rebuild_limit_counts_only_the_last_minute`) calls the real I/O callback with zeros
+  and injects one `Instant` per check: a tap is rebuilt only after 3 s without calls while
+  the output device runs, once, without a permission request, at most 3 times a minute
+  until a demand change, and never for silence, an idle device or a suspended display.
+  The bridge's `web_audio_media::output_device_change::a_tap_that_stops_calling_back_is_rebuilt`
+  and `::a_newer_device_change_supersedes_a_failed_stall_rebuild` run the stall handler,
+  and `audio_requests::tests::aw25_*` pins that the worker checks only while a counted tap is
+  wanted. The trap: keying the check on sample levels instead of calls rebuilds a healthy
+  tap whenever nothing plays. A tap that really stops calling back is not covered; see
+  [audio response](../features/audio-response.md#output-device-changes).
 - **Audio capture follows what the scene reads** — `SceneAudioRequirement.OnlyContentThatReadsAudioRaisesIt`
   and `SceneAudioReport.TheHostHearsTheRequirementOncePerSceneAndTheReplacementResetsIt` in
   `scene_schema_part11_test`, `Decoders/VideoSourceInput.PlainVideoProjectNeverReportsAnAudioRequirement/*`

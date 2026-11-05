@@ -56,6 +56,23 @@ final class PanelStorageActionsTests: PanelTestCase {
     }
   }
 
+  /// The banner row stands while the library's drive is away and goes once its wallpapers play.
+  func testTheBannerNamesTheLibraryWhileItsDriveIsDisconnected() async throws {
+    try await withRecordingPanel { panel, _ in
+      let drive = LibraryDriveStatus.shared
+      defer { drive.set(disconnectedRoot: nil) }
+      XCTAssertNil(panel.controller.libraryDriveMessage)
+
+      let root = panel.root.appendingPathComponent("Library Drive/WallpaperMachine", isDirectory: true)
+      drive.set(disconnectedRoot: root)
+      let message = try XCTUnwrap(panel.controller.libraryDriveMessage)
+      XCTAssertTrue(message.contains(root.path), "the row says which library is missing")
+
+      drive.set(disconnectedRoot: nil)
+      XCTAssertNil(panel.controller.libraryDriveMessage)
+    }
+  }
+
   func testAFolderThatCannotHoldTheLibraryIsRefusedBeforeAnythingIsAsked() async throws {
     try await withRecordingPanel { panel, _ in
       panel.dialogs.chosenURL = panel.root.appendingPathComponent("Library", isDirectory: true)

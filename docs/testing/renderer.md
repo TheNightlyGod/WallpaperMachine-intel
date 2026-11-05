@@ -460,10 +460,18 @@ no assets prints `skipped: …` and is not a pass).
   scenes, cleanup, suspension, permission and failed-transition rollback, and the
   rebuild after an output device change (`restart_*`); `device_watch::tests`
   covers its debounce and subscriber table with real timers of a few tens of
-  milliseconds, never the CoreAudio listener. The
+  milliseconds, never the CoreAudio listener. `capture::lifecycle_tests::recovery_tests`
+  drives the tap stall watch through the real I/O callback with one injected
+  `Instant` per check: silence, an idle output device and suspension never rebuild,
+  a tap without callbacks is rebuilt once after 3 s, and the rate limit and its
+  re-arm on a demand change hold. The
   bridge's `tests::web_audio_media` replays web capture decisions through the
   production demand handler and real controller with a device-free backend:
   checking only the fake engine's suspension flag cannot prove capture starts.
+  Its `output_device_change` tests also rebuild a stalled tap through the stall
+  handler and let a device change supersede that rebuild's retries; the capture
+  lane's `aw25` test proves the worker's once-a-second check runs only while a
+  counted tap is wanted.
 - `wallpaper-core` framing coverage (`cargo test --release -p wallpaper-core --lib
   framing`): a scene's position (`SceneFraming`, two fractions from 0 to 1, centred
   at 0.5 by default) is refused when an axis is NaN, infinite or outside 0..1 by

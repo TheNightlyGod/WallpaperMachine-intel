@@ -26,8 +26,9 @@ use `rg -u` only when those are the target.
   renderer facade and editor drafts; `App/Views/ControlPanel/`: the SwiftUI panel.
 - Panel: `Model/` holds `PanelController` and its typed `async throws` actions (views
   call them through `launch`, never by string), `Shell/`, `Library/`, `Inspector/`,
-  `Discover/`, `Downloads/`, `Pixiv/`, `Settings/`, `Welcome/` the area views and their
-  view models, `Components/`, `Theme/`, `Localization/`, `Images/` the shared pieces.
+  `Discover/`, `Downloads/`, `Pixiv/`, `Settings/`, `Welcome/`, `MenuBar/` (the menu bar
+  panel) the area views and their view models, `Components/`, `Theme/`, `Localization/`,
+  `Images/` the shared pieces.
   Untrusted text is `Text(verbatim:)`, links go through `ExternalLink`; views do no
   network, disk, per-frame or idle work ([conventions](docs/conventions.md#swiftui-control-panel)).
 - `Extension/`: sandboxed extension; `Shared/`: only code compiled by both targets,

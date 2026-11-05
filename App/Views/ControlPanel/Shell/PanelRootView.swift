@@ -51,6 +51,7 @@ private struct PanelWindowContent: View {
     .toolbarVisibility(shell.isWelcomeOpen ? .hidden : .automatic, for: .automatic)
     .overlay { WelcomeOverlayHost() }
     .background { DownloadDialogHost() }
+    .background { TranslationTaskHost() }
     // The width of the window decides whether the inspector starts open (`ShellLayout`). Reported
     // only when the window crosses a width; the model lets the resize settle first.
     .onGeometryChange(for: ShellLayout.Width.self) { ShellLayout.Width(width: $0.size.width) }

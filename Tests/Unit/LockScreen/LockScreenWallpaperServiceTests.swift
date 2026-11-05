@@ -2743,12 +2743,12 @@ final class LockScreenWallpaperServiceTests: XCTestCase {
   /// The scene the app publishes for a project of `type` with the Video backend `backend`.
   @MainActor
   private func publishedVideoScene(
-    type: String, file: String = "clip.mp4", makeFile: Bool = true
+    type: String, file: String = "clip.mp4", makeFile: Bool = true, contents: Data = Data("bytes".utf8)
   ) async throws -> LockScreenScene {
     try Data(#"{"type":"\#(type)","title":"t","file":"\#(file)"}"#.utf8).write(
       to: project.appendingPathComponent("project.json"))
     let media = project.appendingPathComponent(file)
-    if makeFile { try Data("bytes".utf8).write(to: media) }
+    if makeFile { try contents.write(to: media) }
     var record = scene()
     record.displayId = 1
     let service = LockScreenWallpaperService(prepareExtension: {}, notifyConfigurationChanged: {}, scenes: { [record] },
@@ -2775,6 +2775,25 @@ final class LockScreenWallpaperServiceTests: XCTestCase {
     let scene = try await publishedVideoScene(type: "scene")
     XCTAssertNil(scene.plainVideo, "a scene is not a plain video")
     XCTAssertNil(scene.nativeVideoFile, "a scene is not a plain video")
+  }
+
+  /// An HEVC clip tagged `hev1` that a retag makes playable reaches the extension retagged `hvc1`, as
+  /// the desktop plays it, and the project's own file keeps its bytes.
+  @MainActor
+  func testAnHev1ClipIsStagedRetaggedAndTheProjectsFileIsUntouched() async throws {
+    let original = try Data(contentsOf: try Hev1Fixture.write(name: "fixture", into: root))
+    let video = try await publishedVideoScene(type: "video", contents: original)
+    let file = try XCTUnwrap(video.nativeVideoFile)
+    let staged = exchange.appendingPathComponent(video.projectPath).deletingLastPathComponent()
+      .appendingPathComponent(file)
+    XCTAssertEqual(try HevcSampleEntryRetag.inspect(url: staged), .none, "no hev1 entry is left")
+    let playable = try await DerivedVideoCache.playsInAVFoundation(staged)
+    XCTAssertTrue(playable, "the extension's player can take it")
+    XCTAssertEqual(try Data(contentsOf: project.appendingPathComponent(file)), original)
+    let other = try await publishedVideoScene(type: "video")
+    let plain = exchange.appendingPathComponent(other.projectPath).deletingLastPathComponent()
+      .appendingPathComponent(try XCTUnwrap(other.nativeVideoFile))
+    XCTAssertEqual(try Data(contentsOf: plain), Data("bytes".utf8), "anything else is staged as it is")
   }
 
   /// A video whose file is not a regular file inside its project is still published as a video, with

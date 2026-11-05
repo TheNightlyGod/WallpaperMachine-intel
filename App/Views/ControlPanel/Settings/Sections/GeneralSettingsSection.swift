@@ -1,7 +1,8 @@
 import SwiftUI
 
-/// Settings › General: the interface language, how the Library plays its previews, what happens at login and after applying a
-/// wallpaper, the way back to the welcome guide, and resetting every setting.
+/// Settings › General: the interface language, how the Library plays its previews, what a click on the menu bar icon opens,
+/// what happens at login and after applying a wallpaper, the way back to the welcome guide, resetting every setting, and
+/// translating Workshop searches into English.
 struct GeneralSettingsSection: View {
   private static let interface = SettingsItem.Group("interface", title: "Interface")
   private static let startup = SettingsItem.Group("startup", title: "Startup")
@@ -18,6 +19,12 @@ struct GeneralSettingsSection: View {
     title: "Play Library previews only on hover",
     note:
       "When this is off, every Library tile on screen plays its animated preview, as in the Steam Workshop. When it is on, a tile plays only while the pointer rests on it.")
+  static let statusItemClick = SettingsItem(
+    id: "general.status-item-click", section: .general, group: interface,
+    title: "Clicking the menu bar icon",
+    note:
+      "The panel shows what is playing on each display, its controls and a quick switcher. Right-click or Control-click the icon for the menu either way.",
+    keywords: ["Shows the panel", "Shows the menu"])
   static let launchAtLogin = SettingsItem(
     id: "general.launch-at-login", section: .general, group: startup, title: "Launch at login",
     keywords: [
@@ -39,7 +46,10 @@ struct GeneralSettingsSection: View {
       "Returns every setting to its default. Your library, playlists, collections, displays and sign-ins are kept.",
     keywords: ["Reset…", "Restore defaults"])
 
-  static let items = [language, libraryPreviewsOnHover, launchAtLogin, hideAfterApplying, welcomeGuide, resetAll]
+  static let items = [
+    language, libraryPreviewsOnHover, statusItemClick, translateSearches, launchAtLogin, hideAfterApplying, welcomeGuide,
+    resetAll,
+  ]
 
   @Environment(PanelController.self) private var controller
 
@@ -51,7 +61,9 @@ struct GeneralSettingsSection: View {
         SettingsRow(Self.libraryPreviewsOnHover) {
           SettingsSwitchControl(key: .libraryPreviewsOnHover)
         }
+        SettingsRow(Self.statusItemClick) { statusItemClickMenu }
       }
+      SettingsGroup(Self.translation, in: .general) { SearchTranslationSettingsRow() }
       SettingsGroup(Self.startup, in: .general) {
         SettingsRow(Self.launchAtLogin, note: login.note) {
           HStack(spacing: 10) {
@@ -103,6 +115,25 @@ struct GeneralSettingsSection: View {
     ) { tag in
       try await controller.setLanguage(AppLanguage.named(tag))
     }
+  }
+
+  /// The menu bar panel, or the menu. It belongs to the app, not the renderer, so it works while the
+  /// Mac is busy.
+  private var statusItemClickMenu: some View {
+    SettingsMenuControl(
+      key: "statusItemClick", saved: controller.statusItemClick,
+      options: Self.statusItemClickOptions(), waitsForMac: false
+    ) { click in
+      try await controller.setStatusItemClick(click)
+    }
+  }
+
+  @MainActor
+  static func statusItemClickOptions() -> [SettingsMenuOption<StatusItemClick>] {
+    [
+      SettingsMenuOption(value: .panel, title: L("Shows the panel")),
+      SettingsMenuOption(value: .menu, title: L("Shows the menu")),
+    ]
   }
 
   /// The menu's entries: System (Auto) first, then each shipped language under its own name.

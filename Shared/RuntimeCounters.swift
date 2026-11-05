@@ -94,6 +94,9 @@ enum RuntimeCounter: String, CaseIterable, Sendable {
     /// recovery allowance, like a first-frame restart does, but is counted
     /// apart from it.
     case nativeVideoPlaybackRebuild
+    /// A desktop surface opened an HEVC clip tagged `hev1` from its copy
+    /// retagged `hvc1` (`DerivedVideoCache`) instead of the file itself.
+    case nativeVideoHev1Retagged
 }
 
 /// Time-limited, aggregated runtime counters. Off by default: recording happens

@@ -232,10 +232,12 @@ The rules that bind every change:
   Fixtures come from the test bundle or a temporary directory; probe output and
   snapshots go to `FileManager.default.temporaryDirectory`. Nothing a test does may
   reach the desktop either: opening an address, revealing in Finder, opening System
-  Settings and hiding the app go through `DesktopActions.current`, which the test
-  bundle's principal class (`Tests/Unit/Support/TestBundle.swift`) replaces with a
-  recorder before any test runs. New code that opens, reveals or hides uses it, never
-  `NSWorkspace.shared` or `NSApp.hide` directly.
+  Settings, hiding the app, and reading or changing Finder's desktop icons (which
+  restarts Finder) go through `DesktopActions.current`, which the test bundle's
+  principal class (`Tests/Unit/Support/TestBundle.swift`) replaces with a recorder
+  before any test runs. New code that opens, reveals or hides, or changes or restarts
+  Finder, uses it, never `NSWorkspace.shared`, `NSApp.hide`, or `CFPreferences` and
+  `kill` on Finder directly.
 - Panel tests build the controller with `PanelTestCase.makeController(...)` or
   `withPanel(...)` (temporary home, `TemporaryDefaults`, English, the welcome guide
   already seen) and call the typed actions. Render tests host a view in an unordered

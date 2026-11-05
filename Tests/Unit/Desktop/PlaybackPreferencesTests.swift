@@ -164,6 +164,34 @@ final class PlaybackPreferencesTests: XCTestCase {
         XCTAssertEqual(posts.value, 2)
     }
 
+    func testTheInactivityRuleIsOffUntilChosenAndKeepsOnlyAnOfferedTime() {
+        let preferences = PlaybackPreferences(defaults: defaults)
+        XCTAssertEqual(preferences.inactivityAction, .keepRunning, "Being away alone never changes playback")
+        XCTAssertEqual(preferences.inactivityMinutes, 10)
+        XCTAssertEqual(InactivityAction.allCases.map(\.conditionAction), [.keepRunning, .pause, .stop],
+                       "Nobody is watching, so there is no Reduced quality to offer")
+
+        preferences.inactivityAction = .stop
+        preferences.inactivityMinutes = 30
+        preferences.inactivityMinutes = 7
+        let reloaded = PlaybackPreferences(defaults: defaults)
+        XCTAssertEqual(reloaded.inactivityAction, .stop)
+        XCTAssertEqual(reloaded.inactivityMinutes, 30, "A time the menu does not offer is ignored")
+
+        for stored: Any in [7, 0, -10, 10.5, "15", true] {
+            defaults.set(stored, forKey: PlaybackPreferences.inactivityMinutesKey)
+            XCTAssertEqual(PlaybackPreferences(defaults: defaults).inactivityMinutes, 10, "\(stored)")
+        }
+        defaults.set("reduceQuality", forKey: PlaybackPreferences.inactivityActionKey)
+        XCTAssertEqual(PlaybackPreferences(defaults: defaults).inactivityAction, .keepRunning)
+
+        preferences.inactivityAction = .pause
+        preferences.inactivityMinutes = 60
+        preferences.resetToDefaults()
+        XCTAssertEqual(preferences.inactivityAction, .keepRunning)
+        XCTAssertEqual(preferences.inactivityMinutes, 10)
+    }
+
     func testWritingTheDesktopPictureIsOnUntilTurnedOff() {
         let preferences = PlaybackPreferences(defaults: defaults)
         XCTAssertTrue(preferences.writesDesktopPicture, "A fresh install keeps installing the Mission Control picture")

@@ -26,7 +26,7 @@ extension PanelController {
       ? 0 : store.librarySnapshot.wallpapers.reduce(0) { listed.contains($1.id) ? $0 + 1 : $0 }
     return PlaylistState(
       display: display, playlist: playlist, nextChange: playlists.nextChange[display],
-      isHeld: playlists.holds[display] != nil,
+      clipWaitLimit: playlists.clipWaits[display], isHeld: playlists.holds[display] != nil,
       skipped: (playlists.skipped[display] ?? [:]).sorted { $0.key < $1.key }.map {
         PlaylistState.SkippedWallpaper(id: $0.key, message: $0.value.message, retryAfter: $0.value.retryAfter)
       },
@@ -229,6 +229,8 @@ extension PanelController {
         $0.interval = minutes
         $0.trigger = .interval
       }
+    case .waitsForClipEnd(let waits):
+      playlists.update(display) { $0.waitsForClipEnd = waits }
     case .dayWallpaper(let id):
       let id = try playableWallpaperID(id)
       playlists.update(display) { $0.dayWallpaperID = id }

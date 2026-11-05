@@ -23,6 +23,7 @@ final class PanelStoreRevisionsTests: PanelTestCase {
       (PlaybackPreferences.didChangeNotification, panel.controller.playback, .playback),
       (HotKeyPreferences.didChangeNotification, panel.controller.hotKeys, .hotKeys),
       (PlaylistStore.didChangeNotification, panel.playlists, .playlists),
+      (PlaylistStore.clipWaitsDidChangeNotification, panel.playlists, .playlists),
       (WallpaperCollectionStore.didChangeNotification, panel.collections, .collections),
       (WallpaperPresetStore.didChangeNotification, panel.presets, .presets),
       (StillImagePlacementStore.didChangeNotification, panel.imagePlacement, .imagePlacement),

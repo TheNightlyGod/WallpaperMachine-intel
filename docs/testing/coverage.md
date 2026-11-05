@@ -47,7 +47,14 @@ current battery mode ticked, Pause While Using Other Apps ticked only for Pause 
 replacing Mute or Pause, offered with a battery or while a choice is not the default), the
 Workshop downloads line right under Control Panel and absent when idle,
 its byte-weighted percent left out when a job cannot say and never reaching 100, which displays
-are listed), the `random` link and its pools, the
+are listed, and the automation command each item runs, which the menu bar panel's buttons run
+too), the menu bar panel's model (`StatusPanelModelTests`: the state line's order, with a
+disconnected library drive named before any rule and each hold in its own words; the display
+picker and its fallbacks; Recently used without the shown wallpaper; the quick switcher's seeded
+draw, the shown wallpaper first, eight at most, the last batch avoided while there are enough,
+favorites until none but the shown one can play, the caption naming the batch's own pool, and
+another batch offered when the next draw takes another pool),
+the `random` link and its pools, the
 `mute`, `unmute` and `togglemute` links (which take no query) and the shortcut keys for them.
 `WallpaperBackupTests` covers rule merging and local recovery-state rollback, and that the
 mute of every wallpaper is neither exported nor accepted from a package. What each covers, and what
@@ -341,6 +348,29 @@ picture shows between a window closing and the web page's window opening.
   that moves while this app is active is found by the timer with no event, becoming or
   resigning active reads it once, and the timer and the activity observers end with tracking.
   One case runs the real policy from the tracker's changes.
+- `UserInactivityMonitorTests` drive the inactivity watch through an injected input count,
+  timers the test fires and a pointer monitor it feeds (`ManualInactivityInput`): nothing is
+  armed or observed before a timeout is chosen, the one deadline is the timeout less the time
+  already gone without input and is armed again for the time left when input came, never
+  sooner than a second; the timeout makes the Mac inactive and installs the pointer monitors and
+  the two-second read; a pointer event, typing seen by that read, a wake, an unlock or a return
+  to the session ends it and leaves only the deadline; the read waits while the displays sleep or
+  the session is away, as injected display and session readers answer when it is armed rather than
+  as the last notice said (watching that starts while the displays sleep or the session is away
+  arms no read, displays that sleep or wake with no notice are found at the next decision); a
+  sleep, wake, session or unlock notice arms one read whatever the readers say then, and that read
+  asks again, so a wake or return the readers had not yet shown still lets typing end the
+  inactivity and a real sleep stops the read after one turn; each turn asks the displays and only
+  a run's first read asks the session; a new timeout starts over and switching off leaves nothing
+  behind.
+  `SystemConditionMonitorTests` add that the rule is watched only once an action is chosen,
+  follows the chosen action and time, joins the other conditions (named last among equals) and is
+  released by `stop()`; `PlaybackPolicyCompositionTests` run the real policy from it (every
+  display suspends beside a covered one that keeps its own pause, Stop unloads, an inactive Mac
+  is not unattended), and `InactivitySettingsTests` the panel's side (the time row only once
+  the rule does something, only offered times, the row's In effect now line, the On battery
+  naming). Real input, the system count and the real display power and session reads are not
+  exercised.
 - `DisplayRefreshCoalescerTests` — a burst during a refresh is answered by one
   more; screen changes that leave the displays as they were refresh nothing; a
   failed refresh is retried. A display missing from the screen list waits one
@@ -426,6 +456,32 @@ them).
 Not covered: real WindowServer transitions, visible appearance and separate
 per-Space assignments; see
 [display layouts](../features/display-layouts.md#code-and-verification).
+
+### Desktop icons and the notch
+
+- `FinderDesktopIconsTests` — Finder's `CreateDesktop` read as Finder reads it (nothing
+  stored, a Boolean, a number, `true`/`yes`/`false`/`no` in any case, a whole-number string,
+  a value of another kind); a change written once and Finder restarted once, through a
+  stand-in Finder; a choice Finder already has, or a refused write, restarting nothing; a
+  Finder that cannot be ended reported, with the choice kept for its next start; and the live
+  restart's decisions apart from the real processes: no Finder running ends and opens nothing,
+  a running one is ended and checked on once, one that had already quit counts as ended, one
+  that will not end fails the restart.
+- `NotchMaskControllerTests` — the strip over fake screen geometries (a notched display's menu
+  bar from edge to edge; nothing on a display without a notch or under a menu bar that hides
+  itself), outside the working area the coverage probes watch, off until the switch is on and
+  then only on notched displays, a choice made before launch shown at start, strips following
+  display and menu bar changes, `stop()` taking every strip down, and the strip's level between
+  the wallpaper windows and Finder's icons with a class `wallpaperWindows()` never returns.
+- The Settings switches are `PanelDesktopDeclutterTests` (Panel); the menu item's tick is
+  `StatusMenuModelTests` (Automation).
+
+Not covered: a real Finder (that `SIGTERM` brings it back, how long that takes, whether its
+windows reopen, the 5-second fallback) and a real notched display: menu bar text over the strip
+in Light appearance with a bright wallpaper, a menu bar that hides itself there, whether macOS
+reports a menu bar change as a screen-parameter change, and the strip in Mission Control and
+across Spaces (needs a desktop run); see
+[desktop icons and the notch](../features/desktop-picture.md#desktop-icons-and-the-notch).
 
 ## Diagnostics
 
@@ -581,7 +637,10 @@ on [manual-smoke.md](manual-smoke.md).
   reload, rename and deletion; invalid names apply nothing. `NextWallpaperTests`
   — library order, skipping unsupported wallpapers, wrapping.
   `WallpaperHistoryStoreTests` — per-display persistence, bounded recent lists,
-  repeated Previous, removal and clearing.
+  repeated Previous, removal and clearing, each wallpaper's last use (newest across
+  displays, bounded, and history saved before uses were dated loading, dated once in the
+  order of its recent list). Not covered: real history from an older release, only a
+  hand-written blob of its shape.
 - `WallpaperPresetStoreTests` — typed applied-property snapshots (the listed
   properties only, with a rule-hidden one still known to a preset that names it),
   portable managed attachments, size limits, alias rejection, draft and
@@ -592,6 +651,22 @@ on [manual-smoke.md](manual-smoke.md).
   full-size preset archives and manifest preflight. `PanelStorageActionsTests` and
   `StorageSettingsModelTests` (Panel) turn the Storage page's choices into the
   requested pending restore and open no file panels.
+- `StorageVolumeMonitorTests` — the drive of a library kept on another disk, as a
+  folder under a temporary `WALLPAPER_MACHINE_HOME` whose mount notifications go to a
+  private center: ejecting or unplugging it stops every wallpaper through the
+  presentation policy, connecting it again rescans before they play, an eject no
+  unmount follows plays them again after the grace (an eject repeated within it counts
+  the grace from the new attempt, with a hand-released sleep), and another drive, or
+  another library's marker under the same name, changes nothing. A library on the
+  startup disk or on this Mac adds no observer. A library missing at launch opens once
+  its drive is connected, also when it mounted before the monitor started (found on the
+  startup disk then, it opens and its observers are removed), unless a backup restore
+  waits for a reopen. `PanelStorageActionsTests` shows the banner row
+  while the drive is away. Not covered: real volumes (whether macOS posts these
+  notifications for a Finder eject or an unplug, and with which volume URLs), whether
+  the first eject succeeds while a video plays, and the app opening the library in
+  place (`openLibraryAfterLaunch`: the services, the staging sweep and the window's
+  page), which hosted tests never launch.
 - `WallpaperCompatibilityTests` — target, content and configuration generations
   and truthful unknown states; the scene row from a remembered verdict and read again
   each check, a check that reads the scene through an injected renderer probe (a refusal
@@ -616,7 +691,8 @@ on [manual-smoke.md](manual-smoke.md).
   [README](README.md#opt-in-layers)): small generated H.264 clips with bars painted
   at known rows are decoded through `AVAssetImageGenerator` (a few frames, no
   player, window or audio) for letterboxed, pillarboxed, top-only, full-bleed and
-  all-black pictures; skipped in the routine gate, so the bar edges measured on real
+  all-black pictures, and the embedded `hev1` clip is checked on its corrected copy; skipped in the
+  routine gate, so the bar edges measured on real
   decoder output are not covered unless it is run.
   `VideoLetterboxStoreTests` — results per library revision, one probe at a time,
   cancellation writing nothing, the 16-entry bound, and confirming a result against
@@ -625,7 +701,8 @@ on [manual-smoke.md](manual-smoke.md).
   looks on a real display, nor real wallpapers with burnt-in subtitles, fades or
   anamorphic pixels.
 - `LibraryMetricsTests`, `ClientPreferencesTests` — folder size and date measured
-  off the snapshot path, manifest approval and tags, and an explicit defaults
+  off the snapshot path, manifest approval and tags, the author and capped
+  description the search reads, folded in the background, and an explicit defaults
   suite staying independent of the application's own preferences.
 - `LibraryCoverStampsTests` — preview stamps read after the snapshot answered and
   announced once per pass, a rescan that replaced nothing announcing nothing, a
@@ -726,6 +803,16 @@ language choice. The Python catalog checks
 `.xcstrings` naming the same languages and keys, and every phrase of the panel's
 built-in label table translated in every catalog; see
 [localization](../localization.md).
+
+`TranslationSessionHostTests` cover how translation work borrows the sessions the panel's
+`.translationTask` lends, with a fake session and a clock the test fires: a job asks for a
+session for its languages, another pair waits until that session has served every job for
+its own, the same pair asked again gets a fresh session, a translation no session serves
+gives up in time and the next job asks again, a download prompt waits with no timeout, and a
+session lent while the view goes away serves nothing. Not covered: a real
+`TranslationSession`, which only SwiftUI makes, so neither the framework's answers nor how
+long its first session takes to arrive (against the five-second timeout) on macOS 15, nor what
+it throws when the person declines a download.
 
 ## LockScreen
 
@@ -866,7 +953,66 @@ need an authorized runtime check
   rest are left to the scene engine), an unreadable file refuses nothing; real files: an H.264 clip supported, garbage
   named by its extension, an audio-only file refused, H.264 in Matroska supported by the WebM player, VP8 left to the scene engine. `WallpaperActivationRecoveryTests`
   checks Apply, Apply changes and an AV1 verdict refuse before the renderer is reached with the
-  format named, and the same wallpaper applies once its file plays.
+  format named, and the same wallpaper applies once its file plays. The same suite covers HEVC
+  tagged `hev1`: AVFoundation's refusal of the track plays after a retag only when the sample
+  descriptions carry the parameter sets (not when they are only in the stream, not for an `hvc1`
+  track that does not play, and not at all on an OS that plays `hev1`); the embedded `Hev1Fixture`
+  is `playableAfterRetag`, the host is told to play it and the surface is handed a copy AVFoundation
+  plays; a clip too large for a full copy is a settled refusal, while one with no room for it now and
+  one whose full copy is being made wait for the copy unsettled, and the clip plays once the copy is
+  made. The cases with the embedded clip skip themselves on a macOS that plays `hev1` itself.
+- `HevcSampleEntryRetagTests` — the sample-description walk over box trees built in the test:
+  `moov` before or after a 64-bit `mdat`, `udta/meta` full boxes beside the tracks, every `hev1`
+  entry of every track planned and `avc1`/`hvc1` left alone, a VPS, SPS or PPS missing or of no
+  length in any `hev1` entry refusing the whole file, no movie or no `hev1` planning nothing, and a
+  damaged tree (a box or entry larger than its parent, a record cut short) ending the walk without
+  reading past it; the plan of the embedded clip; writing it changes only the planned types, can be
+  repeated, and is refused on a file it was not made for. Not covered: a real FFmpeg `hev1` file other
+  than the embedded one, a fragmented file, and a file whose `moov` holds more than the walk's bound.
+- `DerivedVideoCacheTests` — with the embedded clip in a temporary library: the copy plays (skipped on
+  a macOS that plays `hev1` itself) and the library's file keeps its bytes and date; a copy is reused
+  (not checked again) while the file is unchanged and made again, the old one removed, once it
+  changes, the changed file being played neither from the old copy nor as it is; only a file this
+  session prepared, and did not judge again as needing none, is played from a copy; a copy that
+  still does not play is not kept and not made again; a file that cannot be cloned (an injected
+  `EXDEV`) is fully copied in the background (the request answered at once, a second request
+  sharing the one copy, the copy handed out only when done, `copiesChanged` posted then), a waiter
+  whose task is cancelled let go while the copy goes on, a clip larger than the budget told apart
+  from one that does not fit now, a full copy nothing holds making room for another in the same
+  session while a held one does not, until it is let go, and one that the startup disk has no room
+  for removing no other copy first; a full copy that fails is told as failed (being made until
+  then), leaves nothing and is made again only when asked for again; any other clone failure says
+  nothing about the format; beyond the capacity the least recently used copy goes, but none being
+  read does; deleting a wallpaper removes the copies of its files only, and its clip, put back, is
+  not played as it is but has its copy made again; clearing removes every copy
+  nothing holds (this session's included), copies whose file is gone, files with no record and
+  leftovers of an interrupted copy, reports only full copies' bytes and posts `copiesChanged`,
+  and a cleared clip is not played as it is but has its copy made again; a copy being read stays
+  through clearing and a sweep while its file is away (an ejected drive) and is handed out again
+  when the file is back; a read is given the copy of an `hev1` clip (removed after it when made for
+  that read alone), the file itself when AVFoundation plays it as it is, and any other file itself.
+  `DeletionTests` checks that deleting a wallpaper
+  removes its copies; `LockScreenWallpaperServiceTests` that an `hev1` clip is staged retagged and
+  playable while the project's file is untouched, and anything else is staged as it is;
+  `NativeVideoWallpaperHostTests` that a clip waiting for its copy is loading (not failed, not
+  counted as refused, neither retried at once nor read again per offer) and opens when the copies
+  change; that one waiting for room is asked again when copies change with its state, count and
+  log left as they were while the answer stays the same, and opens once there is room; that one
+  whose full copy failed (an injected read error) has failed with that reason for its revision, is
+  neither copied nor judged again when copies change, and is copied again under a newer revision;
+  and that a clip whose copy went after it was admitted is judged again and opened on a new copy;
+  `NativeVideoPlayerMediaTests` (opt-in) that the retagged copy reaches a first frame with a
+  picture size and no failure, `VideoPosterMediaTests` (opt-in) that the clip's library poster comes
+  from a copy that is removed after it, and `VideoLetterboxProbeMediaTests` (opt-in) that the
+  black-bar check reads the copy. Not covered: a real external, HFS+ or exFAT volume (the full copy runs
+  only after an injected clone failure, the free space is injected), a race of a sweep with a copy
+  moved into place (the sweep reads one listing, which only its structure shows), the default
+  desktop surface holding and letting go of its copy (it opens a window), the poster and the
+  black-bar check on a copy in the routine gate (they decode, so only the opt-in layer runs them),
+  a real read error on a library drive (the failure is injected into the check of the copy), a
+  copy that ends between the host's answer and its record of the wait (the host asks again then,
+  which no test times), and the file identity changing when a volume is mounted again or the Mac
+  restarts, which makes a new copy.
 - `WebMOpeningTests` — the WebM reader through Swift: the properties of a VP9 file, the sample
   buffers (decode order, key frames, seeking), Opus audio as float buffers, VP8 named and refused, junk
   and a cut-off file and a missing file told apart, and the poster. `WebMPlayerTests` — the feeder over
@@ -943,8 +1089,9 @@ need an authorized runtime check
   after that, the allowance returning as old rebuilds leave the window, a stable run
   forgiving the history (measured from its first frame, interrupted only by a
   permitted rebuild, not by a refusal), and a reset.
-  `NativeVideoPlayerMediaTests` (opt-in) add the real stall: an `hev1` clip
-  (`Hev1Fixture`, skipped when an OS decodes it or rejects it outright) reaches
+  `NativeVideoPlayerMediaTests` (opt-in) add the real stall: an `hev1` clip handed to the
+  player as it is, not through its retagged copy
+  (`Hev1Fixture`, skipped when an OS decodes it or rejects it outright), reaches
   ready with no picture size and no layer frame, is restarted twice and then refused,
   with every replaced item released; a healthy clip restarts and plays again, its
   stable run earning the allowance back through the injected clock; and a restart
@@ -1073,11 +1220,16 @@ covered, and the frame-less clip by the opt-in `hev1` test, but no test blocks a
 whether a real long suspension, sleep, lock or covered desktop (hours, display sleep, Low
 Power Mode) ever costs a clip its decoder on this Mac, and whether a kick or a rebuild
 brings one back. The check and the ladder are covered, and so is the dead pipeline they
-must recognise (`hev1`, which a kick and a rebuild cannot repair, so it always ends in the
-failure), but nothing here reclaims a decoder and no test shows a repair that works on
-a stuck pipeline. Those premises are answered by the `nativeVideoPlaybackStalled`,
+must recognise (`hev1` handed over as it is, which a kick and a rebuild cannot repair, so it
+always ends in the failure), but nothing here reclaims a decoder and no test shows a repair that
+works on a stuck pipeline. Those premises are answered by the `nativeVideoPlaybackStalled`,
 `nativeVideoPlaybackKick` and `nativeVideoPlaybackRebuild` counters on a real machine, and
 by the sleep, lock and unlock rows in [manual-smoke](manual-smoke.md#native-video-backend).
+Nor is an `hev1` Workshop clip played on a real display, compared with Wallpaper Engine's frame,
+shown on a real lock screen or in the wallpaper preview, or copied from a library on a drive that
+cannot clone, nor a playlist of such clips or an ejected drive with one: the retag, the copy rules,
+the waits for a copy and the first frame of the copy are covered with the embedded clip and an
+injected clone failure only.
 Most of the rest of this list has rows there too: a rapid switch, the menu bar's tint, Fit,
 Original size and a scale factor against Compatibility, the Mission Control picture of a
 rotated clip, a real hot-plug, mirror set, AirPlay screen or closed lid, and a slow
@@ -1185,12 +1337,20 @@ never to `.shared`.
   replaced no preview leaves every row alone, 10,000 rows built once whatever else changes),
   `PanelLibraryStateTests` (Now Playing, the target menu, display names, history, library counts,
   the update dot, the issue report's facts, the changed properties it lists without typed text
-  or paths and capped, and the files a check found missing), `PanelCollectionActionsTests`, `LibrarySortTests`,
-  `LibraryFilterTests`, `LibrarySelectionTests` (ticks, ranges and the hold-and-sweep gesture),
-  `LibraryGridGeometryTests`, `LibraryTileRulesTests`, `TileGridLayoutTests` (at least three
+  or paths and capped, and the files a check found missing), `PanelCollectionActionsTests`,
+  `LibrarySortTests` (Last used with never-used wallpapers last either way),
+  `LibraryFilterTests` (search folding case, accents and width; author and description; a
+  Workshop link, or an installed id, matching only that id, and a number no wallpaper has
+  for its id searched as words; a collection's name), `LibrarySelectionTests`
+  (ticks, ranges and the hold-and-sweep gesture),
+  `LibraryGridGeometryTests`, `LibraryTileRulesTests` (which empty state names what hides the
+  tiles, a Workshop link or id that is not installed among them, but not an id being typed or one
+  too short for Discover to look up), `TileGridLayoutTests` (at least three
   columns, arrow keys held at the ends), `InstalledBrowserModelTests` (the reopen state and its
   cadence, Favorites and collections as views, a 10,000-wallpaper library filtered as the user
-  types, covers, the selection's life, clicks, keys, Delete, batch actions and notices, the sweep
+  types, Last used following the history and the search reading descriptions, links and
+  collection names, each empty state and its recovery, a typed id saying it is not installed only
+  once pasted, confirmed with Return or restored, covers, the selection's life, clicks, keys, Delete, batch actions and notices, the sweep
   and edge scrolling, every tile on screen playing its preview and the hover-only setting, the
   import popover and pill) and
   `InstalledPageRenderTests` (the page, footer, empty states and popovers in every language and
@@ -1234,7 +1394,17 @@ never to `.shared`.
   rejected account, late failures, the first-run guide keeping its own sign-in), and
   `WorkshopBrowserRenderTests` (the page, inspector, empty states, dialog stages and Downloads list
   in every language at both sizes, shrinking with the inspector open, a tile's VoiceOver label, a
-  download that resumes or pauses with the Downloads list open redrawn in place).
+  download that resumes or pauses with the Downloads list open redrawn in place), and
+  `WorkshopSearchTranslationTests` (a search typed in Chinese sent in English while the field keeps
+  it, **Search “…” instead** kept for a sort and by a reopened panel and the text translated
+  again once another was searched, a click on a replaced line ignored, the page and the
+  window's subtitle searching while the words are translated, the line fitting the smallest
+  window in every language, English untouched, the switch off sending searches and the lists
+  the Workshop reads again by itself as typed while the line on show still searches as typed,
+  Reset all settings, and the Settings row's languages read when shown, after a reset and after
+  another app language, with only the picked one downloaded). The panel fixtures give every
+  controller a `FakeTranslation`, so no panel test asks this Mac's Translation framework; the real
+  framework, a real download prompt and the translations it gives are not covered.
 - Lazy lists: `scripts/tests/test_panel_lazy_lists.py` fails for a `LazyVStack`, `LazyHStack`,
   `LazyVGrid`, `LazyHGrid` or `List` that draws more than one top-level `ForEach`, the shape that
   kept a resumed download's row stale; a `ForEach` inside a separate subview is not seen by it.
@@ -1247,7 +1417,10 @@ never to `.shared`.
   and the scroll position), `SettingsEntryControlsTests`, `QuickSettingsTileTests`,
   `AppearanceSettingsTests`, `PanelGeneralSettingsTests`, `PanelPerformanceSettingsTests` (values
   refused or clamped as their controls are, the condition choices, app rules, a mute from the menu
-  bar reaching the open panel), `PanelSettingsValuesTests`, `QualityPresetTests`,
+  bar reaching the open panel), `PanelSettingsValuesTests`, `PanelDesktopDeclutterTests` (Hide
+  desktop icons asks before Finder restarts, Cancel or a choice Finder already has changes
+  nothing, a refused write or a Finder that cannot be ended is reported; Hide the notch takes
+  effect at once; Reset turns the notch off and leaves Finder's choice alone), `QualityPresetTests`,
   `QualityReportTests`, `ConditionOverrideTests` (On battery names the strongest rule that
   pauses or stops wallpapers on battery and nothing plugged in or already done by the choice,
   each rule's row says In effect now, the published state reaches the panel's readers),
@@ -1282,6 +1455,20 @@ never to `.shared`.
 - Sharing: `PanelSharingTests` (a Workshop wallpaper shares its Workshop page with the website,
   any other id has no Share, the app is shared with the website in the panel's language, **Star on
   GitHub** in About and in the star prompt open the repository and answer the star prompt).
+- Menu bar panel: `StatusPanelControllerTests` (over a fixture `StatusPanelSource`: the buttons
+  send the menu's own commands for the chosen display, the heart and the sound act on the shown
+  wallpaper, an empty display refuses them, window actions close the panel before they act, a
+  failure shows until an action succeeds; nothing is read before `start()` or after `stop()`, the
+  volume is read once per snapshot, the batch stays while open and the next opening avoids it, the
+  caption stays with the batch on show, only covers on show are stamped; the Settings choice of
+  what a click opens is saved and reset, a favorite saved from the menu bar reaches an open
+  control panel, and a sound edit of another wallpaper leaves the inspector's options and drag in
+  place) and `StatusPanelRenderTests` (every control reachable by VoiceOver, the display picker
+  only with two displays, the width in every language and a height under 820 pt). The pure model
+  is `StatusPanelModelTests` (Automation). Not covered: the real status item and popover (click
+  routing, the closing click, the first click while the app is inactive, Escape and Tab, VoiceOver's
+  Show Menu action), `AppDelegate+StatusPanel`'s answers over the live stores, and how the panel
+  fits under the menu bar of a real screen; those need a desktop run.
 
 Not covered: the Settings section list's selection highlight, the toolbar's glass and the tabs
 on it, popover placement, sheets on a real window, hover,
@@ -1318,15 +1505,23 @@ outranking a failed automatic switch, a rotation yielding to a waiting Apply, a 
 due rotation, a display the user emptied staying empty until a wallpaper, Change now or Resume,
 a relaunch finishing its shuffle round without a repeat, an unlock changing an
 unlock rotation once, waiting for a display that cannot play yet for 30 seconds at
-most, and leaving timed rotations, cleared displays and a hand-chosen wallpaper alone),
+most, and leaving timed rotations, cleared displays and a hand-chosen wallpaper alone;
+a rotation that waits for videos, against a fake video host: the change made when the clip
+starts over, the limit reached on the scheduler's own timer fired by hand, the wait noted for
+the panel, a pause, a display out of sight, a hand-chosen wallpaper and Change now, and one
+change per display for one end),
 and in Panel `PanelPlaylistActionsTests` and `PanelPlanActionsTests` (settings reach the
 named display's playlist, values no control offers are refused, button and drag sorting
 with a stale drag refused, Resume, Change now, clearing only the named display's history,
-saved playlists), `PanelLibraryActionsTests` (Now Playing's Next wallpaper: a rotating
+Next change while a change waits for a video, saved playlists), `PanelLibraryActionsTests`
+(Now Playing's Next wallpaper: a rotating
 playlist moves along, a display without one takes the library's next wallpaper),
 `DisplaysSettingsModelTests` (the Custom interval field, the Resume row, announced moves),
 `PlaylistEditTests` (the How often menu's unlock choice and named times) and
-`ShellModelTests` (Recently used clearing only the target display).
+`ShellModelTests` (Recently used clearing only the target display). The video host's side of
+the wait is in `NativeVideoWallpaperHostTests` (a fake surface) and `WebMPlayerTests`; only the
+opt-in `NativeVideoPlayerMediaTests` see the real looper start the clip over, and when the change
+lands against the visible seam, and how that switch looks, are not covered.
 What each covers: [playlists](../features/playlists.md#verification).
 
 ## Preview
@@ -1539,10 +1734,26 @@ unless `scripts/we_reference.py render` hands it real pages to draw. Detail and 
   served from cache, capped at Steam's page limit, with the next page prefetched;
   the sidebar defaults match Wallpaper Engine's; Recently updated reaches Steam as
   `lastupdated` with the search text and tags.
+- `WorkshopSearchLanguageTests` — which language a search reads as: Simplified and
+  Traditional Chinese told apart by their characters, Japanese from kana and from kanji the
+  recognizer is sure of, Korean from Hangul, mixed text read by its CJK characters, English
+  and text with no language left alone, and Portuguese only while the app is in Portuguese.
+  They rely on the NaturalLanguage model of the Mac they run on; whether its confidence for a
+  short Han text (桜, 宇宙) is the same on every macOS release is not established.
+- `WorkshopSearchTranslatorTests` (a `FakeTranslation`, never the Translation framework) — a
+  search translated into English only from a downloaded language, and a language that is not
+  downloaded never asked to translate or download; English, links, ids, empty text and
+  anything while the switch is off never reaching the translator, and the switch kept and
+  reset; answers kept up to the limit; a translation that changes nothing or fails searched
+  as typed and a failure not kept; the search shown as translating only while it waits for
+  the translator; Portuguese only while the app is in Portuguese; and Settings' language read
+  (one per app language, again after the language changes or a reset) and a download of only
+  the language picked.
 - `WorkshopLinkTests` — which pasted text names a Workshop item: bare ids from six
   digits, item page and `steam://` links in their accepted spellings, and the
   look-alikes that must stay searches (other hosts, user info or ports, bad ids,
-  free text holding an id or a link); only the wallpapers list reads an id.
+  free text holding an id or a link), and which ids name their item alone; only the wallpapers
+  list reads an id.
 - `WorkshopTests` — query and tag encoding, sort mapping, the details request and
   its answers (served, withdrawn and other apps' items), the single-item lookup
   with a distinct reason for a removed, foreign, Application or unreadable row, the
@@ -1572,8 +1783,9 @@ unless `scripts/we_reference.py render` hands it real pages to draw. Detail and 
   original failure when no item can be listed or Steam failed its own query, and
   collections left alone. `PanelWorkshopActionsTests` (Panel) cover the panel's source
   actions, sign-in through an injected window, opening a collection rather than
-  downloading it, and the state's flags for an item looked up from a pasted link and a
-  list found on a page Steam changed. Steam's real sign-in
+  downloading it, the state's flags for an item looked up from a pasted link and a
+  list found on a page Steam changed, and Installed's **Show in Steam Workshop** looking an
+  item up on the wallpapers list from another list, its id in the search field. Steam's real sign-in
   window, a real lookup against Steam and a real changed page (the markup is
   fixture-built) are not covered.
 - `WorkshopThumbnailCacheTests` — one download per URL under concurrent requests,

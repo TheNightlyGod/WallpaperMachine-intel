@@ -405,6 +405,35 @@ final class InstalledBrowserModelTests: PanelTestCase {
     XCTAssertEqual(titles(model).count, 5)
   }
 
+  func testLastUsedFollowsTheHistoryAndTheSearchReadsDescriptionsLinksAndCollectionNames()
+    async throws
+  {
+    let panel = try makeController()
+    defer { Task { await panel.shutdown() } }
+    let model = panel.controller.library
+    try panel.installLibrary([
+      LibrarySpec("2077200001", "Zebra", preview: .none),
+      LibrarySpec("b", "Apple", preview: .none, description: "A café at night"),
+      LibrarySpec("c", "Mango", preview: .none),
+    ])
+    try await panel.loadLibrary()
+    try await panel.settleLibrary()
+
+    model.setSort(.lastUsed)
+    XCTAssertEqual(titles(model), ["Apple", "Mango", "Zebra"], "nothing used yet, so by name")
+    panel.store.history.recordSwitch(from: nil, to: "c", on: "primary")
+    XCTAssertEqual(
+      titles(model), ["Mango", "Apple", "Zebra"], "a wallpaper put on a display moves to the front")
+
+    model.setText("CAFE")
+    XCTAssertEqual(titles(model), ["Apple"], "the manifest's description counts, its accent folded")
+    model.setText("https://steamcommunity.com/sharedfiles/filedetails/?id=2077200001")
+    XCTAssertEqual(titles(model), ["Zebra"], "a Workshop link finds its item")
+    _ = try panel.collections.create(name: "Fruit", wallpaperIDs: ["b", "c"])
+    model.setText("fruit")
+    XCTAssertEqual(titles(model), ["Mango", "Apple"], "a collection's name finds its wallpapers")
+  }
+
   func testAClearedSearchAndEachEmptyStateRecovers() async throws {
     let panel = try makeController()
     defer { Task { await panel.shutdown() } }
@@ -413,6 +442,9 @@ final class InstalledBrowserModelTests: PanelTestCase {
     try await installNames(panel, count: 3)
     model.setText("zzz")
     XCTAssertEqual(model.emptyState, .search(text: "zzz"))
+    model.setText("https://steamcommunity.com/sharedfiles/filedetails/?id=3632513108")
+    XCTAssertEqual(
+      model.emptyState, .notInstalled(itemID: "3632513108"), "a link to an item not installed says so")
     model.clearSearch()
     model.setRequired("Customizable", true)
     XCTAssertEqual(model.emptyState, .filters(count: 1))
@@ -422,6 +454,35 @@ final class InstalledBrowserModelTests: PanelTestCase {
     XCTAssertNil(model.emptyState)
     panel.store.librarySnapshot.wallpapers = []
     XCTAssertEqual(model.emptyState, .emptyLibrary)
+  }
+
+  /// A Workshop id typed digit by digit is a search until it is complete: only an id pasted,
+  /// confirmed with Return or restored says the item is not installed.
+  func testATypedIdSaysItIsNotInstalledOnlyOnceItArrivedWhole() async throws {
+    let panel = try makeController()
+    defer { Task { await panel.shutdown() } }
+    let model = panel.controller.library
+    try await installNames(panel, count: 3)
+    let id = "3632513108"
+    var typed = ""
+    for digit in id {
+      typed.append(digit)
+      model.setText(typed)
+      XCTAssertEqual(model.emptyState, .search(text: typed), "a prefix being typed names no item")
+    }
+    model.submitSearch()
+    XCTAssertEqual(model.emptyState, .notInstalled(itemID: id), "Return says the id is complete")
+    model.setText(id + "9")
+    XCTAssertEqual(model.emptyState, .search(text: id + "9"), "typing on makes it a prefix again")
+
+    model.clearSearch()
+    model.setText(id)
+    XCTAssertEqual(model.emptyState, .notInstalled(itemID: id), "a pasted id is whole")
+    model.flushViewState()
+    // The model holds its controller unowned, so the controller is kept alive while asked.
+    let reopened = panel.buildController()
+    XCTAssertEqual(
+      reopened.library.emptyState, .notInstalled(itemID: id), "and so is the one a window left")
   }
 
   func testSelectingAChipRequiresItsTagAndHidingItExcludesIt() async throws {

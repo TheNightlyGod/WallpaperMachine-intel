@@ -157,13 +157,14 @@ final class LibraryTileRulesTests: PanelTestCase {
   func testTheEmptyStateNamesWhatHidesTheTilesInTheOrderOfTheRecovery() {
     func state(
       loading: Bool = false, empty: Bool = false, collection: (String, Int)? = nil,
-      text: String = "", tags: [String] = [], collectionID: String? = nil
+      text: String = "", tags: [String] = [], collectionID: String? = nil, whole: Bool = true
     ) -> LibraryEmptyState? {
       var filter = LibraryFilter(text: text, requiredTags: tags)
       filter.collectionID = collectionID
       return LibraryEmptyState.make(
         rowCount: 0, isLoading: loading, libraryIsEmpty: empty,
-        collection: collection.map { (name: $0.0, memberCount: $0.1) }, filter: filter)
+        collection: collection.map { (name: $0.0, memberCount: $0.1) }, filter: filter,
+        isInstalled: { $0 == "2077200001" }, textIsWhole: whole)
     }
     XCTAssertEqual(state(loading: true, empty: true), .loading)
     XCTAssertEqual(state(empty: true, text: "x"), .emptyLibrary)
@@ -172,6 +173,28 @@ final class LibraryTileRulesTests: PanelTestCase {
       "an empty collection is empty, not filtered away")
     XCTAssertEqual(state(text: "x", tags: ["Anime"]), .searchAndFilters)
     XCTAssertEqual(state(text: "x"), .search(text: "x"))
+    let link = "https://steamcommunity.com/sharedfiles/filedetails/?id=3632513108"
+    XCTAssertEqual(state(text: " 3632513108"), .notInstalled(itemID: "3632513108"))
+    XCTAssertEqual(
+      state(text: link, tags: ["Anime"], collectionID: "n"), .notInstalled(itemID: "3632513108"),
+      "a linked item that is not installed is missing whatever the filters, and Discover can show it")
+    XCTAssertEqual(
+      state(text: "3632513108", tags: ["Anime"]), .searchAndFilters,
+      "a bare number is words too, which the filters may be hiding")
+    XCTAssertEqual(
+      state(text: "https://steamcommunity.com/sharedfiles/filedetails/?id=2077200001", tags: ["Anime"]),
+      .searchAndFilters, "an installed item is hidden by the filters")
+    XCTAssertEqual(state(text: "2077"), .search(text: "2077"), "a short number is words")
+    XCTAssertEqual(
+      state(text: "363251", whole: false), .search(text: "363251"),
+      "an id being typed is words until it arrives whole, so its prefixes claim no item")
+    XCTAssertEqual(
+      state(text: link, whole: false), .notInstalled(itemID: "3632513108"),
+      "a link names its item however it arrived")
+    let short = "https://steamcommunity.com/sharedfiles/filedetails/?id=12345"
+    XCTAssertEqual(
+      state(text: short), .search(text: short),
+      "Discover looks up no id this short from its search field, so none is offered")
     XCTAssertEqual(state(tags: ["Anime", "Web"]), .filters(count: 2))
     XCTAssertEqual(
       state(collection: ("Night", 3), collectionID: "n"), .filters(count: 1),
@@ -179,6 +202,6 @@ final class LibraryTileRulesTests: PanelTestCase {
     XCTAssertNil(
       LibraryEmptyState.make(
         rowCount: 3, isLoading: false, libraryIsEmpty: false, collection: nil,
-        filter: LibraryFilter()))
+        filter: LibraryFilter(), isInstalled: { _ in false }, textIsWhole: true))
   }
 }

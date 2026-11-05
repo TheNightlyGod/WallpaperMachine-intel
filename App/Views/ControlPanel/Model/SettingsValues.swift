@@ -57,6 +57,10 @@ struct DesktopSettings: Equatable, Sendable {
   var refreshesDesktopPicture: Bool
   /// The inverse of macOS's "Click wallpaper to reveal desktop".
   var keepsWindowsOnWallpaperClick: Bool
+  /// The inverse of Finder's own "show icons on the desktop", read from Finder each time.
+  var hidesDesktopIcons: Bool
+  /// A black strip behind the menu bar of displays with a camera notch. Off until turned on.
+  var hidesNotch: Bool
   /// The displays follow property edits before Apply.
   var livePropertyEdits: Bool
 
@@ -168,6 +172,9 @@ struct PlaybackSettings: Equatable {
   var lowBatteryThreshold: Int
   var lowPowerModeAction: SystemConditionAction
   var thermalAction: SystemConditionAction
+  /// What wallpapers do once the Mac has had no input for `inactivityMinutes`.
+  var inactivityAction: InactivityAction = .keepRunning
+  var inactivityMinutes: Int = PlaybackPreferences.defaultInactivityMinutes
   /// Nil on a Mac without an internal battery, which is how the low-battery rows are left out.
   var batteryPercent: Int?
   var lowPowerModeIsOn: Bool
@@ -187,6 +194,8 @@ struct PlaybackSettings: Equatable {
   var showsLowBatteryRows: Bool { hasBattery }
   /// The low battery level is asked only once the rule does something.
   var showsLowBatteryLevel: Bool { hasBattery && lowBatteryAction != .keepRunning }
+  /// So is the time without input after which the Mac counts as inactive.
+  var showsInactivityTime: Bool { inactivityAction != .keepRunning }
   /// "Only play on the display I'm using" needs two displays, or is shown while on so it can be turned off.
   var showsActiveDisplayOnly: Bool { enabledDisplayCount >= 2 || playsOnlyOnActiveDisplay }
   /// The quick On battery module is worth showing on a Mac with a battery, or while its choice is not the default.
@@ -227,6 +236,14 @@ struct PlaybackSettings: Equatable {
 
   @MainActor var thermalNote: String {
     Self.note(thermalLevel.note(for: thermalAction), engaged: conditions.effect(of: .heat))
+  }
+
+  /// What counts as inactive, and what the rule does while the Mac is.
+  @MainActor var inactivityNote: String {
+    Self.note(
+      L(
+        "Inactive means no keyboard, mouse or trackpad input for the time you choose. Wallpapers resume at your next input."
+      ), engaged: conditions.effect(of: .inactivity))
   }
 
   /// "The battery is at 54% now." beside the low-battery choice, and what the rule does while

@@ -451,4 +451,60 @@ final class PlaybackPolicyCompositionTests: XCTestCase {
         XCTAssertEqual(probe.quality, [[.heat], []])
         XCTAssertEqual(probe.presentations, [.suspended, .running])
     }
+
+    // MARK: An inactive Mac
+
+    /// The inactivity rule pauses every display the way an app rule does, beside a display that is
+    /// paused on its own because it is covered, and gives each display back to its own visibility
+    /// at the next input. Stop goes through the unload that frees memory.
+    func testInactivitySuspendsEveryDisplayAndACoveredOneKeepsItsOwnPause() throws {
+        let defaults = try TemporaryDefaults.make(for: self).defaults
+        let preferences = PlaybackPreferences(defaults: defaults)
+        preferences.inactivityAction = .pause
+        let input = ManualInactivityInput()
+        let monitor = SystemConditionMonitor(
+            preferences: preferences, focus: FocusFilterState(defaults: defaults),
+            systemCenter: NotificationCenter(), isLowPowerModeEnabled: { false },
+            thermalState: { .nominal }, battery: NoBattery(), inactivity: input.makeMonitor())
+        var presentations: [GlobalPresentation] = []
+        let policy = WallpaperPresentationPolicy(
+            workspaceCenter: workspaceCenter, lockCenter: lockCenter, windowCenter: windowCenter,
+            surfaces: {
+                [WallpaperSurfaceVisibility(displayID: 1, isVisible: true),
+                 WallpaperSurfaceVisibility(displayID: 2, isVisible: false)]
+            },
+            sessionState: { .init(locked: false) },
+            appRuleActions: { monitor.actions },
+            occlusionSettleDelay: .zero,
+            applyGlobal: { presentation, completion in
+                presentations.append(presentation)
+                completion(.success(()))
+            },
+            applyDisplay: { _, _, completion in completion(.success(())) })
+        monitor.onChange = { policy.evaluate() }
+        monitor.start()
+        policy.start()
+        defer {
+            monitor.onChange = nil
+            monitor.stop()
+            policy.stop()
+        }
+        XCTAssertEqual(policy.suspendedDisplayIDs, [2], "The covered display pauses on its own")
+        XCTAssertTrue(presentations.isEmpty)
+
+        input.secondsSinceInput = 600
+        input.fireTimer()
+        XCTAssertEqual(presentations, [.suspended], "Ten minutes without input pause every display")
+        XCTAssertEqual(policy.suspendedDisplayIDs, [2])
+        XCTAssertFalse(policy.isUnattended, "Only sleeping displays or a lock count as nobody at the Mac")
+
+        input.movePointer()
+        XCTAssertEqual(presentations, [.suspended, .running])
+        XCTAssertEqual(policy.suspendedDisplayIDs, [2], "The covered display is still paused")
+
+        preferences.inactivityAction = .stop
+        input.secondsSinceInput = 600
+        input.fireTimer()
+        XCTAssertEqual(presentations.last, .unloaded)
+    }
 }

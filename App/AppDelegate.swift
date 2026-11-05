@@ -5,6 +5,12 @@ import SwiftUI
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var statusItem: NSStatusItem?
+    /// The status item's menu, filled from `StatusMenuModel` each time it opens. A right click or a
+    /// Control-click on the icon opens it, and a left click too when Settings › General says so.
+    var statusMenu: NSMenu?
+    /// The panel a left click on the status item opens (`AppDelegate+StatusPanel`).
+    private(set) lazy var statusPanel = StatusPanelPopover(source: self)
+    var statusItemClickObserver: NSObjectProtocol?
     /// The menu bar's Wallpaper menu, filled from `StatusMenuModel` each time it opens.
     var wallpaperMenu: NSMenu?
     private(set) var controlPanelWindow: NSWindow?
@@ -34,6 +40,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         windowClosed: { [weak self] in self?.leaveDockUnlessAWindowIsOpen() })
     private var displayChangeObserver: NSObjectProtocol?
     private var powerOffObserver: NSObjectProtocol?
+    /// Follows the drive of a library kept on another disk: stops its wallpapers when it goes, plays
+    /// them when it returns, and opens a library the app launched without.
+    private var libraryDrive: StorageVolumeMonitor?
     /// Set when macOS announces a logout, restart or shutdown, ahead of the quit event.
     private var powerOffNotice = PowerOffNotice()
     private lazy var displayRefresh = DisplayRefreshCoalescer(displayReturned: { [weak self] in
@@ -60,6 +69,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// Keeps the previous picture on screen while a switched wallpaper loads.
     private var switchHold: WallpaperSwitchHold?
     private var windowAuditor: WallpaperWindowAuditor?
+    /// Settings › Desktop & Lock Screen › Hide the notch.
+    private var notchMask: NotchMaskController?
     /// Keeps the windows of a display that follows desktop Spaces on its current desktop only.
     private(set) var spacePinning: WallpaperSpacePinning?
     private var spaceParking: WallpaperSpaceParking?
@@ -153,6 +164,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 }
             }
         AppLog.info("startup: didFinishLaunching start")
+        openLibrary()
+        startShell()
+        startLibraryServices()
+        finishLaunching(launchEvent: launchEvent)
+    }
+
+    /// Opens the library and the renderer bridge over it: at launch, and again when the drive the
+    /// app launched without is connected (`openLibraryAfterLaunch`). When either cannot start,
+    /// `store` stays nil and `startupError` says why.
+    private func openLibrary() {
         do {
             try ClientPaths.prepare()
             let created = try BridgeStore()
@@ -200,26 +221,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             startupError = error
             playbackSnapshotCurrent = false
         }
+    }
+
+    /// What a launch starts once, whether or not the library opened.
+    private func startShell() {
         pixivStore.restoreSession()
         workshopStore.restoreSteamWebSession()
         // Follows the Mac for Automatic sunrise and sunset. It asks for nothing here: access is
         // requested only from an explicit action in the panel.
         SolarLocationTracker.shared.start()
         AppLog.info("startup: solar location tracker started")
-        // A crash during a download leaves its staging behind, holding the whole downloaded item:
-        // SteamCMD's half in app support, what it fetched beside the library. A moved library
-        // leaves its old copy to delete too.
-        let stagingRoots = FileLocation.isSame(ClientPaths.supportURL, ClientPaths.storageURL)
-            ? [ClientPaths.supportURL] : [ClientPaths.supportURL, ClientPaths.storageURL]
-        let pixivStagingRoot = PixivWallpaperPackager.stagingRoot(forLibrary: ClientPaths.libraryURL)
-        let importStagingRoot = WallpaperImportService.stagingRoot(forLibrary: ClientPaths.libraryURL)
+        removeAbandonedStaging()
+        // A moved library leaves its old copy to delete too.
         let support = ClientPaths.supportURL
-        Task.detached(priority: .utility) {
-            for root in stagingRoots { WorkshopDownloader.removeAbandonedStaging(in: root) }
-            StorageMoveService.removeRetiredCopies(support: support)
-            PixivWallpaperPackager.removeAbandonedStaging(in: pixivStagingRoot)
-            WallpaperImportService.removeAbandonedStaging(in: importStagingRoot)
-        }
+        Task.detached(priority: .utility) { StorageMoveService.removeRetiredCopies(support: support) }
 
         NSApp.setActivationPolicy(.accessory)
         AppLog.info("startup: activation policy set to accessory")
@@ -229,8 +244,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         installDisplayChangeObserver()
         AppLog.info("startup: display change observer installed")
         installPowerOffObserver()
+        startLibraryDriveMonitor()
         installApplicationMenu()
         AppLog.info("startup: application menu installed")
+        // Keeps no window and does no work until Hide the notch is turned on.
+        let notchMask = NotchMaskController()
+        self.notchMask = notchMask
+        notchMask.start()
+    }
+
+    /// Starts every service that works over the opened library, then loads it: at launch, and
+    /// once more if the library opens later (`openLibraryAfterLaunch`). Without a library it only
+    /// says so.
+    private func startLibraryServices() {
         if let store {
             workshopStore.startDownloadLifecycle(bridge: store)
             let lockScreen = LockScreenConfiguration.isSupportedBySystem
@@ -435,8 +461,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
             let policy = WallpaperPresentationPolicy(
                 displaySleepAction: { preferences.displaySleepAction },
-                // Low Power Mode, a hot Mac and a Focus filter act exactly as app rules do.
-                appRuleActions: { appRules.actions.union(conditions.actions) },
+                // Low Power Mode, a hot Mac and a Focus filter act exactly as app rules do, and so
+                // does the library's drive going away, as a Stop.
+                appRuleActions: { [weak self] in
+                    appRules.actions.union(conditions.actions).union(self?.libraryDrive?.presentationActions ?? [])
+                },
                 otherAudioActive: { otherAudio.isActive },
                 otherAudioAction: { preferences.otherAudioAction },
                 // The user's own mute of every wallpaper, on top of the rules above and never
@@ -700,6 +729,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
         }
         bootstrapStore()
+    }
+
+    private func finishLaunching(launchEvent: NSAppleEventDescriptor?) {
         AppLog.info("startup: bootstrap dispatched")
         startDiagnosticsSessionIfRequested()
         finishedLaunching = true
@@ -781,6 +813,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             current: { store.shownWallpaperID(on: $0) },
             isRunning: { outOfSight($0) == false },
             isUnseen: { outOfSight($0) == true },
+            // Only a plain video has an end to wait for, and only the video host plays one.
+            watchClipEnd: { [weak self] display, wallpaper, ended in
+                guard let host = self?.nativeVideoHost,
+                      let row = store.settingsSnapshot.displays.first(where: { $0.displayId == display }),
+                      let physical = ResolvedDisplayTitles.liveDisplayID(display, title: row.title) else { return nil }
+                return host.watchClipEnd(displayID: physical, wallpaperID: wallpaper, ended: ended)
+            },
             activate: { display, choose in
                 var applied: String?
                 try await store.commands.run(slot: BridgeStore.activationSlot(displayId: display), origin: .playlist) {
@@ -1222,6 +1261,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// The quit's `restore` stage already put the desktop back, so its `services` stage only lets
     /// the sync go; `applicationWillTerminate` restores it in the place it always has.
     private func tearDownServices(restoringDesktop: Bool) {
+        libraryDrive?.stop()
         globalHotKeys?.stop()
         AppAutomation.shared.handler = nil
         AppAutomation.shared.displays = nil
@@ -1242,6 +1282,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         presentationPolicy = nil
         windowAuditor?.stop()
         windowAuditor = nil
+        notchMask?.stop()
+        notchMask = nil
         wakeRevalidator?.stop()
         wakeRevalidator = nil
         memoryPressureMonitor?.stop()
@@ -1600,18 +1642,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return
         }
 
-        let root: AnyView
-        if let store {
-            root = AnyView(ControlPanelView(
-                store: store, navigation: controlPanelNavigation, workshop: workshopStore,
-                pixiv: pixivStore, updater: updates.updater, imports: libraryImports))
-        } else {
-            let error = startupError ?? lastError
-            root = AnyView(BridgeUnavailableView(
-                error: error,
-                useThisMac: error is StorageUnavailableError ? { [weak self] in self?.keepLibraryOnThisMac() } : nil))
-        }
-        let hosting = NSHostingController(rootView: root)
+        let hosting = NSHostingController(rootView: controlPanelRoot())
         // The window keeps its own size floor, and the hosted toolbar and title belong to it.
         hosting.sizingOptions = []
         hosting.sceneBridgingOptions = [.toolbars, .title]
@@ -1623,6 +1654,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         controlPanelWindow = window
         ControlPanelWindow.bringForward(window)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// The panel over the open library, or what says why there is none.
+    private func controlPanelRoot() -> AnyView {
+        if let store {
+            return AnyView(ControlPanelView(
+                store: store, navigation: controlPanelNavigation, workshop: workshopStore,
+                pixiv: pixivStore, updater: updates.updater, imports: libraryImports))
+        }
+        let error = startupError ?? lastError
+        return AnyView(BridgeUnavailableView(
+            error: error,
+            useThisMac: error is StorageUnavailableError ? { [weak self] in self?.keepLibraryOnThisMac() } : nil))
     }
 
     /// A display whose playlist rotates moves along the playlist; any other display takes the
@@ -1838,6 +1882,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         AppLog.info("storage: the library is in WallpaperMachine's folder on this Mac from the next launch")
         NSApp.terminate(nil)
+    }
+
+    /// See `StorageVolumeMonitor`: it observes nothing unless the library is on another disk than
+    /// the startup disk. Its stop reaches the wallpapers through the presentation policy.
+    private func startLibraryDriveMonitor() {
+        let monitor = StorageVolumeMonitor { [weak self] in
+            do {
+                try await self?.store?.refreshLibraryAsync()
+            } catch {
+                AppLog.warn("storage: the library could not be read again after its drive returned: \(error.localizedDescription)")
+            }
+        }
+        monitor.onChange = { [weak self] in
+            guard let self, !self.shutdownInProgress, !self.shutdownComplete else { return }
+            // A preview plays from the library too, and holds its files open.
+            if self.libraryDrive?.stopsWallpapers == true { self.previewWindow?.close() }
+            self.presentationPolicy?.evaluate()
+        }
+        monitor.onDriveConnectedAfterLaunch = { [weak self] in self?.openLibraryAfterLaunch() }
+        libraryDrive = monitor
+        monitor.start()
+    }
+
+    /// The drive the app launched without is connected: the library opens in place with every
+    /// service a launch starts over it, and an open panel shows it instead of the unavailable page.
+    private func openLibraryAfterLaunch() {
+        guard store == nil, !shutdownInProgress, !shutdownComplete else { return }
+        ClientPaths.reloadStorageLocation()
+        openLibrary()
+        if store != nil {
+            AppLog.info("storage: the library opened without a relaunch")
+            // The launch's sweep looked where the drive was not.
+            removeAbandonedStaging()
+            startLibraryServices()
+        }
+        // The library, or why it still cannot open.
+        (controlPanelWindow?.contentViewController as? NSHostingController<AnyView>)?.rootView = controlPanelRoot()
+        rebuildMenu()
+    }
+
+    /// A crash during a download leaves its staging behind, holding the whole downloaded item:
+    /// SteamCMD's half in app support, what it fetched beside the library. Swept in the background
+    /// at launch, and again when the library opens later (`openLibraryAfterLaunch`); each sweep
+    /// keeps staging a download or an import still claims, or wrote to recently.
+    private func removeAbandonedStaging() {
+        let stagingRoots = FileLocation.isSame(ClientPaths.supportURL, ClientPaths.storageURL)
+            ? [ClientPaths.supportURL] : [ClientPaths.supportURL, ClientPaths.storageURL]
+        let pixivStagingRoot = PixivWallpaperPackager.stagingRoot(forLibrary: ClientPaths.libraryURL)
+        let importStagingRoot = WallpaperImportService.stagingRoot(forLibrary: ClientPaths.libraryURL)
+        Task.detached(priority: .utility) {
+            for root in stagingRoots { WorkshopDownloader.removeAbandonedStaging(in: root) }
+            PixivWallpaperPackager.removeAbandonedStaging(in: pixivStagingRoot)
+            WallpaperImportService.removeAbandonedStaging(in: importStagingRoot)
+        }
     }
 
     private func bootstrapStore() {

@@ -18,13 +18,17 @@ enum WallpaperDeletionService {
     }
 
     /// Trashes the wallpaper's folder, then deletes its scene scripts' saved `localStorage`
-    /// (`<sceneStorage>/<id>`), which belongs to the wallpaper and goes with it.
+    /// (`<sceneStorage>/<id>`) and the playable copies of its video (`DerivedVideoCache`), which
+    /// belong to the wallpaper and go with it.
     static func moveToTrash(id: String, library: URL,
                             sceneStorage: URL = ClientPaths.sceneStorageURL,
+                            derivedVideos: DerivedVideoCache = .shared,
                             recycle: (URL) throws -> Void = { url in
                                 try FileManager.default.trashItem(at: url, resultingItemURL: nil)
                             }) throws {
-        try recycle(wallpaperURL(id: id, library: library))
+        let folder = try wallpaperURL(id: id, library: library)
+        try recycle(folder)
+        derivedVideos.removeCopies(under: folder)
         let storage = sceneStorage.appendingPathComponent(id, isDirectory: true)
         if FileManager.default.fileExists(atPath: storage.path) {
             try FileManager.default.removeItem(at: storage)

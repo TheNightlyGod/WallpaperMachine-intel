@@ -67,6 +67,24 @@ enum SystemConditionAction: String, Codable, CaseIterable, Sendable {
     var reducesQuality: Bool { self == .reduceQuality }
 }
 
+/// What wallpapers do once the Mac has had no keyboard, mouse or trackpad input for the time the
+/// user chose (`PlaybackPreferences.inactivityMinutes`). It offers no Reduced quality: nobody is
+/// watching, so there is nothing to keep playing for.
+enum InactivityAction: String, Codable, CaseIterable, Sendable {
+    case keepRunning
+    case pause
+    case stop
+
+    /// The same choice among the Mac conditions' own, which `SystemConditionMonitor` evaluates.
+    var conditionAction: SystemConditionAction {
+        switch self {
+        case .keepRunning: .keepRunning
+        case .pause: .pause
+        case .stop: .stop
+        }
+    }
+}
+
 /// Why wallpapers are asked to run at reduced quality. Declared in the order the causes are
 /// named when several hold: heat first, then Low Power Mode, then a low battery.
 enum QualityReduction: String, CaseIterable, Comparable, Sendable {
@@ -108,9 +126,9 @@ struct AppRule: Codable, Equatable, Identifiable, Sendable {
 }
 
 /// UserDefaults-backed playback rules for display sleep, other-app audio, another app in front, a
-/// covered desktop, Low Power Mode, a hot Mac, a low battery, playing only on the display in use
-/// and per-app pause, mute and stop, whether every wallpaper is muted, and whether the macOS
-/// desktop picture is written at all. Mutations post `didChangeNotification` once.
+/// covered desktop, Low Power Mode, a hot Mac, a low battery, an inactive Mac, playing only on the
+/// display in use and per-app pause, mute and stop, whether every wallpaper is muted, and whether
+/// the macOS desktop picture is written at all. Mutations post `didChangeNotification` once.
 @MainActor
 final class PlaybackPreferences {
     static let didChangeNotification = Notification.Name("WallpaperMachine.playbackPreferencesDidChange")
@@ -131,6 +149,8 @@ final class PlaybackPreferences {
     nonisolated static let thermalKey = "WallpaperMachine.thermalAction"
     nonisolated static let lowBatteryActionKey = "WallpaperMachine.lowBatteryAction"
     nonisolated static let lowBatteryThresholdKey = "WallpaperMachine.lowBatteryThreshold"
+    nonisolated static let inactivityActionKey = "WallpaperMachine.inactivityAction"
+    nonisolated static let inactivityMinutesKey = "WallpaperMachine.inactivityMinutes"
     private static let periodicDesktopPictureKey = "WallpaperMachine.refreshDesktopPicturePeriodically"
     private static let writeDesktopPictureKey = "WallpaperMachine.writeDesktopPicture"
     nonisolated static let playOnlyOnActiveDisplayKey = "WallpaperMachine.playOnlyOnActiveDisplay"
@@ -139,6 +159,9 @@ final class PlaybackPreferences {
     /// The charge levels the user can pick for the low-battery rule, in percent.
     nonisolated static let lowBatteryThresholds = [10, 20, 30]
     nonisolated static let defaultLowBatteryThreshold = 20
+    /// The times without input the user can pick for the inactivity rule, in minutes.
+    nonisolated static let inactivityMinuteChoices = [5, 10, 15, 30, 60]
+    nonisolated static let defaultInactivityMinutes = 10
 
     private let defaults: UserDefaults
 
@@ -203,6 +226,29 @@ final class PlaybackPreferences {
         set {
             guard Self.lowBatteryThresholds.contains(newValue) else { return }
             defaults.set(newValue, forKey: Self.lowBatteryThresholdKey)
+            postChange()
+        }
+    }
+
+    /// Off until chosen: being away from the Mac alone never changes playback. Applies once the
+    /// Mac has had no keyboard, mouse or trackpad input for `inactivityMinutes`, and ends at the
+    /// next input. Never touches the user's own Play/Pause.
+    var inactivityAction: InactivityAction {
+        get { storedEnum(Self.inactivityActionKey, default: .keepRunning) }
+        set { store(newValue.rawValue, forKey: Self.inactivityActionKey) }
+    }
+
+    /// One of `inactivityMinuteChoices`. A stored value outside the list, which only a hand edit
+    /// or a damaged file can leave, reads as the default; setting one is ignored.
+    var inactivityMinutes: Int {
+        get {
+            guard let stored = defaults.object(forKey: Self.inactivityMinutesKey) as? Int,
+                  Self.inactivityMinuteChoices.contains(stored) else { return Self.defaultInactivityMinutes }
+            return stored
+        }
+        set {
+            guard Self.inactivityMinuteChoices.contains(newValue) else { return }
+            defaults.set(newValue, forKey: Self.inactivityMinutesKey)
             postChange()
         }
     }
@@ -297,7 +343,7 @@ final class PlaybackPreferences {
         for key in [
             Self.displaySleepKey, Self.otherAudioKey, Self.otherAppInFrontKey, Self.desktopCoveredKey, Self.appRulesKey,
             Self.lowPowerModeKey, Self.thermalKey, Self.lowBatteryActionKey, Self.lowBatteryThresholdKey,
-            Self.periodicDesktopPictureKey, Self.writeDesktopPictureKey, Self.playOnlyOnActiveDisplayKey,
+            Self.inactivityActionKey, Self.inactivityMinutesKey, Self.periodicDesktopPictureKey, Self.writeDesktopPictureKey, Self.playOnlyOnActiveDisplayKey,
             Self.wallpapersMutedKey,
         ] {
             defaults.removeObject(forKey: key)

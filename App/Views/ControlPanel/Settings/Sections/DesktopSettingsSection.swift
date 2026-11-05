@@ -32,6 +32,18 @@ struct DesktopSettingsSection: View {
     note:
       "Turns off macOS’s “Click wallpaper to reveal desktop” so clicks reach interactive wallpapers."
   )
+  static let hideDesktopIcons = SettingsItem(
+    id: "desktop.hide-desktop-icons", section: .desktop, group: desktop,
+    title: "Hide desktop icons",
+    note:
+      "Finder stops showing files, folders and disks on the desktop, so they no longer cover the wallpaper. They stay in your Desktop folder. Finder restarts to apply the change.",
+    keywords: ["Restart Finder"])
+  static let hideNotch = SettingsItem(
+    id: "desktop.hide-notch", section: .desktop, group: desktop,
+    title: "Hide the notch",
+    note:
+      "On displays with a camera notch, the menu bar turns black so the notch disappears into it. The rest of the screen still shows the wallpaper.",
+    keywords: ["Menu bar"])
   static let livePropertyEdits = SettingsItem(
     id: "desktop.live-property-edits", section: .desktop, group: desktop,
     title: "Show property edits on the desktop as I make them",
@@ -60,7 +72,8 @@ struct DesktopSettingsSection: View {
     title: "Compatibility & permissions")
 
   static let items = [
-    desktopWallpapers, writeDesktopPicture, refreshMissionControl, keepWindowsOnClick, livePropertyEdits,
+    desktopWallpapers, writeDesktopPicture, refreshMissionControl, keepWindowsOnClick, hideDesktopIcons,
+    hideNotch, livePropertyEdits,
     lockScreenSwitch, lockScreenStatus, lockScreenContext, screenSaverSwitch, screenSaverStatus,
     screenSaverContext,
   ]
@@ -82,6 +95,8 @@ struct DesktopSettingsSection: View {
         SettingsRow(Self.keepWindowsOnClick) {
           SettingsSwitchControl(key: .keepWindowsOnWallpaperClick)
         }
+        SettingsRow(Self.hideDesktopIcons) { SettingsSwitchControl(key: .hideDesktopIcons) }
+        SettingsRow(Self.hideNotch) { SettingsSwitchControl(key: .hideNotch) }
         SettingsRow(Self.livePropertyEdits) { SettingsSwitchControl(key: .livePropertyEdits) }
       }
       SettingsGroup(Self.lockScreen, in: .desktop) {

@@ -119,7 +119,10 @@ whose stored copy is now the only one; the preset attachments retained under
 `PresetAssets` are never candidates either. A missing manifest is distinct from an
 unreadable, damaged, foreign or unsupported manifest; the latter blocks purging or
 replacing that wallpaper's files, is logged and skipped, and the purge continues
-with the others.
+with the others. The same button removes the playable copies of `hev1` videos that nothing is
+playing or reading now ([performance](performance.md#hevc-tagged-hev1)); a clip whose copy it
+removed gets a new one the next time it opens. A clone shares its blocks with the clip, so only
+full copies add to the amount it reports.
 
 ## Lock screen and screen saver
 

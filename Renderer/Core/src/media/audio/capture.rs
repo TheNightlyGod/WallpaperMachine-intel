@@ -4,7 +4,10 @@ use std::{
     mem,
     panic::{AssertUnwindSafe, catch_unwind},
     ptr::{self, NonNull},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use objc2::{AnyThread, ClassType, runtime::AnyObject, sel};
@@ -16,6 +19,7 @@ use objc2_core_audio::{
     kAudioAggregateDeviceIsPrivateKey, kAudioAggregateDeviceNameKey,
     kAudioAggregateDeviceTapAutoStartKey, kAudioAggregateDeviceTapListKey,
     kAudioAggregateDeviceUIDKey, kAudioAggregateDriftCompensationMediumQuality,
+    kAudioDevicePropertyDeviceIsRunningSomewhere, kAudioHardwarePropertyDefaultOutputDevice,
     kAudioHardwarePropertyTranslatePIDToProcessObject, kAudioObjectPropertyElementMain,
     kAudioObjectPropertyScopeGlobal, kAudioObjectUnknown, kAudioSubTapDriftCompensationKey,
     kAudioSubTapDriftCompensationQualityKey, kAudioSubTapUIDKey, kAudioTapPropertyFormat,
@@ -42,6 +46,9 @@ struct CallbackState {
     channel_mode: AudioTapChannelMode,
     sample_rate: u32,
     scratch: Mutex<Vec<f32>>,
+    /// Every call of the callback, silent or not. The capture worker reads it
+    /// to notice a tap that stopped being called.
+    callbacks: AtomicU64,
 }
 
 /// Native teardown is injected only at lifecycle boundaries, never on the audio path.
@@ -216,6 +223,19 @@ impl<O: TeardownOperations> CaptureOwner<O> {
     fn has_pending_cleanup(&self) -> bool {
         self.state.as_ref().is_some_and(|state| state.releasing)
     }
+
+    /// How often the running tap's callback has been called, or `None` when no
+    /// healthy tap runs.
+    fn io_callback_count(&self) -> Option<u64> {
+        let state = self
+            .state
+            .as_ref()
+            .filter(|state| state.running && !state.releasing)?;
+        // SAFETY: a running state owns its callback block until release
+        // destroys the IOProc; reading the counter is all that happens here.
+        let callback = unsafe { state.callback.as_ref() }?;
+        Some(callback.callbacks.load(Ordering::Relaxed))
+    }
 }
 
 pub struct PlatformAudioCaptureBackend {
@@ -281,6 +301,45 @@ impl AudioCaptureBackend for PlatformAudioCaptureBackend {
     fn has_pending_cleanup(&self) -> bool {
         self.capture.has_pending_cleanup()
     }
+
+    fn io_callback_count(&self) -> Option<u64> {
+        self.capture.io_callback_count()
+    }
+
+    fn output_device_is_running(&self) -> bool {
+        default_output_is_running()
+    }
+}
+
+/// Whether the default output device is running for any client. A query that
+/// fails reads as not running, so an unreadable device never causes a rebuild.
+fn default_output_is_running() -> bool {
+    let mut device: AudioObjectID = kAudioObjectUnknown;
+    if !read_u32_property(SYSTEM_OBJECT, kAudioHardwarePropertyDefaultOutputDevice, &mut device)
+        || device == kAudioObjectUnknown
+    {
+        return false;
+    }
+    let mut running = 0u32;
+    read_u32_property(device, kAudioDevicePropertyDeviceIsRunningSomewhere, &mut running)
+        && running != 0
+}
+
+/// Reads one global 32-bit property of `object`; `false` when the call fails.
+fn read_u32_property(object: AudioObjectID, selector: u32, value: &mut u32) -> bool {
+    let address = property_address(selector);
+    let mut size = mem::size_of::<u32>() as u32;
+    let status = unsafe {
+        AudioObjectGetPropertyData(
+            object,
+            NonNull::from(&address),
+            0,
+            ptr::null(),
+            NonNull::from(&mut size),
+            NonNull::from(value).cast(),
+        )
+    };
+    status == 0 && size as usize == mem::size_of::<u32>()
 }
 
 /// Builds the tap, aggregate device and I/O callback into the owner's state.
@@ -316,6 +375,7 @@ fn open_capture(
         channel_mode: state.channel_mode,
         sample_rate: state.sample_rate,
         scratch: Mutex::new(scratch),
+        callbacks: AtomicU64::new(0),
     }));
 
     let mut io_proc: AudioDeviceIOProcID = None;
@@ -522,6 +582,8 @@ unsafe extern "C-unwind" fn io_callback(
     let Some(state) = (unsafe { client_data.cast::<CallbackState>().as_ref() }) else {
         return 0;
     };
+    // One wait-free increment: the stall watch counts calls, not sound.
+    state.callbacks.fetch_add(1, Ordering::Relaxed);
     let list = unsafe { input.as_ref() };
     // A panic in the consumer must not unwind into Core Audio's thread.
     let _ = catch_unwind(AssertUnwindSafe(|| deliver(state, list)));

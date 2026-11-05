@@ -47,6 +47,44 @@ final class PanelPlaylistActionsTests: PanelTestCase {
     XCTAssertEqual(panel.playlists.playlist(for: "primary").nightStart, 1439)
   }
 
+  func testWaitingForVideosIsStoredForTheNamedDisplayAndOffForANewPlaylist() async throws {
+    let panel = try makePanel()
+    defer { Task { await panel.shutdown() } }
+    let controller = panel.controller
+    try await controller.editPlaylist(.mode(.rotate), display: "primary")
+    XCTAssertFalse(controller.playlistState(for: "primary").playlist.waitsForClipEnd)
+    try await controller.editPlaylist(.waitsForClipEnd(true), display: "primary")
+    XCTAssertTrue(PlaylistStore(defaults: panel.defaults).playlist(for: "primary").waitsForClipEnd)
+    try await controller.editPlaylist(.waitsForClipEnd(false), display: "primary")
+    XCTAssertFalse(panel.playlists.playlist(for: "primary").waitsForClipEnd)
+  }
+
+  /// While a change that fell due waits for the video on screen, Next change names the latest time
+  /// it is made, not the deadline that has passed.
+  func testAChangeWaitingForTheVideoSaysWhenItIsMadeAtTheLatest() async throws {
+    let panel = try makePanel()
+    defer { Task { await panel.shutdown() } }
+    let controller = panel.controller
+    try await controller.editPlaylist(.mode(.rotate), display: "primary")
+    try await controller.editPlaylist(.waitsForClipEnd(true), display: "primary")
+    let deadline = Date().addingTimeInterval(-20 * 60)
+    let limit = deadline.addingTimeInterval(30 * 60)
+    panel.playlists.schedule("primary", at: deadline)
+    let onTime = controller.playlistState(for: "primary").nextNote
+
+    panel.playlists.setClipWait(limit, on: "primary")
+    let waiting = controller.playlistState(for: "primary")
+    let locale = PanelLocale.shared.locale
+    XCTAssertEqual(waiting.clipWaitLimit, limit)
+    XCTAssertTrue(waiting.nextNote.contains(PlaylistState.changeTime(limit, locale: locale)), waiting.nextNote)
+    XCTAssertFalse(
+      waiting.nextNote.contains(PlaylistState.changeTime(deadline, locale: locale)), "not the deadline that passed")
+    XCTAssertNotEqual(waiting.nextNote, onTime)
+
+    panel.playlists.setClipWait(nil, on: "primary")
+    XCTAssertEqual(controller.playlistState(for: "primary").nextNote, onTime, "once the wait is over, the usual note")
+  }
+
   func testATypedIntervalOutsideTheMenuIsKept() async throws {
     let panel = try makePanel()
     defer { Task { await panel.shutdown() } }

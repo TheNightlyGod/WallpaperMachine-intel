@@ -70,9 +70,11 @@ class MediaPanelTestCase: PanelTestCase {
     let previousHome = ProcessInfo.processInfo.environment["WALLPAPER_MACHINE_HOME"]
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     setenv("WALLPAPER_MACHINE_HOME", root.path, 1)
+    let language = AppLanguageStore.english()
     let controller = PanelController(
       store: store, navigation: ControlPanelNavigation(), workshop: workshop, pixiv: pixiv,
-      defaults: defaults, dialogs: dialogs, appLanguage: .english())
+      defaults: defaults, dialogs: dialogs, appLanguage: language,
+      searchTranslation: .fake(defaults: defaults, language: language))
     addTeardownBlock { @MainActor in
       controller.stop()
       workshop.cancelSearch()

@@ -38,6 +38,9 @@ final class VideoWallpaperPreviewSurface: WallpaperPreviewSurface {
     private var avAsset: AVURLAsset?
     private var loopRange = CMTimeRange.invalid
     private var webM: WebMPlayer?
+    /// The corrected copy an `hev1` clip plays from, held until the preview stops.
+    private var copyLease: DerivedVideoCache.Lease?
+    private let derivedVideos: DerivedVideoCache
     private var muted = true
     private var paused = false
     private var stopped = false
@@ -46,8 +49,9 @@ final class VideoWallpaperPreviewSurface: WallpaperPreviewSurface {
     private let colorPipeline = VideoColorPipeline()
     private var options = WallpaperEngineOptions.identity
 
-    init(request: WallpaperPreviewRequest) {
+    init(request: WallpaperPreviewRequest, derivedVideos: DerivedVideoCache = .shared) {
         self.request = request
+        self.derivedVideos = derivedVideos
         content = ContentView(frame: CGRect(x: 0, y: 0, width: 960, height: 540))
         content.wantsLayer = true
         content.layer?.backgroundColor = NSColor.black.cgColor
@@ -68,11 +72,7 @@ final class VideoWallpaperPreviewSurface: WallpaperPreviewSurface {
         try Task.checkCancellation()
         guard !stopped else { throw CancellationError() }
         guard let refusal else {
-            let asset = AVURLAsset(url: url)
-            let range = await NativeVideoPlayer.loopRange(of: asset)
-            try Task.checkCancellation()
-            guard !stopped else { throw CancellationError() }
-            try await playWithAVFoundation(asset, looping: range)
+            try await playWithAVFoundation(url: url)
             return
         }
         // AVFoundation never opens Matroska or WebM; the app's reader may.
@@ -80,7 +80,48 @@ final class VideoWallpaperPreviewSurface: WallpaperPreviewSurface {
             playWithWebM(file)
             return
         }
+        // HEVC tagged `hev1` plays from a copy retagged `hvc1`, as it does on the desktop, and a
+        // copy that cannot be had is refused in the desktop's words.
+        if case .notPlayable = refusal, let plan = await Self.retagPlan(of: url) {
+            let failure = await Self.prepareCopy(of: url, plan: plan, in: derivedVideos)
+            try Task.checkCancellation()
+            guard !stopped else { throw CancellationError() }
+            if let failure { throw WallpaperPreviewFailure(message: failure) }
+            guard case let .copy(lease) = derivedVideos.playableFile(for: url) else {
+                throw WallpaperPreviewFailure(message: refusal.reason)
+            }
+            copyLease = lease
+            try await playWithAVFoundation(url: lease.url)
+            return
+        }
         throw WallpaperPreviewFailure(message: refusal.reason)
+    }
+
+    private func playWithAVFoundation(url: URL) async throws {
+        let asset = AVURLAsset(url: url)
+        let range = await NativeVideoPlayer.loopRange(of: asset)
+        try Task.checkCancellation()
+        guard !stopped else { throw CancellationError() }
+        try await playWithAVFoundation(asset, looping: range)
+    }
+
+    /// The retag of an `hev1` clip whose sample descriptions carry the parameter sets, read off the
+    /// main actor; `nil` for any other file.
+    private nonisolated static func retagPlan(of url: URL) async -> HevcSampleEntryRetag.Plan? {
+        guard case let .retag(plan)? = try? HevcSampleEntryRetag.inspect(url: url) else { return nil }
+        return plan
+    }
+
+    /// Makes its copy off the main actor, a full copy waited for unless the preview's task is
+    /// cancelled. `nil` once the copy is there; otherwise what the desktop says about the clip.
+    private nonisolated static func prepareCopy(
+        of url: URL, plan: HevcSampleEntryRetag.Plan, in derived: DerivedVideoCache
+    ) async -> String? {
+        guard case let .failure(failure) = await derived.prepare(source: url, plan: plan, waiting: true) else {
+            return nil
+        }
+        let format = VideoFormatSupport.Format(container: VideoFormatSupport.container(of: url).name, codec: "HEVC")
+        return VideoFormatSupport.refusal(for: failure, format: format).reason
     }
 
     /// Loops `range` of the clip, which the desktop player bounds the same way: its picture,
@@ -253,6 +294,8 @@ final class VideoWallpaperPreviewSurface: WallpaperPreviewSurface {
         avLayer = nil
         webM?.stop()
         webM = nil
+        copyLease?.release()
+        copyLease = nil
     }
 
     /// `none` has no gravity of its own; the nearest one that shows the whole picture stands in.

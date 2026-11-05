@@ -1,7 +1,8 @@
 import SwiftUI
 
 /// Settings › Playback & Power: when wallpapers pause, mute or stop on their own, and how they
-/// behave on battery, in Low Power Mode, when the Mac is hot, under a Focus and beside other apps.
+/// behave on battery, in Low Power Mode, when the Mac is hot or inactive, under a Focus and beside
+/// other apps.
 struct PlaybackSettingsSection: View {
   private static let playback = SettingsItem.Group("playback", title: "Playback")
   private static let context = SettingsItem.Group("context")
@@ -43,6 +44,15 @@ struct PlaybackSettingsSection: View {
     note:
       "Stop frees renderer memory and reloads the wallpaper when the display wakes. Pause keeps it loaded."
   )
+  static let inactivity = SettingsItem(
+    id: "playback.inactivity", section: .playback, group: playback,
+    title: "When the Mac is inactive",
+    note:
+      "Inactive means no keyboard, mouse or trackpad input for the time you choose. Wallpapers resume at your next input."
+  )
+  static let inactivityTime = SettingsItem(
+    id: "playback.inactivity-time", section: .playback, group: playback,
+    title: "Inactive after")
   static let batteryMode = SettingsItem(
     id: "playback.battery-mode", section: .playback, group: playback, title: "On battery",
     note:
@@ -102,19 +112,22 @@ struct PlaybackSettingsSection: View {
     title: "What these settings change")
 
   static let items = [
-    muteAll, desktopCovered, activeDisplayOnly, otherAudio, otherAppInFront, displaySleep, batteryMode, batteryScale,
+    muteAll, desktopCovered, activeDisplayOnly, otherAudio, otherAppInFront, displaySleep, inactivity,
+    inactivityTime, batteryMode, batteryScale,
     batteryFps, reducedQuality, lowBattery, lowBatteryLevel, lowPowerMode, thermal, focus, appRules,
     addAppRule, whatChanges,
   ]
 
   /// The rows this page leaves out now, by the rules its body draws them with: "Only play on the
-  /// display I'm using" needs two displays (or is on), the reduced profile needs a Reduced quality
-  /// choice, and the low-battery rows need a battery (the level also a rule that does something).
+  /// display I'm using" needs two displays (or is on), the time without input needs an inactivity
+  /// rule that does something, the reduced profile needs a Reduced quality choice, and the
+  /// low-battery rows need a battery (the level also a rule that does something).
   @MainActor
   static func unofferedItems(_ controller: PanelController) -> Set<String> {
     let playback = controller.playbackSettings
     var hidden: [SettingsItem] = []
     if !playback.showsActiveDisplayOnly { hidden.append(activeDisplayOnly) }
+    if !playback.showsInactivityTime { hidden.append(inactivityTime) }
     if !controller.qualityReport.reducedQualityChosen {
       hidden += [batteryScale, batteryFps, reducedQuality]
     }
@@ -160,6 +173,22 @@ struct PlaybackSettingsSection: View {
             "displaySleepAction", saved: playback.displaySleepAction,
             options: DisplaySleepAction.allCases.map { ($0, $0.title) }
           ) { try await controller.setDisplaySleepAction($0) }
+        }
+        SettingsRow(Self.inactivity, note: playback.inactivityNote) {
+          menu(
+            "inactivityAction", saved: playback.inactivityAction,
+            options: InactivityAction.allCases.map { ($0, $0.title) }
+          ) { try await controller.setInactivityAction($0) }
+        }
+        if playback.showsInactivityTime {
+          SettingsRow(Self.inactivityTime) {
+            menu(
+              "inactivityMinutes", saved: playback.inactivityMinutes,
+              options: PlaybackPreferences.inactivityMinuteChoices.map {
+                ($0, InactivityAction.timeTitle(minutes: $0))
+              }
+            ) { try await controller.setInactivityMinutes($0) }
+          }
         }
         SettingsRow(Self.batteryMode) {
           menu(
@@ -262,7 +291,7 @@ struct PlaybackSettingsSection: View {
     menu(key, saved: saved, options: SystemConditionAction.allCases.map { ($0, $0.title) }, perform: perform)
   }
 
-  /// What the settings above do, in fourteen short paragraphs.
+  /// What the settings above do, in fifteen short paragraphs.
   private var context: some View {
     SettingsProse {
       Text(
@@ -279,6 +308,9 @@ struct PlaybackSettingsSection: View {
       )
       Text(
         "When displays sleep, Pause keeps wallpapers loaded. Stop frees renderer memory and reloads them when the display wakes."
+      )
+      Text(
+        "When the Mac is inactive, wallpapers pause or stop once there has been no keyboard, mouse or trackpad input for the time you chose, and resume at your next input. Your own Play and Pause are not changed."
       )
       Text(
         "On battery, Keep running leaves quality alone, Reduced quality uses the battery scale and frame rate, and Pause stops wallpapers until you plug in. None of these promises a measured power saving."

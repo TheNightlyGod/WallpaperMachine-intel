@@ -88,6 +88,57 @@ it is an Application wallpaper, which runs Windows programs and is never offered
 (`WorkshopService.lookup`). The panel looks a link up as soon as it is pasted and a bare
 id (six digits or more) when Return or Search is pressed, so typing an id never looks up
 its prefixes; a link typed by hand and ordinary words wait for the usual short pause.
+Installed's search, given a link or id whose item is not installed, offers **Show in
+Steam Workshop**, which opens the wallpapers list with that item and puts its id in the
+search field (`PanelController.lookUpWorkshopItem(id:)`), from whatever list was on show
+([filtering](control-panel.md#filtering)). It is offered only for an id the field looks up
+by itself, six digits or more (`WorkshopLink.isBareItemID(_:)`).
+
+### Searching in another language
+
+Steam matches search words against titles and tags that are mostly English, so a search
+typed in another of the app's languages finds little. With **Settings → General →
+Translate Workshop searches into English** on (the default, stored as
+`WallpaperMachine.translatesWorkshopSearches`, kept by a [backup](backup-restore.md) and
+cleared by Reset all settings), such a search is translated on this Mac with the system's
+Translation framework and Steam is searched with the English words
+(`WorkshopSearchTranslator`). The search field, and a reopened panel, keep what was typed.
+While the words are being translated the page says **Searching Steam Workshop…** and the
+window's subtitle drops its count, as they do while Steam answers. A
+line under the lists says **Searched in English for “…”** with **Search “…” instead**,
+which searches the words as typed; a sort, a filter, another list or a reopened panel
+then keeps them as typed until the text changes (the Workshop store keeps that choice, not
+the panel window). Open on Steam opens the English search. Turning the switch off applies
+from the next search: the one on show keeps its line, whose **Search “…” instead** still
+works, and a list the Workshop opens or reads again by itself (another list, Back, a Steam
+sign-in) is searched as typed.
+
+The language is read on the device (`WorkshopSearchLanguage`): kana makes a search
+Japanese and Hangul Korean; Han characters alone are Japanese only when Apple's language
+recognizer is at least 90% sure, else Chinese, Traditional when ICU's
+Traditional-to-Simplified transform changes them. Mixed text such as "anime 女孩" is read
+by its CJK characters. Portuguese is read only while the app itself is in Portuguese,
+from three letters on and at 90% or more, because short Portuguese and English queries
+(names, a word cut short while typing) look alike. English, links, item ids, text over
+256 characters and anything while the switch is off are sent as typed, and so is a
+search whose translation fails or changes nothing (a name such as "Totoro"). The last 100
+answers are kept in memory for the panel window, so a sort or another page translates
+nothing again.
+
+A search is translated only from a language already downloaded for translation
+(`LanguageAvailability` reports it installed); one that is not downloaded is never asked
+for, because that would put the system's download prompt in the middle of a search. The
+Settings row says which languages are ready and offers the others in a **Download…** menu,
+by their own names; choosing one shows the system's prompt, and nothing downloads
+without it. The row reads the languages only while the switch is on: when it appears, when
+the switch or Reset all settings turns it on, and again when the Language menu changes
+the app's language (Portuguese is listed only while the app is in Portuguese). Downloaded languages are the system's and serve every app. Before macOS 26 a
+translation session exists only inside SwiftUI's `.translationTask`, so the panel's
+`TranslationTaskHost` lends one to `TranslationSessionHost`, which serves every queued job
+for the session's languages before asking for another, and a search no session answers
+within five seconds is sent as typed; from macOS 26 a search between
+downloaded languages uses `TranslationSession(installedSource:target:)` directly, and only a
+download still needs the panel's session.
 
 ### When Steam changes the page's markup
 

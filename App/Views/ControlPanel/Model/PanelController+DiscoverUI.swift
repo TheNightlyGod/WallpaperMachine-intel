@@ -17,14 +17,16 @@ extension PanelController {
   ///
   /// It reads only the store's list-level values, never the tiles or the selection, so the window's
   /// title is not redrawn when a tile is selected or a download moves. The source is named as
-  /// `WorkshopBrowseState` names it.
+  /// `WorkshopBrowseState` names it, and a search whose words are still being translated is
+  /// searching, as the page's footer says.
   var workshopTitleSubtitle: String {
     let shown = workshop.source
     let named = workshop.committedQuery?.source == shown ? workshop.sourceTitle : nil
     let source = WorkshopSourceState(
       source: shown, name: named ?? shown.name, canGoBack: !workshop.sourceHistory.isEmpty)
     let summary = WorkshopSummary.make(
-      source: shown, isLoading: workshop.isLoading, isSignedIn: workshop.steamWebSession != nil,
+      source: shown, isLoading: workshop.isLoading || searchTranslation.isTranslating,
+      isSignedIn: workshop.steamWebSession != nil,
       hasLoaded: workshop.hasLoaded, totalCount: workshop.totalCount,
       isLookup: workshop.committedQuery?.itemID != nil, isDegraded: workshop.isDegraded)
     return source.titleSubtitle(summary: summary)

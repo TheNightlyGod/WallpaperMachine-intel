@@ -1,7 +1,8 @@
 import AppKit
 
 /// The status item, the application menu and its Wallpaper menu, built from `StatusMenuModel`,
-/// and the actions their items run.
+/// and the actions their items run. What a click on the status item opens is in
+/// `AppDelegate+StatusPanel`.
 extension AppDelegate: NSMenuDelegate, NSMenuItemValidation {
     func installStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -19,8 +20,15 @@ extension AppDelegate: NSMenuDelegate, NSMenuItemValidation {
 
         let menu = NSMenu()
         menu.delegate = self
-        item.menu = menu
+        statusMenu = menu
         rebuildMenu(menu)
+        // What a left click opens follows Settings › General at once.
+        configureStatusItemClick()
+        statusItemClickObserver = NotificationCenter.default.addObserver(
+            forName: StatusItemClick.didChangeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.configureStatusItemClick() }
+        }
     }
 
     /// An item created while Launch Services is still starting the app can stay out of the menu
@@ -197,7 +205,7 @@ extension AppDelegate: NSMenuDelegate, NSMenuItemValidation {
     }
 
     func rebuildMenu(_ menu: NSMenu? = nil) {
-        guard let menu = menu ?? statusItem?.menu else { return }
+        guard let menu = menu ?? statusMenu else { return }
         menu.removeAllItems()
         statusMenuItems(for: StatusMenuModel.entries(for: statusMenuInput())).forEach(menu.addItem)
         if let update = updates.menuItem() {
@@ -237,8 +245,9 @@ extension AppDelegate: NSMenuDelegate, NSMenuItemValidation {
     }
 
     /// What the status menu's layout depends on. While the app starts or quits no display is
-    /// offered, since a command on one could not run.
-    private func statusMenuInput() -> StatusMenuModel.Input {
+    /// offered, since a command on one could not run. The menu bar panel reads the same input
+    /// without the downloads line, which it does not show.
+    func statusMenuInput(includingDownloads: Bool = true) -> StatusMenuModel.Input {
         var displays: [StatusMenuModel.Display] = []
         if let store, !shutdownInProgress, !shutdownComplete {
             let screens = SystemDisplays.screens()
@@ -271,7 +280,7 @@ extension AppDelegate: NSMenuDelegate, NSMenuItemValidation {
             }
         }
         // Not while the app starts or quits, when opening Discover would not be wanted.
-        let downloads = store != nil && !shutdownInProgress && !shutdownComplete
+        let downloads = includingDownloads && store != nil && !shutdownInProgress && !shutdownComplete
             ? StatusMenuModel.DownloadActivity.make(workshopStore.downloader.inProgressTransfers) : nil
         // The battery choice is the engine's, so it waits for the renderer like the displays.
         var battery: StatusMenuModel.Battery?
@@ -286,7 +295,9 @@ extension AppDelegate: NSMenuDelegate, NSMenuItemValidation {
             paused: store?.appSnapshot.playbackState == .paused,
             wallpapersMuted: PlaybackPreferences.shared.wallpapersMuted,
             downloads: downloads, battery: battery,
-            displays: displays, canLockScreen: ScreenLock.isAvailable)
+            displays: displays, canLockScreen: ScreenLock.isAvailable,
+            // Read again for every build, so a change made in Terminal or elsewhere shows.
+            desktopIconsHidden: shutdownInProgress || shutdownComplete ? nil : !FinderDesktopIcons().areShown)
     }
 
     private func statusMenuItems(for entries: [StatusMenuModel.Entry]) -> [NSMenuItem] {
@@ -314,19 +325,39 @@ extension AppDelegate: NSMenuDelegate, NSMenuItemValidation {
     /// same path as a link or a shortcut key, so it shares the display's queue slot and shows
     /// a failure at the foot of the menu.
     @objc private func statusMenuItemChosen(_ sender: NSMenuItem) {
-        guard let command = sender.representedObject as? StatusMenuModel.Command else { return }
+        guard let command = sender.representedObject as? StatusMenuModel.Command,
+              statusMenuCommandCanRun(command) else { return }
+        if let automation = command.automation {
+            runAutomation(automation, alertsOnFailure: command == .playPause)
+        } else {
+            openStatusMenuDestination(command)
+        }
+    }
+
+    /// Play/Pause is offered only with a current snapshot and wallpapers to play or pause, and
+    /// Next only when the display has another wallpaper to go to; either can have changed since the
+    /// menu or the menu bar panel showed it.
+    func statusMenuCommandCanRun(_ command: StatusMenuModel.Command) -> Bool {
+        switch command {
+        case .playPause:
+            guard let store, !shutdownInProgress, !shutdownComplete, playbackSnapshotCurrent else { return false }
+            return !store.appSnapshot.activeWallpaperIds.isEmpty
+        case .next(let display):
+            guard let store, !shutdownInProgress, !shutdownComplete else { return false }
+            return canActivateNextWallpaper(store: store, displayId: display)
+        default:
+            return true
+        }
+    }
+
+    /// The items that open a window, lock the screen or change a battery choice rather than run an
+    /// automation command.
+    func openStatusMenuDestination(_ command: StatusMenuModel.Command) {
         switch command {
         case .openControlPanel:
             openControlPanel()
         case .openDownloads:
             showDiscover()
-        case .playPause:
-            // Offered only with a current snapshot and wallpapers to play or pause.
-            guard let store, !shutdownInProgress, !shutdownComplete, playbackSnapshotCurrent,
-                  !store.appSnapshot.activeWallpaperIds.isEmpty else { return }
-            runAutomation(.togglePlayback, alertsOnFailure: true)
-        case .toggleMute:
-            runAutomation(.toggleMute)
         case .batteryMode(let mode):
             chooseBatteryMode(mode)
         case .otherAppInFront(let action):
@@ -335,19 +366,6 @@ extension AppDelegate: NSMenuDelegate, NSMenuItemValidation {
             store?.supportPrompt?.recordBatteryAsked()
             PlaybackPreferences.shared.otherAppInFrontAction = action
             AppLog.info("when another app is in front: \(action.rawValue), from the menu bar")
-        case .previous(let display):
-            runAutomation(.previous(display: display))
-        case .next(let display):
-            guard let store, !shutdownInProgress, !shutdownComplete,
-                  canActivateNextWallpaper(store: store, displayId: display)
-            else { return }
-            runAutomation(.next(display: display))
-        case .random(let display):
-            runAutomation(.random(display: display, pool: .all))
-        case .apply(let id, let display), .startAgain(let id, let display):
-            runAutomation(.apply(wallpaperID: id, display: display))
-        case .remove(let display):
-            runAutomation(.removeWallpaper(display: display))
         case .openInPanel(let display):
             // The panel's own target check, since the display may have changed since the menu opened.
             if let store, store.settingsSnapshot.displays.contains(where: {
@@ -356,8 +374,12 @@ extension AppDelegate: NSMenuDelegate, NSMenuItemValidation {
                 controlPanelNavigation.targetDisplayID = display
             }
             showControlPanel(selection: .wallpaper)
+        case .toggleDesktopIcons:
+            toggleDesktopIcons()
         case .lockScreen:
             lockScreen()
+        case .playPause, .toggleMute, .previous, .next, .random, .apply, .remove, .startAgain:
+            break
         }
     }
 
@@ -448,7 +470,28 @@ extension AppDelegate: NSMenuDelegate, NSMenuItemValidation {
         ScreenLock.lock()
     }
 
-    @objc private func exitApplication() {
+    /// Hide Desktop Icons: hides Finder's desktop icons, or shows them again. Finder restarts to
+    /// apply it, so the menu asks first, as Settings does; Cancel changes nothing.
+    private func toggleDesktopIcons() {
+        guard !shutdownInProgress, !shutdownComplete else { return }
+        let icons = FinderDesktopIcons()
+        let hiding = icons.areShown
+        // An accessory app's alert opens behind the active app unless it is brought forward.
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = hiding ? String(localized: "Hide desktop icons?") : String(localized: "Show desktop icons?")
+        alert.informativeText = String(localized: "Finder restarts to apply this. Let any copy or move in Finder finish first.")
+        alert.addButton(withTitle: String(localized: "Restart Finder"))
+        alert.addButton(withTitle: String(localized: "Cancel"))
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        do {
+            try icons.setShown(!hiding)
+        } catch {
+            NSAlert(error: error).runModal()
+        }
+    }
+
+    @objc func exitApplication() {
         quitChosenFromMenu = true
         defer { quitChosenFromMenu = false }
         NSApp.terminate(nil)

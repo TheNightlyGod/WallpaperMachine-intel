@@ -176,13 +176,15 @@ extension PanelFixture {
   func buildSettingsController(
     updater: AppUpdateStore? = nil, energyUsage: EnergyUsageMonitor? = nil
   ) -> PanelController {
-    PanelController(
+    let language = AppLanguageStore.english()
+    return PanelController(
       store: store, navigation: navigation, workshop: workshop, pixiv: pixiv, updater: updater,
       presentation: presentation, theme: theme, defaults: defaults, dialogs: dialogs,
-      energyUsage: energyUsage, appLanguage: .english(),
+      energyUsage: energyUsage, appLanguage: language,
       playback: PlaybackPreferences(defaults: defaults), playlists: playlists,
       hotKeys: HotKeyPreferences(defaults: defaults), collections: collections, presets: presets,
       backup: backup, imagePlacement: imagePlacement, compatibility: compatibility,
-      automations: automations, spaces: spaces, systemConditions: systemConditions)
+      automations: automations, spaces: spaces, systemConditions: systemConditions,
+      searchTranslation: .fake(defaults: defaults, backend: translation, language: language))
   }
 }
