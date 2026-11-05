@@ -3996,7 +3996,8 @@ bool MetalRender::Impl::prepareDepthTargets()
     depth_targets.clear();
     ms_depth_targets.clear();
     for (const auto& desc : descriptions) {
-        if ((!desc.depth_test && !desc.scene_depth_attachment) || desc.depth_only) continue;
+        if ((!desc.depth_test && !desc.scene_depth_attachment && !desc.shares_depth_attachment) ||
+            desc.depth_only) continue;
         std::vector<uint32_t> counts { desc.samples };
         if (desc.sort_owner && !desc.force_single_sample && sorting_sample_targets.contains(desc.target_key) && target_samples.contains(desc.target_key)) {
             counts = {1u, target_samples.at(desc.target_key)};
@@ -4044,7 +4045,8 @@ void MetalRender::Impl::refreshPassTargets(Scene& scene)
         pass_targets[i]       = target;
         const bool reflection_clear = desc.kind == MetalPassKind::Clear &&
             desc.reflection_pass && desc.target_key == kReflectionTarget;
-        if (!desc.depth_only && ((i < prepared.size() && (prepared[i].depth_test || desc.scene_depth_attachment)) || reflection_clear)) {
+        if (!desc.depth_only && ((i < prepared.size() && (prepared[i].depth_test || desc.scene_depth_attachment ||
+                                                           desc.shares_depth_attachment)) || reflection_clear)) {
             // Reuse a depth attachment only when a real draw already required it.
             // The reflection's colour clear and its first depth draw can then
             // share an encoder, and both attachments are cleared together.
@@ -4095,7 +4097,8 @@ void MetalRender::Impl::planAttachmentStores()
     for (std::size_t position = 0; position < descriptions.size(); ++position) {
         const auto  i    = passAt(position);
         const auto& desc = descriptions[i];
-        if (i < pass_depths.size() && pass_depths[i] != nil)
+        // A draw that only shares the attachment reads nothing it holds.
+        if (i < pass_depths.size() && pass_depths[i] != nil && ! desc.shares_depth_attachment)
             depth_last_use[(__bridge const void*)pass_depths[i]] = position;
         if (desc.samples <= 1 || desc.depth_only || desc.target_key.empty()) continue;
         const auto ms = ms_targets.find(desc.target_key);
@@ -4219,7 +4222,8 @@ bool MetalRender::Impl::passOverwritesTarget(std::size_t index, id<MTLTexture> a
     if (! proof.candidate || ! passDraws(index)) return false;
     // One sample, no depth, the ordinary program, and not sampling the image it draws into.
     if (desc.samples != 1 || attachment.sampleCount != 1) return false;
-    if (index < pass_depths.size() && pass_depths[index] != nil) return false;
+    // A draw that only shares its target's depth attachment tests nothing against it.
+    if (index < pass_depths.size() && pass_depths[index] != nil && ! desc.shares_depth_attachment) return false;
     if (index < pass_reads_own_target.size() && pass_reads_own_target[index] != 0) return false;
     if (index < video_plane_active.size() && video_plane_active[index] != 0) return false;
     if (proof.blends && ! HoldsOnlyFiniteValues(attachment.pixelFormat)) return false;
@@ -5543,7 +5547,8 @@ bool MetalRender::Impl::prepareDraw(Scene& scene, std::size_t index, PreparedPas
 
     // A depth-only draw (a shadow caster) writes into its target as a depth attachment and
     // has no colour attachment at all.
-    const bool depth_attached = desc.depth_test || desc.depth_only || desc.scene_depth_attachment;
+    const bool depth_attached =
+        desc.depth_test || desc.depth_only || desc.scene_depth_attachment || desc.shares_depth_attachment;
     MetalPipelineKey key {
         .program_id       = ProgramContentId(program->stages),
         .vertex_layout_id = layout_id,
@@ -5786,8 +5791,8 @@ void MetalRender::Impl::pumpVideoPlaneVariants(Scene& scene, bool planes_enabled
             .vertex_layout_id = pass.vertex_layout_id,
             .blend            = ToMetalBlendState(desc.blend, desc.alpha_rule, desc.samples),
             .color_format     = static_cast<MetalPixelFormat>(target->second.pixelFormat),
-            .depth_format     = (desc.depth_test || desc.scene_depth_attachment) ? MetalPixelFormat::Depth32Float
-                                                : MetalPixelFormat::Invalid,
+            .depth_format     = (desc.depth_test || desc.scene_depth_attachment || desc.shares_depth_attachment)
+                                    ? MetalPixelFormat::Depth32Float : MetalPixelFormat::Invalid,
             .depth_compare    = desc.depth_test ? MetalDepthCompare::LessEqual
                                                 : MetalDepthCompare::Never,
             .sample_count     = desc.samples,

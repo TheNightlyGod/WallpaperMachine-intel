@@ -967,7 +967,7 @@ def cost_run(session: Session, settings: dict, condition: str, name: str, warm: 
                 run["reasons"].append(f"saturated run on {surface_name(surface)} failed (status {status})")
                 continue
             suffix = "@" + surface_name(surface)
-            for metric in ("gpu_ms_p50", "gpu_ms_p95", "gpu_ms_mean", "cpu_ms_mean",
+            for metric in ("gpu_ms_p50", "gpu_ms_p95", "gpu_ms_mean", "gpu_busy_ms_mean", "cpu_ms_mean",
                            "render_passes_per_draw", "blits_per_draw", "render_target_bytes"):
                 run["metrics"][f"sat_{metric}{suffix}"] = cost.get(metric)
     return run

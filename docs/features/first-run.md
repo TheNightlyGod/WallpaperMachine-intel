@@ -4,9 +4,10 @@ One-time offers on a Mac that has not seen them: the welcome guide that covers t
 first window, a single request to star or support the project after the first
 downloaded wallpaper is applied, a later request for a GitHub star, one question
 about [performance data](telemetry.md) for someone who finished the guide before it
-had that switch, one offer to import the Steam subscriptions for someone signed in
-to Steam who has not met that import, and, after a few weeks of use, one invitation to
-MMFoundation's Discord. Each is shown once and remembered in the app's defaults. The panel
+had that switch, one question about saving battery for someone whose wallpaper plays on
+battery with nothing chosen to save it, one offer to import the Steam subscriptions for
+someone signed in to Steam who has not met that import, and, after a few weeks of use, one
+invitation to MMFoundation's Discord. Each is shown once and remembered in the app's defaults. The panel
 they appear in is described in [control panel](control-panel.md).
 
 ## First run
@@ -79,7 +80,8 @@ have **Back**, and decision pages have **Skip**:
 4. **Preferences.** Launch at login, Keep windows in place when clicking the
    wallpaper and [Send performance data](telemetry.md) (off) are switches; the last
    is disabled in a run without the telemetry service. **On battery** is a menu: Keep running, Reduced quality
-   or Pause. They are drafts: **Continue** commits only the ones that changed, in
+   or Pause; reaching this page answers the [battery question](#the-battery-question), so a new
+   user is not asked again. They are drafts: **Continue** commits only the ones that changed, in
    order, and stops at the first refusal; **Skip** discards them. Launch at
    login is disabled with its reason while the app is outside Applications. When the
    user has switched the app off in System Settings → General → Login Items, the row
@@ -151,11 +153,12 @@ finishes that action in their browser. See [Supporter details](../../SPONSORS.md
 
 ## Star prompt, the performance data question and the subscriptions offer
 
-`SupportPromptStore` schedules all five prompts and `PanelController.pendingPrompt`
+`SupportPromptStore` schedules all six prompts and `PanelController.pendingPrompt`
 names at most one; `SupportPromptPresenter` shows it in the same sheet with the same
 waiting rules as above (`SupportPromptSheet`). When several are due, the order is the
-performance data question, then the subscriptions offer, then the support prompt, then
-the star prompt, then the [Discord invitation](#discord-invitation), and no
+performance data question, then the [battery question](#the-battery-question), then the
+subscriptions offer, then the support prompt, then the star prompt, then the
+[Discord invitation](#discord-invitation), and no
 prompt appears on the same calendar day as another. Once one has been answered or
 dismissed, no other appears in that window.
 
@@ -184,6 +187,45 @@ Settings → About also has **Share WallpaperMachine…**, the system share menu
 website's home page (the Chinese page for either Chinese app language), and **Star on
 GitHub**. A Workshop wallpaper's details offer **Share…**; see
 [control panel](control-panel.md#sharing-a-wallpaper).
+
+## The battery question
+
+**Save battery when your Mac is unplugged?** asks once, on a Mac with an internal battery
+(a UPS is not one), how wallpapers should behave on battery, because nobody who has not
+opened Settings → Playback & Power knows that by default the battery changes nothing about them. It comes
+up only when all of these hold: the welcome guide was finished; the Mac runs on battery
+now, or a wallpaper played on battery since the app started (the app notes it when the
+power source changes to or from battery while a wallpaper plays; nothing is saved across
+launches); a wallpaper is on a display and not paused; **On battery** and **When another app
+is in front** are both still **Keep running**; and the question was never answered. Its
+priority is right after the performance data question, with the same one-a-day and
+one-pending rules.
+
+Its lead says that wallpapers play on battery just as they do plugged in and that nothing
+changes unless a choice is made. When one wallpaper plays and it has an
+[energy rating](performance.md#per-wallpaper-energy-rating) with a share of the battery, a
+sentence names it the way the inspector does: `The wallpaper playing now uses about 9% of a
+full battery charge per hour.`, or `less than 1%` below one percent; without a rating, or
+with different wallpapers on the displays, there is no figure. The choices each make one
+setting of Playback & Power through its Settings setter and open nothing:
+
+- **Pause while I use other apps** sets **When another app is in front** to **Pause on
+  battery**; on battery the wallpaper animates only while the desktop is in front: Finder
+  (which clicking the desktop brings forward, so a Finder window in front counts too) or this
+  app, and holds its last frame while any other app is.
+- **Lower quality on battery** sets **On battery** to **Reduced quality**; its note names
+  the reduced frame rate and render scale the engine reports now (for example
+  `30 fps and 75% render scale`).
+- **Always pause on battery** sets **On battery** to **Pause**.
+
+**Keep running** (the sheet's cancel button, in place of **Not now**), the close button and
+Escape spend the question and change nothing; a setting the engine refuses keeps the sheet
+up with the reason. Reaching the guide's Preferences page, which shows the **On battery**
+choice, counts as asked, so a new user is not asked twice; someone who finished the guide
+before the question existed is asked once. Choosing **On battery** or **When another app is
+in front** in Settings, or an item of the menu bar's **On Battery** submenu, also counts.
+`PanelBatteryQuestionTests` and `SupportPromptStoreTests` cover when it comes and what each
+choice sets.
 
 ## Discord invitation
 

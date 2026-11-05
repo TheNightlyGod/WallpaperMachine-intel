@@ -190,9 +190,13 @@ extension PanelController {
     try await change { playback.otherAudioAction = action }
   }
 
-  /// `otherAppInFrontAction`.
+  /// `otherAppInFrontAction`. Choosing here answers the one-time battery question, since the row
+  /// offers Pause on battery.
   func setOtherAppInFrontAction(_ action: OtherAppInFrontAction) async throws {
-    try await change { playback.otherAppInFrontAction = action }
+    try await change {
+      playback.otherAppInFrontAction = action
+      store.supportPrompt?.recordBatteryAsked()
+    }
   }
 
   /// `displaySleepAction`.
@@ -201,9 +205,13 @@ extension PanelController {
   }
 
   /// `batteryMode`: the engine's own choice of what to do on battery. Its Reduced quality is named
-  /// `reducedQuality`, one letter from the condition choices' `reduceQuality`, on purpose.
+  /// `reducedQuality`, one letter from the condition choices' `reduceQuality`, on purpose. Choosing
+  /// here answers the one-time battery question.
   func setBatteryMode(_ mode: BridgeBatteryMode) async throws {
-    try await change(.batteryMode) { try await store.setBatteryModeAsync(mode) }
+    try await change(.batteryMode) {
+      try await store.setBatteryModeAsync(mode)
+      store.supportPrompt?.recordBatteryAsked()
+    }
   }
 
   /// `lowPowerModeAction`.

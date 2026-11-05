@@ -403,6 +403,50 @@ final class WelcomeRenderTests: PanelTestCase {
     }
   }
 
+  /// The battery question too, with its three choices and the playing wallpaper's measured share of
+  /// a charge, in every language, with and without the error line of a refused setting.
+  func testTheBatteryQuestionFitsItsWidthInEveryLanguage() async throws {
+    let defaults = try TemporaryDefaults.make(for: self).defaults
+    let prompt = SupportPromptStore(defaults: defaults)
+    prompt.recordTelemetryAsked()
+    try await withPanel(supportPrompt: prompt) { panel in
+      let controller = panel.controller
+      controller.batteryPercent = 54
+      panel.store.settingsSnapshot.onBatteryPower = true
+      panel.store.settingsSnapshot.batteryTargetFps = 30
+      panel.store.settingsSnapshot.batteryRenderScale = 0.75
+      panel.store.librarySnapshot.wallpapers = [
+        BridgeWallpaperEntry(
+          id: "scene", title: "Scene", kind: .projectScene, supported: true, active: true,
+          selected: false, previewPath: nil)
+      ]
+      panel.store.appSnapshot.activeWallpaperIds = ["scene"]
+      panel.store.appSnapshot.playbackState = .playing
+      let ratings = WallpaperEnergyRatings(
+        file: panel.root.appendingPathComponent("energy-ratings.json"), batteryWattHours: { 50 })
+      ratings.record(
+        WallpaperEnergyContext(
+          wallpaperID: "scene",
+          conditions: WallpaperEnergyConditions(displays: 1, frameRateCap: nil, renderScale: 1)),
+        milliwatts: 4_600, seconds: 150)
+      panel.store.wallpaperEnergyRatings = ratings
+      panel.show()
+      XCTAssertEqual(controller.supportPrompt.prompt, .battery)
+      for failing in [false, true] {
+        if failing {
+          // No engine answer: the choice is refused and the sheet says why.
+          await controller.supportPrompt.choose(.alwaysPauseOnBattery)
+          XCTAssertNotNil(controller.supportPrompt.error)
+        }
+        for language in AppLanguage.supported.map(\.tag) {
+          try controller.appLanguage.set(language)
+          PanelLocale.shared.bind(to: controller.appLanguage)
+          assertSheetFits(controller, language)
+        }
+      }
+    }
+  }
+
   private func assertSheetFits(
     _ controller: PanelController, _ language: String, file: StaticString = #filePath, line: UInt = #line
   ) {

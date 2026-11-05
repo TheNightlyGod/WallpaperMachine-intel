@@ -333,6 +333,79 @@ final class PlaybackPolicyCompositionTests: XCTestCase {
         XCTAssertEqual(probe.quality.count, 1, "Waking does not send the unchanged request again")
     }
 
+    /// "When another app is in front" on Pause on battery reaches the policy as the pause rule it
+    /// is: another app in front on battery suspends every display, plugging in presents again at
+    /// once, and it composes with the user's mute and a mute rule without touching sound.
+    func testPauseOnBatterySuspendsOnlyOnBatteryWithAnotherAppInFront() throws {
+        let defaults = try TemporaryDefaults.make(for: self).defaults
+        let preferences = PlaybackPreferences(defaults: defaults)
+        preferences.otherAppInFrontAction = .pauseOnBattery
+        var frontmost: String? = "com.apple.finder"
+        var onBattery = false
+        let monitor = AppRuleMonitor(
+            preferences: preferences, workspaceCenter: workspaceCenter, runningBundleIDs: { [] },
+            frontmostBundleID: { frontmost }, onBattery: { onBattery },
+            desktopBundleIDs: ["com.apple.finder", "com.example.Self"])
+        let probe = CompositionProbe()
+        probe.userMuted = true
+        let policy = WallpaperPresentationPolicy(
+            workspaceCenter: workspaceCenter,
+            lockCenter: lockCenter,
+            windowCenter: windowCenter,
+            surfaces: { [WallpaperSurfaceVisibility(displayID: 1, isVisible: true)] },
+            sessionState: { .init(locked: false) },
+            displaySleepAction: { .pause },
+            appRuleActions: { monitor.actions },
+            otherAudioActive: { false },
+            otherAudioAction: { .keepRunning },
+            userMuted: { probe.userMuted },
+            qualityReductions: { [] },
+            occlusionSettleDelay: .zero,
+            applyGlobal: { presentation, completion in
+                probe.presentations.append(presentation)
+                completion(.success(()))
+            },
+            applyAudio: { suppressed, completion in
+                probe.audio.append(suppressed)
+                completion(.success(()))
+            },
+            applyQuality: { _, completion in completion(.success(())) },
+            applyDisplay: { _, _, completion in completion(.success(())) })
+        monitor.onChange = { policy.evaluate() }
+        monitor.start()
+        policy.start()
+        defer {
+            monitor.onChange = nil
+            monitor.stop()
+            policy.stop()
+        }
+        func activate(_ bundleID: String?) {
+            frontmost = bundleID
+            workspaceCenter.post(name: NSWorkspace.didActivateApplicationNotification, object: nil)
+        }
+
+        activate("com.example.Editor")
+        XCTAssertTrue(probe.presentations.isEmpty, "Plugged in, another app in front changes nothing")
+        XCTAssertEqual(policy.globalPresentation, .running)
+
+        onBattery = true
+        monitor.refresh()
+        XCTAssertEqual(probe.presentations, [.suspended], "Unplugged with another app in front: paused")
+        XCTAssertEqual(probe.audio, [true], "The user's mute is delivered once and never lifted by the pause")
+
+        activate("com.apple.finder")
+        XCTAssertEqual(probe.presentations, [.suspended, .running], "Clicking the desktop plays again")
+        activate("com.example.Editor")
+        XCTAssertEqual(probe.presentations, [.suspended, .running, .suspended])
+
+        onBattery = false
+        monitor.refresh()
+        XCTAssertEqual(probe.presentations, [.suspended, .running, .suspended, .running],
+                       "Plugging in plays again without the desktop in front")
+        XCTAssertEqual(probe.audio, [true], "Pausing and playing never touched the sound")
+        XCTAssertEqual(policy.globalPresentation, .running)
+    }
+
     func testHeatThrottlesAtSeriousAndEscalatesToAPauseAtCritical() throws {
         let defaults = try TemporaryDefaults.make(for: self).defaults
         let preferences = PlaybackPreferences(defaults: defaults)

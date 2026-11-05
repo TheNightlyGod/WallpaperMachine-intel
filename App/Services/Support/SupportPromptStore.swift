@@ -1,7 +1,7 @@
 import Foundation
 import Observation
 
-/// The panel's five one-time prompts and when each may appear.
+/// The panel's six one-time prompts and when each may appear.
 ///
 /// - `support` asks for support once a successfully downloaded wallpaper has been applied.
 /// - `star` asks for a GitHub star, once, from someone who did not choose it in the support
@@ -9,6 +9,11 @@ import Observation
 ///   never downloads a wallpaper, and so never sees the support prompt, gets it too.
 /// - `telemetry` asks once whether to send performance data, only someone who had finished the
 ///   welcome guide before it offered the switch; the guide asks everyone else.
+/// - `battery` asks once whether to save battery, on a Mac with an internal battery that runs on
+///   it now (or has, with a wallpaper playing, since the app started), while a wallpaper plays and
+///   nothing saves battery yet: On battery and "When another app is in front" both Keep running.
+///   The guide's Preferences page, which shows the On battery choice, and a battery choice made in
+///   Settings or the menu bar count as asking it.
 /// - `subscriptions` offers once to import the Steam subscriptions, to someone who finished the
 ///   guide and is signed in to Steam but has never signed in to Steam Community here: someone who
 ///   finished the guide before it offered the import, or skipped its Steam page. The guide's
@@ -18,7 +23,7 @@ import Observation
 ///   comes before the star and, for someone new, usually not right after it. Joining from
 ///   Settings › About or the Help menu spends it.
 ///
-/// At most one is pending at a time, in that order of priority (telemetry, subscriptions,
+/// At most one is pending at a time, in that order of priority (telemetry, battery, subscriptions,
 /// support, star, discord), and
 /// none appears on the same day as another. "First use" for the star and Discord prompts is the
 /// first day the panel was opened with a build that counts it, so an existing user's clock starts
@@ -27,7 +32,23 @@ import Observation
 @Observable
 final class SupportPromptStore {
     enum Prompt: String {
-        case telemetry, subscriptions, support, star, discord
+        case telemetry, battery, subscriptions, support, star, discord
+    }
+
+    /// What the battery question depends on, as the panel reads it when it asks for the prompt.
+    /// The default asks nothing.
+    struct BatteryFacts: Equatable {
+        /// The Mac has an internal battery (a UPS is not one).
+        var hasBattery = false
+        /// It runs on battery now.
+        var onBattery = false
+        /// A wallpaper is on a display and not paused.
+        var wallpaperPlaying = false
+        var batteryMode = BridgeBatteryMode.keepRunning
+        var otherAppInFront = OtherAppInFrontAction.keepRunning
+
+        /// Nothing saves battery yet: both choices are still Keep running.
+        var keepsRunning: Bool { batteryMode == .keepRunning && otherAppInFront == .keepRunning }
     }
 
     static let starDelay: TimeInterval = 14 * 24 * 60 * 60
@@ -42,6 +63,7 @@ final class SupportPromptStore {
         var starChosen = false
         var starPresented = false
         var telemetryAsked = false
+        var batteryAsked = false
         var subscriptionsOffered = false
         var discordChosen = false
         var discordPresented = false
@@ -61,6 +83,7 @@ final class SupportPromptStore {
             starChosen = try container.decodeIfPresent(Bool.self, forKey: .starChosen) ?? false
             starPresented = try container.decodeIfPresent(Bool.self, forKey: .starPresented) ?? false
             telemetryAsked = try container.decodeIfPresent(Bool.self, forKey: .telemetryAsked) ?? false
+            batteryAsked = try container.decodeIfPresent(Bool.self, forKey: .batteryAsked) ?? false
             subscriptionsOffered = try container.decodeIfPresent(Bool.self, forKey: .subscriptionsOffered) ?? false
             discordChosen = try container.decodeIfPresent(Bool.self, forKey: .discordChosen) ?? false
             discordPresented = try container.decodeIfPresent(Bool.self, forKey: .discordPresented) ?? false
@@ -75,6 +98,9 @@ final class SupportPromptStore {
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let calendar: Calendar
     private var state: State
+    /// A wallpaper played while the Mac ran on battery at some point since the app started. Kept
+    /// in memory only: a later launch has to see it again.
+    private(set) var batteryUseSeen = false
 
     /// The support prompt is waiting to be shown.
     var isPending: Bool { state.pending && !state.presented }
@@ -96,12 +122,15 @@ final class SupportPromptStore {
 
     /// The prompt to show now, if any. `welcomeSeen` is whether the welcome guide had been
     /// finished; `telemetryOn` whether sending performance data is already on; `steamSignedIn`
-    /// whether a Steam account is signed in for downloads.
+    /// whether a Steam account is signed in for downloads; `battery` what the battery question
+    /// depends on, read only while that question can still come up.
     func pendingPrompt(
-        welcomeSeen: Bool, telemetryOn: Bool, steamSignedIn: Bool = false, now: Date = Date()
+        welcomeSeen: Bool, telemetryOn: Bool, steamSignedIn: Bool = false,
+        battery: @autoclosure () -> BatteryFacts = BatteryFacts(), now: Date = Date()
     ) -> Prompt? {
         if let last = state.lastPromptAt, calendar.isDate(last, inSameDayAs: now) { return nil }
         if welcomeSeen, !telemetryOn, !state.telemetryAsked { return .telemetry }
+        if welcomeSeen, !state.batteryAsked, asksAboutBattery(battery()) { return .battery }
         if welcomeSeen, steamSignedIn, !state.subscriptionsOffered { return .subscriptions }
         if isPending { return .support }
         if !state.starChosen, !state.starPresented, let first = state.firstUseAt,
@@ -113,6 +142,28 @@ final class SupportPromptStore {
             return .discord
         }
         return nil
+    }
+
+    /// The battery question applies: a Mac with a battery that runs on it now or has with a
+    /// wallpaper playing since launch, a wallpaper playing, and nothing chosen yet.
+    private func asksAboutBattery(_ facts: BatteryFacts) -> Bool {
+        facts.hasBattery && (facts.onBattery || batteryUseSeen) && facts.wallpaperPlaying
+            && facts.keepsRunning
+    }
+
+    /// A wallpaper played while the Mac ran on battery. Lasts until the app quits.
+    func recordBatteryUse() {
+        guard !batteryUseSeen else { return }
+        batteryUseSeen = true
+    }
+
+    /// The battery choices were shown or made elsewhere (the guide's Preferences page, Settings,
+    /// the menu bar), so the question is not needed.
+    func recordBatteryAsked() {
+        guard !state.batteryAsked else { return }
+        var next = state
+        next.batteryAsked = true
+        persist(next)
     }
 
     func recordDownload(wallpaperID: String) {
@@ -196,6 +247,9 @@ final class SupportPromptStore {
         case .telemetry:
             guard !state.telemetryAsked else { return }
             next.telemetryAsked = true
+        case .battery:
+            guard !state.batteryAsked else { return }
+            next.batteryAsked = true
         case .subscriptions:
             guard !state.subscriptionsOffered else { return }
             next.subscriptionsOffered = true

@@ -78,6 +78,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var otherAudioMonitor: OtherAudioMonitor?
     private var systemConditionMonitor: SystemConditionMonitor?
     private var powerSourceMonitor: PowerSourceMonitor?
+    /// The source `powerSourceChanged` last heard, so a change can tell what it left.
+    private var reportedPowerSource: PowerSourceMonitor.Source?
     private var powerSourceRefresh: Task<Void, Never>?
     private var activeDisplayTracker: ActiveDisplayTracker?
     private var playlistScheduler: PlaylistScheduler?
@@ -405,7 +407,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 }
             }
             let preferences = PlaybackPreferences.shared
-            let appRules = AppRuleMonitor(preferences: preferences)
+            // Pause on battery reads the source the power source monitor last reported (the
+            // system's own until that monitor exists); `powerSourceChanged` refreshes the rules.
+            let appRules = AppRuleMonitor(preferences: preferences, onBattery: { [weak self] in
+                (self?.powerSourceMonitor?.source ?? PowerSourceMonitor.systemSource()) == .battery
+            })
             let otherAudio = OtherAudioMonitor(preferences: preferences)
             let conditions = SystemConditionMonitor(preferences: preferences, focus: .shared, state: .shared)
             let activeDisplay = ActiveDisplayTracker()
@@ -595,6 +601,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             conditions.start()
             let power = PowerSourceMonitor()
             powerSourceMonitor = power
+            reportedPowerSource = power.source
             power.onChange = { [weak self] source in self?.powerSourceChanged(source) }
             power.start()
             policy.start()
@@ -1418,9 +1425,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// The renderer applies its power policy (battery Pause, Reduced quality) when
     /// the source changes and reports nothing back. Reading the snapshot again is
     /// what makes the hosts here (web pages, native video) take in the pause, frame
-    /// rate and render scale that came with it.
+    /// rate and render scale that came with it. The app's own battery-scoped rule
+    /// ("When another app is in front" set to Pause on battery) is worked out again
+    /// at once, and so are the post-wake reads, which arrive here when they find a
+    /// different source.
     private func powerSourceChanged(_ source: PowerSourceMonitor.Source) {
+        let previous = reportedPowerSource
+        reportedPowerSource = source
         guard let store, !shutdownInProgress, !shutdownComplete else { return }
+        // A wallpaper presenting across a change to or from battery played on battery, which
+        // is what the one-time battery question waits for (a panel opened on battery sees it
+        // for itself).
+        if source == .battery || previous == .battery, wallpaperIsPresenting(store) {
+            store.supportPrompt?.recordBatteryUse()
+        }
+        appRuleMonitor?.refresh()
         powerSourceRefresh?.cancel()
         powerSourceRefresh = Task { [weak self] in
             await PowerSourceRefresh.run(
@@ -1438,6 +1457,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 },
                 bridgeOnBattery: { store.settingsSnapshot.onBatteryPower })
             self?.rebuildMenu()
+        }
+    }
+
+    /// A wallpaper is on a display and drawing: not paused by the user or by the presentation
+    /// policy for every display, and its display is not suspended on its own (covered, behind a
+    /// full-screen app, not the display in use).
+    private func wallpaperIsPresenting(_ store: BridgeStore) -> Bool {
+        store.settingsSnapshot.displays.contains { row in
+            store.shownWallpaperID(on: row.displayId) != nil
+                && ownSuspension(ofDisplay: row.displayId, store: store) == false
         }
     }
 

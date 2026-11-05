@@ -31,6 +31,9 @@ final class BridgeStore {
     var latestBridgeErrorRevision: UInt64
     var lockScreenWallpaper: LockScreenWallpaperService?
     @ObservationIgnored var onSnapshotApplied: (() -> Void)?
+    /// The panel's: a setting that changes rendering work was applied outside it (the menu bar's
+    /// On Battery choice), so its energy readout restarts its window as it does for its own rows.
+    @ObservationIgnored var onRenderingSettingAppliedElsewhere: (@MainActor () -> Void)?
     @ObservationIgnored var onWallpaperApplied: (@MainActor (_ wallpaperID: String, _ displayID: String) -> Void)?
     @ObservationIgnored var onUserWallpaperChoice: (@MainActor (_ wallpaperID: String, _ displayID: String) -> Void)?
     /// The user took a wallpaper off a display, and the display is empty now. Not called for the

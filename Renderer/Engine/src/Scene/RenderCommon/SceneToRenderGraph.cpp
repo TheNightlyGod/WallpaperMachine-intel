@@ -10,7 +10,9 @@
 #include "Utils/Logging.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
+#include <cstdlib>
 #include <memory>
 #include <limits>
 #include <string>
@@ -25,6 +27,15 @@ namespace wallpaper
 {
 namespace
 {
+
+std::atomic<bool>& ScenePassMergeSwitch()
+{
+    static std::atomic<bool> enabled { [] {
+        const char* value = std::getenv("WALLPAPER_MACHINE_SCENE_PASS_MERGE");
+        return value == nullptr || std::string_view(value) != "0";
+    }() };
+    return enabled;
+}
 
 using rg::ClearPass;
 using rg::CopyPass;
@@ -1083,8 +1094,19 @@ private:
     // Keep every effect/copy/clear of one object contiguous, including a self-link
     // snapshot added during link resolution. Fixed shadows and postprocessing stay
     // on their respective sides of the sorted objects.
+    //
+    // Only a scene sorted by depth needs that while it runs: the renderer then moves each
+    // object's passes as one block whenever the camera or a layer moves (see the Metal
+    // backend's draw order). Elsewhere the object order is fixed when the graph is built and
+    // every pass already declares what it reads and writes, which orders it against the other
+    // objects wherever their pictures meet: the draws into the scene's image follow one
+    // another, a reader of a layer's picture follows (or, reading the previous frame's,
+    // precedes) the layer that draws it, a shared buffer passes from one object to the next.
+    // What else the block order adds is a split of the scene's render pass around a layer's
+    // own buffers, which the scheduler can draw ahead of the scene draws instead.
     void sequenceSortedPasses() {
         if (m_sorted_owners.empty() && m_reflected_owners.empty()) return;
+        if (!m_scene.transparent_sorting && ScenePassMergeEnabled()) return;
         const auto owner = [&](rg::NodeID id) -> SceneNode* {
             const auto* pass = m_graph->getPass(id);
             if (const auto* draw = dynamic_cast<const DrawPass*>(pass)) return draw->desc().sort_owner;
@@ -1249,5 +1271,9 @@ std::unique_ptr<rg::RenderGraph> sceneToRenderGraph(Scene& scene)
 {
     return GraphBuilder(scene).build();
 }
+
+bool ScenePassMergeEnabled() { return ScenePassMergeSwitch().load(std::memory_order_relaxed); }
+
+bool SetScenePassMergeForTests(bool enabled) { return ScenePassMergeSwitch().exchange(enabled); }
 
 } // namespace wallpaper

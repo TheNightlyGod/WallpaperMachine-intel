@@ -3,6 +3,10 @@ import AppKit
 /// Reports the app-rule actions currently in force: the per-app rules' and that of
 /// "When another app is in front". Workspace notifications are observed only while at least one
 /// of them can do something.
+///
+/// "Pause on battery" also depends on the power source, which the monitor reads only when that
+/// choice is made and another app is in front. Nothing here observes the power source: the app
+/// calls `refresh()` when it changes (`PowerSourceMonitor`, which also reads it again after a wake).
 @MainActor
 final class AppRuleMonitor {
     /// The apps that count as the desktop for "When another app is in front": Finder, which
@@ -11,9 +15,10 @@ final class AppRuleMonitor {
     nonisolated static let defaultDesktopBundleIDs: Set<String> = Set(
         ["com.apple.finder", Bundle.main.bundleIdentifier].compactMap { $0 })
 
-    /// Whether the monitor has anything to watch for these preferences.
+    /// Whether the monitor has anything to watch for these preferences. Pause on battery is
+    /// watched on mains power too, so unplugging finds the app in front already known.
     static func isNeeded(for preferences: PlaybackPreferences) -> Bool {
-        !preferences.appRules.isEmpty || preferences.otherAppInFrontAction.ruleAction != nil
+        !preferences.appRules.isEmpty || preferences.otherAppInFrontAction.watchesFrontmostApp
     }
 
     var onChange: (@MainActor () -> Void)?
@@ -24,17 +29,21 @@ final class AppRuleMonitor {
     private let preferencesCenter: NotificationCenter
     private let runningBundleIDs: @MainActor () -> Set<String>
     private let frontmostBundleID: @MainActor () -> String?
+    private let onBattery: @MainActor () -> Bool
     private let desktopBundleIDs: Set<String>
 
     private var observers: [(NotificationCenter, NSObjectProtocol)] = []
     private var started = false
 
+    /// `onBattery` says whether the Mac runs on battery now; an unknown source is not battery.
+    /// Without one, the system's providing power source is read.
     init(
         preferences: PlaybackPreferences,
         workspaceCenter: NotificationCenter = NSWorkspace.shared.notificationCenter,
         preferencesCenter: NotificationCenter = .default,
         runningBundleIDs: (@MainActor () -> Set<String>)? = nil,
         frontmostBundleID: (@MainActor () -> String?)? = nil,
+        onBattery: (@MainActor () -> Bool)? = nil,
         desktopBundleIDs: Set<String> = AppRuleMonitor.defaultDesktopBundleIDs
     ) {
         self.desktopBundleIDs = desktopBundleIDs
@@ -47,6 +56,12 @@ final class AppRuleMonitor {
         self.frontmostBundleID = frontmostBundleID ?? {
             NSWorkspace.shared.frontmostApplication?.bundleIdentifier
         }
+        self.onBattery = onBattery ?? { PowerSourceMonitor.systemSource() == .battery }
+    }
+
+    /// The power source changed: Pause on battery may start or end. Does nothing while stopped.
+    func refresh() {
+        recompute()
     }
 
     func start() {
@@ -119,8 +134,8 @@ final class AppRuleMonitor {
             if matches { next.insert(rule.action) }
         }
         // No app in front (a moment between activations) is not another app.
-        if let action = preferences.otherAppInFrontAction.ruleAction,
-           let frontmost, !desktopBundleIDs.contains(frontmost) {
+        if let frontmost, !desktopBundleIDs.contains(frontmost),
+           let action = preferences.otherAppInFrontAction.ruleAction(onBattery: onBattery()) {
             next.insert(action)
         }
         publish(next)

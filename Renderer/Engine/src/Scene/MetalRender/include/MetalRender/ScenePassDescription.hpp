@@ -76,6 +76,10 @@ struct ScenePassDescription
     /// a clear/background draw with depth testing disabled.
     bool scene_depth_attachment { false };
     bool reads_scene_depth { false };
+    /// A draw that does not depth-test but takes its target's depth attachment all the same,
+    /// with depth testing off, so it shares one render pass with the depth-tested draws around
+    /// it (`ShareDepthAttachments`).
+    bool shares_depth_attachment { false };
 
     // ---- target
     /// Resolved render-target key. Empty for a pass that produces no pixels.
@@ -225,6 +229,19 @@ struct MetalQuad
 [[nodiscard]] std::vector<std::optional<std::vector<std::size_t>>> PlanUnreadCopies(
     const std::vector<ScenePassDescription>& descriptions, const std::vector<std::size_t>& order,
     const std::function<bool(std::size_t)>& considered);
+
+/// Marks `shares_depth_attachment` on every draw that does not depth-test and comes, in the
+/// descriptions' order, between two draws into the same single-sample target that do. A render
+/// pass has one depth attachment or none, so a draw without one between two with one ends the
+/// render pass, and with it the target's colour and depth are stored and loaded back (a 3D
+/// model, then a flat layer or text over it, then another model). The draw then takes the
+/// attachment with depth testing off: what it draws is the same, and the three share one render
+/// pass. A draw before the first or after the last depth-tested one is left alone, and so is one
+/// that passes on other targets cut off from every depth-tested draw (it would load and store
+/// the depth without joining anything), so a render pass that holds no depth-tested draw never
+/// carries the attachment. A scene `sorted_by_depth`
+/// (transparent sorting) changes its objects' order at run time, so none of its draws is marked.
+void ShareDepthAttachments(std::vector<ScenePassDescription>& descriptions, bool sorted_by_depth = false);
 
 /// Whether drawing `quad` with its corners at clip position `matrix * vec4(corner, 1.0)`
 /// (`matrix` column-major, as the shader's `float4x4` reads it) covers the centre of every texel

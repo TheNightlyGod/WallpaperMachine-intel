@@ -481,7 +481,7 @@ wins. There is no timer and no per-frame check (bridge `tests::playback_reconcil
 | Mute all wallpapers | On, Off | Off |
 | When windows cover the desktop | **Pause**, **Keep running** | Pause |
 | When another app plays sound | **Keep running**, **Mute**, **Pause** | Keep running |
-| When another app is in front | **Keep running**, **Mute**, **Pause** | Keep running |
+| When another app is in front | **Keep running**, **Mute**, **Pause**, **Pause on battery** | Keep running |
 | When displays sleep | **Pause**, **Stop (free memory)** | Pause |
 | Only play on the display I’m using | On, Off; shown with two or more displays | Off |
 | On battery | **Keep running**, **Reduced quality**, **Pause** | Keep running |
@@ -594,6 +594,29 @@ replacing them. Workspace activation notifications are observed only while it or
 rule can do something; there is no polling. A full-screen app needs no choice: its
 display already pauses because the wallpaper cannot be seen.
 
+**Pause on battery** is **Pause** limited to battery power, for the case the covered-desktop
+pause leaves alone: a wallpaper animating in the gaps between windows that do not cover the
+working area while you work in other apps. While the Mac runs on battery and another app is
+in front, every wallpaper pauses exactly as with **Pause**: it holds its last frame and plays
+again the moment you click the desktop or return to this app. On mains power it does
+nothing, and an unknown power source counts as mains. Plugging in resumes at once and
+unplugging with another app in front pauses at once: `AppRuleMonitor` reads the source the
+app's `PowerSourceMonitor` last reported (an injected closure, read only while this choice is
+made and another app is in front) and is worked out again from the app delegate's
+power-source change, which also receives the reads after a wake that find a different source.
+Activations stay observed on mains power so that an unplug finds the app in front already
+known. The row's note says it applies only on battery. It is off unless chosen, like every
+other choice of the row; a [backup](backup-restore.md) carries it and **Reset all settings**
+puts the row back on **Keep running**. The menu bar's **On Battery** submenu offers it as
+**Pause While Using Other Apps** ([control panel](control-panel.md#menu-bar-one-display-at-a-time)),
+and the [battery question](first-run.md#the-battery-question) as **Pause while I use other
+apps**. A paused wallpaper draws nothing, so for the time another app is in front on battery it
+saves the wallpaper's whole cost: headless, at 60 fps on the 3456x2234@2 built-in panel of an M5
+Pro, two ordinary scenes (3802900973 and 3413921910) drew 1.6 and 2.3 W of GPU power
+(`perf_bench.py cost`), to which WindowServer adds its share for presenting them
+([power benchmarking](../testing/power-benchmark.md#windowservers-share)). How much battery
+that keeps depends on the wallpaper and on how much of the time other apps are in front.
+
 **Stop** on display sleep frees renderer memory. The wallpaper is reloaded when the
 display wakes. **Pause** keeps it loaded.
 
@@ -653,7 +676,9 @@ is on battery. A configuration saved with the former pause-on-battery switch map
 The power source is also read when the Mac wakes and again two seconds later,
 because a plug or unplug during sleep may not be reported; a change found that way
 applies the same rule, and a read that finds the same source as the one last applied
-changes nothing.
+changes nothing. The same three choices are in the menu bar's **On Battery** submenu
+and in the one-time [battery question](first-run.md#the-battery-question); both set it
+through the engine as this row does (`BridgeStore.setBatteryModeAsync`).
 
 The renderer applies all of this itself when the power source changes, and reports
 nothing back. The app watches the source too (`PowerSourceMonitor`: the system
@@ -703,6 +728,17 @@ page alike, and they are things the user turned on for the moment (a Focus, an a
 in use) rather than a state of the Mac's power. The **Focus** row says which filter is
 in effect now; the **App rules** rows do not yet say which rule is engaged.
 
+**Pause on battery** is the one app-in-front choice scoped to the battery, and it is
+presented as a choice of its own row, **When another app is in front**, whose label and
+note say it applies only on battery, rather than as a fourth **On battery** choice: it
+combines with any of them (Reduced quality on battery while the desktop is in view, a pause
+while other apps are in front), and **On battery** stays the engine's one setting. Quick
+Settings' **On battery** module does not name it as in effect, because it never is while
+the panel can be seen: this app in front counts as the desktop. Where the battery choices
+are gathered for someone who has not found this page, they come together: the menu bar's
+**On Battery** submenu holds the three **On battery** choices and **Pause While Using Other
+Apps**, and the [battery question](first-run.md#the-battery-question) offers both kinds.
+
 All three conditions also offer **Reduced quality**, which keeps the wallpapers
 playing instead of pausing them. While a chosen condition holds, the app asks the
 engine for the reduced-quality profile (the scale and frame rate described under
@@ -736,16 +772,18 @@ conditions are observed as above).
   created, so the lower rate reloads the page, with the loss of what it kept in
   memory, and the end of the request reloads it again
   ([frame rate](web-wallpapers.md#runtime-shape)). Nothing is added per frame.
-- **Saving.** The power saving of Reduced quality, here or on battery, has not been
-  measured, and nothing in the app or these docs claims one. The planned comparison
-  is a [power benchmark](../testing/power-benchmark.md#condition-matrix) of the same
-  content with the profile on and off. The matrix has no row for it yet and the
-  benchmark script no scenario, and the
-  [comparison rules](../testing/power-benchmark.md#comparison-rules) call a lowered
-  frame rate or scale a quality tier, not an equal-quality saving. It needs an
-  authorized desktop session.
-  Whether a change made while the Mac is locked behaves as intended has likewise not
-  been exercised on a Mac.
+- **Saving.** The renderer's half was measured headlessly (`perf_bench.py cost`, the
+  default profile of 30 fps and 75 % against 60 fps and 100 %, as a `--variant` setting
+  `WE_TEST_ENERGY_FPS` and `WE_TEST_ENERGY_RENDER_SCALE`, 3 pairs, on the 3456x2234@2
+  built-in panel of an M5 Pro): the GPU power of 3802900973 fell from 1.60 to 0.41 W and
+  that of 3413921910 from 2.27 to 0.56 W, about three quarters, and the app's CPU power
+  about halved. It is a quality tier, not an equal-quality saving
+  ([comparison rules](../testing/power-benchmark.md#comparison-rules)). WindowServer's
+  share, which follows the
+  present rate, and the desktop as a whole need an authorized desktop session
+  ([condition matrix](../testing/power-benchmark.md#condition-matrix)).
+  Whether a change made while the Mac is locked behaves as intended has not been
+  exercised on a Mac.
 
 A Focus can act on wallpapers through a Focus filter (`WallpaperFocusFilter`, an
 App Intents `SetFocusFilterIntent`): in System Settings → Focus → a Focus → Focus

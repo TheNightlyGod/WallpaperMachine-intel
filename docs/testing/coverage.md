@@ -42,7 +42,10 @@ precedence, editor round trips and preference validation, and the menu bar menu'
 layout (flat for one display, a submenu per display with every command naming its
 display, ordering and titles, Remove or Start Again, Random Wallpaper where something else
 can be chosen, Mute Wallpapers after Play/Pause, ticked while muted and offered then with
-nothing playing, the Workshop downloads line right under Control Panel and absent when idle,
+nothing playing, the On Battery submenu after it in both layouts and the Wallpaper menu (the
+current battery mode ticked, Pause While Using Other Apps ticked only for Pause on battery and
+replacing Mute or Pause, offered with a battery or while a choice is not the default), the
+Workshop downloads line right under Control Panel and absent when idle,
 its byte-weighted percent left out when a job cannot say and never reaching 100, which displays
 are listed), the `random` link and its pools, the
 `mute`, `unmute` and `togglemute` links (which take no query) and the shortcut keys for them.
@@ -272,7 +275,11 @@ picture shows between a window closing and the web page's window opening.
   condition choice), the stored Reduced quality choice of the three system conditions
   that is never a rule action, running versus frontmost rules, "When another app is
   in front" (Finder, this app and no app count as the desktop; it composes with a
-  rule and is watched only while chosen), and the
+  rule and is watched only while chosen; Pause on battery pauses only on battery with
+  an injected power source, is worked out again at once by a power change, reads the
+  source only when another app is in front, is watched on mains power too, resets to Keep
+  running, and suspends the policy on battery and presents again on plugging in without
+  touching sound), and the
   other-audio settle and the system feedback services (alerts, the volume click, Siri
   listening) it ignores by their system path. The quality channel is one more delivery beside presentation and audio:
   a reduction reaches the bridge on its own without suspending anything, an unchanged set is
@@ -1262,7 +1269,15 @@ never to `.shared`.
   and `SupportPromptPresenterTests` also cover the Discord invitation: **Join Discord** opens
   https://mmfoundation.dev/discord in English and Chinese and ends it, **Not now** spends it
   without opening anything, a refused link keeps the sheet up, and **Join Discord** in About
-  answers it; `WelcomeRenderTests` lays its sheet out in every language. See
+  answers it; `WelcomeRenderTests` lays its sheet out in every language.
+  `PanelBatteryQuestionTests` cover the battery question through the panel: it comes on
+  battery (or after a battery use since launch) with a wallpaper playing and both battery
+  choices on Keep running, never on a Mac without a battery or to a hidden panel; each of its
+  choices sets exactly its own setting and spends it, **Keep running** changes nothing, a
+  refused setting keeps the sheet up, a choice in Settings or reaching the guide's Preferences
+  page answers it, and the sheet names the playing wallpaper's share of a charge (or less than
+  1%, or nothing without a rating or with several wallpapers) and the reduced profile;
+  `WelcomeRenderTests` lays that sheet out in every language too. See
   [first run](../features/first-run.md).
 - Sharing: `PanelSharingTests` (a Workshop wallpaper shares its Workshop page with the website,
   any other id has no Share, the app is shared with the website in the panel's language, **Star on
@@ -1418,9 +1433,11 @@ install and a no-login smoke run (see [README.md](README.md#opt-in-layers)).
 
 `SupportPromptStoreTests` — a downloaded wallpaper qualifies only after a
 successful activation, a pending prompt survives relaunch and further downloads,
-and a presented prompt never returns. Across the five prompts: one a day in
+and a presented prompt never returns. Across the six prompts: one a day in
 priority order, the performance data question only for someone who finished the
-guide without it, the subscriptions offer only for someone signed in to Steam who
+guide without it, the battery question right after it, only with a battery, a battery use
+now or since launch (not saved across launches), a wallpaper playing and nothing chosen,
+once for good and spent by the guide or a choice elsewhere, the subscriptions offer only for someone signed in to Steam who
 finished the guide without meeting the import (spent by the guide's card or a Steam
 Community sign-in), the star prompt after 14 days and 5 days of use (one day counts
 once) and not after the star was chosen, the Discord invitation after 21 days and 7 days

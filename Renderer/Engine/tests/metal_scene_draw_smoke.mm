@@ -9985,27 +9985,55 @@ TEST_F(MetalSceneDraw, AnEffectReadingWhereItsLayerIsIsRedrawnWhenTheCameraShake
 
 TEST_F(MetalSceneDraw, AMovingLayerBetweenTwoCardsIsReusedAndJoinsTheCardsRenderPasses)
 {
-    // The layer's own buffers sit between two draws into the scene's image. Drawing them closes
-    // the scene's render pass in between; the renderer as shipped reuses them while the layer
-    // moves, which lets the cards and the layer's last pass share one render pass. An Apple GPU
-    // can then blend a later draw one level apart in a texel (an M5 Pro did, in a few frames of
-    // a scene with bone-attached layers): accepted for the GPU time saved. This pins what the
-    // shipped renderer does, and that `WALLPAPER_MACHINE_LAYER_LOCAL_SIGNATURES=0` encodes the
-    // frame as drawing every pass does.
-    if (std::getenv("WALLPAPER_MACHINE_LAYER_LOCAL_SIGNATURES") != nullptr) {
-        GTEST_SKIP() << "WALLPAPER_MACHINE_LAYER_LOCAL_SIGNATURES chooses the reuse this checks";
+    // The layer's own buffers sit between two draws into the scene's image in the objects'
+    // order. Drawn there, they close the scene's render pass in between. The renderer as shipped
+    // draws them ahead of both cards instead (`WALLPAPER_MACHINE_SCENE_PASS_MERGE`), so the cards
+    // and the layer's last pass share one render pass whether the chain is drawn or reused.
+    // Switched off, it reuses them while the layer moves, which lets the same draws share one
+    // render pass on the frames it does. An Apple GPU can then blend a later draw one level apart
+    // in a texel (an M5 Pro did, in a few frames of a scene with bone-attached layers): accepted
+    // for the GPU time saved. This pins what the shipped renderer does, and that
+    // `WALLPAPER_MACHINE_LAYER_LOCAL_SIGNATURES=0` encodes the frame as drawing every pass does.
+    if (std::getenv("WALLPAPER_MACHINE_LAYER_LOCAL_SIGNATURES") != nullptr ||
+        std::getenv("WALLPAPER_MACHINE_SCENE_PASS_MERGE") != nullptr) {
+        GTEST_SKIP() << "an A/B switch chooses the reuse or the order this checks";
     }
+    struct RestoreMerge
+    {
+        bool was { wallpaper::SetScenePassMergeForTests(true) };
+        ~RestoreMerge() { wallpaper::SetScenePassMergeForTests(was); }
+    } restore;
     constexpr int frames  = 12;
     const auto    project = WriteStillChainFixture(root_ / "framed-chain", false, kStillCard, kStillEffect, true);
+    const auto    merged  = RunStillChain(project, root_ / "framed-merged", true, std::nullopt, true, frames);
+    const auto    merged_drawn = RunStillChain(project, root_ / "framed-merged-drawn", false, std::nullopt, true, frames);
+    wallpaper::SetScenePassMergeForTests(false);
     const auto    shipped = RunStillChain(project, root_ / "framed-shipped", true, std::nullopt, true, frames);
     const auto    drawn   = RunStillChain(project, root_ / "framed-drawn", false, std::nullopt, true, frames);
     const auto    off     = RunStillChain(project, root_ / "framed-off", true, false, true, frames);
-    for (const auto* run : { &shipped, &drawn, &off }) {
+    for (const auto* run : { &merged, &merged_drawn, &shipped, &drawn, &off }) {
         ASSERT_EQ(run->frames.size(), std::size_t(frames));
         ASSERT_EQ(run->scene_passes.size(), std::size_t(frames));
     }
     for (int frame = 1; frame < frames; ++frame) {
         SCOPED_TRACE("frame " + std::to_string(frame));
+        EXPECT_GE(merged.reused[frame], 2u) << "the still chain of the moving layer was drawn again";
+        EXPECT_EQ(merged.scene_passes[frame], 1u);
+        EXPECT_EQ(merged_drawn.scene_passes[frame], 1u) << "the drawn chain split the scene's render pass";
+        EXPECT_TRUE(merged.frames[frame] == merged_drawn.frames[frame]);
+        // The chain drawn ahead of the cards leaves the picture drawing it between them gives,
+        // at most one level apart in a channel of a few texels.
+        ASSERT_EQ(merged_drawn.frames[frame].size(), drawn.frames[frame].size());
+        std::size_t differing = 0;
+        int         largest   = 0;
+        for (std::size_t i = 0; i < drawn.frames[frame].size(); ++i) {
+            const int delta = std::abs(int(merged_drawn.frames[frame][i]) - int(drawn.frames[frame][i]));
+            differing += delta != 0;
+            largest = std::max(largest, delta);
+        }
+        EXPECT_LE(largest, 1);
+        EXPECT_LE(differing * 10000, drawn.frames[frame].size()) << differing << " channels differ";
+
         EXPECT_GE(shipped.reused[frame], 2u) << "the still chain of the moving layer was drawn again";
         EXPECT_LT(shipped.scene_passes[frame], drawn.scene_passes[frame]);
         // Switched off, the frame is encoded render pass for render pass as drawing every pass.
@@ -10013,6 +10041,77 @@ TEST_F(MetalSceneDraw, AMovingLayerBetweenTwoCardsIsReusedAndJoinsTheCardsRender
         EXPECT_TRUE(off.frames[frame] == drawn.frames[frame]);
     }
     EXPECT_NE(drawn.frames.front(), drawn.frames.back()) << "nothing moved";
+}
+
+TEST_F(MetalSceneDraw, AFlatLayerBetweenTwoDepthTestedLayersSharesTheirRenderPass)
+{
+    // A green card that depth-tests and writes depth, a red layer that does not depth-test, a
+    // blue card that depth-tests behind the green one. A render pass has one depth attachment
+    // or none, so the red layer used to end the scene's render pass twice, each time storing and
+    // loading back the scene's colour and depth. It now takes the attachment with depth testing
+    // off: one render pass and the same picture. `WALLPAPER_MACHINE_SCENE_PASS_MERGE=0` draws it
+    // as before.
+    if (std::getenv("WALLPAPER_MACHINE_SCENE_PASS_MERGE") != nullptr) {
+        GTEST_SKIP() << "WALLPAPER_MACHINE_SCENE_PASS_MERGE chooses what this compares";
+    }
+    struct Restore
+    {
+        bool merge { wallpaper::SetScenePassMergeForTests(true) };
+        bool optimise { wallpaper::render::SceneOptimizationEnabled() };
+        ~Restore()
+        {
+            wallpaper::SetScenePassMergeForTests(merge);
+            wallpaper::render::SetSceneOptimizationEnabled(optimise);
+        }
+    } restore;
+    // Every frame is drawn in full, so the counts describe the render passes, not reuse.
+    wallpaper::render::SetSceneOptimizationEnabled(false);
+    const auto project = WriteEffectDepthFixture(root_ / "depth-sandwich", "disabled", "disabled", "", "");
+    std::map<int, std::vector<uint8_t>> pixels;
+    std::map<int, uint32_t>             scene_passes;
+    std::map<int, bool>                 shared;
+    // 1: merged; 0: switched off. That a scene sorted by depth shares nothing is
+    // MetalDepthSharing's (`metal_backend_test`).
+    for (const int run : { 1, 0 }) {
+        const bool merge = run == 1;
+        SCOPED_TRACE(merge ? "merged" : "switched off");
+        wallpaper::SetScenePassMergeForTests(merge);
+        LoadedScene loaded;
+        std::string error;
+        ASSERT_TRUE(LoadScene(project, root_ / ("depth-sandwich-" + std::to_string(run)), loaded, error)) << error;
+        loaded.scene->FindRenderTarget(std::string(SpecTex_Default))->withDepth = true;
+        ASSERT_FALSE(SelectSceneBackend(*loaded.scene).failed());
+        @autoreleasepool {
+            CAMetalLayer* layer   = [CAMetalLayer layer];
+            layer.device          = MTLCreateSystemDefaultDevice();
+            layer.pixelFormat     = MTLPixelFormatBGRA8Unorm;
+            layer.drawableSize    = CGSizeMake(384, 256);
+            layer.framebufferOnly = NO;
+            MetalRender render;
+            ASSERT_TRUE(render.init(MetalRenderInitInfo {
+                .metal_layer = (__bridge void*)layer, .width = 384, .height = 256,
+                .render_width = 384, .render_height = 256, .display_scale_factor = 1.0,
+            })) << render.lastError();
+            auto graph = sceneToRenderGraph(*loaded.scene);
+            ASSERT_NE(graph, nullptr);
+            std::vector<wallpaper::metal::ScenePassDescription> descriptions;
+            ASSERT_TRUE(wallpaper::metal::BuildScenePassDescriptions(*loaded.scene, *graph, descriptions, &error))
+                << error;
+            shared[run] = std::any_of(descriptions.begin(), descriptions.end(),
+                                      [](const auto& desc) { return desc.shares_depth_attachment; });
+            ASSERT_TRUE(render.compileRenderGraph(*loaded.scene, *graph)) << render.lastError();
+            for (int frame = 0; frame < 2; ++frame) AdvanceSceneFrame(render, *loaded.scene);
+            scene_passes[run] = render.LastFrameEncodeCountsForTests().scene_output_passes;
+            pixels[run]       = ReadOutput(render, *loaded.scene);
+            render.destroy();
+        }
+    }
+    EXPECT_EQ(scene_passes[1], 1u) << "the layer that does not depth-test split the scene's render pass";
+    EXPECT_EQ(scene_passes[0], 3u);
+    EXPECT_TRUE(shared[1]);
+    EXPECT_FALSE(shared[0]);
+    ASSERT_FALSE(pixels[0].empty());
+    EXPECT_TRUE(pixels[1] == pixels[0]) << "sharing the depth attachment changed the picture";
 }
 
 TEST_F(MetalSceneDraw, ATextLayerWhoseEffectsAreAllOffIsDrawnAsPlainText)
@@ -16968,6 +17067,7 @@ TEST_F(MetalSceneDraw, LocalProjectsNamedByTheEnvironmentRunThroughTheNativeBack
                 std::scoped_lock lock(gpu.tagged_mutex);
                 gpu.tagged_ns.clear();
                 gpu.tagged_buffers.clear();
+                gpu.tagged_spans.clear();
             }
             CAMetalLayer* layer        = [CAMetalLayer layer];
             layer.device               = device;
@@ -17196,12 +17296,25 @@ TEST_F(MetalSceneDraw, LocalProjectsNamedByTheEnvironmentRunThroughTheNativeBack
                     << "the GPU did not finish the draws";
                 std::vector<double> gpu_ms;
                 uint64_t            buffers = 0;
+                // The time the GPU was busy with any of those buffers: the union of their
+                // spans, which counts once what two draws' buffers ran at the same time.
+                double busy_ms = 0.0;
                 {
                     std::scoped_lock lock(gpu.tagged_mutex);
                     for (std::size_t frame = 1; frame < std::size_t(frame_count); ++frame) {
                         const bool seen = frame < gpu.tagged_ns.size();
                         gpu_ms.push_back(seen ? double(gpu.tagged_ns[frame]) / 1e6 : 0.0);
                         buffers += seen ? gpu.tagged_buffers[frame] : 0;
+                    }
+                    std::vector<std::pair<double, double>> spans;
+                    for (const auto& span : gpu.tagged_spans)
+                        if (span.tag >= 1 && span.tag < frame_count) spans.emplace_back(span.start, span.end);
+                    std::sort(spans.begin(), spans.end());
+                    double covered_until = -1.0;
+                    for (const auto& [start, end] : spans) {
+                        const double from = std::max(start, covered_until);
+                        if (end > from) busy_ms += (end - from) * 1e3;
+                        covered_until = std::max(covered_until, end);
                     }
                 }
                 double total = 0.0;
@@ -17213,7 +17326,7 @@ TEST_F(MetalSceneDraw, LocalProjectsNamedByTheEnvironmentRunThroughTheNativeBack
                 };
                 std::printf("[ COST     ] %s {\"surface\":\"%ux%u@%g\",\"render_scale\":%g,"
                             "\"resolution\":\"%s\",\"draws\":%zu,\"gpu_ms_p50\":%.4f,"
-                            "\"gpu_ms_p95\":%.4f,\"gpu_ms_mean\":%.4f,\"cpu_ms_mean\":%.4f,"
+                            "\"gpu_ms_p95\":%.4f,\"gpu_ms_mean\":%.4f,\"gpu_busy_ms_mean\":%.4f,\"cpu_ms_mean\":%.4f,"
                             "\"command_buffers_per_draw\":%.3f,\"render_passes_per_draw\":%.3f,"
                             "\"scene_output_passes_per_draw\":%.3f,\"blits_per_draw\":%.3f,"
                             "\"copied_bytes_per_draw\":%.0f,\"traded_copies_per_draw\":%.3f,"
@@ -17225,7 +17338,8 @@ TEST_F(MetalSceneDraw, LocalProjectsNamedByTheEnvironmentRunThroughTheNativeBack
                             loaded.scene->resolution == SceneResolution::Display ? "display"
                                                                                  : "canvas",
                             gpu_ms.size(), quantile(0.5), quantile(0.95),
-                            total / double(gpu_ms.size()), draw_cpu_ms / measured,
+                            total / double(gpu_ms.size()), busy_ms / double(gpu_ms.size()),
+                            draw_cpu_ms / measured,
                             double(buffers) / double(gpu_ms.size()),
                             double(encodes.render_passes) / measured,
                             double(encodes.scene_output_passes) / measured,
@@ -19717,9 +19831,16 @@ TEST_F(MetalSceneDraw, AttachmentsNothingReadsAgainAreLeftUnstoredAndDrawTheSame
         second["id"]     = 4;
         second["name"]   = "far caster";
         second["origin"] = { 176, 128, 100 };
-        // The card between the two models has no depth, so the second starts a render pass.
+        // The card between the two models has no depth, so the second starts a render pass: with
+        // `WALLPAPER_MACHINE_SCENE_PASS_MERGE` the card takes the models' depth attachment and
+        // the three share one render pass, so the merge is off here.
         layout["objects"] = nlohmann::json::array({ first, layout["objects"][0], second, layout["objects"][2] });
         std::ofstream(root / "layout.json") << layout;
+        struct RestoreMerge
+        {
+            bool was { wallpaper::SetScenePassMergeForTests(false) };
+            ~RestoreMerge() { wallpaper::SetScenePassMergeForTests(was); }
+        } unmerged;
         AttachmentRun off, on;
         ExpectSameFramesEitherWay(project, root, true, off, on);
         EXPECT_EQ(off.counts.stored_depth_attachments, 2u);

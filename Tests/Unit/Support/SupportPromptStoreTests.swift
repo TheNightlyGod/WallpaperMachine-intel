@@ -254,6 +254,100 @@ final class SupportPromptStoreTests: XCTestCase {
         XCTAssertEqual(shown, [.telemetry, .subscriptions, .support, .star, .discord])
     }
 
+    // MARK: - The battery question
+
+    /// A Mac with a battery, on battery, a wallpaper playing and both battery choices on Keep running.
+    private let unplugged = SupportPromptStore.BatteryFacts(
+        hasBattery: true, onBattery: true, wallpaperPlaying: true)
+
+    func testTheBatteryQuestionNeedsABatteryABatteryUseAWallpaperAndNothingChosen() {
+        let store = SupportPromptStore(defaults: defaults, calendar: calendar)
+        store.recordTelemetryAsked()
+        func due(_ change: (inout SupportPromptStore.BatteryFacts) -> Void = { _ in },
+                 welcomeSeen: Bool = true) -> SupportPromptStore.Prompt? {
+            var facts = unplugged
+            change(&facts)
+            return store.pendingPrompt(welcomeSeen: welcomeSeen, telemetryOn: false, battery: facts, now: start)
+        }
+        XCTAssertEqual(due(), .battery)
+        XCTAssertNil(due { $0.hasBattery = false }, "a UPS or a desktop Mac is not asked")
+        XCTAssertNil(due { $0.onBattery = false }, "plugged in, and never seen on battery since launch")
+        XCTAssertNil(due { $0.wallpaperPlaying = false }, "nothing playing, nothing to save")
+        XCTAssertNil(due { $0.batteryMode = .reducedQuality }, "a battery choice was made")
+        XCTAssertNil(due { $0.batteryMode = .pause })
+        for action in [OtherAppInFrontAction.mute, .pause, .pauseOnBattery] {
+            XCTAssertNil(due { $0.otherAppInFront = action }, "\(action) already saves energy")
+        }
+        XCTAssertNil(due(welcomeSeen: false), "the guide shows the On battery choice to new users")
+        XCTAssertNil(store.pendingPrompt(welcomeSeen: true, telemetryOn: false, now: start),
+                     "without the panel's facts nothing is asked")
+    }
+
+    /// A wallpaper that played on battery since launch counts once plugged in again; a relaunch
+    /// has to see it again.
+    func testABatteryUseSinceLaunchCountsUntilTheAppQuits() {
+        let store = SupportPromptStore(defaults: defaults, calendar: calendar)
+        store.recordTelemetryAsked()
+        var pluggedIn = unplugged
+        pluggedIn.onBattery = false
+        XCTAssertNil(store.pendingPrompt(welcomeSeen: true, telemetryOn: false, battery: pluggedIn, now: start))
+        store.recordBatteryUse()
+        XCTAssertEqual(store.pendingPrompt(welcomeSeen: true, telemetryOn: false, battery: pluggedIn, now: start), .battery)
+        XCTAssertNil(SupportPromptStore(defaults: defaults, calendar: calendar)
+            .pendingPrompt(welcomeSeen: true, telemetryOn: false, battery: pluggedIn, now: start),
+                     "the battery use is not saved")
+    }
+
+    /// Shown once it is spent for good; the guide's Preferences page, or a choice in Settings or
+    /// the menu bar, spends it without showing it; state saved before it existed loads it unspent.
+    func testTheBatteryQuestionIsAskedOnceForGood() throws {
+        let store = SupportPromptStore(defaults: defaults, calendar: calendar)
+        store.recordTelemetryAsked()
+        XCTAssertEqual(store.pendingPrompt(welcomeSeen: true, telemetryOn: false, battery: unplugged, now: start), .battery)
+        store.markPresented(.battery, now: start)
+        XCTAssertNil(store.pendingPrompt(welcomeSeen: true, telemetryOn: false, battery: unplugged, now: start + 60))
+        XCTAssertNil(SupportPromptStore(defaults: defaults, calendar: calendar)
+            .pendingPrompt(welcomeSeen: true, telemetryOn: false, battery: unplugged, now: start + 30 * day),
+                     "asked once, a relaunch included")
+
+        let elsewhere = SupportPromptStore(defaults: try TemporaryDefaults.make(for: self).defaults, calendar: calendar)
+        elsewhere.recordTelemetryAsked()
+        elsewhere.recordBatteryAsked()
+        XCTAssertNil(elsewhere.pendingPrompt(welcomeSeen: true, telemetryOn: false, battery: unplugged, now: start))
+
+        let key = "WallpaperMachine.supportPrompt.state"
+        let earlierDefaults = try TemporaryDefaults.make(for: self).defaults
+        let earlier = SupportPromptStore(defaults: earlierDefaults, calendar: calendar)
+        earlier.recordTelemetryAsked()
+        var saved = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: try XCTUnwrap(earlierDefaults.data(forKey: key))) as? [String: Any])
+        XCTAssertNotNil(saved.removeValue(forKey: "batteryAsked"))
+        earlierDefaults.set(try JSONSerialization.data(withJSONObject: saved), forKey: key)
+        XCTAssertEqual(SupportPromptStore(defaults: earlierDefaults, calendar: calendar)
+            .pendingPrompt(welcomeSeen: true, telemetryOn: false, battery: unplugged, now: start), .battery,
+                       "an existing user who finished the guide earlier is asked once")
+    }
+
+    /// Right after the performance data question, before everything else, each on a day of its own.
+    func testTheBatteryQuestionComesRightAfterThePerformanceDataQuestion() {
+        let store = SupportPromptStore(defaults: defaults, calendar: calendar)
+        store.recordDownload(wallpaperID: "downloaded")
+        store.recordSuccessfulActivation(wallpaperID: "downloaded")
+        useOnDays(store, 8)
+        var now = start + 30 * day
+        var shown = [SupportPromptStore.Prompt]()
+        while let prompt = store.pendingPrompt(
+            welcomeSeen: true, telemetryOn: false, steamSignedIn: true, battery: unplugged, now: now) {
+            shown.append(prompt)
+            store.markPresented(prompt, now: now)
+            XCTAssertNil(store.pendingPrompt(
+                welcomeSeen: true, telemetryOn: false, steamSignedIn: true, battery: unplugged, now: now + 60),
+                         "one prompt a day")
+            now += day
+        }
+        XCTAssertEqual(shown, [.telemetry, .battery, .subscriptions, .support, .star, .discord])
+    }
+
     /// Someone who joined from Settings › About or the Help menu is not invited.
     func testJoiningDiscordElsewhereSkipsTheInvitation() {
         let store = SupportPromptStore(defaults: defaults, calendar: calendar)

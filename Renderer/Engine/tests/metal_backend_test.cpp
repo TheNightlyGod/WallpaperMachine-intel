@@ -1337,6 +1337,78 @@ TEST(MetalHiddenClears, ACopyOfTheTargetOrAClearThatMayNotApplyKeepsTheClear)
                      .has_value());
 }
 
+TEST(MetalDepthSharing, AFlatDrawBetweenTwoDepthTestedDrawsJoinsTheirDepthAttachment)
+{
+    // A model, a flat layer and text over it, another model, all on the scene; a flat layer
+    // before the first model and one after the last; a flat draw elsewhere.
+    const auto tested = [](std::string target) {
+        auto d       = DrawStep(std::move(target), MetalLoadAction::Load);
+        d.depth_test = true;
+        return d;
+    };
+    std::vector<ScenePassDescription> passes {
+        DrawStep("scene", MetalLoadAction::Clear), // 0 before the first model
+        tested("scene"),                           // 1 model
+        DrawStep("scene", MetalLoadAction::Load),  // 2 flat layer
+        DrawStep("other", MetalLoadAction::Load),  // 3 another target
+        DrawStep("scene", MetalLoadAction::Load),  // 4 text
+        tested("scene"),                           // 5 model
+        DrawStep("scene", MetalLoadAction::Load),  // 6 after the last model
+    };
+    // A post-processing draw is single-sample like every other draw of a target without MSAA.
+    passes[4].force_single_sample = true;
+    ShareDepthAttachments(passes);
+    for (std::size_t i = 0; i < passes.size(); ++i) {
+        SCOPED_TRACE(i);
+        EXPECT_EQ(passes[i].shares_depth_attachment, i == 2 || i == 4);
+    }
+
+    // A flat draw that passes on another target cut off from both models joins neither of them,
+    // so it takes no attachment: it would only load and store the depth.
+    std::vector<ScenePassDescription> isolated {
+        tested("scene"), DrawStep("effect", MetalLoadAction::Load), DrawStep("scene", MetalLoadAction::Load),
+        DrawStep("effect", MetalLoadAction::Load), tested("scene"),
+    };
+    ShareDepthAttachments(isolated);
+    for (const auto& pass : isolated) EXPECT_FALSE(pass.shares_depth_attachment);
+    // Joined to one of them on either side, it does.
+    isolated[3].target_key = "scene";
+    ShareDepthAttachments(isolated);
+    EXPECT_TRUE(isolated[2].shares_depth_attachment);
+    EXPECT_TRUE(isolated[3].shares_depth_attachment);
+
+    // A scene sorted by depth reorders its objects as it runs, so build order says nothing about
+    // which draws end up between the models: none is marked.
+    auto sorted = passes;
+    for (auto& pass : sorted) pass.shares_depth_attachment = false;
+    ShareDepthAttachments(sorted, true);
+    for (const auto& pass : sorted) EXPECT_FALSE(pass.shares_depth_attachment);
+
+    // A target with a multisampled draw keeps its draws as they were, and so does a target
+    // whose draws do not depth-test, a depth-only draw (a shadow caster) and the volumetric
+    // scene's draws, which carry the scene's depth already.
+    auto multisampled = passes;
+    for (auto& pass : multisampled) pass.shares_depth_attachment = false;
+    multisampled[1].samples = 4;
+    ShareDepthAttachments(multisampled);
+    for (const auto& pass : multisampled) EXPECT_FALSE(pass.shares_depth_attachment);
+
+    std::vector<ScenePassDescription> others {
+        tested("shadow"), DrawStep("shadow", MetalLoadAction::Load), tested("shadow"),
+        DrawStep("scene", MetalLoadAction::Load),
+    };
+    others[0].depth_only = others[2].depth_only = true;
+    others[1].depth_only                        = true;
+    ShareDepthAttachments(others);
+    for (const auto& pass : others) EXPECT_FALSE(pass.shares_depth_attachment);
+
+    std::vector<ScenePassDescription> volumetric { tested("scene"), DrawStep("scene", MetalLoadAction::Load),
+                                                   tested("scene") };
+    volumetric[1].scene_depth_attachment = true;
+    ShareDepthAttachments(volumetric);
+    EXPECT_FALSE(volumetric[1].shares_depth_attachment);
+}
+
 TEST(MetalHiddenClears, ACopyIsForTheDrawsAfterItThatSampleItsResultAlone)
 {
     ScenePassDescription copy;

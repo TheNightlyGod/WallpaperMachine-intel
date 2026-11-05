@@ -6,7 +6,9 @@ import Foundation
 /// Previous, Next, Random Wallpaper and Recently used act on that display. With two or more, each
 /// display gets a submenu with its own commands, so any of them can be changed without opening the panel.
 /// While Workshop downloads run, a line under Control Panel says how many and how far they are,
-/// and opens Discover where the downloads list is.
+/// and opens Discover where the downloads list is. On a Mac with a battery, an On Battery submenu
+/// after Mute Wallpapers holds the battery choice and Pause While Using Other Apps, whichever
+/// layout.
 /// `AppDelegate` gathers the `Input` and turns the entries into `NSMenuItem`s; the update,
 /// error and Exit items stay there.
 enum StatusMenuModel {
@@ -18,6 +20,10 @@ enum StatusMenuModel {
         case playPause
         /// Mutes every wallpaper, or lets them play their own sound again; see `AutomationCommand.toggleMute`.
         case toggleMute
+        /// Settings › Playback & Power › On battery, through the engine as the panel sets it.
+        case batteryMode(BridgeBatteryMode)
+        /// Settings › Playback & Power › When another app is in front, set to this choice.
+        case otherAppInFront(OtherAppInFrontAction)
         case previous(display: String)
         case next(display: String)
         /// A random wallpaper other than the one the display shows; see `AutomationCommand.random`.
@@ -95,10 +101,33 @@ enum StatusMenuModel {
         var wallpapersMuted: Bool = false
         /// The Workshop downloads in progress; nil when there are none.
         var downloads: DownloadActivity? = nil
+        /// The On Battery submenu (`Battery.offered`); nil leaves it out.
+        var battery: Battery? = nil
         /// The displays a command can act on, in menu order (`orderedDisplays`); empty while
         /// the app starts or quits.
         var displays: [Display]
         var canLockScreen: Bool
+    }
+
+    /// What the On Battery submenu shows: the battery choice, and whether "When another app is in
+    /// front" pauses on battery.
+    struct Battery: Equatable {
+        var mode: BridgeBatteryMode
+        var otherAppInFront: OtherAppInFrontAction
+
+        /// The submenu's state where it belongs: on a Mac with an internal battery, as Quick
+        /// Settings offers its On battery module, or wherever one of its two choices is not the
+        /// default, so a choice a restored backup brought can be undone. Nil otherwise.
+        static func offered(
+            hasBattery: Bool, mode: BridgeBatteryMode, otherAppInFront: OtherAppInFrontAction
+        ) -> Battery? {
+            guard hasBattery || mode != .keepRunning || otherAppInFront == .pauseOnBattery else { return nil }
+            return Battery(mode: mode, otherAppInFront: otherAppInFront)
+        }
+
+        /// Ticked only for Pause on battery: a Mute or Pause chosen in Settings, which applies on
+        /// every power source, reads as unticked here, and choosing the item replaces it.
+        var pausesWhileUsingOtherApps: Bool { otherAppInFront == .pauseOnBattery }
     }
 
     /// A display the menu may list, before its order and title are settled.
@@ -127,6 +156,10 @@ enum StatusMenuModel {
         // Ticked while muted, and offered then whatever is playing, so a mute can always be undone.
         if input.wallpapersMuted || (input.playbackIsCurrent && input.hasActiveWallpapers) {
             actions.append(.command(.toggleMute, title: String(localized: "Mute Wallpapers"), checked: input.wallpapersMuted))
+        }
+        // Choices for the whole Mac, offered whatever is playing, like the settings they are.
+        if let battery = input.battery {
+            actions.append(.submenu(title: String(localized: "On Battery"), entries: batteryEntries(battery)))
         }
         if input.displays.count > 1 {
             actions += input.displays.map { .submenu(title: $0.title, entries: submenu(for: $0)) }
@@ -210,6 +243,25 @@ enum StatusMenuModel {
     }
 
     // MARK: Building blocks
+
+    /// The On Battery submenu: Keep Running, Reduced Quality and Pause with the current choice
+    /// ticked, then Pause While Using Other Apps, which turns "When another app is in front" to
+    /// Pause on battery, or back to Keep running while it is ticked.
+    private static func batteryEntries(_ battery: Battery) -> [Entry] {
+        let modes: [(BridgeBatteryMode, String)] = [
+            (.keepRunning, String(localized: "Keep Running")),
+            (.reducedQuality, String(localized: "Reduced Quality")),
+            (.pause, String(localized: "Pause")),
+        ]
+        let pauses = battery.pausesWhileUsingOtherApps
+        return modes.map { mode, title in
+            .command(.batteryMode(mode), title: title, checked: mode == battery.mode)
+        } + [
+            .separator,
+            .command(.otherAppInFront(pauses ? .keepRunning : .pauseOnBattery),
+                     title: String(localized: "Pause While Using Other Apps"), checked: pauses),
+        ]
+    }
 
     /// Previous, Next, Random Wallpaper and Recently used for one display; each appears only
     /// when it can act.

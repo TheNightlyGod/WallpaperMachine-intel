@@ -2095,11 +2095,12 @@ a view direction from `g_EyePosition` in every variant but uses it only when lit
 last pass, which puts the layer on the scene, follows the layer and the camera and is
 drawn again either way, and so is a composition layer's first pass, which reads the
 screen behind the layer. The reused buffers hold the same pixels, but the frame is not
-always byte for byte the same: in a scene whose objects are drawn in their own order (a
-layer reads another layer's picture, sorted transparency) a layer's buffers sit between
-two draws into the scene's image, and leaving them out lets those draws share one render
-pass that drawing them splits in two. An Apple GPU can then blend a later draw one level
-apart in a texel: an M5 Pro did in two pixels of a few frames of 3808922316 at
+always byte for byte the same: in a scene sorted by depth (sorted transparency), and in
+any scene whose objects are drawn in their own order with
+[render pass merging](#draws-into-one-image-share-a-render-pass) switched off, a layer's buffers
+sit between two draws into the scene's image, and leaving them out lets those draws share
+one render pass that drawing them splits in two. An Apple GPU can then blend a later draw
+one level apart in a texel: an M5 Pro did in two pixels of a few frames of 3808922316 at
 3456x2234@2, where the reuse leaves out 17 passes a frame (about 8 % of its GPU time).
 That difference is accepted for the saving; `WALLPAPER_MACHINE_LAYER_LOCAL_SIGNATURES=0`
 draws such passes again whenever the layer or the camera moves, for comparison.
@@ -2111,6 +2112,90 @@ current output size nothing is pinned, and the per-frame sampling and signature 
 that decide what to reuse are skipped outright, since their only reachable answer is
 "draw everything". The budget itself is unchanged; a target that cannot be pinned
 still redraws.
+
+### Draws into one image share a render pass
+
+Native Metal draws consecutive passes into one image in one render pass. Every further
+render pass on the scene's image stores the whole picture and loads it back: at
+3456x2234@2 with Fill, a 3972x2234 image, 35.5 MB each way per frame (less what the
+GPU's lossless compression saves). Of the 91 installed scenes of the development
+library, measured at that size, 66 drew the scene's image in more than one render pass,
+351 splits in all. 292 of them are real dependencies and stay: a layer's effect or a
+composition layer samples the scene's image as the layers before it left it (158), or a
+draw samples the image it draws into, which reads a copy made between the two render
+passes (134). The other 59 were not, and two rules remove all but one of them (a layer
+drawn into a picture that an earlier layer reads from the previous frame can still land
+between two draws into the scene's image):
+
+- **The objects' own order.** In a scene whose layers sample another layer's picture
+  (or with a planar reflection), every pass of one object used to run before the next
+  object's first, so a layer's own effect buffers sat between the draws into the scene's
+  image before and after it, and each such layer split the scene's render pass (37
+  splits, in 9 scenes). Unless the scene sorts transparency by depth, which moves whole
+  objects while the scene runs, the passes are now ordered by what they read and write,
+  as every other scene's are, and the scheduler draws a layer's buffers ahead of the
+  draws into the scene's image. A layer that samples another layer's picture still sees
+  this frame's picture of an earlier layer and the previous frame's of a later one, and a
+  layer that samples the scene's image still runs between the draws it reads.
+- **The depth attachment.** A render pass has one depth attachment or none, so a draw
+  that does not depth-test between two draws into the same image that do (a flat layer
+  or text between two 3D models) ended the render pass on both sides, and the image's
+  colour and depth were stored and loaded back each time (22 splits, in 2 scenes). Such
+  a draw now takes that image's depth attachment, with depth testing off. That holds only
+  for an image all of whose draws are single-sample, and only for a draw between the
+  image's first and last depth-tested draw that reaches one of them through draws into the
+  same image alone: the flat layers before a scene's first model or after its last take no
+  depth attachment, and neither does one that passes on other images cut off from both models,
+  which would only load and store the depth. A scene that sorts transparency by depth
+  puts its objects in a new order as it runs, so its draws keep their own render passes.
+
+Sharing the depth attachment leaves the picture byte for byte the same. Drawing a layer's
+buffers ahead joins draws into the scene's image that the object order kept in separate
+render passes, and an Apple GPU can then blend a later draw one level apart in a few
+texels, the same effect the [layer-local reuse](#scene-render-optimisation) accepts; the
+synthetic scene `MetalSceneDraw.AMovingLayerBetweenTwoCardsIsReusedAndJoinsTheCardsRenderPasses`
+draws allows at most that against the old order. On real wallpapers no difference was
+found: `perf_bench.py identity` matched a build without the change on every compared frame
+of 3808922316, 3662790108, 3226487183, 3624257712, 3521337568, 3255418892 and 3610485014
+(3784370784, 3589454154 and 3276911872 differ between two runs of the same build and were
+not comparable). Per frame, at 3456x2234@2:
+
+| Scene | Render passes on the scene's image | Loading their target | MB loaded |
+|---|---|---|---|
+| 3808922316 | 32 → 11 | 27 → 6 | 958 → 213 |
+| 3662790108 | 27 → 4 | 26 → 3 | 804 → 93 |
+| 3226487183 | 11 → 7 | 13 → 6 | 455 → 213 |
+| 3784370784 | 21 → 19 | 20 → 18 | 946 → 852 |
+| 3624257712 | 7 → 4 | 6 → 3 | 213 → 107 |
+| 3521337568 | 8 → 6 | 5 → 3 | 178 → 107 |
+| 3255418892 | 6 → 4 | 13 → 11 | 143 → 72 |
+| 3276911872, 3610485014, 3589454154 | one fewer | one fewer | 35.5 or 31 less |
+
+3662790108 also stores its depth 3 times a frame instead of 14. Paced at 60 fps on the
+built-in panel's surface alone (`perf_bench.py cost`, a build without the change against
+one with it, 5 pairs in ABBA order on an M5 Pro, the app's own coalition), the GPU drew the
+same frames for less power: 3808922316 from 4.36 to 3.84 W (-12 %, every pair, the 95 %
+interval -0.56 to -0.50 W) in the same 6.7 ms a frame; 3226487183 from 7.96 to 7.24 W
+(-9 %) and 3662790108 from 27.5 to 26.0 W (-6 %), each in every pair taken but with pairs
+lost to the machine leaving nominal thermal state, so short of the three-pair verdict.
+3624257712 (-0.6 W) and 3521337568 (-0.07 W) moved within their spread. Where the GPU time
+does not move, the saving is memory traffic: the GPU spends as long but reads and writes
+far less. The back-to-back GPU time of the changed scenes moved within the
+harness's run-to-run spread, which on scenes the change does not touch was -16 % to
++18 % during the measurement; every one of the 91 scenes still draws. Drawing a layer's
+buffers ahead keeps them alive across the draws they now precede, so buffers that took
+turns on one image no longer can: the render targets take 62 MB more on 3808922316 (516
+to 578 MB), 28 MB more on 3226487183 (396 to 424 MB), 2.7 to 4.3 MB more on 3662790108,
+3610485014 and 3784370784 and the same elsewhere, never more than the targets take
+without sharing (`WALLPAPER_MACHINE_METAL_TARGET_SHARING=0`).
+`WALLPAPER_MACHINE_SCENE_PASS_MERGE=0` restores the order and the attachments as they were
+([A/B switches](../testing/power-benchmark.md#ab-comparison-entry-points)).
+
+What still splits the scene's image is mostly a draw that reads it: a blend mode or a lens
+that samples the picture under it through a copy. Where such a draw reads only its own
+pixel, an Apple GPU could read the destination inside the same render pass (programmable
+blending) with no copy and no split, once the shader compiler can prove the read is of
+the fragment's own texel.
 
 ### 2D scene resolution
 

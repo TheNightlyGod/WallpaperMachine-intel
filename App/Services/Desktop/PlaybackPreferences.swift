@@ -17,15 +17,24 @@ enum OtherAppInFrontAction: String, Codable, CaseIterable, Sendable {
     case keepRunning
     case mute
     case pause
+    /// Pause as `pause` does, but only while the Mac runs on battery; plugged in it does nothing.
+    case pauseOnBattery
 
-    /// The rule action it contributes, the same way an app rule's does; nil while it keeps running.
-    var ruleAction: AppRuleAction? {
+    /// The rule action it contributes while another app is in front, the same way an app rule's
+    /// does: nil while it keeps running, and for Pause on battery while the Mac is not on battery.
+    /// `onBattery` is read only for Pause on battery.
+    func ruleAction(onBattery: @autoclosure () -> Bool) -> AppRuleAction? {
         switch self {
         case .keepRunning: nil
         case .mute: .mute
         case .pause: .pause
+        case .pauseOnBattery: onBattery() ? .pause : nil
         }
     }
+
+    /// Whether the app in front can change playback on some power source, which is when app
+    /// activations have to be watched.
+    var watchesFrontmostApp: Bool { self != .keepRunning }
 }
 
 /// What a wallpaper does while other windows cover its display's working area.
@@ -148,7 +157,8 @@ final class PlaybackPreferences {
         set { store(newValue.rawValue, forKey: Self.otherAudioKey) }
     }
 
-    /// Off until chosen: which app is in front alone never changes playback.
+    /// Off until chosen: which app is in front alone never changes playback. Pause on battery
+    /// pauses only while the Mac runs on battery.
     var otherAppInFrontAction: OtherAppInFrontAction {
         get { storedEnum(Self.otherAppInFrontKey, default: .keepRunning) }
         set { store(newValue.rawValue, forKey: Self.otherAppInFrontKey) }

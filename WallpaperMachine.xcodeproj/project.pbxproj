@@ -144,6 +144,7 @@
 		203102C477AEA1C24A033250 /* WallpaperPreviewRequest.swift in Sources */ = {isa = PBXBuildFile; fileRef = 836E34D0CB775D350D32A402 /* WallpaperPreviewRequest.swift */; };
 		205129B44CC28B232D0A421A /* PixivFilters.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D012C7083373D73FC784302 /* PixivFilters.swift */; };
 		2169344E8075C9C6DD73B10B /* StillImagePageRenderingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED0E5A801F89BF191C52D151 /* StillImagePageRenderingTests.swift */; };
+		217FC09C49AB496285DD0655 /* PanelBatteryQuestionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 076564FF02BB35D37AE8CF7D /* PanelBatteryQuestionTests.swift */; };
 		21AF33794B9910002B9D9780 /* DragStepPump.swift in Sources */ = {isa = PBXBuildFile; fileRef = 747CB01170DA0B81D67AF2DA /* DragStepPump.swift */; };
 		21D2B4348A9E30906834E9E5 /* PresetsBarStateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A4EAF5792F31756B234CD8D0 /* PresetsBarStateTests.swift */; };
 		224430163C437773C0B5449A /* DesktopPosterFrame.swift in Sources */ = {isa = PBXBuildFile; fileRef = A3B065FB82AB0276E98D5A0C /* DesktopPosterFrame.swift */; };
@@ -1157,6 +1158,7 @@
 		070EEE2F8212CE754ACD9505 /* AccessibilityTreeSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccessibilityTreeSupport.swift; sourceTree = "<group>"; };
 		071F07F651ED4ECE8377152A /* DisplayRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DisplayRow.swift; sourceTree = "<group>"; };
 		074D5BF397105BD2E2BD4DDD /* TileDownloadState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TileDownloadState.swift; sourceTree = "<group>"; };
+		076564FF02BB35D37AE8CF7D /* PanelBatteryQuestionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PanelBatteryQuestionTests.swift; sourceTree = "<group>"; };
 		078014A1ECC04882D93A38E1 /* DownloaderLifecycleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloaderLifecycleTests.swift; sourceTree = "<group>"; };
 		07912BE45DAC76DCD128B083 /* LetterboxDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LetterboxDetector.swift; sourceTree = "<group>"; };
 		07A8672C9A03D8353209ACD5 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
@@ -3108,6 +3110,7 @@
 				23BA9AD1873C892CF237DA42 /* PanelActionRoutingTests.swift */,
 				F9FF9C7F7ACD659CD6AE2AB0 /* PanelApplyingFixture.swift */,
 				B44AC1CE6D55896F0DE18E15 /* PanelAutomationActionsTests.swift */,
+				076564FF02BB35D37AE8CF7D /* PanelBatteryQuestionTests.swift */,
 				48CF5F3EFD9AF365D19F30BE /* PanelCollectionActionsTests.swift */,
 				9CC9A77F55DB2CC1AB92846E /* PanelCompatibilityTests.swift */,
 				728E7897632BB07E9BADA8A0 /* PanelControllerTests.swift */,
@@ -4288,6 +4291,7 @@
 				6B56BBDC7EECEC2B449536A7 /* PanelActionRoutingTests.swift in Sources */,
 				FAE8615F833B5B53739C59C1 /* PanelApplyingFixture.swift in Sources */,
 				BE5EE4CAD276FC474A6140AA /* PanelAutomationActionsTests.swift in Sources */,
+				217FC09C49AB496285DD0655 /* PanelBatteryQuestionTests.swift in Sources */,
 				7407133015B49EA52AF2AA5F /* PanelCollectionActionsTests.swift in Sources */,
 				C6A5A34B2D6A2C8B37FD4C16 /* PanelCompatibilityTests.swift in Sources */,
 				C9CF29E3A5A8F4D614B479F0 /* PanelControllerTests.swift in Sources */,

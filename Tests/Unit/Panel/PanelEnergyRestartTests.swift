@@ -69,6 +69,19 @@ final class PanelEnergyRestartTests: PanelTestCase {
     }
   }
 
+  /// The menu bar's On Battery choice is applied outside the panel; the store tells the panel, whose
+  /// readout restarts its window as it does for its own battery row.
+  func testABatteryChoiceFromTheMenuBarRestartsTheComparison() async throws {
+    try await withRecordingPanel { panel, _ in
+      let (controller, restarts) = makeCounting(panel)
+      defer { controller.energyUsage.setActive(false) }
+      let before = restarts()
+      let hook = try XCTUnwrap(panel.store.onRenderingSettingAppliedElsewhere)
+      hook()
+      XCTAssertEqual(restarts(), before + 1)
+    }
+  }
+
   func testSettingsThatChangeNoRenderingWorkLeaveTheWindowAlone() async throws {
     try await withRecordingPanel { panel, _ in
       let (controller, restarts) = makeCounting(panel)

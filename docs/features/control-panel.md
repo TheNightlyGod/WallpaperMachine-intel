@@ -207,7 +207,8 @@ the rest opens in a popover from the ⓘ beside the title.
   overrides never reads as the one in force ([performance](performance.md)). On
   battery also names a low-battery, Low Power Mode or heat rule that pauses or stops
   wallpapers, and that rule's Playback & Power row says **In effect now**; Focus
-  filters and app rules keep to their own rows
+  filters, app rules and **When another app is in front** (its **Pause on battery**
+  included) keep to their own rows
   ([performance](performance.md#low-battery-low-power-mode-heat-and-focus)).
 - **General** starts with the [Language](#language) picker (Interface), then Startup
   (**Launch at login** and **Hide window after applying a wallpaper**), Help (the
@@ -244,7 +245,7 @@ the rest opens in a popover from the ⓘ beside the title.
   see [edits on the desktop](wallpaper-properties.md#showing-edits-on-the-desktop)),
   then the Lock screen and Screen saver groups.
 - **Playback & Power** holds the Playback group (mute all, occlusion, other-app
-  audio, another app in front, display sleep, playing only on the display in use, battery, low battery,
+  audio, another app in front (always, or only on battery), display sleep, playing only on the display in use, battery, low battery,
   Low Power Mode, heat, Focus, app rules) and the **What these settings change**
   disclosure. The battery, low-battery, Low Power Mode and heat choices can each
   lower quality instead of pausing, and the page names which one is lowering it. See
@@ -548,7 +549,18 @@ Previous Wallpaper, Next Wallpaper, Random Wallpaper and Recently used act on th
 them, after Play/Pause, **Mute Wallpapers** silences every wallpaper at once and is ticked while it
 is on ([Mute all wallpapers](performance.md#playback)); it is one item for the whole Mac, shown
 the same way with two or more displays, and shown while it is on even with nothing playing so it can
-be turned off. With two or more
+be turned off. On a Mac with an internal battery, an **On Battery** submenu follows it, in both
+layouts and whatever is playing: **Keep Running**, **Reduced Quality** and **Pause** set
+Settings → Playback & Power → **On battery** through the same engine setter as the row (with
+Settings open, the [Energy use](performance.md#energy-use) comparison restarts for it as it does
+for the row), with the current one ticked; after a separator, **Pause While Using Other Apps** switches **When another
+app is in front** between **Pause on battery** (ticked) and **Keep running**. A **Mute** or
+**Pause** chosen for that row in Settings, which acts on every power source, reads as unticked
+there, and choosing the item replaces it with **Pause on battery**
+([Pause on battery](performance.md#playback)). A Mac without a battery shows the submenu only
+while one of the two choices is not its default, so a choice a restored backup brought can be
+undone. A choice made there counts as having answered the
+[battery question](first-run.md#the-battery-question). With two or more displays
 (enabled, independent and connected; a mirror or a disabled display is not
 listed) the menu has one submenu per display, named as the panel names it and ordered
 the main display first, then left to right as the screens sit; screens with the same

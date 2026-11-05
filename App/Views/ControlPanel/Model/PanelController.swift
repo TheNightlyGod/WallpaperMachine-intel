@@ -343,6 +343,7 @@ final class PanelController {
     self.libraryMetrics.onChange = { [weak self] in self?.revisions.bump(.libraryMetrics) }
     self.libraryCovers.onChange = { [weak self] in self?.revisions.bump(.libraryCovers) }
     self.energyUsage.onChange = { [weak self] in self?.revisions.bump(.energy) }
+    self.store.onRenderingSettingAppliedElsewhere = { [weak self] in self?.energyUsage.settingChanged() }
     // What the engine routed to the native player: the report Settings shows as In use now.
     self.energyUsage.nativeVideoPlaying = { [weak self] in
       self?.store.settingsSnapshot.videoBackends.contains { $0.backend == "native" } ?? false

@@ -29,7 +29,7 @@ final class PanelSettingsResetTests: PanelTestCase {
       try await controller.setHotKey(.togglePlayback, keyCode: 35, modifierFlags: [.command, .option])
       try await controller.setDesktopCoveredAction(.keepRunning)
       try await controller.setPlaysOnlyOnActiveDisplay(true)
-      try await controller.setOtherAppInFrontAction(.mute)
+      try await controller.setOtherAppInFrontAction(.pauseOnBattery)
       controller.playback.addRule(bundleIdentifier: "com.example.game", name: "Game")
       try await controller.setLivePropertyEdits(true)
       try await controller.setConcurrentDownloads(6)

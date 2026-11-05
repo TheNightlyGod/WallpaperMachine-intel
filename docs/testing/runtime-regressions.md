@@ -116,6 +116,26 @@ device.
   included. On a real scene, `WE_TEST_METAL_PROJECTS` prints render passes and
   blits per frame and CPU per `drawFrame`, and its PPM must stay byte-identical to
   a build without the change.
+- **Draws kept apart only by their order or their depth attachment** —
+  `ScenePassMerge.*` (`rendergraph_smoke`): in a scene whose layers sample another
+  layer's picture, a layer's own effect buffers are drawn ahead of the draws into the
+  scene's image around it, which then follow one another; a sample still reads this
+  frame's picture of an earlier layer and the previous frame's of a later one, a layer
+  whose effect samples the scene's image still runs between the draws it reads, a
+  depth-sorted scene keeps each object's passes together, and
+  `SetScenePassMergeForTests(false)` restores the object order.
+  `MetalDepthSharing.*` (`metal_backend_test`): only a draw that does not depth-test
+  between two depth-tested draws into one single-sample target, and joined to one of them by
+  draws into that target alone, takes the attachment, and none does in a scene sorted by depth.
+  `MetalSceneDraw.AFlatLayerBetweenTwoDepthTestedLayersSharesTheirRenderPass`: a red
+  layer without depth testing between two depth-tested cards draws the scene in one
+  render pass instead of three, byte for byte the same picture.
+  `MetalSceneDraw.AMovingLayerBetweenTwoCardsIsReusedAndJoinsTheCardsRenderPasses`:
+  a layer chain between two cards no longer splits the scene's render pass, drawn or
+  reused, and with the merge off the old split and reuse behaviour is pinned; the joined
+  render pass may differ from the split one by at most one level in 0.01 % of channels. On real
+  scenes, `perf_bench.py identity` against a build without the change
+  ([scene rendering](../features/scene-rendering.md#draws-into-one-image-share-a-render-pass)).
 - **Shared target images** — `MetalSceneDraw.TargetsThatAreNeverAliveTogetherShareImagesAndDrawTheSamePicture`:
   traded copies of the scene (two lenses, scene optimisation on) and the effect
   buffers of two layers drawn one after the other (optimisation off, so nothing is
@@ -187,8 +207,9 @@ device.
   prints render passes loading their target per frame, and
   `WALLPAPER_MACHINE_OVERWRITE_LOAD_ELISION=0` must give the same poster PPM.
 - **Depth and multisampled stores** — `MetalSceneDraw.AttachmentsNothingReadsAgainAreLeftUnstoredAndDrawTheSamePicture`:
-  two depth-tested models with a card between them store depth only from the first
-  model's render pass, which the second loads; with 4x MSAA, lenses that split the
+  two depth-tested models with a card between them (the render pass merge off, so the
+  card still splits them) store depth only from the first model's render pass, which
+  the second loads; with 4x MSAA, lenses that split the
   scene's render passes keep their samples for the next one and only the last render
   pass leaves them unstored. Frames match `MetalRender::SetAttachmentStoreElisionForTests(false)`.
   A depth image something samples (the volumetrics depth) is always stored, a hidden

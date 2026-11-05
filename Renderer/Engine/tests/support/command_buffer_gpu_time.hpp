@@ -43,6 +43,16 @@ struct CommandBufferGpuTime
     std::mutex            tagged_mutex;
     std::vector<uint64_t> tagged_ns;
     std::vector<uint32_t> tagged_buffers;
+    /// Each tagged buffer's tag and its GPU start and end (seconds), for the time the GPU
+    /// was busy with any of them: buffers of consecutive draws can run at once, and then
+    /// their own spans count the time they shared twice.
+    struct Span
+    {
+        int64_t tag;
+        double  start;
+        double  end;
+    };
+    std::vector<Span> tagged_spans;
 
     using Histogram = std::array<uint64_t, kBuckets>;
 
@@ -123,6 +133,7 @@ inline void CountedCommit(id self, SEL command)
             }
             counters.tagged_ns[index] += ns;
             ++counters.tagged_buffers[index];
+            if (ns > 0) counters.tagged_spans.push_back({ tag, buffer.GPUStartTime, buffer.GPUEndTime });
         }
         counters.completed.fetch_add(1);
     }];

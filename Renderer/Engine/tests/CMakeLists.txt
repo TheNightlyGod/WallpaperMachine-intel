@@ -560,7 +560,7 @@ gtest_discover_tests(
     DISCOVERY_TIMEOUT 60
 )
 add_executable(rendergraph_smoke rendergraph_smoke.cpp graph_contract_cases.cpp
-    transparent_sorting_test.cpp planar_reflection_test.cpp)
+    transparent_sorting_test.cpp planar_reflection_test.cpp scene_pass_merge_test.cpp)
 target_link_libraries(rendergraph_smoke PRIVATE ${PROJECT_NAME} wpRenderCommon wpRGraph wpScene wpAudio wpFs GTest::gtest_main)
 target_include_directories(rendergraph_smoke PRIVATE . ${CMAKE_SOURCE_DIR}/src)
 target_compile_features(rendergraph_smoke PRIVATE cxx_std_20)

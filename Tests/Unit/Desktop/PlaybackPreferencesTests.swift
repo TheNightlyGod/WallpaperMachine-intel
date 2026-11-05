@@ -82,6 +82,26 @@ final class PlaybackPreferencesTests: XCTestCase {
         XCTAssertTrue(preferences.appRules.isEmpty)
     }
 
+    /// Pause on battery is stored like the other choices, pauses only on battery, and Reset all
+    /// settings puts the row back on Keep running.
+    func testPauseOnBatteryIsStoredPausesOnlyOnBatteryAndResets() {
+        let preferences = PlaybackPreferences(defaults: defaults)
+        preferences.otherAppInFrontAction = .pauseOnBattery
+        XCTAssertEqual(PlaybackPreferences(defaults: defaults).otherAppInFrontAction, .pauseOnBattery)
+
+        XCTAssertEqual(OtherAppInFrontAction.pauseOnBattery.ruleAction(onBattery: true), .pause)
+        XCTAssertNil(OtherAppInFrontAction.pauseOnBattery.ruleAction(onBattery: false))
+        for onBattery in [false, true] {
+            XCTAssertNil(OtherAppInFrontAction.keepRunning.ruleAction(onBattery: onBattery))
+            XCTAssertEqual(OtherAppInFrontAction.mute.ruleAction(onBattery: onBattery), .mute)
+            XCTAssertEqual(OtherAppInFrontAction.pause.ruleAction(onBattery: onBattery), .pause)
+        }
+
+        preferences.resetToDefaults()
+        XCTAssertEqual(preferences.otherAppInFrontAction, .keepRunning)
+        XCTAssertEqual(PlaybackPreferences(defaults: defaults).otherAppInFrontAction, .keepRunning)
+    }
+
     func testReducedQualityIsStoredForEachConditionAndIsNotARuleAction() {
         let preferences = PlaybackPreferences(defaults: defaults)
         preferences.lowPowerModeAction = .reduceQuality

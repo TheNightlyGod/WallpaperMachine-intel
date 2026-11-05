@@ -777,6 +777,25 @@ final class WallpaperBackupTests: XCTestCase {
         }
     }
 
+    /// "When another app is in front" is backed up with every choice the row offers, Pause on
+    /// battery included, and only those restore.
+    func testTheOtherAppInFrontChoiceIsBackedUpAndOnlyAnOfferedOneRestores() throws {
+        let preferences = try defaults()
+        PlaybackPreferences(defaults: preferences).otherAppInFrontAction = .pauseOnBattery
+        let export = try WallpaperBackupPreferences(defaults: preferences, domainName: domainName(for: preferences))
+        let key = "WallpaperMachine.otherAppInFrontAction"
+
+        let stored = try WallpaperBackupPreferences.decode(XCTUnwrap(export.values[key], key))
+        try WallpaperBackupPreferences.validate(stored, forKey: key)
+        XCTAssertEqual(stored as? String, "pauseOnBattery")
+        for action in OtherAppInFrontAction.allCases {
+            XCTAssertNoThrow(try WallpaperBackupPreferences.validate(action.rawValue, forKey: key), action.rawValue)
+        }
+        for value: Any in ["pauseOnAC", "", "reducedQuality", 1, true] {
+            XCTAssertThrowsError(try WallpaperBackupPreferences.validate(value, forKey: key), "\(value)")
+        }
+    }
+
     /// Muting every wallpaper is local to this Mac: a backup never carries it, and a package that
     /// claims to cannot silence a Mac whose owner did not ask.
     func testMutingEveryWallpaperIsNeitherBackedUpNorRestored() async throws {

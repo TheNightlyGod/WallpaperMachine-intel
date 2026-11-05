@@ -35,7 +35,7 @@ struct PlaybackSettingsSection: View {
     id: "playback.other-app-in-front", section: .playback, group: playback,
     title: "When another app is in front",
     note:
-      "Clicking the desktop brings Finder to the front, so Finder and this app count as the desktop. Mute and Pause work as they do when another app plays sound."
+      "Clicking the desktop brings Finder to the front, so Finder and this app count as the desktop. Mute and Pause work as they do when another app plays sound. Pause on battery applies only on battery: the wallpaper holds its last frame and plays again when you click the desktop or plug in your Mac."
   )
   static let displaySleep = SettingsItem(
     id: "playback.display-sleep", section: .playback, group: playback,
@@ -149,7 +149,7 @@ struct PlaybackSettingsSection: View {
             options: OtherAudioAction.allCases.map { ($0, $0.title) }
           ) { try await controller.setOtherAudioAction($0) }
         }
-        SettingsRow(Self.otherAppInFront) {
+        SettingsRow(Self.otherAppInFront, note: playback.otherAppInFrontNote) {
           menu(
             "otherAppInFrontAction", saved: playback.otherAppInFrontAction,
             options: OtherAppInFrontAction.allCases.map { ($0, $0.title) }
@@ -275,7 +275,7 @@ struct PlaybackSettingsSection: View {
         "When another app plays sound, Mute uses each wallpaper’s output mute channel. Web mute availability is shown in its details. Pause stops every wallpaper until that sound ends."
       )
       Text(
-        "When another app is in front, Mute or Pause lasts until you click the desktop or return to this app."
+        "When another app is in front, Mute or Pause lasts until you click the desktop or return to this app. Pause on battery does the same only while the Mac runs on battery, and plugging in ends it."
       )
       Text(
         "When displays sleep, Pause keeps wallpapers loaded. Stop frees renderer memory and reloads them when the display wakes."

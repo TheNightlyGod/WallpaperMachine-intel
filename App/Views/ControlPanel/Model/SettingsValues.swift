@@ -208,6 +208,16 @@ struct PlaybackSettings: Equatable {
     conditionOverridingBatteryMode?.statusText ?? quality.onBatteryText
   }
 
+  /// The note of "When another app is in front" while Pause on battery is chosen: the sentence about
+  /// the battery leads, so the line under the title says what that choice does. Nil keeps the
+  /// declared note, which says the same after the others.
+  @MainActor var otherAppInFrontNote: String? {
+    guard otherAppInFrontAction == .pauseOnBattery else { return nil }
+    return L(
+      "Pause on battery applies only on battery: the wallpaper holds its last frame and plays again when you click the desktop or plug in your Mac. Clicking the desktop brings Finder to the front, so Finder and this app count as the desktop. Mute and Pause work as they do when another app plays sound."
+    )
+  }
+
   /// "Low Power Mode is on now.", and what its rule does while engaged.
   @MainActor var lowPowerModeNote: String {
     Self.note(

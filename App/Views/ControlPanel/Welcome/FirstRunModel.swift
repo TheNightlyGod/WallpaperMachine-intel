@@ -192,9 +192,13 @@ final class FirstRunModel {
     guard !navigationBusy else { return }
     step = destination
     error = nil
-    // The Preferences page carries the performance data switch, so it answers the one-time
-    // question; someone who leaves the guide before reaching it is asked once later instead.
-    if destination == .preferences { controller.store.supportPrompt?.recordTelemetryAsked() }
+    // The Preferences page carries the performance data switch and the On battery choice, so it
+    // answers both one-time questions; someone who leaves the guide before reaching it is asked
+    // once later instead.
+    if destination == .preferences {
+      controller.store.supportPrompt?.recordTelemetryAsked()
+      controller.store.supportPrompt?.recordBatteryAsked()
+    }
   }
 
   func next() { if let next = step.next { go(to: next) } }

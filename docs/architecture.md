@@ -80,7 +80,12 @@ belong to the `AppUpdateCoordinator` it owns (`App/Services/GitHub/`).
   the menu opens, so it needs no timer); choosing it opens Discover. **Mute Wallpapers**
   is one ticked item after Play/Pause in both layouts: it flips `PlaybackPreferences.wallpapersMuted`
   (`AutomationCommand.toggleMute`) and takes no queue turn, since the presentation policy
-  hears the preference change and delivers it. Random Wallpaper
+  hears the preference change and delivers it. On a Mac with an internal battery (read with
+  `BatteryReading` when the menu opens), or on any Mac while either of its choices is not the
+  default (`StatusMenuModel.Battery.offered`), an **On Battery** submenu follows it in both layouts: the engine's battery mode, set through
+  `BridgeStore.setBatteryModeAsync` in a turn of `BridgeStore.commands` as Settings does, and
+  **Pause While Using Other Apps**, which writes `PlaybackPreferences.otherAppInFrontAction`
+  (Pause on battery or Keep running) with no queue turn, like the mute. Random Wallpaper
   is `AutomationCommand.random`, like a link, a Shortcuts action or a shortcut key: it takes the
   display's turn in `BridgeStore.commands` and picks from the library and favorites then
   (`BridgeStore.activateRandomWallpaperAsync`), with its round kept by `PlaylistStore`. `AppDelegate`
@@ -304,7 +309,7 @@ Services are grouped by domain under `App/Services/`; each domain has a matching
 | `Playlist/` | `WallpaperPlaylist`, `PlaylistPlanner`, `PlaylistStore`, `PlaylistScheduler` | Per-display rotation and day/night wallpapers, switched through the display's command slot; see [features/playlists.md](features/playlists.md) |
 | `Preview/` | `WallpaperPreviewSession`, `WallpaperPreviewRequest`, `SceneWallpaperPreviewSurface`, `WebWallpaperPreviewSurface` | Isolated live-preview inputs, lifecycle and surfaces |
 | `Steam/` | `SteamCMDRuntime`, `SteamCMDSetupStore` | SteamCMD discovery, download, validation, security approval |
-| `Support/` | `SupportPromptStore` | The one-time prompts: support after a downloaded wallpaper is applied, a later star request, the performance data question, the subscriptions offer and the Discord invitation; see [features/first-run.md](features/first-run.md) |
+| `Support/` | `SupportPromptStore` | The one-time prompts: support after a downloaded wallpaper is applied, a later star request, the performance data question, the battery question, the subscriptions offer and the Discord invitation; see [features/first-run.md](features/first-run.md) |
 | `SystemMedia/` | `DesktopMediaSession`, `SystemMediaProvider`, `SceneMediaSink` | One system now-playing session (MediaRemote adapter with AppleScript fallback) feeding web and scene wallpapers; see [features/media-integration.md](features/media-integration.md) |
 | `Telemetry/` | `TelemetryService`, `TelemetryReport`, `TelemetrySampler`, `TelemetrySpool`, `TelemetryClient`, `TelemetryPreferences`, `TelemetryActiveCount` | Send performance data, only while it is on: activation times, energy ratings, how runs ended and 60 s frame windows as numbers and fixed words, sent once a day to the website; and the daily active count every copy sends with no install id; see [features/telemetry.md](features/telemetry.md) |
 | `UserAssets/` | `UserAssetStore`, `ManagedUserAssetStore`, `UserAssetWorker` | Importing, watching and picking for file/directory wallpaper properties |
@@ -407,7 +412,9 @@ per-Space getter and setter through optional private CoreGraphics and HIServices
   it went from locked to unlocked calls `onSessionUnlocked` once, after the presentation it
   settles, which the app delegate hands to `PlaylistScheduler.noteUnlock()` for playlists set
   to change when the Mac is unlocked ([playlists](features/playlists.md#each-time-the-mac-is-unlocked)).
-  `AppRuleMonitor` (the app rules and "When another app is in front") and `OtherAudioMonitor` feed those conditions, and wallpaper audio is
+  `AppRuleMonitor` (the app rules and "When another app is in front", whose Pause on battery
+  reads the source `PowerSourceMonitor` last reported and is refreshed from the app delegate's
+  power-source change) and `OtherAudioMonitor` feed those conditions, and wallpaper audio is
   suppressed separately (`setAudioSuppressed`) for a mute rule, other-app audio set to mute or the
   user's own mute of every wallpaper (`PlaybackPreferences.wallpapersMuted`). The bridge ORs that one
   flag with each wallpaper's saved mute, so the user's mute never rewrites a saved sound setting.
