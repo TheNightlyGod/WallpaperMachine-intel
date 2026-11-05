@@ -12,6 +12,95 @@ app's update window shows the sections of every version newer than the installed
 one, in the app's language; the GitHub Release body repeats only the English notes.
 See [docs/release.md](docs/release.md) for how a version is cut.
 
+## [1.9.2](https://github.com/MMFoundation/WallpaperMachine/compare/v1.9.1...v1.9.2) (2026-11-05)
+
+### English
+
+This update puts more control in the menu bar and adds new ways for wallpapers to pause when you step away, work on battery or eject the library's drive
+
+#### Features
+
+- Clicking the menu bar icon opens a Now Playing panel with playback controls, volume and a one-click switcher for favorite and recent wallpapers ([36e1b2b](https://github.com/MMFoundation/WallpaperMachine/commit/36e1b2b413d3dd1ce0c42fed7119fe0f93118911))
+- Wallpapers can pause or stop after a chosen time without keyboard, mouse or trackpad input, and come back at your next input ([36e1b2b](https://github.com/MMFoundation/WallpaperMachine/commit/36e1b2b413d3dd1ce0c42fed7119fe0f93118911))
+- On battery, a wallpaper can now pause while you work in another app, and a new On Battery submenu in the menu bar holds the battery choices ([4654af5](https://github.com/MMFoundation/WallpaperMachine/commit/4654af5f9f3701c6979af58dca15f98439e90b51))
+- MP4 and MOV video wallpapers with HEVC tagged hev1, as FFmpeg often writes them, now play without re-encoding or changing the original file ([36e1b2b](https://github.com/MMFoundation/WallpaperMachine/commit/36e1b2b413d3dd1ce0c42fed7119fe0f93118911))
+- Library search now also finds authors, descriptions, pasted Workshop links and collection names, ignoring case and accents ([36e1b2b](https://github.com/MMFoundation/WallpaperMachine/commit/36e1b2b413d3dd1ce0c42fed7119fe0f93118911))
+- A library on an external drive is now followed, so its wallpapers stop to let the drive eject and play again when it is reconnected ([36e1b2b](https://github.com/MMFoundation/WallpaperMachine/commit/36e1b2b413d3dd1ce0c42fed7119fe0f93118911))
+- Steam Workshop searches typed in Chinese, Japanese or Korean are translated into English on your Mac, with the option to search your own words instead ([36e1b2b](https://github.com/MMFoundation/WallpaperMachine/commit/36e1b2b413d3dd1ce0c42fed7119fe0f93118911))
+- Timed playlists gain an optional Wait for the video to finish setting, off by default, so video wallpapers are not cut mid-clip ([36e1b2b](https://github.com/MMFoundation/WallpaperMachine/commit/36e1b2b413d3dd1ce0c42fed7119fe0f93118911))
+- A new Last used sort lists the wallpapers most recently shown on a display first ([36e1b2b](https://github.com/MMFoundation/WallpaperMachine/commit/36e1b2b413d3dd1ce0c42fed7119fe0f93118911))
+- Desktop icons can be hidden from the menu bar menu or Settings so they no longer cover the wallpaper ([36e1b2b](https://github.com/MMFoundation/WallpaperMachine/commit/36e1b2b413d3dd1ce0c42fed7119fe0f93118911))
+- Hide the notch, off by default, turns the menu bar black on displays with a camera notch so the notch blends in ([36e1b2b](https://github.com/MMFoundation/WallpaperMachine/commit/36e1b2b413d3dd1ce0c42fed7119fe0f93118911))
+
+#### Improvements
+
+- Displays that are covered or behind a full-screen app now change wallpaper on schedule out of sight, so the new one is ready when they reappear ([ad9bd5c](https://github.com/MMFoundation/WallpaperMachine/commit/ad9bd5c663dde8e7d5beae0a2da3b727217bed6b))
+- Scenes that mix 3D models with flat layers, or draw layers in their own order, now need much less GPU work per frame ([4654af5](https://github.com/MMFoundation/WallpaperMachine/commit/4654af5f9f3701c6979af58dca15f98439e90b51))
+
+#### Bug Fixes
+
+- Audio-reactive wallpapers no longer freeze after sleep or a system audio hiccup and recover on their own ([36e1b2b](https://github.com/MMFoundation/WallpaperMachine/commit/36e1b2b413d3dd1ce0c42fed7119fe0f93118911))
+- Audio oscilloscope effects draw their wave instead of a dark red fill (closes [#161](https://github.com/MMFoundation/WallpaperMachine/issues/161)) ([495cea8](https://github.com/MMFoundation/WallpaperMachine/commit/495cea8020286edc5850ad9d678707928045ccc8))
+- Mute All and a wallpaper's own mute switch no longer contradict each other, and each now shows what the other is doing ([7e59679](https://github.com/MMFoundation/WallpaperMachine/commit/7e59679716435761149fa55d82863dd65addc7d0))
+
+### 简体中文
+
+本次更新把更多控制放进菜单栏，并让壁纸在你离开、使用电池或推出壁纸库所在磁盘时有更多暂停方式
+
+#### 新功能
+
+- 点按菜单栏图标即可打开正在播放面板，提供播放控制和音量调节，还能一键切换到收藏或最近使用的壁纸 ([36e1b2b](https://github.com/MMFoundation/WallpaperMachine/commit/36e1b2b413d3dd1ce0c42fed7119fe0f93118911))
+- 可设置在键盘、鼠标或触控板闲置一段时间后暂停或停止壁纸，再次操作时自动恢复 ([36e1b2b](https://github.com/MMFoundation/WallpaperMachine/commit/36e1b2b413d3dd1ce0c42fed7119fe0f93118911))
+- 使用电池时，壁纸可在你使用其他 App 时暂停，菜单栏新增的使用电池时子菜单可直接更改相关选项 ([4654af5](https://github.com/MMFoundation/WallpaperMachine/commit/4654af5f9f3701c6979af58dca15f98439e90b51))
+- FFmpeg 常输出的 hev1 标记 HEVC 格式 MP4 和 MOV 视频壁纸现可播放，无需重新编码，也不会改动原文件 ([36e1b2b](https://github.com/MMFoundation/WallpaperMachine/commit/36e1b2b413d3dd1ce0c42fed7119fe0f93118911))
+- 壁纸库搜索现在也能查找作者、描述、粘贴的创意工坊链接和合集名称，且不区分大小写和重音符号 ([36e1b2b](https://github.com/MMFoundation/WallpaperMachine/commit/36e1b2b413d3dd1ce0c42fed7119fe0f93118911))
+- 壁纸库位于外置磁盘时，推出磁盘会先停止壁纸以便顺利推出，重新连接后自动恢复播放 ([36e1b2b](https://github.com/MMFoundation/WallpaperMachine/commit/36e1b2b413d3dd1ce0c42fed7119fe0f93118911))
+- 在 Steam 创意工坊用中文、日文或韩文搜索时，会在本机翻译成英文再搜索，也可改为按原文搜索 ([36e1b2b](https://github.com/MMFoundation/WallpaperMachine/commit/36e1b2b413d3dd1ce0c42fed7119fe0f93118911))
+- 定时轮换的播放列表新增可选的等待视频播完设置，默认关闭，视频壁纸不会在中途被切换 ([36e1b2b](https://github.com/MMFoundation/WallpaperMachine/commit/36e1b2b413d3dd1ce0c42fed7119fe0f93118911))
+- 新增最近使用排序方式，最近在显示器上显示过的壁纸排在最前 ([36e1b2b](https://github.com/MMFoundation/WallpaperMachine/commit/36e1b2b413d3dd1ce0c42fed7119fe0f93118911))
+- 可从菜单栏菜单或设置中隐藏桌面图标，让它们不再遮挡壁纸 ([36e1b2b](https://github.com/MMFoundation/WallpaperMachine/commit/36e1b2b413d3dd1ce0c42fed7119fe0f93118911))
+- 新增默认关闭的隐藏刘海选项，在带摄像头刘海的显示器上将菜单栏变黑，让刘海融入其中 ([36e1b2b](https://github.com/MMFoundation/WallpaperMachine/commit/36e1b2b413d3dd1ce0c42fed7119fe0f93118911))
+
+#### 改进
+
+- 被遮挡或位于全屏 App 后方的显示器现在会在后台按计划切换壁纸，重新显示时新壁纸已就绪 ([ad9bd5c](https://github.com/MMFoundation/WallpaperMachine/commit/ad9bd5c663dde8e7d5beae0a2da3b727217bed6b))
+- 混合 3D 模型与平面图层或按自定顺序绘制图层的场景，每帧所需的 GPU 工作量大幅减少 ([4654af5](https://github.com/MMFoundation/WallpaperMachine/commit/4654af5f9f3701c6979af58dca15f98439e90b51))
+
+#### 问题修复
+
+- 音频响应壁纸不再在睡眠唤醒或系统音频异常后停止响应，并会自动恢复 ([36e1b2b](https://github.com/MMFoundation/WallpaperMachine/commit/36e1b2b413d3dd1ce0c42fed7119fe0f93118911))
+- 音频示波器效果现在会正确绘制波形，不再显示为暗红色 (closes [#161](https://github.com/MMFoundation/WallpaperMachine/issues/161)) ([495cea8](https://github.com/MMFoundation/WallpaperMachine/commit/495cea8020286edc5850ad9d678707928045ccc8))
+- 全部静音与单个壁纸的静音开关不再互相矛盾，两者都会显示对方的状态 ([7e59679](https://github.com/MMFoundation/WallpaperMachine/commit/7e59679716435761149fa55d82863dd65addc7d0))
+
+### 한국어
+
+이번 업데이트는 메뉴 막대에서 더 많은 것을 제어하게 하고, 자리를 비우거나 배터리를 쓰거나 보관함 드라이브를 추출할 때 배경화면을 멈추는 방법을 더했습니다
+
+#### 새로운 기능
+
+- 메뉴 막대 아이콘을 클릭하면 지금 재생 중 패널이 열려 재생 제어와 음량 조절, 즐겨찾기 및 최근 배경화면으로의 빠른 전환을 제공합니다 ([36e1b2b](https://github.com/MMFoundation/WallpaperMachine/commit/36e1b2b413d3dd1ce0c42fed7119fe0f93118911))
+- 키보드, 마우스, 트랙패드 입력이 정해진 시간 동안 없으면 배경화면을 일시 정지하거나 중지하고, 다시 입력하면 재개하도록 설정할 수 있습니다 ([36e1b2b](https://github.com/MMFoundation/WallpaperMachine/commit/36e1b2b413d3dd1ce0c42fed7119fe0f93118911))
+- 배터리 사용 중 다른 앱으로 작업할 때 배경화면을 일시 정지할 수 있으며, 메뉴 막대의 새 배터리 사용 시 하위 메뉴에서 바로 설정을 바꿀 수 있습니다 ([4654af5](https://github.com/MMFoundation/WallpaperMachine/commit/4654af5f9f3701c6979af58dca15f98439e90b51))
+- FFmpeg가 흔히 만드는 hev1 태그 HEVC 형식의 MP4 및 MOV 동영상 배경화면을 이제 재인코딩이나 원본 변경 없이 재생합니다 ([36e1b2b](https://github.com/MMFoundation/WallpaperMachine/commit/36e1b2b413d3dd1ce0c42fed7119fe0f93118911))
+- 보관함 검색에서 이제 제작자, 설명, 붙여 넣은 창작마당 링크, 컬렉션 이름도 찾으며 대소문자와 악센트를 구분하지 않습니다 ([36e1b2b](https://github.com/MMFoundation/WallpaperMachine/commit/36e1b2b413d3dd1ce0c42fed7119fe0f93118911))
+- 보관함이 외장 드라이브에 있으면 드라이브를 추출할 때 배경화면이 중지되어 추출할 수 있고, 다시 연결하면 재생이 이어집니다 ([36e1b2b](https://github.com/MMFoundation/WallpaperMachine/commit/36e1b2b413d3dd1ce0c42fed7119fe0f93118911))
+- Steam 창작마당에서 중국어, 일본어, 한국어로 검색하면 Mac에서 영어로 번역해 검색하며, 입력한 그대로 검색할 수도 있습니다 ([36e1b2b](https://github.com/MMFoundation/WallpaperMachine/commit/36e1b2b413d3dd1ce0c42fed7119fe0f93118911))
+- 타이머로 순환하는 재생 목록에 선택 사항인 동영상 끝까지 기다리기 설정이 추가되어 기본적으로 꺼짐 상태이며, 동영상 배경화면이 중간에 끊기지 않습니다 ([36e1b2b](https://github.com/MMFoundation/WallpaperMachine/commit/36e1b2b413d3dd1ce0c42fed7119fe0f93118911))
+- 새 최근 사용 정렬은 디스플레이에 가장 최근 표시된 배경화면을 맨 앞에 보여 줍니다 ([36e1b2b](https://github.com/MMFoundation/WallpaperMachine/commit/36e1b2b413d3dd1ce0c42fed7119fe0f93118911))
+- 메뉴 막대 메뉴나 설정에서 데스크탑 아이콘을 숨겨 배경화면을 가리지 않게 할 수 있습니다 ([36e1b2b](https://github.com/MMFoundation/WallpaperMachine/commit/36e1b2b413d3dd1ce0c42fed7119fe0f93118911))
+- 기본적으로 꺼짐 상태인 노치 숨기기 옵션은 카메라 노치가 있는 디스플레이에서 메뉴 막대를 검게 만들어 노치를 감춥니다 ([36e1b2b](https://github.com/MMFoundation/WallpaperMachine/commit/36e1b2b413d3dd1ce0c42fed7119fe0f93118911))
+
+#### 개선 사항
+
+- 가려졌거나 전체 화면 앱 뒤에 있는 디스플레이도 보이지 않는 동안 일정대로 배경화면을 바꿔, 다시 보일 때 새 배경화면이 준비되어 있습니다 ([ad9bd5c](https://github.com/MMFoundation/WallpaperMachine/commit/ad9bd5c663dde8e7d5beae0a2da3b727217bed6b))
+- 3D 모델과 평면 레이어를 섞거나 레이어를 자체 순서로 그리는 장면은 이제 프레임당 GPU 작업이 크게 줄었습니다 ([4654af5](https://github.com/MMFoundation/WallpaperMachine/commit/4654af5f9f3701c6979af58dca15f98439e90b51))
+
+#### 버그 수정
+
+- 오디오 반응형 배경화면이 잠자기나 시스템 오디오 문제 이후 멈추던 현상이 사라지고 스스로 복구됩니다 ([36e1b2b](https://github.com/MMFoundation/WallpaperMachine/commit/36e1b2b413d3dd1ce0c42fed7119fe0f93118911))
+- 오디오 오실로스코프 효과가 짙은 빨간색 대신 파형을 제대로 그립니다 (closes [#161](https://github.com/MMFoundation/WallpaperMachine/issues/161)) ([495cea8](https://github.com/MMFoundation/WallpaperMachine/commit/495cea8020286edc5850ad9d678707928045ccc8))
+- 모두 음소거와 개별 배경화면 음소거 스위치가 더 이상 서로 어긋나지 않고 각각 상대의 상태를 보여 줍니다 ([7e59679](https://github.com/MMFoundation/WallpaperMachine/commit/7e59679716435761149fa55d82863dd65addc7d0))
+
 ## [1.9.1](https://github.com/MMFoundation/WallpaperMachine/compare/v1.8.2...v1.9.1) (2026-11-04)
 
 ### English
