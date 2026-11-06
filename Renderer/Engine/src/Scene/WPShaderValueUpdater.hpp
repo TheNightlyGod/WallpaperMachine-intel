@@ -123,9 +123,14 @@ struct WPCameraParallax {
 class WPShaderValueUpdater : public IShaderValueUpdater {
 public:
     using WallClock = std::function<std::chrono::system_clock::time_point()>;
-    explicit WPShaderValueUpdater(Scene* scene, WallClock clock = std::chrono::system_clock::now)
-        : m_scene(scene), m_wall_clock(std::move(clock)) {}
-    virtual ~WPShaderValueUpdater() {}
+    explicit WPShaderValueUpdater(Scene* scene, WallClock clock = std::chrono::system_clock::now);
+    ~WPShaderValueUpdater() override;
+
+    void BeginDraw() override;
+    void EndDraw() override;
+#ifdef WESCENE_BUILD_TESTS
+    std::array<uint64_t, 2> LightPackingCountsForTests() const;
+#endif
 
     void FrameBegin() override;
     void UpdateAttachmentsAfterPose() override;
@@ -234,6 +239,12 @@ private:
                              const WPShaderValueData* data) const;
     void UpdateSprites(SceneNode* node, sprite_map_t& sprites, const UpdateUniformOp& write);
     std::vector<PuppetAttachmentGroup> m_puppetAttachments;
+
+    struct LightPacking;
+    LightPacking& PackedLights(bool modern) const;
+    /// One retained set of arrays, bounded by this scene's compiled light budgets.
+    mutable std::unique_ptr<LightPacking> m_lightPacking;
+    bool                 m_drawing { false };
 
     Scene*               m_scene;
     WallClock            m_wall_clock;

@@ -20,6 +20,7 @@
 
 #include <array>
 #include <cmath>
+#include <cstring>
 #include <functional>
 #include <limits>
 #include <map>
@@ -99,6 +100,118 @@ struct Stage {
         return out;
     }
 };
+
+// Light arrays are shared by draws only after simulation, for the duration of one backend draw.
+struct LitStage : Stage {
+    explicit LitStage() {
+        scene.light_config.point = 1;
+        scene.light_config.spot = 1;
+        scene.light_config.tube = 1;
+        scene.light_config.directional = 1;
+        for (const auto type : { SceneLightType::Legacy, SceneLightType::Point,
+                                 SceneLightType::Point, SceneLightType::Spot,
+                                 SceneLightType::Tube, SceneLightType::Directional }) {
+            auto light = std::make_unique<SceneLight>(type, Vector3f(1.0f, 0.5f, 0.25f), 10.0f, 2.0f);
+            auto place = std::make_shared<SceneNode>();
+            place->SetTranslate(Vector3f(0.0f, 0.0f, static_cast<float>(scene.lights.size()) * 10.0f));
+            light->setNode(place);
+            scene.sceneGraph->AppendChild(place);
+            scene.lights.push_back(std::move(light));
+        }
+        for (uint32_t slot = 0; slot < 2; ++slot)
+            updater.InitUniforms(node.get(), slot, Declares({
+                "g_LightsPosition", "g_LightsColorPremultiplied", "g_LightsColorRadius",
+                "g_LPoint_Origin", "g_LSpot_Origin", "g_LTube_OriginA", "g_LDirectional_Direction" }));
+    }
+};
+
+void ExpectSameLightBytes(const Captured& actual, const Captured& expected) {
+    ASSERT_EQ(actual.size(), expected.size());
+    for (const auto& [name, bytes] : expected) {
+        const auto found = actual.find(name);
+        ASSERT_NE(found, actual.end()) << name;
+        ASSERT_EQ(found->second.size(), bytes.size()) << name;
+        EXPECT_EQ(std::memcmp(found->second.data(), bytes.data(), bytes.size() * sizeof(float)), 0)
+            << name;
+    }
+}
+
+TEST(ShaderUpdaterLights, OneDrawPacksEachLightFamilyOnceForManyPassesAndReuseKeys) {
+    LitStage f;
+    const auto expected = f.Update(0);
+    const auto expected_hash = f.updater.LightStateHash(f.node.get(), 0);
+    const auto uncached_before = f.updater.LightPackingCountsForTests();
+    for (unsigned pass = 0; pass < 20; ++pass) {
+        ExpectSameLightBytes(f.Update(pass % 2), expected);
+        EXPECT_EQ(f.updater.LightStateHash(f.node.get(), pass % 2), expected_hash);
+    }
+    const auto before = f.updater.LightPackingCountsForTests();
+    EXPECT_EQ(before[0] - uncached_before[0], 40u);
+    EXPECT_EQ(before[1] - uncached_before[1], 40u);
+    f.updater.BeginDraw();
+    for (unsigned pass = 0; pass < 20; ++pass) {
+        ExpectSameLightBytes(f.Update(pass % 2), expected);
+        EXPECT_EQ(f.updater.LightStateHash(f.node.get(), pass % 2), expected_hash);
+    }
+    f.updater.EndDraw();
+    const auto after = f.updater.LightPackingCountsForTests();
+    EXPECT_EQ(after[0] - before[0], 1u);
+    EXPECT_EQ(after[1] - before[1], 1u);
+}
+
+TEST(ShaderUpdaterLights, NextDrawSeesLightAndParentChangesAndDirectCallsAlwaysReadLiveState) {
+    LitStage f;
+    f.updater.BeginDraw();
+    const auto old = f.Update(0);
+    const auto old_hash = f.updater.LightStateHash(f.node.get(), 0);
+    f.updater.EndDraw();
+    f.scene.sceneGraph->SetTranslate(Vector3f(8.0f, 3.0f, -100.0f));
+    f.scene.lights[0]->setIntensity(7.0f);
+    f.scene.lights[1]->setColor(Vector3f(0.25f, 0.0f, 0.75f));
+    f.scene.lights[3]->node()->SetVisible(false);
+    const auto expected = f.Update(0);
+    EXPECT_NE(old, expected);
+    const auto expected_hash = f.updater.LightStateHash(f.node.get(), 0);
+    EXPECT_NE(old_hash, expected_hash);
+    f.updater.BeginDraw();
+    ExpectSameLightBytes(f.Update(1), expected);
+    EXPECT_EQ(f.updater.LightStateHash(f.node.get(), 1), expected_hash);
+    f.updater.EndDraw();
+    f.scene.lights[2]->setIntensity(0.125f);
+    EXPECT_NE(f.Update(1), expected) << "without a draw scope, reads must not retain old light values";
+}
+
+TEST(ShaderUpdaterLights, ReflectionCameraKeepsItsOwnLightOrderingInsideOneDraw) {
+    LitStage f;
+    SceneCamera reflected(1920, 1080, 0.01f, 1000.0f);
+    auto reflected_node = std::make_shared<SceneNode>();
+    reflected_node->SetRotation(Vector3f(0.0f, static_cast<float>(std::acos(-1.0)), 0.0f));
+    reflected.AttatchNode(reflected_node);
+    const auto ordinary = f.Update(0);
+    f.scene.activeCamera = &reflected;
+    const auto reflection = f.Update(0);
+    ASSERT_NE(ordinary.at("g_LPoint_Origin"), reflection.at("g_LPoint_Origin"));
+    const auto reflection_hash = f.updater.LightStateHash(f.node.get(), 0);
+    f.updater.BeginDraw();
+    ExpectSameLightBytes(f.Update(0), reflection);
+    EXPECT_EQ(f.updater.LightStateHash(f.node.get(), 0), reflection_hash);
+    f.scene.activeCamera = f.screen.get();
+    ExpectSameLightBytes(f.Update(1), ordinary);
+    f.scene.activeCamera = &reflected;
+    ExpectSameLightBytes(f.Update(1), reflection);
+    f.updater.EndDraw();
+    f.scene.activeCamera = f.screen.get();
+}
+
+TEST(ShaderUpdaterLights, DrawsWithoutLightingDoNoLightPacking) {
+    LitStage f;
+    f.updater.InitUniforms(f.node.get(), 0, Declares({kTime}));
+    f.updater.BeginDraw();
+    f.Update(0);
+    EXPECT_EQ(f.updater.LightStateHash(f.node.get(), 0), 0u);
+    f.updater.EndDraw();
+    EXPECT_EQ(f.updater.LightPackingCountsForTests(), (std::array<uint64_t, 2>{0, 0}));
+}
 
 // ---- texture animation -------------------------------------------------------------------------
 

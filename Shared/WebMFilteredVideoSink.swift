@@ -16,6 +16,7 @@ final class WebMFilteredVideoSink: WebMSampleSink, @unchecked Sendable {
   private var sessionFormat: CMFormatDescription?
   private var pool: CVPixelBufferPool?
   private var poolSize = CGSize.zero
+  private var outputFormat: CMVideoFormatDescription?
   private let outputColorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
   private(set) var hasFailed = false
 
@@ -137,9 +138,14 @@ final class WebMFilteredVideoSink: WebMSampleSink, @unchecked Sendable {
     CVBufferSetAttachment(output, kCVImageBufferTransferFunctionKey, kCVImageBufferTransferFunction_sRGB, .shouldPropagate)
     context.render(try pipeline.apply(to: CIImage(cvImageBuffer: image)), to: output,
       bounds: CGRect(origin: .zero, size: size), colorSpace: outputColorSpace)
-    var format: CMVideoFormatDescription?
-    try check(CMVideoFormatDescriptionCreateForImageBuffer(allocator: nil, imageBuffer: output, formatDescriptionOut: &format))
-    guard let format else { throw NSError(domain: NSOSStatusErrorDomain, code: Int(kCVReturnInvalidPixelFormat)) }
+    // The pool normally produces the same format on every frame. Keep one description,
+    // but check the actual buffer's layout and colour attachments before reusing it.
+    if outputFormat.map({ CMVideoFormatDescriptionMatchesImageBuffer($0, imageBuffer: output) }) != true {
+      var format: CMVideoFormatDescription?
+      try check(CMVideoFormatDescriptionCreateForImageBuffer(allocator: nil, imageBuffer: output, formatDescriptionOut: &format))
+      outputFormat = format
+    }
+    guard let format = outputFormat else { throw NSError(domain: NSOSStatusErrorDomain, code: Int(kCVReturnInvalidPixelFormat)) }
     var timing = source
     var sample: CMSampleBuffer?
     try check(CMSampleBufferCreateReadyWithImageBuffer(

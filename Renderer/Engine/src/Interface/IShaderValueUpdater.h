@@ -60,6 +60,11 @@ public:
     IShaderValueUpdater()          = default;
     virtual ~IShaderValueUpdater() = default;
 
+    /// Brackets a backend draw after simulation and light updates. Scene light properties
+    /// stay fixed until EndDraw; per-pass camera overrides may still change. Direct uniform
+    /// calls outside this scope always read live state.
+    virtual void BeginDraw() {}
+    virtual void EndDraw() {}
     virtual void FrameBegin()                                                          = 0;
     /// Publishes attachment transforms after the runtime has evaluated poses in
     /// their current layer world. Updaters without puppet bindings do no work.

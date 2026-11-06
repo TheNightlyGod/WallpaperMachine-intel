@@ -31,21 +31,24 @@ final class WebMFilteredVideoSinkTests: XCTestCase {
     }
   }
 
-  private func whiteSample(gray: UInt8 = 255) throws -> CMSampleBuffer {
+  private func whiteSample(
+    gray: UInt8 = 255, width: Int = 4, height: Int = 4,
+    time: CMTime = CMTime(value: 7, timescale: 3)
+  ) throws -> CMSampleBuffer {
     var pixel: CVPixelBuffer?
-    XCTAssertEqual(CVPixelBufferCreate(nil, 4, 4, kCVPixelFormatType_32BGRA,
+    XCTAssertEqual(CVPixelBufferCreate(nil, width, height, kCVPixelFormatType_32BGRA,
       [kCVPixelBufferIOSurfacePropertiesKey as String: [:]] as CFDictionary, &pixel), kCVReturnSuccess)
     let image = try XCTUnwrap(pixel)
     CVPixelBufferLockBaseAddress(image, [])
     let bytes = try XCTUnwrap(CVPixelBufferGetBaseAddress(image)).assumingMemoryBound(to: UInt8.self)
     memset(bytes, Int32(gray), CVPixelBufferGetDataSize(image))
-    for y in 0..<4 { for x in 0..<4 { bytes[y * CVPixelBufferGetBytesPerRow(image) + x * 4 + 3] = 255 } }
+    for y in 0..<height { for x in 0..<width { bytes[y * CVPixelBufferGetBytesPerRow(image) + x * 4 + 3] = 255 } }
     CVPixelBufferUnlockBaseAddress(image, [])
     CVBufferSetAttachment(image, kCVImageBufferCGColorSpaceKey,
       try XCTUnwrap(CGColorSpace(name: CGColorSpace.sRGB)), .shouldPropagate)
     var format: CMVideoFormatDescription?
     XCTAssertEqual(CMVideoFormatDescriptionCreateForImageBuffer(allocator: nil, imageBuffer: image, formatDescriptionOut: &format), noErr)
-    var timing = CMSampleTimingInfo(duration: CMTime(value: 1, timescale: 30), presentationTimeStamp: CMTime(value: 7, timescale: 3), decodeTimeStamp: .invalid)
+    var timing = CMSampleTimingInfo(duration: CMTime(value: 1, timescale: 30), presentationTimeStamp: time, decodeTimeStamp: .invalid)
     var sample: CMSampleBuffer?
     XCTAssertEqual(CMSampleBufferCreateReadyWithImageBuffer(allocator: nil, imageBuffer: image,
       formatDescription: try XCTUnwrap(format), sampleTiming: &timing, sampleBufferOut: &sample), noErr)
@@ -84,6 +87,39 @@ final class WebMFilteredVideoSinkTests: XCTestCase {
     let pixels = try XCTUnwrap(CVPixelBufferGetBaseAddress(image)).assumingMemoryBound(to: UInt8.self)
     // ccsimple scales encoded grey by (40/50)^2: 128 * 0.64 = 81.92.
     for channel in 0..<3 { XCTAssertEqual(Double(pixels[channel]), 82, accuracy: 1) }
+  }
+
+  func testConsecutiveFilteredFramesKeepTheirPixelsTimingAndMatchingFormatAcrossResizes() throws {
+    let pipeline = VideoColorPipeline()
+    var options = WallpaperEngineOptions.identity
+    options.colorEnabled = true
+    options.brightness = 40
+    pipeline.update(.init(options: options))
+    let output = FilteredVideoOutput()
+    let sink = WebMFilteredVideoSink(output: output, pipeline: pipeline)
+    let frames: [(width: Int, height: Int, gray: UInt8)] = [(4, 4, 64), (4, 4, 128), (6, 3, 192), (4, 4, 255)]
+    for (index, frame) in frames.enumerated() {
+      let source = try whiteSample(
+        gray: frame.gray, width: frame.width, height: frame.height, time: CMTime(value: Int64(index), timescale: 30))
+      sink.accept(source)
+      XCTAssertEqual(output.buffers.count, index + 1)
+      let sample = try XCTUnwrap(output.buffers.last)
+      let image = try XCTUnwrap(CMSampleBufferGetImageBuffer(sample))
+      let format = try XCTUnwrap(CMSampleBufferGetFormatDescription(sample))
+      XCTAssertTrue(CMVideoFormatDescriptionMatchesImageBuffer(format, imageBuffer: image))
+      XCTAssertEqual(CMVideoFormatDescriptionGetDimensions(format).width, Int32(frame.width))
+      XCTAssertEqual(CMVideoFormatDescriptionGetDimensions(format).height, Int32(frame.height))
+      XCTAssertEqual(CMSampleBufferGetPresentationTimeStamp(sample), CMSampleBufferGetPresentationTimeStamp(source))
+      XCTAssertEqual(CMSampleBufferGetDuration(sample), CMSampleBufferGetDuration(source))
+      CVPixelBufferLockBaseAddress(image, .readOnly)
+      defer { CVPixelBufferUnlockBaseAddress(image, .readOnly) }
+      let pixels = try XCTUnwrap(CVPixelBufferGetBaseAddress(image)).assumingMemoryBound(to: UInt8.self)
+      for channel in 0..<3 { XCTAssertEqual(Double(pixels[channel]), Double(frame.gray) * 0.64, accuracy: 1) }
+      XCTAssertEqual(pixels[3], 255)
+    }
+    let firstFormat = try XCTUnwrap(CMSampleBufferGetFormatDescription(output.buffers[0]))
+    let nextFormat = try XCTUnwrap(CMSampleBufferGetFormatDescription(output.buffers[1]))
+    XCTAssertTrue(firstFormat === nextFormat, "successive same-format frames share one description")
   }
 
   func testFramesMarkedDoNotDisplayAreDecodedWithoutBeingDisplayedOrPassedThrough() throws {

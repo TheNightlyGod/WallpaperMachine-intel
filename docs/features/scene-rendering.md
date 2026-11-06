@@ -561,6 +561,14 @@ A projection-only reader updates its matrices without importing cookie images.
 For a texture consumer, candidate images load
 once during graph preparation, including a cookie-owning light whose public type
 may later switch to spot; selection changes never read files inside a draw.
+After simulation and light updates, the renderer packs each light family lazily for the
+current draw and shares its exact arrays across lit passes and static-reuse checks.
+The retained buffers are bounded by the scene's light budgets; the next draw always
+rebuilds their contents, so animation, scripts, visibility and parent transforms stay
+live. A reflection phase whose camera points another way repacks the newer light
+arrays to preserve their camera-dependent order. Draws with no light readers do no
+packing. This removes repeated light sorting and allocation without changing quality,
+frame cadence or the light budget; battery savings have not been measured.
 A lit pass reuses its last image only while
 the lights it reads are unchanged. A lit or reflective image layer with effects is
 drawn unlit into its card and lit once, by a closing `PRELIGHTING` pass drawn where

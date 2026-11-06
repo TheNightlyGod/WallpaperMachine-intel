@@ -50,7 +50,14 @@ macOS refuses every Apple Event before the Automation prompt can appear. If the
 fallback player exits or neither player reports a readable track, the title, cover,
 playback, timeline and transport target are withdrawn together; late artwork from
 the previous subscription is ignored, and a recovered player is read afresh. The
-fallback asks once a second; `NSAppleScriptNowPlayingRunner` compiles each script (a
+fallback asks once a second while Music or Spotify is running. When neither is
+running it keeps no timer and does not repeatedly enumerate applications. Workspace
+launch/exit notifications refresh the supported-player list immediately, restore the
+same polling cadence on launch, and retire pending queries and covers on exit. Other
+applications' notifications do not trigger player queries. The last consumer leaving
+removes both the timer and the workspace observers; callbacks from that subscription
+cannot restart work after a later subscription begins.
+`NSAppleScriptNowPlayingRunner` compiles each script (a
 player's state query, Music's cover query, a transport command) once on its private
 serial queue and runs the compiled script again, rather than parsing it and loading
 the player's scripting terminology on every question. A script that fails to compile

@@ -89,9 +89,8 @@ void PutVec4(std::vector<float>& array, std::size_t slot, const Vector3d& xyz, f
     array[slot * 4 + 3] = w;
 }
 
-LightingV1Arrays PackLightingV1(const Scene& scene) {
+void PackLightingV1(const Scene& scene, LightingV1Arrays& arrays) {
     const auto&      config = scene.light_config;
-    LightingV1Arrays arrays;
     for (auto* array : { &arrays.point_color, &arrays.point_origin }) array->assign(config.point * 4, 0.0f);
     for (auto* array : { &arrays.spot_color, &arrays.spot_origin, &arrays.spot_direction,
                          &arrays.spot_exponent })
@@ -200,7 +199,6 @@ LightingV1Arrays PackLightingV1(const Scene& scene) {
         case SceneLightType::Legacy: break;
         }
     }
-    return arrays;
 }
 
 /// The legacy four-light packing: positions in `g_LightsPosition`, colours
@@ -320,6 +318,64 @@ uint64_t HashBands(uint64_t hash, std::span<const float> bands) {
 
 } // namespace
 
+struct WPShaderValueUpdater::LightPacking {
+    LightingV1Arrays modern;
+    LegacyLightArrays legacy;
+    Vector3d direction { 0.0, 0.0, -1.0 };
+    bool modern_valid { false };
+    bool legacy_valid { false };
+#ifdef WESCENE_BUILD_TESTS
+    std::array<uint64_t, 2> packs { 0, 0 };
+#endif
+};
+
+WPShaderValueUpdater::WPShaderValueUpdater(Scene* scene, WallClock clock)
+    : m_scene(scene), m_wall_clock(std::move(clock)) {}
+
+WPShaderValueUpdater::~WPShaderValueUpdater() = default;
+
+void WPShaderValueUpdater::BeginDraw() {
+    m_drawing = true;
+    if (m_lightPacking != nullptr) {
+        m_lightPacking->modern_valid = false;
+        m_lightPacking->legacy_valid = false;
+    }
+}
+
+void WPShaderValueUpdater::EndDraw() { m_drawing = false; }
+
+WPShaderValueUpdater::LightPacking& WPShaderValueUpdater::PackedLights(bool modern) const {
+    if (m_lightPacking == nullptr) m_lightPacking = std::make_unique<LightPacking>();
+    auto& packed = *m_lightPacking;
+    if (modern) {
+        // Reflection draws temporarily replace the active camera. Its forward axis is the
+        // only camera input to light packing; a different axis must retain its own ordering.
+        const Vector3d direction = m_scene->activeCamera != nullptr
+            ? m_scene->activeCamera->GetDirection() : Vector3d(0.0, 0.0, -1.0);
+        if (!m_drawing || !packed.modern_valid || packed.direction != direction) {
+            PackLightingV1(*m_scene, packed.modern);
+            packed.direction = direction;
+            packed.modern_valid = true;
+#ifdef WESCENE_BUILD_TESTS
+            ++packed.packs[1];
+#endif
+        }
+    } else if (!m_drawing || !packed.legacy_valid) {
+        packed.legacy = PackLegacyLights(*m_scene);
+        packed.legacy_valid = true;
+#ifdef WESCENE_BUILD_TESTS
+        ++packed.packs[0];
+#endif
+    }
+    return packed;
+}
+
+#ifdef WESCENE_BUILD_TESTS
+std::array<uint64_t, 2> WPShaderValueUpdater::LightPackingCountsForTests() const {
+    return m_lightPacking != nullptr ? m_lightPacking->packs : std::array<uint64_t, 2>{0, 0};
+}
+#endif
+
 void WPShaderValueUpdater::FrameBegin() {
     // Every audio read of this frame (passes, particle operators, scripts) sees one spectrum.
     if (m_scene != nullptr && m_scene->runtime != nullptr) m_scene->runtime->BeginAudioFrame();
@@ -369,13 +425,13 @@ uint64_t WPShaderValueUpdater::LightStateHash(SceneNode* node, uint32_t material
 
     uint64_t hash = 0xcbf29ce484222325ULL;
     if (info.has_LP || info.has_LCP || info.has_LCR) {
-        const auto legacy = PackLegacyLights(*m_scene);
+        const auto& legacy = PackedLights(false).legacy;
         hash = HashFloats(hash, legacy.positions.data(), legacy.positions.size());
         hash = HashFloats(hash, legacy.colors.data(), legacy.colors.size());
         hash = HashFloats(hash, legacy.color_radius.data(), legacy.color_radius.size());
     }
     if (info.has_LIGHTS_V1) {
-        const auto lights = PackLightingV1(*m_scene);
+        const auto& lights = PackedLights(true).modern;
         for (const auto* values : {
                  &lights.point_color, &lights.point_origin, &lights.spot_color, &lights.spot_origin,
                  &lights.spot_direction, &lights.spot_exponent, &lights.tube_color,
@@ -1088,7 +1144,7 @@ void WPShaderValueUpdater::UpdateUniforms(SceneNode* node, uint32_t material_slo
 
     // ---- lights
     if (info->has_LP || info->has_LCP || info->has_LCR) {
-        const auto legacy = PackLegacyLights(*m_scene);
+        const auto& legacy = PackedLights(false).legacy;
         write(G_LP, ShaderValue(legacy.positions.data(), legacy.positions.size()));
         write(G_LCP, ShaderValue(legacy.colors.data(), legacy.colors.size()));
         if (info->has_LCR) {
@@ -1096,7 +1152,7 @@ void WPShaderValueUpdater::UpdateUniforms(SceneNode* node, uint32_t material_slo
         }
     }
     if (info->has_LIGHTS_V1) {
-        const auto lights = PackLightingV1(*m_scene);
+        const auto& lights = PackedLights(true).modern;
         const std::array<std::pair<std::string_view, const std::vector<float>*>, 11> arrays { {
             { G_LPOINT_COLOR, &lights.point_color },
             { G_LPOINT_ORIGIN, &lights.point_origin },

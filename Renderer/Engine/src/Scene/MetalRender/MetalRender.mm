@@ -7935,6 +7935,16 @@ bool MetalRender::drawFrame(Scene& scene, bool* presented)
     if (pImpl->cookie_sources_ready) pImpl->refreshLightCookie(scene);
     UpdateSceneVolumetrics(scene);
 
+    // Simulation and all light updates are complete. Share their packed arrays across passes
+    // and reuse-key reads, ending the scope on every early return and exception as well.
+    struct UniformDrawScope {
+        IShaderValueUpdater* updater;
+        explicit UniformDrawScope(IShaderValueUpdater* value) : updater(value) {
+            if (updater != nullptr) updater->BeginDraw();
+        }
+        ~UniformDrawScope() { if (updater != nullptr) updater->EndDraw(); }
+    } uniform_scope(scene.shaderValueUpdater.get());
+
     @autoreleasepool {
         auto& impl = *pImpl;
         impl.refreshDrawOrder(scene);

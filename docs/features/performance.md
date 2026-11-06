@@ -952,6 +952,10 @@ the project has none; Fill and Stretch stay black. Desktop posters and lock-scre
 those same borders. A preview at the identity has no video composition, and edits received while
 an item is being prepared are reconciled before it starts. Filtered WebM samples use the decoder's
 presentation timestamps; invisible reference frames update the decoder without being displayed.
+The filtered feed reuses one output format description while it matches the next pixel buffer's
+layout and colour attachments, replacing it when they change instead of allocating a description
+for every frame. Filtering, pixels and presentation timing are unchanged; power savings have not
+been measured.
 Decode or filter failures are reported through the player's recovery path instead of passing an
 unfiltered packet to the display.
 A mirror display plays its source's clip with a player of its own, and each mirror group is
@@ -1425,6 +1429,13 @@ nothing could see or hear.
 - **Video decode.** The decode thread is woken when a frame is actually ready, not
   on every tick that has nothing new, and per-tick counter bookkeeping runs only
   while renderer counters are on.
+- **Lighting data.** Lit scene passes share packed light arrays within a draw, after
+  simulation has updated the lights. Reflection camera changes repack the arrays whose
+  ordering depends on the camera. The next draw reads fresh light state; shader values
+  and frame cadence stay the same ([scene rendering](scene-rendering.md)).
+- **Media fallback.** When neither Music nor Spotify is running, the AppleScript fallback
+  waits for application launch notifications with no polling timer. A running player is
+  still queried once a second ([media integration](media-integration.md)).
 - **Discover previews.** Animation sources exist only for visible tiles in a visible
   document ([tile thumbnails](workshop-downloads.md#tile-thumbnails)).
 - **Installed previews.** Tiles show small still covers, and one animation exists

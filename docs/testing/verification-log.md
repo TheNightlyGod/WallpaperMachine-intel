@@ -25,6 +25,18 @@ and moves whatever falls past ten verbatim into a monthly file under
 [archive/](archive/); promote anything durable before it goes. Editing an
 entry's recorded result is not allowed.
 
+## 2026-11-06 — Reduce redundant lighting, video and idle media work
+
+- Changed light packing to reuse exact per-draw arrays, preserving reflection camera ordering and rebuilding after simulation; no quality or cadence settings changed.
+- Shader updater regression suite: 32 passed; 20 passes plus 20 reuse-key reads pack each light family 40 times without a draw scope and once within it, with identical bytes and hashes.
+- AppleScript fallback has no timer while Music and Spotify are absent; launch/exit observation preserves immediate recovery and the existing 1 Hz live cadence.
+- Filtered WebM reuses one compatible output format description; regression checks cover timing, pixels and changed dimensions.
+- Targeted native tests: AppleScriptMediaProviderTests, FallbackSystemMediaProviderTests and WebMFilteredVideoSinkTests; 23 passed, none skipped.
+- python3 scripts/test.py passed: Python checks plus 4622 native tests passed, 66 skipped, no failures; one main-thread runtime warning was reported.
+- python3 scripts/check_rust.py --output artifacts/power-efficiency/rust-unsandboxed passed; desktop/media/network opt-ins remained disabled. Initial sandbox run could not access cache and IOSurface services.
+- python3 scripts/check_renderer.py passed: 12 generated pooled/isolated pixel comparisons equal, zero diagnostic errors, reload cycles passed; local asset-dependent checks explicitly skipped.
+- Missing Xcode Metal Toolchain component installed before native verification; no desktop run, Wallpaper Engine comparison or hardware battery/power measurement. No Release build or commit.
+
 ## 2026-11-05 — Nine features adopted from rival Mac wallpaper apps
 
 Menu bar Now Playing panel, inactivity pause, playlist wait for a clip's end, hev1 HEVC from a retagged copy, broader Installed search and Last used, library-drive follow, Workshop search translation, Hide Desktop Icons and the notch strip, and the stalled audio-tap rebuild. Each was reviewed independently, plus once across all nine, and fixed in two verified rounds.
@@ -121,11 +133,3 @@ Branch t3/optimize-power-usage (PR #156) against the v1.8.2 renderer on an M5 Pr
 - Back-to-back GPU ms per draw, off vs on, 3 rounds on battery with other GPU load — indicative only: -7 to -10 % on four scenes, within noise on three
 - Not run: `scripts/power_ab.py` desktop windows and the paired `perf_bench.py cost` energy run (machine on battery at 21–26 % and in use); frame pacing's on-screen gap distribution unverified on a real display
 - SDR display framing measured and not merged (interior not byte-identical); Wallpaper Engine reference frames captured for 3784370784, 3796026374, 3626305963, 3808922316
-
-## 2026-11-03 — Web lock screen: silence for audio listeners, wallpaper switches no longer count as renderer exits (issue 155)
-
-- Cause 1: the lock-screen page never called the audio listener; 音域回响 starts its idle animation only after the first call, so it held its first frame. ScreenSaverWebSurface now feeds a subscribed, playing page 128 zeros once a second (the desktop's quiet-stretch spacing).
-- Cause 2: applying a wallpaper reloads WallpaperAgent, which ends the old renderer while its exit watch was still armed; four switches in ten minutes restored the system wallpaper (seen with ZZZ at 15:58:05). LockScreenWallpaperService now cancels renderer watches before publishing a new revision.
-- New tests testASubscribedPageHearsSilenceWhilePlayingAndAgainAfterAResume and testSwitchingWallpapersIsNotCountedAsTheRendererFailing fail with the fixes removed and pass with them.
-- python3 scripts/test.py: 4298 passed, 0 failed, 53 skipped. Release build OK.
-- Gap: real lock behaviour not checked by the agent; ZZZ's earlier memory-limit stall is unchanged.
