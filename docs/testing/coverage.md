@@ -1044,6 +1044,11 @@ need an authorized runtime check
   by a reading taken while the desktop (or one display) was covered playing again
   once `WallpaperHosts.reconcile` has the host read the bridge again (that
   `AppDelegate` makes the call after each delivery is not run by any test),
+  a covered clip whose first poster read returns no frame updating the real poster
+  coordinator when it becomes ready (both after and during that empty read), without
+  a resume or another settle capture; the request's Space context survives that retry,
+  concurrent consumers receive their own contexts and an older answer cannot erase a
+  newer request still waiting for readiness;
   posters from replaced surfaces not published, and the switch hold (see
   [Wallpaper switching](#wallpaper-switching)). `NativeVideoPlaybackFailureTests` — the
   reported failure keeps the codes under the localized message, a clip with

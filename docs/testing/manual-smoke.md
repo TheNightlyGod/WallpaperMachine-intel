@@ -585,8 +585,11 @@ counters (`nativeVideoPlaybackStalled`, `nativeVideoPlaybackKick`,
 
 Two effects are open questions for window-based video wallpapers on recent macOS builds:
 the translucent menu bar keeping the tint of the first frame instead of following the
-picture, and a new picture showing only after another app is clicked. Neither has been
-seen in this app, and nothing in the code or the tests can show either. The native window
+picture, and a new picture showing only after another app is clicked. Issue
+[#169](https://github.com/MMFoundation/WallpaperMachine/issues/169) reports the menu bar
+keeping the old wallpaper after a playlist rotates until the desktop is revealed.
+Native tests cover an empty poster read while a clip prepares, retried on readiness even
+while covered; they do not establish how macOS samples the menu bar. The native window
 is opaque (`isOpaque = true` in `NativeVideoWallpaperWindow`) and nothing re-commits it
 after a switch.
 
@@ -597,6 +600,9 @@ after a switch.
       or an entry under **Recently used**) without touching any other app: the new
       picture appears at once, not only after another app or window is clicked. Repeat
       from the panel's Apply, and for clip to clip, clip to scene and scene to clip.
+- [ ] Leave another app covering the desktop while a playlist rotates between visibly
+      different clips, including one that takes time to load. The menu bar and Dock
+      pick up the new wallpaper without revealing the desktop or clicking another app.
 - [ ] Press **Next Wallpaper** several times in a row over native clips: only the last
       one appears on the desktop, with no flash of the ones in between. The log says
       `superseded while its metadata was read` for any that were overtaken.

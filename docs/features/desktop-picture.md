@@ -214,6 +214,12 @@ Each poster is a second decode of a few frames and is counted as
   not at the next snapshot. A pass that leaves the windows as they were asks for
   nothing, does not look at the desktops and keeps a settled poster, unless the last
   look could not put a picture back: then it tries again.
+  If the clip cannot produce a frame yet, the host keeps its latest poster request,
+  including the Space context, and retries when the clip becomes ready, even while
+  another app covers the display. Readiness arriving during an empty read is consumed
+  after that read finishes. A successful read needs no readiness retry; closing or
+  parking the surface drops its pending demand. This adds no timer and never resumes
+  a paused or covered clip.
 - **A wallpaper comes back with the same look.** A playlist turning back to a
   wallpaper, a switch back, or another display's change retaking every poster would
   take it three times again, each a readback, an encode and a new file macOS keeps

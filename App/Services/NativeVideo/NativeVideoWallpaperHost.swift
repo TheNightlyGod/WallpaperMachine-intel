@@ -101,6 +101,20 @@ final class NativeVideoWallpaperHost {
     private var reconcileRequested = false
     private var stopped = false
     private var posterObserver: NSObjectProtocol?
+    /// A clip can be asked before it has a frame. Keep that demand until it answers or its
+    /// surface leaves, since settle captures skip a covered display.
+    private final class PosterRequest {
+        let layer: CALayer
+        let context: String?
+        var reading = false
+        var readyDuringRead = false
+
+        init(layer: CALayer, context: String?) {
+            self.layer = layer
+            self.context = context
+        }
+    }
+    private var posterRequests: [UInt32: PosterRequest] = [:]
     /// How long after a wake the playing surfaces are asked to check their
     /// pipelines. The system may need a moment after the displays come on to
     /// give the video decoder back, and a check made at once could find it still
@@ -756,6 +770,10 @@ final class NativeVideoWallpaperHost {
             // The clip has a picture: the held one, if this window carries it, goes. A window
             // that carries none does not mind.
             self.switchHold?.contentReady(displayID: displayID)
+            if let request = self.posterRequests[displayID] {
+                if request.reading { request.readyDuringRead = true }
+                else { self.readPoster(displayID: displayID, surface: surface, request: request) }
+            }
         }
         surface.onHealthEvent = { [weak self, weak surface] event in
             guard let self, let surface, self.surfaces[displayID] === surface else { return }
@@ -1221,6 +1239,7 @@ final class NativeVideoWallpaperHost {
         guard let descriptor = descriptors[displayID], surface.isReadyForDisplay,
               keepPlan[displayID]?.contains(descriptor.wallpaperId) == true else { return false }
         let load = logLoads[displayID]
+        posterRequests.removeValue(forKey: displayID)
         cancelFirstFrameWatch(displayID)
         clipLeft(displayID, surface: surface)
         recordState(descriptor, phase: .closed)
@@ -1276,6 +1295,7 @@ final class NativeVideoWallpaperHost {
     }
 
     private func close(displayID: UInt32, surface: NativeVideoSurface) {
+        posterRequests.removeValue(forKey: displayID)
         cancelFirstFrameWatch(displayID)
         clipLeft(displayID, surface: surface)
         if let wallpaper = descriptors[displayID] { recordState(wallpaper, phase: .closed) }
@@ -1367,22 +1387,38 @@ final class NativeVideoWallpaperHost {
         warnedUnseen.removeAll()
     }
 
-    /// Answers a desktop poster request from the player that is already
-    /// running. A second player would decode the same clip twice.
+    /// Answers a desktop poster request from the player that is already running. An empty
+    /// answer while the clip prepares waits for readiness, without resuming it or polling.
     private func answerPosterRequest(_ notification: Notification) {
-        guard let layer = notification.object as? CALayer,
+        guard !stopped, let layer = notification.object as? CALayer,
             let (displayID, surface) = surfaces.first(where: { $0.value.posterLayer === layer })
         else { return }
-        let context = DesktopPosterNotification.context(in: notification.userInfo)
+        let request = PosterRequest(layer: layer, context: DesktopPosterNotification.context(in: notification.userInfo))
+        posterRequests[displayID] = request
+        readPoster(displayID: displayID, surface: surface, request: request)
+    }
+
+    private func readPoster(displayID: UInt32, surface: NativeVideoSurface, request: PosterRequest) {
+        request.reading = true
+        request.readyDuringRead = false
         Task { @MainActor [weak self] in
             let image = await surface.posterImage()
-            guard let self, !self.stopped, let image else { return }
-            // The surface that answered must still be this display's surface.
-            // A poster produced by a wallpaper that has since been replaced is
-            // a frame of the wrong clip, and publishing it would show it.
-            guard self.surfaces[displayID] === surface, surface.posterLayer === layer,
-                  let frame = DesktopPosterFrame.rgba(image) else { return }
-            frame.publish(for: layer, to: self.frameCenter, context: context)
+            // A poster from a wallpaper that has since been replaced must never be published.
+            guard let self, !self.stopped, self.surfaces[displayID] === surface,
+                  surface.posterLayer === request.layer else { return }
+            request.reading = false
+            guard let image, let frame = DesktopPosterFrame.rgba(image) else {
+                // Readiness can arrive before the empty read finishes. Consume it once here;
+                // otherwise it would be lost, or start a second decode alongside this one.
+                if self.posterRequests[displayID] === request, request.readyDuringRead {
+                    self.readPoster(displayID: displayID, surface: surface, request: request)
+                }
+                return
+            }
+            // Other consumers (such as the switch hold) can ask for the same surface. Answer
+            // each with its own context; an older answer must not clear a newer pending demand.
+            if self.posterRequests[displayID] === request { self.posterRequests.removeValue(forKey: displayID) }
+            frame.publish(for: request.layer, to: self.frameCenter, context: request.context)
         }
     }
 

@@ -114,6 +114,7 @@ final class NativeVideoWallpaperHostTests: XCTestCase {
         /// replace the surface while a request is still in flight.
         var poster: CGImage?
         var posterDelay: Duration = .zero
+        var posterRead: (@MainActor () async -> CGImage?)?
         /// Delivered synchronously the moment a callback is installed, which
         /// is what the real player does when it was already holding a failure.
         var failureOnInstall: String?
@@ -192,6 +193,7 @@ final class NativeVideoWallpaperHostTests: XCTestCase {
         func setPresentationSuspended(_ suspended: Bool) { self.suspended = suspended }
         var isPlaying: Bool { !isStopped && !userPaused && !suspended }
         func posterImage() async -> CGImage? {
+            if let posterRead { return await posterRead() }
             if posterDelay != .zero { try? await Task.sleep(for: posterDelay) }
             return poster
         }
@@ -2762,6 +2764,137 @@ final class NativeVideoWallpaperHostTests: XCTestCase {
         workspace.didWrite = nil
         try sync.stopAndRestore()
         host.shutdown()
+    }
+
+    func testConcurrentPosterConsumersReceiveTheirOwnContexts() async throws {
+        let center = NotificationCenter()
+        let host = makeHost(wallpapers: [wallpaper()], recorder: Recorder(), frameCenter: center)
+        host.start()
+        defer { host.shutdown() }
+        await host.apply([wallpaper()])
+        let surface = try XCTUnwrap(surfacesMade[7])
+        let releaseRead = AsyncGate()
+        openedAtTeardown.append(releaseRead)
+        surface.posterRead = { await releaseRead.wait(); return Self.makeImage() }
+        let answered = expectation(description: "both consumers receive the frame with their own context")
+        answered.expectedFulfillmentCount = 2
+        var contexts: [String] = []
+        let observer = center.addObserver(forName: DesktopPosterNotification.ready, object: surface.posterLayer,
+                                          queue: .main) { note in
+            contexts.append(DesktopPosterNotification.context(in: note.userInfo) ?? "")
+            answered.fulfill()
+        }
+        defer { center.removeObserver(observer) }
+        for context in ["current-space", "switch-hold:next-wallpaper"] {
+            center.post(name: DesktopPosterNotification.request, object: surface.posterLayer,
+                        userInfo: [DesktopPosterNotification.Key.context: context])
+        }
+        await releaseRead.waitUntilWaiting(2)
+        releaseRead.open()
+        await fulfillment(of: [answered], timeout: 2)
+        XCTAssertEqual(Set(contexts), ["current-space", "switch-hold:next-wallpaper"])
+    }
+
+    func testAnOlderPosterAnswerDoesNotForgetANewerEmptyRequest() async throws {
+        let center = NotificationCenter()
+        let host = makeHost(wallpapers: [wallpaper()], recorder: Recorder(), frameCenter: center)
+        host.start()
+        defer { host.shutdown() }
+        await host.apply([wallpaper()])
+        let surface = try XCTUnwrap(surfacesMade[7])
+        let releaseOldRead = AsyncGate()
+        openedAtTeardown.append(releaseOldRead)
+        let emptyRead = expectation(description: "the newer request has no frame yet")
+        var reads = 0
+        surface.posterRead = {
+            reads += 1
+            if reads == 1 { await releaseOldRead.wait() }
+            else if reads == 2 { emptyRead.fulfill(); return nil }
+            return Self.makeImage()
+        }
+        let oldAnswer = expectation(description: "the older consumer receives its frame")
+        let currentAnswer = expectation(description: "readiness still answers the newer request")
+        let observer = center.addObserver(forName: DesktopPosterNotification.ready, object: surface.posterLayer,
+                                          queue: .main) { note in
+            switch DesktopPosterNotification.context(in: note.userInfo) {
+            case "switch-hold:previous": oldAnswer.fulfill()
+            case "current-space": currentAnswer.fulfill()
+            default: XCTFail("a poster lost its request context")
+            }
+        }
+        defer { center.removeObserver(observer) }
+        center.post(name: DesktopPosterNotification.request, object: surface.posterLayer,
+                    userInfo: [DesktopPosterNotification.Key.context: "switch-hold:previous"])
+        await releaseOldRead.waitUntilWaiting()
+        center.post(name: DesktopPosterNotification.request, object: surface.posterLayer,
+                    userInfo: [DesktopPosterNotification.Key.context: "current-space"])
+        await fulfillment(of: [emptyRead], timeout: 2)
+        releaseOldRead.open()
+        await fulfillment(of: [oldAnswer], timeout: 2)
+        surface.isReadyForDisplay = true
+        surface.onReadyForDisplay?()
+        await fulfillment(of: [currentAnswer], timeout: 2)
+        XCTAssertEqual(reads, 3)
+    }
+
+    func testACoveredVideoUpdatesItsPosterWhenItsFirstReadHadNoFrame() async throws {
+        try await checkPosterAfterPreparation(readyDuringRead: false)
+    }
+
+    func testACoveredVideoUpdatesItsPosterWhenItBecomesReadyDuringAnEmptyRead() async throws {
+        try await checkPosterAfterPreparation(readyDuringRead: true)
+    }
+
+    private func checkPosterAfterPreparation(readyDuringRead: Bool) async throws {
+        let center = NotificationCenter()
+        let host = makeHost(wallpapers: [wallpaper()], recorder: Recorder(), frameCenter: center)
+        host.start()
+        defer { host.shutdown() }
+        // A playlist rotates while another app covers the desktop. Settling will not ask again.
+        host.setPresentationSuspended(true, forDisplay: 7)
+        await host.apply([wallpaper()])
+        let surface = try XCTUnwrap(surfacesMade[7])
+        let layer = try XCTUnwrap(surface.posterLayer)
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("preparing-poster-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let target = DesktopPictureTarget(display: "7", space: "test-space")
+        let workspace = PosterWorkspace(target: target, original: root.appendingPathComponent("original.png"))
+        let original = workspace.picture
+        let sync = try DesktopWallpaperSync(folder: root.appendingPathComponent("posters"), workspace: workspace,
+            surfaces: { [DesktopPosterSurface(layer: layer, display: "7")] }, frameCenter: center,
+            scope: { _ in .desktop(id: "test-space", context: "covered-video") },
+            encode: { $0.pixels }, settleDelays: [])
+        sync.canCapture = { _ in false }
+        sync.start()
+        defer { workspace.didWrite = nil; sync.stop() }
+        let firstRead = expectation(description: "the opening clip has no poster yet")
+        let releaseRead = AsyncGate()
+        openedAtTeardown.append(releaseRead)
+        var reads = 0
+        surface.posterRead = {
+            reads += 1
+            if reads == 1 {
+                firstRead.fulfill()
+                if readyDuringRead { await releaseRead.wait() }
+                return nil
+            }
+            return Self.makeImage()
+        }
+        sync.refresh()
+        await fulfillment(of: [firstRead], timeout: 2)
+        XCTAssertEqual(workspace.picture, original)
+
+        let updated = expectation(description: "the ready clip replaces the previous desktop picture while covered")
+        workspace.didWrite = { updated.fulfill() }
+        surface.isReadyForDisplay = true
+        surface.onReadyForDisplay?()
+        releaseRead.open()
+        await fulfillment(of: [updated], timeout: 2)
+
+        let url = try XCTUnwrap(workspace.picture?.url)
+        XCTAssertEqual(try Data(contentsOf: url), try XCTUnwrap(DesktopPosterFrame.rgba(Self.makeImage())).pixels)
+        XCTAssertFalse(surface.isPlaying, "making the poster must not resume a covered wallpaper")
+        XCTAssertEqual(reads, 2, "one readiness event retries the empty read once")
     }
 
     func testScreenGeometryUpdatesWithoutRecreatingThePlayingSurface() async throws {
