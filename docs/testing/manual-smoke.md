@@ -621,6 +621,11 @@ until such a measurement says otherwise.
 Needs two displays that each show their own wallpaper. The layout and the commands are
 unit-tested; how the menu draws and reads on real screens is not.
 
+- [ ] In the menu bar panel, show a wallpaper with a square preview, then mouse-click each
+      display segment above the large cover in both directions: the selected segment, title
+      and cover follow the chosen display. Repeat with a portrait preview and a 16:9 preview.
+      Use actual pointer clicks; an accessibility press alone does not exercise the cover
+      hit-testing regression ([#171](https://github.com/MMFoundation/WallpaperMachine/issues/171)).
 - [ ] Open the menu bar item: there is one submenu per display instead of the flat
       Previous / Next / Recently used, the main display first and the others left to
       right as the screens sit on the desk. Long display names stay readable, and

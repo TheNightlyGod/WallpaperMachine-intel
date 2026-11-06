@@ -95,6 +95,9 @@ private struct StatusPanelNowPlaying: View {
       NowPlayingCover(
         source: panel.wallpaper.flatMap(controller.cover(for:)), width: width,
         height: (width * 9 / 16).rounded(), cornerRadius: 10)
+      // Clipping an aspect-filled image leaves its hit area outside the visible cover.
+      // This cover is decorative, so it must not intercept the display picker above it.
+      .allowsHitTesting(false)
       HStack(alignment: .top, spacing: 8) {
         VStack(alignment: .leading, spacing: 3) {
           Text(verbatim: panel.wallpaper?.title ?? L("Nothing on this display"))

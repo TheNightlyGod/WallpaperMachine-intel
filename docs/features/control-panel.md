@@ -671,6 +671,8 @@ the wallpaper's volume only from opening to closing, and each opening builds it 
 `StatusPanelModel` (`App/Services/Automation/`) decides what it shows and the switcher's draw
 without AppKit; `StatusPanelController` and `StatusPanelView` (`App/Views/ControlPanel/MenuBar/`)
 hold and draw it; `AppDelegate+StatusPanel` routes the click and carries out its commands.
+The large cover ignores pointer hit testing so aspect-filled artwork cropped to 16:9 cannot
+intercept clicks on the display picker above it.
 Tests: `StatusPanelModelTests`, `StatusPanelControllerTests` and `StatusPanelRenderTests`.
 
 ## Deleting wallpapers
