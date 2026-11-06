@@ -135,9 +135,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var terminationSignal: Int32?
     /// Set while the app's own Quit or Exit runs `terminate`, so the quit line can say so.
     var quitChosenFromMenu = false
+    let terminateApplication: @MainActor () -> Void
     private var themeSubscription: AnyCancellable?
     private var iconSubscription: AnyCancellable?
     private var diagnostics: RuntimeDiagnosticsSession?
+
+    init(terminateApplication: @escaping @MainActor () -> Void = { NSApp.terminate(nil) }) {
+        self.terminateApplication = terminateApplication
+        super.init()
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Hosted unit tests need these types but not the desktop lifecycle, so they get no

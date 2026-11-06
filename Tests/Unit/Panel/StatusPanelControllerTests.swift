@@ -170,6 +170,37 @@ final class StatusPanelControllerTests: PanelTestCase {
                    "The control panel opens with the panel's display as its target")
   }
 
+  func testQuitWithoutARendererLetsShutdownRunAfterThePanelCloses() async throws {
+    try await withPanel { _ in
+      final class Shutdown { var finished = false }
+      let shutdown = Shutdown()
+      let terminated = expectation(description: "the quit wait finished")
+      var dismissed = false
+      var teardown: Task<Void, Never>?
+      let app = AppDelegate(terminateApplication: {
+        XCTAssertTrue(dismissed)
+        // AppKit's terminateLater waits in a nested run loop for the asynchronous teardown.
+        // Bound that wait here so a regression fails instead of hanging the test host.
+        teardown = Task { @MainActor in
+          await Task.yield()
+          shutdown.finished = true
+        }
+        let deadline = Date().addingTimeInterval(2)
+        while !shutdown.finished, Date() < deadline {
+          _ = RunLoop.main.run(mode: .default, before: deadline)
+        }
+        XCTAssertTrue(shutdown.finished, "Quit must let main-actor cleanup run while it waits")
+        terminated.fulfill()
+      })
+      XCTAssertNil(app.store, "Quit must work before the renderer is available")
+      let controller = StatusPanelController(source: app, dismiss: { dismissed = true })
+
+      await controller.quit().value
+      await fulfillment(of: [terminated], timeout: 5)
+      await teardown?.value
+    }
+  }
+
   func testAFailureShowsUntilAnActionSucceeds() async throws {
     let source = Source(input())
     let controller = makeController(source)

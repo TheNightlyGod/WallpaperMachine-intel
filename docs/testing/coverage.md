@@ -1471,12 +1471,14 @@ never to `.shared`.
   caption stays with the batch on show, only covers on show are stamped; the Settings choice of
   what a click opens is saved and reset, a favorite saved from the menu bar reaches an open
   control panel, and a sound edit of another wallpaper leaves the inspector's options and drag in
-  place) and `StatusPanelRenderTests` (every control reachable by VoiceOver, the display picker
+  place; the real `AppDelegate` quit route with no renderer closes the panel before termination
+  and lets main-actor cleanup run inside an injected, bounded termination wait) and
+  `StatusPanelRenderTests` (every control reachable by VoiceOver, the display picker
   only with two displays, the width in every language and a height under 820 pt). The pure model
   is `StatusPanelModelTests` (Automation). Not covered: the real status item and popover (click
   routing, the closing click, the first click while the app is inactive, Escape and Tab, VoiceOver's
-  Show Menu action), `AppDelegate+StatusPanel`'s answers over the live stores, and how the panel
-  fits under the menu bar of a real screen; those need a desktop run.
+  Show Menu action), actual process termination, `AppDelegate+StatusPanel`'s answers over the live
+  stores, and how the panel fits under the menu bar of a real screen; those need a desktop run.
 
 Not covered: the Settings section list's selection highlight, the toolbar's glass and the tabs
 on it, popover placement, sheets on a real window, hover,

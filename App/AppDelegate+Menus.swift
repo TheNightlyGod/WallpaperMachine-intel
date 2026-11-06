@@ -492,8 +492,14 @@ extension AppDelegate: NSMenuDelegate, NSMenuItemValidation {
     }
 
     @objc func exitApplication() {
-        quitChosenFromMenu = true
-        defer { quitChosenFromMenu = false }
-        NSApp.terminate(nil)
+        // The menu bar panel calls from a main-actor task. AppKit's terminateLater wait
+        // cannot drain that queue from inside one of its jobs, so shutdown would never run.
+        RunLoop.main.perform { [self] in
+            MainActor.assumeIsolated {
+                quitChosenFromMenu = true
+                defer { quitChosenFromMenu = false }
+                terminateApplication()
+            }
+        }
     }
 }

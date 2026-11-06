@@ -116,7 +116,11 @@ belong to the `AppUpdateCoordinator` it owns (`App/Services/GitHub/`).
 - **Shutdown.** `applicationShouldTerminate` returns `.terminateLater` and hands an ordered
   asynchronous teardown to `QuitSupervisor`: lock-screen and desktop-poster restoration first,
   then the services, import, update, SteamCMD, Workshop and pixiv work, and the renderer bridge
-  last. Every stage has a deadline. Restoration gets 20 seconds, and a failure or a stall
+  last. Menu Quit/Exit requests, including the menu bar panel's power button, enter AppKit from
+  the main run loop: calling `terminate` directly inside the panel's main-actor task would
+  prevent AppKit's nested wait from running the asynchronous cleanup. Quit remains available
+  before the renderer starts or when it fails to start.
+  Every stage has a deadline. Restoration gets 20 seconds, and a failure or a stall
   cancels the quit: the panel comes back, an alert says why, a pending update install is
   called off and the menu shows the error. The other stages share 10 seconds; one that
   outlives its time is named, left behind and the rest still run, and the bridge keeps at
