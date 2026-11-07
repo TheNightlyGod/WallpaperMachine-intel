@@ -74,6 +74,20 @@ provider skips base64 decoding and the `MediaArtwork` lookup for a repeated
 and timeline; failed input is never cached, and the cache is released when the last
 consumer leaves or the stream fails.
 
+A missed track-change notification can otherwise leave the first song displayed
+forever. When a finite playing timeline is more than two seconds past its reported
+end, the provider uses its existing timeline tick to request one complete `get`
+snapshot from the same bundled adapter. Normal playback still uses notifications;
+there is no additional periodic metadata poll. An unchanged, malformed or failed
+snapshot gets at most one retry, at least five seconds later. Repeated stale stream
+messages do not reset that budget. A new item, or a reported timeline restart before
+the end, permits recovery at its next boundary. Paused sessions, unknown durations
+and subscriptions without consumers do no recovery work. New stream messages and
+subscription changes invalidate outstanding snapshots, so an old query cannot
+restore the previous song. The short-lived reader is limited to 8 MiB and three
+seconds; cancellation or timeout terminates and reaps it without disturbing the
+long-lived stream. A successful empty snapshot withdraws the old song and cover.
+
 **The setting starts a source; presenting keeps it running.**
 `WallpaperBridge.systemMediaSceneHandles()` names the applied desktop Scenes that
 have the setting on **and** are actually presenting; the host starts and stops its

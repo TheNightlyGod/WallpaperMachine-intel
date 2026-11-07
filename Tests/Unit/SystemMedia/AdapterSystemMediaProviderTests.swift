@@ -16,6 +16,19 @@ private final class TestMediaStream: SystemMediaStreaming {
     /// Transport commands this stream was asked to carry out, in order.
     private(set) var commands: [Int] = []
     var acceptsCommands = true
+    var snapshotRequests = 0
+    var snapshotData: Data?
+    var holdSnapshot = false
+    var snapshotContinuation: CheckedContinuation<Data?, Never>?
+    var onSnapshot: (() -> Void)?
+    func snapshot() async -> Data? {
+        snapshotRequests += 1
+        onSnapshot?()
+        if holdSnapshot {
+            return await withCheckedContinuation { snapshotContinuation = $0 }
+        }
+        return snapshotData
+    }
     func send(command: Int) async -> Bool {
         commands.append(command)
         return acceptsCommands
@@ -221,6 +234,171 @@ final class AdapterSystemMediaProviderTests: XCTestCase {
         guard case .unavailable = provider.availability else { return XCTFail("exit must report unavailable") }
         XCTAssertEqual(stream.starts, 1)
         provider.removeConsumer()
+    }
+}
+
+@MainActor
+final class SystemMediaRecoveryTests: XCTestCase {
+    private func payload(_ title: String, elapsed: Double = 0, timestamp: Double = 100,
+                         playing: Bool = true, duration: Double = 10) -> [String: Any] {
+        ["title": title, "artist": "Artist", "album": "Album", "contentItemIdentifier": title,
+         "processIdentifier": 123, "playing": playing, "duration": duration,
+         "elapsedTime": elapsed, "timestamp": timestamp, "playbackRate": playing ? 1 : 0]
+    }
+
+    func testMissedTrackChangeRecoversFromSystemWithoutPollingDuringNormalPlayback() async throws {
+        let stream = TestMediaStream()
+        let timer = ManualMediaTimerScheduler()
+        var now = Date(timeIntervalSince1970: 100)
+        let provider = AdapterSystemMediaProvider(stream: stream, scheduler: timer, now: { now })
+        let recovered = expectation(description: "second track delivered without its stream event")
+        var title = ""
+        var position: Double?
+        var covers: [String] = []
+        provider.onThumbnailChanged = { covers.append($0.pngBase64DataURL) }
+        provider.onPropertiesChanged = { value in
+            title = value.title
+            if title == "Second" { recovered.fulfill() }
+        }
+        provider.onTimelineChanged = { position = $0?.position }
+        provider.addConsumer()
+        defer { provider.removeConsumer() }
+        var first = payload("First")
+        first["artworkData"] = try makeSyntheticPNG(width: 2, height: 2) { _, _ in (255, 0, 0) }.base64EncodedString()
+        try stream.send(first)
+        now = Date(timeIntervalSince1970: 109)
+        timer.fireRepeating()
+        await Task.yield()
+        XCTAssertEqual(stream.snapshotRequests, 0)
+        XCTAssertEqual(title, "First")
+        var second = payload("Second", timestamp: 110)
+        second["artworkData"] = try makeSyntheticPNG(width: 2, height: 2) { _, _ in (0, 0, 255) }.base64EncodedString()
+        stream.snapshotData = try JSONSerialization.data(withJSONObject: second)
+        now = Date(timeIntervalSince1970: 113)
+        timer.fireRepeating()
+        await fulfillment(of: [recovered], timeout: 2)
+        XCTAssertEqual(title, "Second")
+        XCTAssertEqual(position, 3)
+        XCTAssertEqual(covers.count, 2)
+        XCTAssertNotEqual(covers.first, covers.last)
+        XCTAssertEqual(stream.snapshotRequests, 1)
+    }
+
+    func testLateRecoveryCannotReplaceNewerStreamMetadataOrReviveStoppedSubscription() async throws {
+        let stream = TestMediaStream()
+        stream.holdSnapshot = true
+        let timer = ManualMediaTimerScheduler()
+        var now = Date(timeIntervalSince1970: 100)
+        let provider = AdapterSystemMediaProvider(stream: stream, scheduler: timer, now: { now })
+        var title = ""
+        provider.onPropertiesChanged = { title = $0.title }
+        provider.addConsumer()
+        try stream.send(payload("First"))
+        let requested = expectation(description: "snapshot held")
+        stream.onSnapshot = { requested.fulfill() }
+        now = Date(timeIntervalSince1970: 113)
+        timer.fireRepeating()
+        await fulfillment(of: [requested], timeout: 2)
+        try stream.send(payload("Third", timestamp: 112))
+        stream.snapshotContinuation?.resume(returning: try JSONSerialization.data(withJSONObject: payload("Second", timestamp: 110)))
+        stream.snapshotContinuation = nil
+        await Task.yield()
+        provider.replayCurrentState()
+        XCTAssertEqual(title, "Third")
+
+        let secondRequest = expectation(description: "next boundary query held")
+        stream.onSnapshot = { secondRequest.fulfill() }
+        now = Date(timeIntervalSince1970: 125)
+        timer.fireRepeating()
+        await fulfillment(of: [secondRequest], timeout: 2)
+        provider.removeConsumer()
+        provider.addConsumer()
+        defer { provider.removeConsumer() }
+        stream.snapshotContinuation?.resume(returning: try JSONSerialization.data(withJSONObject: payload("Old subscription")))
+        stream.snapshotContinuation = nil
+        await Task.yield()
+        provider.replayCurrentState()
+        XCTAssertEqual(title, "")
+        XCTAssertTrue(timer.liveRepeating.isEmpty)
+    }
+
+    func testStaleOrFailedSnapshotHasOnlyOneBoundedRetry() async throws {
+        let stream = TestMediaStream()
+        let timer = ManualMediaTimerScheduler()
+        var now = Date(timeIntervalSince1970: 100)
+        let provider = AdapterSystemMediaProvider(stream: stream, scheduler: timer, now: { now })
+        provider.addConsumer()
+        defer { provider.removeConsumer() }
+        try stream.send(payload("First"))
+        stream.snapshotData = try JSONSerialization.data(withJSONObject: payload("First"))
+        let firstRequest = expectation(description: "first stale snapshot")
+        stream.onSnapshot = { firstRequest.fulfill() }
+        now = Date(timeIntervalSince1970: 113)
+        timer.fireRepeating()
+        await fulfillment(of: [firstRequest], timeout: 2)
+        await Task.yield()
+        now = Date(timeIntervalSince1970: 114)
+        timer.fireRepeating()
+        await Task.yield()
+        XCTAssertEqual(stream.snapshotRequests, 1)
+        let retry = expectation(description: "one recovery retry")
+        stream.onSnapshot = { retry.fulfill() }
+        stream.snapshotData = Data("invalid JSON".utf8)
+        now = Date(timeIntervalSince1970: 119)
+        timer.fireRepeating()
+        await fulfillment(of: [retry], timeout: 2)
+        await Task.yield()
+        for second in 120...140 {
+            now = Date(timeIntervalSince1970: Double(second))
+            try stream.send(payload("First"))
+            timer.fireRepeating()
+            await Task.yield()
+        }
+        XCTAssertEqual(stream.snapshotRequests, 2, "a silent or wedged source must not cause indefinite polling")
+    }
+
+    func testRecoveryWithdrawsMetadataWhenSystemHasNoPlayer() async throws {
+        let stream = TestMediaStream()
+        let timer = ManualMediaTimerScheduler()
+        var now = Date(timeIntervalSince1970: 100)
+        let provider = AdapterSystemMediaProvider(stream: stream, scheduler: timer, now: { now })
+        var title = ""
+        var playback = SystemMediaPlaybackState.stopped
+        var timeline: SystemMediaTimeline?
+        provider.onPropertiesChanged = { title = $0.title }
+        provider.onPlaybackChanged = { playback = $0 }
+        provider.onTimelineChanged = { timeline = $0 }
+        provider.addConsumer()
+        defer { provider.removeConsumer() }
+        try stream.send(payload("First"))
+        let cleared = expectation(description: "stopped session withdrawn")
+        provider.onPropertiesChanged = { value in title = value.title; if title.isEmpty { cleared.fulfill() } }
+        stream.snapshotData = Data("{}".utf8)
+        now = Date(timeIntervalSince1970: 113)
+        timer.fireRepeating()
+        await fulfillment(of: [cleared], timeout: 2)
+        XCTAssertEqual(title, "")
+        XCTAssertEqual(playback, .stopped)
+        XCTAssertNil(timeline)
+        XCTAssertTrue(timer.liveRepeating.isEmpty)
+    }
+
+    func testPauseUnknownDurationAndNoConsumersDoNotQuery() async throws {
+        let stream = TestMediaStream()
+        let timer = ManualMediaTimerScheduler()
+        var now = Date(timeIntervalSince1970: 100)
+        let provider = AdapterSystemMediaProvider(stream: stream, scheduler: timer, now: { now })
+        provider.addConsumer()
+        try stream.send(payload("Paused", playing: false))
+        now = Date(timeIntervalSince1970: 1000)
+        timer.fireRepeating()
+        try stream.send(payload("Live", duration: 0))
+        timer.fireRepeating()
+        provider.removeConsumer()
+        timer.fireRepeating()
+        await Task.yield()
+        XCTAssertEqual(stream.snapshotRequests, 0)
+        XCTAssertTrue(timer.liveRepeating.isEmpty)
     }
 }
 
