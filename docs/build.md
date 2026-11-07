@@ -23,6 +23,10 @@ Homebrew packages the renderer links against, exactly as listed in
 brew install quickjs-ng libpng brotli lz4 nlohmann-json argparse
 ```
 
+QuickJS-NG 0.18 changed its interrupt callback from `JSRuntime*` to `JSContext*`.
+The script engine accepts either signature and keeps its execution deadline in
+the opaque host state, so older local packages and current CI packages both work.
+
 Plus the build tooling those packages are compiled and consumed with:
 
 ```sh

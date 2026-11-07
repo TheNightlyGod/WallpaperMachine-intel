@@ -1286,7 +1286,10 @@ private:
     bool                 m_previous_interrupted;
 };
 
-int InterruptHandler(JSRuntime*, void* opaque) {
+// QuickJS-NG 0.18 passes JSContext instead of JSRuntime. The deadline lives in
+// our opaque host state, so infer the unused pointer type from the callback API.
+template<typename QuickJSState>
+int InterruptHandler(QuickJSState*, void* opaque) {
     auto* context = static_cast<ScriptEngineContext*>(opaque);
     if (context->deadline_ns == 0) return 0;
     if (context->NowNanoseconds() < context->deadline_ns) return 0;
