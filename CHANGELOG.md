@@ -12,6 +12,53 @@ app's update window shows the sections of every version newer than the installed
 one, in the app's language; the GitHub Release body repeats only the English notes.
 See [docs/release.md](docs/release.md) for how a version is cut.
 
+## [1.9.3](https://github.com/MMFoundation/WallpaperMachine/compare/v1.9.2...v1.9.3) (2026-11-07)
+
+### English
+
+This update makes the Library smoother to scroll and fixes several annoyances with playback, the desktop picture and the menu bar panel
+
+#### Improvements
+
+- Rapid swipes through the Library now scroll smoothly, while animated previews keep their full quality ([29250ca](https://github.com/MMFoundation/WallpaperMachine/commit/29250caa38d01b6e4b0e0d706dc6b6a58d65d440))
+
+#### Bug Fixes
+
+- When a wallpaper pauses for an app in front, minimizing that app's screen-filling window now resumes playback at once, without a click on the desktop ([e013fe6](https://github.com/MMFoundation/WallpaperMachine/commit/e013fe6bcefcc6ff8e061843efd6113bccb6512e))
+- Quit in the menu bar panel closes the app completely again, even before any wallpaper has started playing ([0c7a019](https://github.com/MMFoundation/WallpaperMachine/commit/0c7a01991a5707dcbe129552b8a9076f9f4e4569))
+- Square and portrait wallpaper covers in the menu bar panel no longer block clicks on the display picker (closes [#171](https://github.com/MMFoundation/WallpaperMachine/issues/171)) ([910768c](https://github.com/MMFoundation/WallpaperMachine/commit/910768c558a55d29ad94b7e771a93b3db64bc7ab))
+- The macOS desktop picture now updates to match a video wallpaper even while another app covers it, instead of waiting for the desktop to show (closes [#169](https://github.com/MMFoundation/WallpaperMachine/issues/169)) ([eac7c33](https://github.com/MMFoundation/WallpaperMachine/commit/eac7c333ddf379418d26b208fd0aadc8f7494283))
+
+### 简体中文
+
+本次更新让壁纸库滚动更流畅，并修复了播放、桌面图片和菜单栏面板中的几处问题
+
+#### 改进
+
+- 在壁纸库中快速滑动时滚动更流畅，动态预览的画质保持不变 ([29250ca](https://github.com/MMFoundation/WallpaperMachine/commit/29250caa38d01b6e4b0e0d706dc6b6a58d65d440))
+
+#### 问题修复
+
+- 壁纸因前台应用而暂停时，最小化该应用占满屏幕的窗口即可立即恢复播放，无需再点按桌面 ([e013fe6](https://github.com/MMFoundation/WallpaperMachine/commit/e013fe6bcefcc6ff8e061843efd6113bccb6512e))
+- 菜单栏面板中的“退出”按钮可以再次完整退出应用，即使壁纸尚未开始播放也是如此 ([0c7a019](https://github.com/MMFoundation/WallpaperMachine/commit/0c7a01991a5707dcbe129552b8a9076f9f4e4569))
+- 菜单栏面板中的方形和竖版壁纸封面不再挡住对显示器选择器的点按 (closes [#171](https://github.com/MMFoundation/WallpaperMachine/issues/171)) ([910768c](https://github.com/MMFoundation/WallpaperMachine/commit/910768c558a55d29ad94b7e771a93b3db64bc7ab))
+- 即使壁纸被其他应用遮挡，macOS 桌面图片也会及时更新为视频壁纸的画面，无需等到桌面露出 (closes [#169](https://github.com/MMFoundation/WallpaperMachine/issues/169)) ([eac7c33](https://github.com/MMFoundation/WallpaperMachine/commit/eac7c333ddf379418d26b208fd0aadc8f7494283))
+
+### 한국어
+
+이번 업데이트로 보관함 스크롤이 더 부드러워지고 재생, 데스크탑 사진, 메뉴 막대 패널의 몇 가지 불편한 점이 해결되었습니다
+
+#### 개선 사항
+
+- 보관함에서 빠르게 스와이프해도 스크롤이 부드럽고 움직이는 미리보기의 화질도 그대로 유지됩니다 ([29250ca](https://github.com/MMFoundation/WallpaperMachine/commit/29250caa38d01b6e4b0e0d706dc6b6a58d65d440))
+
+#### 버그 수정
+
+- 앞에 있는 앱 때문에 배경화면이 일시 정지된 경우 그 앱의 화면을 가득 채운 창을 최소화하면 바탕화면을 클릭하지 않아도 바로 다시 재생됩니다 ([e013fe6](https://github.com/MMFoundation/WallpaperMachine/commit/e013fe6bcefcc6ff8e061843efd6113bccb6512e))
+- 메뉴 막대 패널의 종료 버튼으로 앱이 다시 완전히 종료되며 배경화면이 아직 재생되기 전에도 마찬가지입니다 ([0c7a019](https://github.com/MMFoundation/WallpaperMachine/commit/0c7a01991a5707dcbe129552b8a9076f9f4e4569))
+- 메뉴 막대 패널의 정사각형 및 세로형 배경화면 커버가 더 이상 디스플레이 선택기 클릭을 가로막지 않습니다 (closes [#171](https://github.com/MMFoundation/WallpaperMachine/issues/171)) ([910768c](https://github.com/MMFoundation/WallpaperMachine/commit/910768c558a55d29ad94b7e771a93b3db64bc7ab))
+- 다른 앱이 배경화면을 가리고 있어도 macOS 데스크탑 사진이 비디오 배경화면에 맞게 바로 업데이트되며 바탕화면이 드러날 때까지 기다리지 않습니다 (closes [#169](https://github.com/MMFoundation/WallpaperMachine/issues/169)) ([eac7c33](https://github.com/MMFoundation/WallpaperMachine/commit/eac7c333ddf379418d26b208fd0aadc8f7494283))
+
 ## [1.9.2](https://github.com/MMFoundation/WallpaperMachine/compare/v1.9.1...v1.9.2) (2026-11-05)
 
 ### English
