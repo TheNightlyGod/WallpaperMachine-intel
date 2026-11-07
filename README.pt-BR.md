@@ -63,6 +63,12 @@
    A 1.8.2 e as anteriores não são, então o macOS bloqueia a primeira abertura: clique em
    **Abrir Mesmo Assim** em Ajustes do Sistema → Privacidade e Segurança, uma única vez.
 
+Usa o [Homebrew](https://brew.sh)? Um só comando faz os dois primeiros passos:
+
+```bash
+brew install --cask wallpapermachine
+```
+
 A partir daí, um guia de boas-vindas assume, e o app passa a se atualizar sozinho.
 O [guia de instalação](https://www.wallpapermachine.app/guides/install/) (em inglês) mostra
 cada passo com imagens.
@@ -218,14 +224,17 @@ os nomes das contas Steam são substituídos antes.
 
 Baixe a versão assinada de graça na
 [versão mais recente](https://github.com/WallpaperMachine/WallpaperMachine/releases/latest),
-ou [compile a partir do código-fonte](#código-aberto-livre-para-compilar). As versões
+instale a mesma imagem de disco assinada com o
+[Homebrew](https://formulae.brew.sh/cask/wallpapermachine)
+(`brew install --cask wallpapermachine`) ou
+[compile a partir do código-fonte](#código-aberto-livre-para-compilar). As versões
 posteriores à 1.8.2 são assinadas com um Developer ID e notarizadas pela Apple, então abrem
 direto; a 1.8.2 e as anteriores não são notarizadas, então o macOS bloqueia a primeira abertura
 até você clicar em Abrir Mesmo Assim em Ajustes do Sistema → Privacidade e Segurança. O
 [guia de instalação](https://www.wallpapermachine.app/guides/install/) (em inglês) acompanha
 tudo, do download até o guia de boas-vindas. A partir daí o app procura
 novas versões sozinho e, quando consegue substituir a própria cópia, oferece
-**Reiniciar para Atualizar**.
+**Reiniciar para Atualizar**. Uma cópia instalada pelo Homebrew se atualiza do mesmo jeito.
 
 </details>
 

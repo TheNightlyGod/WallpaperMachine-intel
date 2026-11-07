@@ -1,7 +1,8 @@
 # Versioning and releases
 
 Version numbers, the pipeline that publishes a build, the notes it writes, and what
-the in-app updater expects of a release. Build mechanics live in [build.md](build.md). To cut
+the in-app updater and the [Homebrew cask](#homebrew) expect of a release. Build mechanics
+live in [build.md](build.md). To cut
 a release, follow the [checklist](#checklist-for-a-release); when one fails, see
 [Recovering a failed release](#recovering-a-failed-release); for an urgent fix that
 must not wait for what `main` holds, see [Hotfix releases](#hotfix-releases).
@@ -961,6 +962,26 @@ Renaming the image, publishing a prerelease, or attaching only a zip silently
 breaks automatic updates; `Tests/Unit/GitHub/AppUpdateTests.swift` pins this
 behavior, including the exact published image name and an install from a real disk
 image.
+
+## Homebrew
+
+The `wallpapermachine` cask lives in Homebrew's repository, not here
+([`Casks/w/wallpapermachine.rb`](https://github.com/Homebrew/homebrew-cask/blob/HEAD/Casks/w/wallpapermachine.rb)).
+It installs the release's own disk image, the `v<x.y.z>` release's
+`WallpaperMachine-<x.y.z>-arm64.dmg`, and pins it by SHA-256: renaming the image or
+changing the tag format breaks Homebrew installs as well as updates, and replacing a
+published image, even with a rebuild of the same version, makes `brew install` of that
+version fail its checksum. Homebrew finds a new version through the release marked
+Latest (`livecheck` with `github_latest`) and its autobump opens the version bump
+itself, so a release needs no step for it; until that bump merges, `brew install` gets
+the previous version, which then updates itself. The cask declares `auto_updates`, so
+`brew upgrade` leaves an installed copy to the in-app updater
+([updates](features/updates.md#installing)). Changing what the cask states takes a pull
+request to that repository: the minimum macOS (`depends_on macos: :sequoia`), the
+bundle identifier `app.wallpapermachine` it quits before uninstalling, or the app-data
+folders its `zap` stanza moves to the Trash, which include
+`~/Library/Application Support/WallpaperMachine` and so the wallpaper library unless it
+was [moved](features/library-location.md).
 
 ## Recovering a failed release
 

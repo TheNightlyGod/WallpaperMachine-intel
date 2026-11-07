@@ -63,6 +63,12 @@
    공증을 받지 않은 빌드라서 macOS가 첫 실행을 막습니다. 시스템 설정 → 개인정보 보호 및 보안에서
    **그래도 열기**를 클릭하세요(처음 한 번만 필요합니다).
 
+[Homebrew](https://brew.sh)를 쓴다면 명령 하나로 다운로드와 설치를 한 번에 끝낼 수 있습니다.
+
+```bash
+brew install --cask wallpapermachine
+```
+
 이후 과정은 시작 가이드에서 안내하고, 그다음부터는 앱이 스스로 업데이트합니다.
 [설치 가이드](https://www.wallpapermachine.app/guides/install/)(영문)에서 모든 단계를
 그림과 함께 볼 수 있습니다.
@@ -212,13 +218,16 @@ Mac 사용자 이름, Steam 계정 이름은 자동으로 가려집니다.
 <summary><b>어떻게 설치하나요?</b></summary>
 
 [최신 릴리스](https://github.com/WallpaperMachine/WallpaperMachine/releases/latest)에서
-서명된 빌드를 무료로 받거나, [소스에서 직접 빌드](#오픈-소스와-직접-빌드)하세요.
+서명된 빌드를 무료로 받거나, [Homebrew](https://formulae.brew.sh/cask/wallpapermachine)로
+같은 서명된 디스크 이미지를 설치하거나(`brew install --cask wallpapermachine`),
+[소스에서 직접 빌드](#오픈-소스와-직접-빌드)하세요.
 1.8.2 이후 버전은 Developer ID로 서명되고 Apple의 공증을 받아 바로 열립니다.
 1.8.2 이하 버전은 공증을 받지 않은 빌드라서 macOS는 시스템 설정 → 개인정보 보호 및 보안에서
 **그래도 열기**를 클릭할 때까지 첫 실행을 막습니다.
 [설치 가이드](https://www.wallpapermachine.app/guides/install/)(영문)가 다운로드부터
 시작 가이드까지 안내합니다. 그 후로는 앱이 새 버전을 직접 확인합니다. 앱이 응용 프로그램
 폴더에 있고 현재 계정에 수정 권한이 있으면, 메뉴에 **재시작하여 업데이트**가 나타납니다.
+Homebrew로 설치한 앱도 같은 방식으로 업데이트됩니다.
 
 </details>
 

@@ -190,6 +190,13 @@ folder. A copy anywhere else, or one a standard account cannot replace (for
 example installed by an administrator), gets the manual path above; asking to
 install it anyway reports a permission error.
 
+**Homebrew.** A copy installed with `brew install --cask wallpapermachine` is the
+release's own app, put in `/Applications`, and updates the same way. The cask
+declares `auto_updates`, so `brew upgrade` leaves the app to this updater unless run
+with `--greedy`, and `brew list --versions` keeps showing the version Homebrew
+installed. What the cask needs from a release is in
+[release](../release.md#homebrew).
+
 **Preparing.** About shows **Preparing update…** with **Cancel**. A worker actor
 attaches the image read-only and out of sight (`hdiutil attach -nobrowse -readonly
 -noautoopen`) at a private mount point in a `mwe-update-<uuid>` directory of the

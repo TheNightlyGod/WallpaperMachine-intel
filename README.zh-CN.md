@@ -59,6 +59,12 @@
 2. **安装**：打开它，把 WallpaperMachine 拖到“应用程序”文件夹。
 3. **打开它。** 1.8.2 之后的版本已通过 Apple 公证，可以直接打开；1.8.2 及更早的版本未经公证，macOS 会拦下首次启动：在“系统设置 → 隐私与安全性”中点按一次**仍要打开**即可。
 
+在用 [Homebrew](https://brew.sh)？一条命令就能完成前两步：
+
+```bash
+brew install --cask wallpapermachine
+```
+
 接下来由首次使用引导带你完成设置，此后应用会自行更新。[安装指南](https://www.wallpapermachine.app/zh/guides/install/)配有图片，逐步介绍每一个步骤。
 
 - **开箱即用：** 内置视频壁纸 Aurora Drift、pixiv 插画、你自己的视频和图片，以及无需登录即可浏览整个创意工坊。
@@ -158,7 +164,7 @@ WallpaperMachine 支持场景、视频和网页渲染。兼容性因壁纸而异
 <details>
 <summary><b>如何获取？</b></summary>
 
-签名版可以从 [GitHub 最新发布](https://github.com/WallpaperMachine/WallpaperMachine/releases/latest)免费下载，你也可以[用源代码自行构建](#开源与自行构建)。1.8.2 之后的版本使用 Developer ID 签名并经过 Apple 公证，可以直接打开；1.8.2 及更早的版本未经公证，macOS 会拦下首次启动，直到你在“系统设置 → 隐私与安全性”中点按“仍要打开”。[安装指南](https://www.wallpapermachine.app/zh/guides/install/)会带你从下载一直走到首次使用引导。此后应用会自行检查新版本；在能替换自身副本的情况下，它会提供**重启并更新**。
+签名版可以从 [GitHub 最新发布](https://github.com/WallpaperMachine/WallpaperMachine/releases/latest)免费下载，也可以用 [Homebrew](https://formulae.brew.sh/cask/wallpapermachine) 安装同一个签名磁盘映像（`brew install --cask wallpapermachine`），你还可以[用源代码自行构建](#开源与自行构建)。1.8.2 之后的版本使用 Developer ID 签名并经过 Apple 公证，可以直接打开；1.8.2 及更早的版本未经公证，macOS 会拦下首次启动，直到你在“系统设置 → 隐私与安全性”中点按“仍要打开”。[安装指南](https://www.wallpapermachine.app/zh/guides/install/)会带你从下载一直走到首次使用引导。此后应用会自行检查新版本；在能替换自身副本的情况下，它会提供**重启并更新**。用 Homebrew 安装的副本也会这样自行更新。
 
 </details>
 
