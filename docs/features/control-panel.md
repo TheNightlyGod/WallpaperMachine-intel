@@ -85,13 +85,23 @@ open (`TileGridLayout.zoomWidths`). The step is saved as `WallpaperMachine.tileZ
 (nothing at the standard size), travels with a [backup](backup-restore.md), and Reset all
 settings returns it to Actual Size. **Help → WallpaperMachine Guides** opens the website's
 guides, in Chinese for either Chinese and in English otherwise. The grids are lazy:
-only the rows near the screen are built. While a trackpad or wheel scroll (and its glide)
+only the rows near the screen are built. Installed uses an `NSCollectionView` with a
+bounded pool of reusable SwiftUI tile hosts. Its native clip view owns scrolling;
+scrolling does not invalidate the collection layout or rebuild the panel's SwiftUI grid.
+Each host receives only the panel appearance values its tile uses, and unchanged values
+do not invalidate its view graph. Pointer, visibility and size tracking belong to the
+native collection, so its tiles do not also run SwiftUI scroll-observation modifiers.
+The collection and press-and-sweep use the same cell geometry, including after zooming
+or resizing, and visible preview IDs are reported together as rows cross the viewport.
+While a trackpad or wheel scroll (and its glide)
 is under way, tiles ignore the pointer: no hover controls, no hover preview; they
 come back under the pointer when the scroll stops, so content moving under a still pointer
 does not cost frames. On Installed, the target display's tile wears an
 accent **Active** capsule with a small equalizer that moves only while playback runs
 and the window is on screen; a wallpaper that another enabled, independent display shows
 wears a dark **Other display** capsule.
+The equalizer paints its bars inside fixed bounds, so animation ticks do not resize
+SwiftUI child views and repeatedly lay out the surrounding panel while it scrolls.
 
 Discover tiles show cached still thumbnails first and then, for tiles on screen,
 Steam's animated preview once it loads; the animation lifecycle, and why the
@@ -123,7 +133,12 @@ animations load at once, in grid order, and a tile that scrolls away, a hidden w
 its animation. A preview that is a single picture or over the animation budget keeps
 its cover and is not asked again by scrolling. Only the tiles on screen and those still
 holding an animation are looked at, so a scroll through a large library never walks
-all of it.
+all of it. Animation bytes are observed by wallpaper ID: loading or releasing one
+preview during scrolling invalidates only that tile, rather than every visible tile.
+Animated preview metadata and display-ready pixels are prepared off the main thread;
+indexed frames are expanded and color-converted before Core Animation commits them.
+The player retains the current frame and one upcoming frame, with the same resolution,
+color and transparency, and discards preparation that finishes after its source changes.
 
 **Settings → General → Play Library previews only on hover** (off by default, stored as
 `WallpaperMachine.libraryPreviewsOnHover`, kept by a [backup](backup-restore.md) and

@@ -82,9 +82,9 @@ final class InstalledBrowserModel {
   }
   var livePreview: LivePreview?
 
-  /// The animations of the tiles that play while every tile on screen plays, by tile id. A tile
-  /// draws its entry; nothing else of the grid's books is observed.
-  var gridAnimations: [String: Data] = [:]
+  /// Each tile observes only its own animation; a load or release during scrolling must not
+  /// invalidate every other tile that is already on screen.
+  let gridAnimations = LibraryPreviewAnimations()
 
   // MARK: Import
 

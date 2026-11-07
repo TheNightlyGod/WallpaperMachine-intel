@@ -1,15 +1,11 @@
 import SwiftUI
 
-/// Where each tile of the Installed grid is, worked out from what the grid reports about itself
-/// rather than asked of the views.
+/// The regular geometry shared by the Installed collection layout and press-and-sweep selection.
 ///
-/// The press-and-sweep selection needs the tile under the pointer, and SwiftUI cannot answer that
-/// for a lazy grid. The grid is regular, so a point maps to a tile by arithmetic: the number of
-/// columns is the grid's own rule (`TileGridLayout`), a tile's size is measured once from a
-/// drawn tile, and the scroll offset is read off the scroll view. Nothing here runs unless the
-/// pointer is down.
+/// A point maps to a tile by arithmetic: columns follow `TileGridLayout`, the collection supplies
+/// the cell size, and the native clip view supplies the scroll offset.
 struct LibraryGridGeometry: Equatable {
-  /// The gap between tiles, and the room around the grid, which the page passes to `TileGrid`.
+  /// The gap between tiles and the room around the grid.
   static let spacing: CGFloat = 14
   static let insets = EdgeInsets(top: 12, leading: 20, bottom: 20, trailing: 20)
   /// The round controls in a tile's corners (check and heart), and the room around them. 24 points

@@ -35,6 +35,7 @@ struct WallpaperTile<Artwork: View>: View {
 
   @Environment(\.panelTheme) private var theme
   @Environment(\.isFocused) private var isFocused
+  @Environment(\.libraryCollectionTile) private var collectionTile
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   static var cornerRadius: CGFloat { 10 }
@@ -134,7 +135,7 @@ struct WallpaperTile<Artwork: View>: View {
     case .quietSelection:
       outlined(radius: radius, color: theme.surface.muted.color, lineWidth: 1.5)
     case .none:
-      if isFocused {
+      if collectionTile?.isFocused ?? isFocused {
         RoundedRectangle(cornerRadius: radius + 2, style: .continuous)
           .strokeBorder(theme.accent.focus.color, lineWidth: 2)
           .padding(-2)

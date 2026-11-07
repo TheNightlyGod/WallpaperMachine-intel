@@ -23,13 +23,20 @@ struct Equalizer: View {
 
   var body: some View {
     TimelineView(.animation(minimumInterval: 1.0 / 24, paused: !animates)) { context in
-      HStack(alignment: .bottom, spacing: barWidth * 0.75) {
-        ForEach(Self.cycles.indices, id: \.self) { index in
-          Capsule()
-            .frame(width: barWidth, height: height * scale(of: index, at: context.date))
+      // Changing the height of three SwiftUI views on every tick invalidates layout up through
+      // the grid and panel. The animation only changes pixels inside these fixed bounds.
+      Canvas { drawing, _ in
+        for index in Self.cycles.indices {
+          let barHeight = height * scale(of: index, at: context.date)
+          let rect = CGRect(
+            x: CGFloat(index) * barWidth * 1.75, y: height - barHeight,
+            width: barWidth, height: barHeight)
+          drawing.fill(
+            Path(roundedRect: rect, cornerRadius: min(barWidth, barHeight) / 2),
+            with: .foreground)
         }
       }
-      .frame(height: height, alignment: .bottom)
+      .frame(width: barWidth * 4.5, height: height)
     }
     .accessibilityHidden(true)
   }

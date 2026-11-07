@@ -1,4 +1,5 @@
 import AppKit
+import Observation
 import XCTest
 
 @testable import WallpaperMachine
@@ -1126,6 +1127,37 @@ final class InstalledBrowserModelTests: PanelTestCase {
   }
 
   // MARK: The animated previews
+
+  func testScrollingPreviewChangesOnlyInvalidateTheAffectedTile() async throws {
+    let panel = try makeController()
+    defer { Task { await panel.shutdown() } }
+    let model = panel.controller.library
+    let changed = PreviewChangeFlag()
+    withObservationTracking {
+      _ = model.playingAnimation(for: "visible")
+    } onChange: { changed.set() }
+
+    model.gridAnimations["entering"] = Data([1])
+    model.gridAnimations["entering"] = nil
+    XCTAssertFalse(changed.isSet, "another preview entering or leaving must not redraw this tile")
+    model.gridAnimations["visible"] = Data([2])
+    XCTAssertTrue(changed.isSet, "the tile must redraw when its own preview arrives")
+
+    let released = PreviewChangeFlag()
+    withObservationTracking {
+      _ = model.playingAnimation(for: "visible")
+    } onChange: { released.set() }
+    model.releaseGridPreviews()
+    XCTAssertTrue(released.isSet, "releasing previews must notify the tiles that were playing")
+    XCTAssertNil(model.playingAnimation(for: "visible"))
+  }
+
+  private final class PreviewChangeFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+    var isSet: Bool { lock.withLock { value } }
+    func set() { lock.withLock { value = true } }
+  }
 
   /// Turns on Settings › General › Play Library previews only on hover.
   private func playOnHover(_ panel: PanelFixture) async throws {

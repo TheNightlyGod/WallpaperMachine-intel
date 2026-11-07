@@ -20,13 +20,28 @@ struct AnimatedFrames: @unchecked Sendable {
     else { return nil }
     self.source = source
     count = CGImageSourceGetCount(source)
-    delays = (0..<count).map { Self.delay(of: source, at: $0) }
+    var delays: [TimeInterval] = []
+    delays.reserveCapacity(count)
+    for index in 0..<count {
+      guard !Task.isCancelled else { return nil }
+      delays.append(Self.delay(of: source, at: index))
+    }
+    self.delays = delays
   }
 
-  /// Frame `index` decoded to at most `maxPixelSize` on its long side.
-  func image(at index: Int, maxPixelSize: Int) -> CGImage? {
+  /// Source metadata can be expensive too: a GIF's delays require reading every frame.
+  nonisolated static func load(_ data: Data) async -> AnimatedFrames? {
+    guard !Task.isCancelled else { return nil }
+    let work = Task.detached(priority: .utility) { AnimatedFrames(data: data) }
+    return await withTaskCancellationHandler { await work.value } onCancel: { work.cancel() }
+  }
+
+  /// Frame `index`, downsampled and prepared for the destination display off the main thread.
+  /// ImageIO can return indexed pixels even for a thumbnail. Handing those straight to a layer
+  /// makes Core Animation expand and color-convert them during the main-thread commit.
+  func image(at index: Int, maxPixelSize: Int, colorSpace: CGColorSpace? = nil) -> CGImage? {
     guard (0..<count).contains(index) else { return nil }
-    return CGImageSourceCreateThumbnailAtIndex(
+    guard let image = CGImageSourceCreateThumbnailAtIndex(
       source, index,
       [
         kCGImageSourceCreateThumbnailFromImageAlways: true,
@@ -34,6 +49,20 @@ struct AnimatedFrames: @unchecked Sendable {
         kCGImageSourceThumbnailMaxPixelSize: max(16, maxPixelSize),
         kCGImageSourceShouldCache: false,
       ] as CFDictionary)
+    else { return nil }
+    // Keep higher-precision previews in their original format rather than quantizing them.
+    guard image.bitsPerComponent <= 8 else { return image }
+    let destination = colorSpace
+      ?? (image.colorSpace?.model == .rgb ? image.colorSpace : CGColorSpace(name: CGColorSpace.sRGB))
+    guard let destination,
+      let context = CGContext(
+        data: nil, width: image.width, height: image.height, bitsPerComponent: 8, bytesPerRow: 0,
+        space: destination,
+        bitmapInfo: CGBitmapInfo.byteOrder32Little.rawValue | CGImageAlphaInfo.premultipliedFirst.rawValue)
+    else { return image }
+    context.setBlendMode(.copy)
+    context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+    return context.makeImage()
   }
 
   /// A frame's delay, from whichever dictionary its format uses. Delays under 20 ms (including
@@ -90,6 +119,8 @@ final class AnimatedPreviewView: NSView {
     didSet { if contentMode != oldValue { needsLayout = true } }
   }
   private var frames: AnimatedFrames?
+  private let prepareFrames: @Sendable (Data) async -> AnimatedFrames?
+  private var sourceLoad: Task<Void, Never>?
   private var loadedData: Data?
   private var index = 0
   private var timer: Timer?
@@ -106,7 +137,12 @@ final class AnimatedPreviewView: NSView {
   private var occlusionObserver: NSObjectProtocol?
   private let content = CALayer()
 
-  override init(frame: NSRect) {
+  override convenience init(frame: NSRect) {
+    self.init(frame: frame, prepareFrames: { await AnimatedFrames.load($0) })
+  }
+
+  init(frame: NSRect, prepareFrames: @escaping @Sendable (Data) async -> AnimatedFrames?) {
+    self.prepareFrames = prepareFrames
     super.init(frame: frame)
     wantsLayer = true
     layer?.masksToBounds = true
@@ -117,6 +153,7 @@ final class AnimatedPreviewView: NSView {
   required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
   deinit {
+    sourceLoad?.cancel()
     timer?.invalidate()
     if let occlusionObserver { NotificationCenter.default.removeObserver(occlusionObserver) }
   }
@@ -126,10 +163,21 @@ final class AnimatedPreviewView: NSView {
   func set(data: Data?) {
     guard data != loadedData else { return }
     loadedData = data
+    sourceLoad?.cancel()
+    sourceLoad = nil
     stop()
-    frames = data.flatMap(AnimatedFrames.init(data:))
+    frames = nil
     index = 0
     content.contents = nil
+    guard let data else { return }
+    let prepare = prepareFrames
+    sourceLoad = Task { [weak self] in
+      let frames = await prepare(data)
+      guard !Task.isCancelled, let self else { return }
+      self.sourceLoad = nil
+      self.frames = frames
+      if self.isPlaying { self.start() }
+    }
   }
 
   func setPlaying(_ playing: Bool) {
@@ -141,6 +189,7 @@ final class AnimatedPreviewView: NSView {
   /// The frame currently drawn, for tests.
   var currentFrameIndex: Int { index }
   var isAnimating: Bool { timer != nil }
+  var preparedFrameCount: Int { frames?.count ?? 0 }
 
   override func layout() {
     super.layout()
@@ -247,10 +296,11 @@ final class AnimatedPreviewView: NSView {
     guard let frames else { return }
     let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
     let pixels = Int((max(bounds.width, bounds.height, 64) * scale).rounded(.up))
+    let colorSpace = (window?.colorSpace ?? window?.screen?.colorSpace)?.cgColorSpace
     decode?.cancel()
     decode = Task { [weak self] in
       let image = await Task.detached(priority: .utility) {
-        frames.image(at: index, maxPixelSize: pixels)
+        frames.image(at: index, maxPixelSize: pixels, colorSpace: colorSpace)
       }.value
       guard !Task.isCancelled, let self else { return }
       self.decode = nil

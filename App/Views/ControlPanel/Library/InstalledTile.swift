@@ -14,11 +14,10 @@ struct InstalledTile: View {
 
   @Environment(PanelController.self) private var controller
   @Environment(\.panelTheme) private var theme
-  @Environment(\.isFocused) private var isFocused
+  @Environment(\.libraryCollectionTile) private var collectionTile
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
   @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
   @Environment(\.accessibilitySwitchControlEnabled) private var switchControlEnabled
-  @State private var isHovering = false
 
   /// Whether the check and the heart stay in the tile while they are hidden, so VoiceOver and
   /// Switch Control can always reach them. Otherwise they are built only while they show: two
@@ -34,8 +33,9 @@ struct InstalledTile: View {
     let isArming = model.armingID == row.id
     let marks = LibraryTileMarks(row, isFavorite: isFavorite)
     let chrome = LibraryTileChrome(
-      isChecked: isChecked, isChosen: isChosen, isFavorite: isFavorite, isHovering: isHovering,
-      isFocused: isFocused, isArming: isArming, isSelecting: model.isSelecting,
+      isChecked: isChecked, isChosen: isChosen, isFavorite: isFavorite,
+      isHovering: collectionTile?.isHovering ?? false,
+      isFocused: collectionTile?.isFocused ?? false, isArming: isArming, isSelecting: model.isSelecting,
       hasSelection: !model.selection.isEmpty)
     let kind = row.kind.label
     // The tile reads as selected only while the inspector shows it, as the web panel's tile did;
@@ -82,15 +82,6 @@ struct InstalledTile: View {
     .scaleEffect(isArming ? 0.97 : 1)
     .animation(reduceMotion ? nil : .easeOut(duration: 0.35), value: isArming)
     .onTapGesture { click(model) }
-    .onHover { hovering in
-      isHovering = hovering
-      if hovering { model.pointerEntered(row.id) } else { model.pointerLeft(row.id) }
-    }
-    .onChange(of: isFocused) { model.focusChanged(row.id, isFocused: isFocused) }
-    // While every tile on screen plays, what is on screen decides which do.
-    .onScrollVisibilityChange(threshold: 0.25) { model.tileVisibilityChanged(row.id, isOnScreen: $0) }
-    .onDisappear { model.tileVisibilityChanged(row.id, isOnScreen: false) }
-    .onGeometryChange(for: CGSize.self, of: \.size) { model.geometry.cellSize = $0 }
     .accessibilityValue(Text(verbatim: marks.names.joined(separator: ", ")))
     .accessibilityAddTraits(.isButton)
     .accessibilityAction { model.tileActivated(row.id) }

@@ -50,6 +50,14 @@ extension InstalledBrowserModel {
     refreshGridPreviews()
   }
 
+  /// A native collection reports the visible set together, so a row crossing the viewport
+  /// schedules previews once, rather than restarting the scheduler for every cell in the row.
+  func tilesVisibilityChanged(_ ids: Set<String>) {
+    guard ids != tilesOnScreen else { return }
+    tilesOnScreen = ids
+    refreshGridPreviews()
+  }
+
   /// The window hid or showed. A hidden window releases every animation and keeps the books, so
   /// showing it again plays the same tiles.
   func setGridHidden(_ hidden: Bool) {
@@ -63,7 +71,7 @@ extension InstalledBrowserModel {
   func releaseGridPreviews(keepingTilesOnScreen: Bool = false) {
     for task in gridPreviewTasks.values { task.cancel() }
     gridPreviewTasks = [:]
-    if !gridAnimations.isEmpty { gridAnimations = [:] }
+    gridAnimations.removeAll()
     gridPreviews.releaseAll()
     if !keepingTilesOnScreen { tilesOnScreen = [] }
   }
