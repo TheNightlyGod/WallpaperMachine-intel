@@ -215,6 +215,22 @@ final class StatusPanelControllerTests: PanelTestCase {
     XCTAssertNil(controller.failure)
   }
 
+  func testUpdateNoticeFollowsTheStoreAndOpensUpdatesAfterDismissal() async throws {
+    let source = Source(input())
+    let controller = makeController(source, dismiss: { source.log.append("dismiss") })
+    controller.start()
+    source.input.update = AppUpdateNotice(kind: .available, version: "2.0.0", automatic: false)
+    try await waitUntil("update is visible") { controller.panel.update?.version == "2.0.0" }
+    await controller.openUpdates().value
+    XCTAssertEqual(source.performed.last, .openUpdates)
+    XCTAssertEqual(source.log.suffix(2), ["dismiss", "perform"])
+    controller.stop()
+    let reads = source.reads
+    source.input.update = nil
+    for _ in 0..<20 { await Task.yield() }
+    XCTAssertEqual(source.reads, reads)
+  }
+
   // MARK: Following the stores while open
 
   func testNothingIsReadBeforeThePanelOpensOrAfterItCloses() async throws {

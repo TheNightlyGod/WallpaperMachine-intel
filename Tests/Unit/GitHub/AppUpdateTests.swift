@@ -524,6 +524,20 @@ final class AppUpdateTests: XCTestCase {
 
     /// A requirement Security cannot compile refuses every copy, so a typo in it would stop
     /// all in-app updates while the refusal tests below still pass.
+    func testSignedApplicationMustMatchOfferedVersionAndSystemRequirement() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("update-target-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let app = try Self.makeApplication(in: root, bundleIdentifier: AppUpdateConfiguration.bundleIdentifier)
+        func release(_ version: String, minimum: String? = nil) -> GitHubRelease {
+            GitHubRelease(version: SemanticVersion(version)!, htmlURL: AppUpdateConfiguration.releasesURL,
+                          prerelease: false, assets: [], minimumSystemVersion: minimum)
+        }
+        XCTAssertNoThrow(try AppUpdateInstaller.verifyTarget(app, release: release("1.2.3"), systemVersion: "15"))
+        XCTAssertThrowsError(try AppUpdateInstaller.verifyTarget(app, release: release("1.2.4"), systemVersion: "15"))
+        XCTAssertThrowsError(try AppUpdateInstaller.verifyTarget(app, release: release("1.2.3"), systemVersion: "14"))
+        XCTAssertThrowsError(try AppUpdateInstaller.verifyTarget(app, release: release("1.2.3", minimum: "16"), systemVersion: "16"))
+    }
+
     func testReleaseSigningRequirementCompiles() {
         var requirement: SecRequirement?
         XCTAssertEqual(SecRequirementCreateWithString(
@@ -604,7 +618,7 @@ final class AppUpdateTests: XCTestCase {
         let notes = Fixture()
         notes.client.release = notes.release(version: "1.2.0", assets: [])
         await expect(notes.store.checkForUpdates(), equals: .manual(currentVersion: "1.0.0", availableVersion: "1.2.0"))
-        await expect(notes.store.downloadUpdate(), equals: .error(currentVersion: "1.0.0", operation: .download, code: .configuration, availableVersion: nil))
+        await expect(notes.store.downloadUpdate(), equals: .error(currentVersion: "1.0.0", operation: .download, code: .configuration, availableVersion: "1.2.0"))
         XCTAssertEqual(notes.client.downloadCalls, 0)
     }
 
@@ -859,7 +873,7 @@ final class AppUpdateTests: XCTestCase {
             fixture.client.release = fixture.release(version: "1.1.0")
             await fixture.store.checkForUpdates()
             await expect(fixture.store.downloadUpdate(), equals: .error(
-                currentVersion: "1.0.0", operation: .download, code: .verification, availableVersion: nil))
+                currentVersion: "1.0.0", operation: .download, code: .verification, availableVersion: "1.1.0"))
             fixture.store.revealDownloadedUpdate()
             XCTAssertTrue(fixture.opened.isEmpty)
             XCTAssertTrue(fixture.revealed.isEmpty)
@@ -958,7 +972,7 @@ final class AppUpdateTests: XCTestCase {
         fixture.client.release = fixture.release(version: "1.1.0")
         fixture.client.downloadError = URLError(.timedOut)
         await fixture.store.checkForUpdates()
-        await expect(fixture.store.downloadUpdate(), equals: .error(currentVersion: "1.0.0", operation: .download, code: .network, availableVersion: nil))
+        await expect(fixture.store.downloadUpdate(), equals: .error(currentVersion: "1.0.0", operation: .download, code: .network, availableVersion: "1.1.0"))
 
         fixture.client.downloadError = nil
         await fixture.store.checkForUpdates()
@@ -1129,6 +1143,146 @@ final class AppUpdateTests: XCTestCase {
         await fulfillment(of: [drained], timeout: 5)
     }
 
+    func testBackgroundModesNeverOpenWindowsAndNeverInstallDuringOnboarding() async {
+        for mode in AppUpdateMode.allCases {
+            let fixture = Fixture()
+            fixture.store.mode = mode
+            fixture.client.release = fixture.release(version: "1.1.0")
+            let coordinator = AppUpdateCoordinator(updater: fixture.store,
+                isShuttingDown: { false }, isUnattended: { true }, menuChanged: {},
+                showAbout: { XCTFail("Background work must not activate a window") },
+                beforeAutomaticCheck: {}, windowClosed: {}, onboardingComplete: { false })
+            await coordinator.runAutomaticCheck()
+            for _ in 0..<5 { await Task.yield() }
+            XCTAssertNil(coordinator.window)
+            XCTAssertTrue(fixture.scheduled.isEmpty)
+            XCTAssertEqual(fixture.client.downloadCalls, mode == .notify ? 0 : 1)
+            XCTAssertTrue(fixture.revealed.isEmpty)
+        }
+        let manual = Fixture()
+        manual.store.mode = .automatic
+        manual.installer.canInstallInPlace = false
+        manual.client.release = manual.release(version: "1.1.0")
+        let coordinator = AppUpdateCoordinator(updater: manual.store,
+            isShuttingDown: { false }, isUnattended: { true }, menuChanged: {},
+            showAbout: { XCTFail("A manual installation stays passive") }, beforeAutomaticCheck: {}, windowClosed: {},
+            onboardingComplete: { true })
+        await coordinator.runAutomaticCheck()
+        XCTAssertEqual(manual.client.downloadCalls, 0)
+        XCTAssertTrue(manual.revealed.isEmpty)
+    }
+
+    func testPostponementPersistsAndExpiresWithoutDiscardingTheDownload() async {
+        var clock = Date(timeIntervalSince1970: 100_000)
+        let fixture = Fixture(now: { clock })
+        fixture.store.mode = .automatic
+        fixture.client.release = fixture.release(version: "1.1.0")
+        await fixture.store.checkForUpdates()
+        XCTAssertTrue(fixture.store.mayDownloadAutomatically)
+        await fixture.store.downloadUpdate()
+        fixture.store.postponeUpdate()
+        XCTAssertTrue(fixture.store.isDeferred)
+        XCTAssertTrue(fixture.store.hasDownloadedUpdate)
+        let reopened = AppUpdateStore(currentVersion: "1.0.0", client: fixture.client, defaults: fixture.defaults, now: { clock })
+        await reopened.checkForUpdates()
+        XCTAssertEqual(reopened.mode, .automatic)
+        XCTAssertTrue(reopened.isDeferred)
+        clock.addTimeInterval(AppUpdatePolicy.postponement)
+        XCTAssertFalse(reopened.isDeferred)
+        XCTAssertTrue(fixture.store.hasDownloadedUpdate)
+    }
+
+    func testAutomaticInstallRechecksAfterPreparingAndAtHandoff() async {
+        let fixture = Fixture()
+        fixture.client.release = fixture.release(version: "1.1.0")
+        await fixture.store.checkForUpdates()
+        await fixture.store.downloadUpdate()
+        let gate = Gate()
+        fixture.installer.prepareGate = gate
+        var unattended = true
+        let install = Task { await fixture.store.installUpdate(automatically: true, allowed: { unattended }) }
+        await gate.waitUntilEntered()
+        unattended = false
+        gate.open()
+        await install.value
+        XCTAssertTrue(fixture.scheduled.isEmpty)
+        XCTAssertEqual(fixture.terminateCalls, 0)
+        XCTAssertEqual(fixture.store.state, .ready(currentVersion: "1.0.0", availableVersion: "1.1.0"))
+        fixture.installer.prepareGate = nil
+        unattended = true
+        await fixture.store.installUpdate(automatically: true, allowed: { unattended })
+        unattended = false
+        fixture.scheduled[0]()
+        XCTAssertEqual(fixture.installer.installCalls, 0)
+        XCTAssertEqual(fixture.terminateCalls, 0)
+    }
+
+    func testFailedRecheckKeepsCandidateNotesAndDownloadRetryDoesNotRefetch() async {
+        let fixture = Fixture()
+        fixture.client.release = fixture.release(version: "1.1.0", notes: "### Fixed\n- A change")
+        await fixture.store.checkForUpdates()
+        fixture.client.fetchError = URLError(.notConnectedToInternet)
+        await fixture.store.checkForUpdates()
+        XCTAssertEqual(fixture.store.state.availableVersion, "1.1.0")
+        XCTAssertEqual(fixture.store.releaseNotes?.version, "1.1.0")
+        fixture.client.fetchError = nil
+        await fixture.store.checkForUpdates()
+        fixture.client.downloadError = URLError(.timedOut)
+        await fixture.store.downloadUpdate()
+        let checks = fixture.client.fetchCalls
+        fixture.client.downloadError = nil
+        await fixture.store.retryUpdate()
+        XCTAssertEqual(fixture.client.fetchCalls, checks)
+        XCTAssertTrue(fixture.store.hasDownloadedUpdate)
+    }
+
+    func testCancelledRecheckRestoresTheDiscoveredVersion() async {
+        let fixture = Fixture()
+        fixture.client.release = fixture.release(version: "1.1.0")
+        await fixture.store.checkForUpdates()
+        let gate = Gate()
+        fixture.client.fetchGate = gate
+        let check = Task { await fixture.store.checkForUpdates() }
+        await gate.waitUntilEntered()
+        fixture.store.cancel()
+        gate.open()
+        await expect(check.value, equals: .available(currentVersion: "1.0.0", availableVersion: "1.1.0"))
+    }
+
+    func testCompleteCacheRestoresWithoutDownloadAndConfirmsOnlyTheRunningVersion() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("update-cache-\(UUID())")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let client = FakeAppUpdateClient()
+        let asset = GitHubReleaseAsset(name: "WallpaperMachine-1.1.0-arm64.dmg",
+            downloadURL: AppUpdateConfiguration.releasesURL, size: 3,
+            digest: "sha256:" + SHA256.hash(data: Data("dmg".utf8)).map { String(format: "%02x", $0) }.joined())
+        client.release = GitHubRelease(version: try XCTUnwrap(SemanticVersion("1.1.0")),
+            htmlURL: AppUpdateConfiguration.releasesURL, prerelease: false, assets: [asset], notes: "### Fixed\n- Update")
+        let defaults = TemporaryDefaults.makeForCurrentTest().defaults
+        let workspace = AppUpdateWorkspace(archiveURL: { _, name in root.appendingPathComponent(name) },
+            reveal: { _ in XCTFail("No Finder during restore") }, open: { _ in XCTFail("No windows during restore") },
+            persistence: AppUpdatePersistence(directory: root))
+        let original = AppUpdateStore(currentVersion: "1.0.0", client: client, installer: FakeInstaller(),
+                                      workspace: workspace, defaults: defaults)
+        await original.checkForUpdates()
+        await original.downloadUpdate()
+        XCTAssertEqual(client.downloadCalls, 1)
+        let restored = AppUpdateStore(currentVersion: "1.0.0", client: client, installer: FakeInstaller(),
+            workspace: workspace, scheduleInstall: { _ in }, terminate: {}, defaults: defaults)
+        await restored.discardStaleDownloads()
+        XCTAssertEqual(restored.state, .ready(currentVersion: "1.0.0", availableVersion: "1.1.0"))
+        XCTAssertEqual(client.downloadCalls, 1)
+        XCTAssertNil(restored.recentlyInstalledVersion)
+        await restored.installUpdate()
+        let upgraded = AppUpdateStore(currentVersion: "1.1.0", client: client, installer: FakeInstaller(),
+            workspace: workspace, defaults: defaults)
+        await upgraded.discardStaleDownloads()
+        XCTAssertEqual(upgraded.recentlyInstalledVersion, "1.1.0")
+        XCTAssertFalse(upgraded.hasDownloadedUpdate)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent(asset.name).path))
+    }
+
     private func expect(_ state: AppUpdateState, equals expected: AppUpdateState) {
         XCTAssertEqual(state, expected)
     }
@@ -1204,7 +1358,8 @@ private final class Fixture {
     /// The store's preferences (automatic installs, the skipped version), never the app's own.
     let defaults = TemporaryDefaults.makeForCurrentTest().defaults
 
-    init(installTimeout: Duration = .seconds(45), installer: (any AppUpdateInstalling)? = nil) {
+    init(installTimeout: Duration = .seconds(45), installer: (any AppUpdateInstalling)? = nil,
+         now: @escaping () -> Date = Date.init) {
         destination = FileManager.default.temporaryDirectory.appendingPathComponent("private/mwe-\(UUID().uuidString).dmg")
         let recorder = recorder
         let workspace = AppUpdateWorkspace(
@@ -1224,7 +1379,8 @@ private final class Fixture {
                 recorder.onTerminate?()
             },
             installTimeout: installTimeout,
-            defaults: defaults
+            defaults: defaults,
+            now: now
         )
     }
 
@@ -1525,7 +1681,8 @@ private extension AppUpdateTests {
         let app = folder.appendingPathComponent("WallpaperMachine.app")
         try FileManager.default.createDirectory(at: app.appendingPathComponent("Contents/MacOS"), withIntermediateDirectories: true)
         let info: [String: Any] = ["CFBundleIdentifier": bundleIdentifier, "CFBundleExecutable": "WallpaperMachine",
-                                   "CFBundlePackageType": "APPL", "CFBundleShortVersionString": version]
+                                   "CFBundlePackageType": "APPL", "CFBundleShortVersionString": version,
+                                   "LSMinimumSystemVersion": "15.0"]
         try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
             .write(to: app.appendingPathComponent("Contents/Info.plist"))
         try FileManager.default.copyItem(at: URL(fileURLWithPath: "/usr/bin/true"),

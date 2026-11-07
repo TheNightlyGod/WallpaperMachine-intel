@@ -14,8 +14,8 @@ enum UpdateWindow {
     let skip: () -> Void
     let later: () -> Void
     let install: () -> Void
-    /// The checkbox: automatic updates on or off.
-    let setAutomatic: (Bool) -> Void
+    let setMode: (AppUpdateMode) -> Void
+    var cancel: () -> Void = {}
   }
 
   /// - Parameter language: The notes translation the window opens with, the app's effective
@@ -77,12 +77,15 @@ struct UpdateWindowView: View {
       header(state)
       VStack(alignment: .leading, spacing: 8) {
         notesBar
-        UpdateNotesBox(releases: store.pendingReleases, language: notesLanguage.selection)
+        UpdateNotesBox(releases: store.notesReleases, language: notesLanguage.selection)
+        if store.notesReleases.isEmpty {
+          Text("No release notes are available for this version.").font(.caption)
+        } else {
+          Text("Release notes include up to 20 recent versions. Older changes are available on GitHub.")
+            .font(.caption).foregroundStyle(theme.surface.muted.color)
+        }
       }
-      footer(
-        state,
-        automatic: Binding(
-          get: { store.automaticallyInstallsUpdates }, set: { actions.setAutomatic($0) }))
+      footer(state)
     }
     .padding(.horizontal, 24)
     // From the window's top edge: the title bar holds only the window buttons, then a gap.
@@ -151,12 +154,14 @@ struct UpdateWindowView: View {
       Text("WallpaperMachine \(available) has been downloaded—you have \(current). WallpaperMachine quits and reopens to install it.")
     case .manual:
       Text("WallpaperMachine \(available) is now available—you have \(current). Download it from GitHub Releases.")
+    case .error(_, _, let code, _):
+      Text(verbatim: UpdatePresentation.errorText(code, rateLimitedUntil: store.rateLimitedUntil))
     default:
       Text("WallpaperMachine \(available) is now available—you have \(current). Would you like to download it now?")
     }
   }
 
-  private func footer(_ state: AppUpdateState, automatic: Binding<Bool>) -> some View {
+  private func footer(_ state: AppUpdateState) -> some View {
     VStack(alignment: .leading, spacing: 12) {
       switch state {
       case .downloading(_, _, let percent, let transferred, let total, _):
@@ -172,15 +177,19 @@ struct UpdateWindowView: View {
       case .preparing:
         progress(value: nil) { Text("Preparing update…") }
       default:
-        Toggle("Automatically download and install updates in the future", isOn: automatic)
-          .toggleStyle(.checkbox)
-          .font(.system(size: 13))
-          .foregroundStyle(theme.surface.text.color)
+        Picker("Update mode", selection: Binding(get: { store.mode }, set: actions.setMode)) {
+          ForEach(AppUpdateMode.allCases, id: \.self) { mode in
+            Text(verbatim: mode.title).tag(mode)
+          }
+        }
+        .pickerStyle(.menu)
+        Text(verbatim: store.mode.explanation).font(.caption).foregroundStyle(theme.surface.muted.color)
       }
       HStack(spacing: 10) {
         Button("Skip This Version", action: actions.skip)
           .disabled(state.isBusy)
         Spacer(minLength: 12)
+        if state.isBusy { Button("Cancel", action: actions.cancel) }
         Button("Remind Me Later", action: actions.later)
           .keyboardShortcut(.cancelAction)
         primary(state)
@@ -193,15 +202,17 @@ struct UpdateWindowView: View {
   private func primary(_ state: AppUpdateState) -> some View {
     Group {
       switch state {
-      case .ready: Button("Install and Relaunch", action: actions.install)
+      case .ready:
+        Button(store.canInstallInPlace ? L("Install and Relaunch") : L("Show in Finder"), action: actions.install)
       case .manual: Button("Open GitHub Releases", action: actions.install)
-      default: Button("Install Update", action: actions.install)
+      case .error: Button("Retry", action: actions.install)
+      default: Button("Download Update", action: actions.install)
       }
     }
     .buttonStyle(.panelPrimary)
     .keyboardShortcut(.defaultAction)
     // Nothing to install while a check runs or after one failed.
-    .disabled(state.isBusy || state.availableVersion == nil)
+    .disabled(state.isBusy || state.availableVersion == nil || store.isChecking || store.isRestoring || store.installIsScheduled)
   }
 
   private func progress(value: Double?, @ViewBuilder label: () -> some View) -> some View {
@@ -220,7 +231,7 @@ struct UpdateWindowView: View {
 
 /// The scrolling box of release notes: each version as a linked badge with its date, then its
 /// sections and bullets, issue and commit references linked.
-private struct UpdateNotesBox: View {
+struct UpdateNotesBox: View {
   let releases: [AppReleaseHistory.Entry]
   let language: AppReleaseHistory.Language
   @Environment(\.panelTheme) private var theme

@@ -2,10 +2,12 @@
 """Unit tests for scripts/publish_release.py."""
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -16,7 +18,29 @@ publish_release = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(publish_release)
 
-ASSETS = ["WallpaperMachine-0.6.0-arm64.dmg", "WallpaperMachine-0.6.0-arm64.dmg.sha256"]
+def release_fixture(root, tag):
+    image = root / f"WallpaperMachine-{tag[1:]}-arm64.dmg"
+    image.write_bytes(b"signed image fixture")
+    digest = hashlib.sha256(image.read_bytes()).hexdigest()
+    checksum = root / (image.name + ".sha256")
+    checksum.write_text(f"{digest}  {image.name}\n")
+    notes = root / "notes.md"
+    notes.write_text("Release notes\n")
+    manifest = root / "WallpaperMachine-update.json"
+    manifest.write_text(json.dumps({
+        "tag_name": tag, "prerelease": False, "body": notes.read_text(),
+        "minimum_system_version": "15.0", "architectures": ["arm64"],
+        "bundle_identifier": "app.wallpapermachine",
+        "assets": [{"name": image.name, "size": image.stat().st_size, "digest": "sha256:" + digest,
+                    "browser_download_url": f"https://github.com/owner/repo/releases/download/{tag}/{image.name}"}],
+    }))
+    return str(notes), [str(image), str(checksum), str(manifest)]
+
+
+def publish_fixture(github, tag="v0.6.0"):
+    with tempfile.TemporaryDirectory() as directory:
+        notes, assets = release_fixture(Path(directory), tag)
+        return publish_release.publish(tag, notes, assets, run=github)
 
 
 def completed(stdout="", returncode=0):
@@ -31,11 +55,14 @@ class FakeGitHub:
         self.drafted = list(drafted)
         self.fail_on = fail_on
         self.calls: list[list[str]] = []
+        self.uploaded = []
 
     def __call__(self, command, check=True):
         self.calls.append(command)
         verb = command[2] if len(command) > 2 else ""
         if verb == "view":
+            if "assets,isDraft,tagName" in command:
+                return completed(json.dumps({"assets": self.uploaded, "isDraft": True, "tagName": command[3]}))
             if self.draft is None:
                 return completed(returncode=1)
             return completed("true\n" if self.draft else "false\n")
@@ -46,6 +73,10 @@ class FakeGitHub:
             return completed(json.dumps(entries))
         if self.fail_on and self.fail_on in command:
             raise publish_release.PublishError(f"{verb} failed")
+        if verb == "upload":
+            self.uploaded = [{"name": Path(path).name, "size": Path(path).stat().st_size,
+                              "digest": "sha256:" + hashlib.sha256(Path(path).read_bytes()).hexdigest()}
+                             for path in command[4:] if not path.startswith("--")]
         return completed()
 
     @property
@@ -66,7 +97,7 @@ class PlanTests(unittest.TestCase):
 
 class PublishTests(unittest.TestCase):
     def publish(self, github, tag="v0.6.0"):
-        return publish_release.publish(tag, "notes.md", ASSETS, run=github)
+        return publish_fixture(github, tag)
 
     def test_a_new_tag_is_drafted_uploaded_then_published(self):
         github = FakeGitHub(draft=None)
@@ -101,6 +132,37 @@ class PublishTests(unittest.TestCase):
         self.assertEqual(cleared, [], "Nothing may publish a release whose upload failed")
 
 
+class AssetContractTests(unittest.TestCase):
+    def test_missing_manifest_or_wrong_digest_never_mutates_github(self):
+        with tempfile.TemporaryDirectory() as directory:
+            notes, assets = release_fixture(Path(directory), "v0.6.0")
+            github = FakeGitHub()
+            with self.assertRaises(publish_release.PublishError):
+                publish_release.publish("v0.6.0", notes, assets[:2], run=github)
+            Path(assets[0]).write_bytes(b"changed")
+            with self.assertRaises(publish_release.PublishError):
+                publish_release.publish("v0.6.0", notes, assets, run=github)
+            self.assertEqual(github.mutations, [])
+
+    def test_uploaded_mismatch_is_never_promoted(self):
+        class MissingAsset(FakeGitHub):
+            def __call__(self, command, check=True):
+                if "assets,isDraft,tagName" in command:
+                    self.uploaded.pop()
+                return super().__call__(command, check)
+        github = MissingAsset()
+        with self.assertRaises(publish_release.PublishError):
+            publish_fixture(github)
+        self.assertFalse(any("--draft=false" in command for command in github.mutations))
+
+    def test_dry_run_never_uploads_or_promotes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            notes, assets = release_fixture(Path(directory), "v0.6.0")
+            github = FakeGitHub()
+            publish_release.publish("v0.6.0", notes, assets, run=github, dry_run=True)
+            self.assertEqual(github.mutations, [])
+
+
 class LatestTests(unittest.TestCase):
     def test_a_newer_release_published_during_upload_is_observed_before_promotion(self):
         class InterleavedGitHub(FakeGitHub):
@@ -111,7 +173,7 @@ class LatestTests(unittest.TestCase):
                 return result
 
         github = InterleavedGitHub(published=["v0.5.0"])
-        _, latest = publish_release.publish("v0.6.0", "notes.md", ASSETS, run=github)
+        _, latest = publish_fixture(github, "v0.6.0")
         self.assertFalse(latest)
         self.assertIn("--latest=false", github.mutations[-1])
 
@@ -124,7 +186,7 @@ class LatestTests(unittest.TestCase):
                 return result
 
         github = InterleavedGitHub(published=["v0.5.0"])
-        _, latest = publish_release.publish("v0.7.0", "notes.md", ASSETS, run=github)
+        _, latest = publish_fixture(github, "v0.7.0")
         self.assertTrue(latest)
         self.assertIn("--latest", github.mutations[-1])
 
@@ -137,7 +199,7 @@ class LatestTests(unittest.TestCase):
 
         github = UnavailableGitHub()
         with self.assertRaises(publish_release.PublishError):
-            publish_release.publish("v0.7.0", "notes.md", ASSETS, run=github)
+            publish_fixture(github, "v0.7.0")
         self.assertFalse(any("--draft=false" in command for command in github.mutations))
 
     def test_the_first_release_claims_latest(self):
@@ -149,19 +211,19 @@ class LatestTests(unittest.TestCase):
     def test_an_older_build_finishing_last_does_not_steal_latest(self):
         # v0.7.0 built faster and published first; v0.6.0 must not demote it.
         github = FakeGitHub(draft=None, published=["v0.7.0"])
-        _, latest = publish_release.publish("v0.6.0", "notes.md", ASSETS, run=github)
+        _, latest = publish_fixture(github, "v0.6.0")
         self.assertFalse(latest)
         self.assertIn("--latest=false", github.mutations[-1])
 
     def test_the_newer_build_finishing_last_does_claim_latest(self):
         github = FakeGitHub(draft=None, published=["v0.6.0"])
-        _, latest = publish_release.publish("v0.7.0", "notes.md", ASSETS, run=github)
+        _, latest = publish_fixture(github, "v0.7.0")
         self.assertTrue(latest)
         self.assertIn("--latest", github.mutations[-1])
 
     def test_a_greater_prerelease_or_draft_does_not_block_latest(self):
         github = FakeGitHub(draft=None, published=["v0.5.0"], prereleases=["v0.9.0"], drafted=["v0.8.0"])
-        _, latest = publish_release.publish("v0.6.0", "notes.md", ASSETS, run=github)
+        _, latest = publish_fixture(github, "v0.6.0")
         self.assertTrue(latest, "Only a public, non-prerelease version is what the updater reads")
         self.assertIn("--latest", github.mutations[-1])
 

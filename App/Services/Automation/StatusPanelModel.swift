@@ -63,6 +63,7 @@ enum StatusPanelModel {
         /// The wallpaper's own saved mute, as the inspector's Mute this wallpaper sets it.
         case setMuted(wallpaper: String, muted: Bool)
         case openSettings
+        case openUpdates
         case quit
     }
 
@@ -100,6 +101,7 @@ enum StatusPanelModel {
         var snapshotRevision: UInt64 = 0
         /// Moves with every library rescan, so the covers' stamps are read again.
         var libraryRevision: UInt64 = 0
+        var update: AppUpdateNotice? = nil
     }
 
     /// A display in the picker.
@@ -138,6 +140,7 @@ enum StatusPanelModel {
         /// Wallpapers used on the display before, newest use first, without the one it shows.
         var recent: [Wallpaper] = []
         var isLibraryEmpty = true
+        var update: AppUpdateNotice? = nil
 
         var showsDisplayPicker: Bool { displays.count > 1 }
     }
@@ -166,6 +169,7 @@ enum StatusPanelModel {
     ) -> Panel {
         let installed = Dictionary(input.library.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         var panel = Panel()
+        panel.update = input.update
         panel.displays = choices(input.menu.displays)
         panel.isLibraryEmpty = input.library.isEmpty
         panel.isPaused = input.menu.paused

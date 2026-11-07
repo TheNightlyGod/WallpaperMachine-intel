@@ -29,18 +29,13 @@ struct AboutSettingsSection: View {
     ])
   static let updateAutomatic = SettingsItem(
     id: "about.update-automatic", section: .about, group: updates,
-    title: "Automatically download and install updates",
+    title: "Update mode",
     note:
-      "Updates download in the background and install while the display sleeps or the Mac is locked; WallpaperMachine quits and reopens to finish."
+      "Updates download in the background and install while the display sleeps or the Mac is locked; WallpaperMachine quits and reopens to finish.",
+    keywords: ["Check and notify", "Download automatically", "Download and install automatically"]
   )
   static let updateNotes = SettingsItem(
     id: "about.update-notes", section: .about, group: updates, title: "What’s new")
-  static let updateFootnote = SettingsItem(
-    id: "about.update-footnote", section: .about, group: updates, title: "Updates",
-    note:
-      "Updates are checked against the latest published GitHub Release. Download and restart-install happen only after you confirm."
-  )
-
   static let shareApp = SettingsItem(
     id: "about.share", section: .about, group: share, title: "Share WallpaperMachine…",
     keywords: ["Star on GitHub"])
@@ -54,7 +49,7 @@ struct AboutSettingsSection: View {
 
   static let items = [
     appVersion, gitRevision, updateStatus, updateActions, updateAutomatic, updateNotes,
-    updateFootnote, shareApp,
+    shareApp,
     creditsItem,
   ]
 
@@ -168,7 +163,7 @@ struct AboutUpdateControls: Equatable {
     openingReleases: Bool, revealing: Bool
   ) -> AboutUpdateControls {
     let anyPending =
-      [.checkForUpdates, .downloadUpdate, .installUpdate].contains(where: isPending)
+      [.checkForUpdates, .downloadUpdate, .installUpdate, .retryUpdate].contains(where: isPending)
       || openingReleases || revealing
     let busy = presentation.isBusy || anyPending
     // Cancel stays possible while the update is being prepared; only its own press disables it.
@@ -222,19 +217,47 @@ private struct AboutUpdatesRows: View {
       .padding(.vertical, 8)
     }
     actions(presentation, controls)
-    SettingsRow(AboutSettingsSection.updateAutomatic) {
-      Toggle(
-        noLabel,
-        isOn: controller.displaysSettings.binding(
-          PanelActionCoordinator.key("setting", detail: "automaticUpdates"),
-          current: controller.updater.automaticallyInstallsUpdates
-        ) { try await controller.setAutomaticallyInstallsUpdates($0) }
-      )
-      .toggleStyle(.switch)
-      .labelsHidden()
+    DisplaysRow(item: AboutSettingsSection.updateAutomatic, title: L("Update mode"),
+                note: controller.updater.mode.explanation) {
+      UpdateModePicker()
     }
-    if presentation.hasNotes { notes(presentation) }
-    DisplaysItemNote(item: AboutSettingsSection.updateFootnote)
+    if let checked = controller.updater.lastCheckedAt {
+      Text(verbatim: L("Last successful check: \(checked.formatted(date: .abbreviated, time: .shortened))"))
+        .font(.caption)
+        .foregroundStyle(theme.surface.muted.color)
+        .padding(.horizontal, 12)
+    }
+    if let notice = AppUpdateNotice(store: controller.updater) {
+      Text(verbatim: notice.title)
+        .font(.caption)
+        .padding(.horizontal, 12)
+      HStack {
+        if notice.kind == .installed {
+          Button("Dismiss") {
+            controller.launch(PanelActionCoordinator.key("dismissRecentUpdate")) {
+              try await controller.dismissRecentUpdate()
+            }
+          }
+        } else {
+          Button("Remind Me Later") {
+            controller.launch(PanelActionCoordinator.key("postponeUpdate")) {
+              try await controller.postponeUpdate()
+            }
+          }
+          Button("Skip This Version") {
+            controller.launch(PanelActionCoordinator.key("skipUpdate")) { try await controller.skipUpdate() }
+          }
+          .disabled(presentation.isBusy)
+        }
+      }
+      .padding(.horizontal, 12)
+    }
+    if controller.settings.search.shows(AboutSettingsSection.updateNotes) {
+      if !controller.updater.notesReleases.isEmpty {
+        ReleaseHistoryView(releases: controller.updater.notesReleases)
+          .frame(minHeight: 180, idealHeight: 280)
+      } else if presentation.hasNotes { notes(presentation) }
+    }
   }
 
   @ViewBuilder
@@ -253,7 +276,8 @@ private struct AboutUpdatesRows: View {
               Button(label) { run(action) }
             }
           }
-          .disabled(controls.primaryIsDisabled)
+          .disabled(controls.primaryIsDisabled
+            || (controller.updater.installIsScheduled && presentation.action != .cancelUpdate))
         }
         if presentation.showsReleases {
           Button(UpdatePresentation.releasesLabel) {
@@ -319,6 +343,7 @@ private struct AboutUpdatesRows: View {
       case .downloadUpdate: try await controller.downloadUpdate()
       case .installUpdate: _ = try await controller.installUpdate()
       case .cancelUpdate: try await controller.cancelUpdate()
+      case .retryUpdate: try await controller.retryUpdate()
       }
     }
   }

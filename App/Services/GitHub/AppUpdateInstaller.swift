@@ -11,6 +11,7 @@ protocol AppUpdateInstallationTask: Sendable {
 protocol AppUpdateInstalling: Sendable {
     var canInstallInPlace: Bool { get }
     func prepareInstallation(archive: URL) async throws -> URL
+    func prepareInstallation(archive: URL, release: GitHubRelease) async throws -> URL
     func discardPreparation(_ extractedApp: URL) async
     func install(extractedApp: URL, replacing destination: URL) throws -> any AppUpdateInstallationTask
 }
@@ -61,6 +62,12 @@ struct AppUpdateInstaller: AppUpdateInstalling, @unchecked Sendable {
         try await AppUpdatePreparationWorker().prepare(
             archive: archive, root: fileManager.temporaryDirectory, signingRequirement: signingRequirement,
             currentVersion: currentVersion)
+    }
+
+    func prepareInstallation(archive: URL, release: GitHubRelease) async throws -> URL {
+        try await AppUpdatePreparationWorker().prepare(
+            archive: archive, root: fileManager.temporaryDirectory, signingRequirement: signingRequirement,
+            currentVersion: currentVersion, release: release)
     }
 
     func discardPreparation(_ extractedApp: URL) async {
@@ -279,6 +286,21 @@ struct AppUpdateInstaller: AppUpdateInstalling, @unchecked Sendable {
     /// Refuses a copy that is not newer than the running one. A genuine older release passes
     /// the signature check, so this is what stops a mirror relaying it as the latest from
     /// rolling the app back.
+    static func verifyTarget(_ app: URL, release: GitHubRelease, systemVersion: String = AppUpdatePolicy.systemVersion) throws {
+        let info = NSDictionary(contentsOf: app.appendingPathComponent("Contents/Info.plist")) as? [String: Any]
+        guard let version = info?["CFBundleShortVersionString"] as? String,
+              SemanticVersion(version) == release.version else { throw verificationIssue }
+        guard let minimum = info?["LSMinimumSystemVersion"] as? String,
+              let required = UpdateSystemVersion(minimum), let current = UpdateSystemVersion(systemVersion),
+              current >= required,
+              Bundle(url: app)?.executableArchitectures?.contains(NSNumber(value: CPU_TYPE_ARM64)) == true,
+              AppUpdatePolicy.supports(release, systemVersion: systemVersion)
+        else { throw AppUpdateIssue(code: .incompatible, detail: "Incompatible signed application") }
+        if let declared = release.minimumSystemVersion, UpdateSystemVersion(declared) != required {
+            throw verificationIssue
+        }
+    }
+
     static func verifyNewer(_ app: URL, than currentVersion: String) throws {
         let info = NSDictionary(contentsOf: app.appendingPathComponent("Contents/Info.plist")) as? [String: Any]
         guard let candidate = (info?["CFBundleShortVersionString"] as? String).flatMap(SemanticVersion.init),
@@ -292,12 +314,27 @@ private actor AppUpdatePreparationWorker {
         try AppUpdateInstaller.prepare(archive: archive, root: root, signingRequirement: signingRequirement,
                                        currentVersion: currentVersion)
     }
+    func prepare(archive: URL, root: URL, signingRequirement: String, currentVersion: String,
+                 release: GitHubRelease) throws -> URL {
+        let app = try AppUpdateInstaller.prepare(archive: archive, root: root, signingRequirement: signingRequirement,
+                                                currentVersion: currentVersion)
+        do {
+            try AppUpdateInstaller.verifyTarget(app, release: release)
+            return app
+        } catch {
+            discard(app.deletingLastPathComponent())
+            throw error
+        }
+    }
     func discard(_ work: URL) {
         try? FileManager.default.removeItem(at: work)
     }
 }
 
 extension AppUpdateInstalling {
+    func prepareInstallation(archive: URL, release: GitHubRelease) async throws -> URL {
+        try await prepareInstallation(archive: archive)
+    }
     func discardPreparation(_ extractedApp: URL) async {}
 }
 

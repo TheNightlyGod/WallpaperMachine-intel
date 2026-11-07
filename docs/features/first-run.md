@@ -90,6 +90,12 @@ have **Back**, and decision pages have **Skip**:
    Started at login, the app stays in the menu bar without opening the panel,
    unless this guide is unfinished or the renderer failed to start
    (`ControlPanelLaunch`).
+   **Update mode** applies immediately rather than on Continue. A confirmed fresh
+   installation defaults to automatic download and unattended installation; the row
+   explains that the app quits and reopens while the display sleeps or the Mac is
+   locked. Choose **Check and notify** or **Download automatically** to keep restart
+   manual. Existing users retain their previous setting, and automatic installation
+   waits until this guide is finished or dismissed ([updates](updates.md)).
    The last row, **Animate lock screen** (off by default, marked experimental), is
    not a draft: like Settings it changes the lock screen at once, shows the native
    status while busy (**Updating…** while the guide's own request is on its way), is

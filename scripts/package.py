@@ -39,6 +39,7 @@ in the file, and `--require-notices` makes it an error too (the gate for a distr
 """
 import argparse
 import hashlib
+import json
 from pathlib import Path
 import re
 import shutil
@@ -459,9 +460,13 @@ def package(args):
         print(f"{MARK.ok} Notarized and stapled: {image.name}")
     # Prove the image, not the build tree: users and the in-app updater install
     # exactly this file, and a bundle that does not survive the round trip is not one.
-    report(dmg.verify(image, version, contract=image_contract(credentials is not None)), reported)
+    metadata = {}
+    report(dmg.verify(image, version, contract=image_contract(credentials is not None), metadata=metadata), reported)
+    digest = sha256(image)
+    metadata.update(image=image.name, size=image.stat().st_size, sha256=digest)
+    image.with_name(image.name + ".metadata.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
     checksum = image.with_name(image.name + ".sha256")
-    checksum.write_text(f"{sha256(image)}  {image.name}\n")
+    checksum.write_text(f"{digest}  {image.name}\n")
     if args.install:
         destination = Path.home() / "Applications/WallpaperMachine.app"
         destination.parent.mkdir(exist_ok=True)

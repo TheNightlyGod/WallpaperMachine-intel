@@ -49,6 +49,19 @@ struct StatusPanelView: View {
         StatusPanelSwitcher()
         if !panel.recent.isEmpty { StatusPanelRecent() }
       }
+      if let update = panel.update {
+        Button { controller.openUpdates() } label: {
+          Label {
+            Text(verbatim: update.title)
+              .font(.system(size: 12, weight: .medium))
+              .fixedSize(horizontal: false, vertical: true)
+          } icon: { Image(systemName: "arrow.down.circle") }
+          .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(theme.accent.accent.color)
+        .accessibilityIdentifier("status-panel-update")
+      }
       Divider()
       StatusPanelFooter()
       if let failure = controller.failure {

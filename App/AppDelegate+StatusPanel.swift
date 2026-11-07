@@ -57,7 +57,7 @@ extension AppDelegate: StatusPanelSource {
     func statusPanelInput() -> StatusPanelModel.Input {
         let menu = statusMenuInput(includingDownloads: false)
         guard let store, !shutdownInProgress, !shutdownComplete else {
-            return StatusPanelModel.Input(menu: menu, library: [])
+            return StatusPanelModel.Input(menu: menu, library: [], update: AppUpdateNotice(store: updates.updater))
         }
         let held = Set(store.heldWallpaperIDs)
         let library = store.librarySnapshot.wallpapers.map { entry in
@@ -73,7 +73,8 @@ extension AppDelegate: StatusPanelSource {
             menu: menu, library: library, favorites: PanelPreferences.favorites(),
             hold: statusPanelHold(store: store), switching: Set(switching),
             targetDisplayID: controlPanelNavigation.targetDisplayID,
-            snapshotRevision: store.snapshotRevision, libraryRevision: store.libraryRefreshRevision)
+            snapshotRevision: store.snapshotRevision, libraryRevision: store.libraryRefreshRevision,
+            update: AppUpdateNotice(store: updates.updater))
     }
 
     func performStatusPanel(_ command: StatusPanelModel.Command) async throws {
@@ -107,6 +108,8 @@ extension AppDelegate: StatusPanelSource {
             }
         case .openSettings:
             openSettings()
+        case .openUpdates:
+            showAboutSettings()
         case .quit:
             exitApplication()
         }

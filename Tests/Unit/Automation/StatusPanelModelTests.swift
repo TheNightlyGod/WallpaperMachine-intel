@@ -43,6 +43,14 @@ final class StatusPanelModelTests: XCTestCase {
 
     // MARK: What the panel shows
 
+    func testAnUpdateRemainsVisibleWhenNoDisplayCanPlay() {
+        var empty = input(displays: [], active: false)
+        empty.update = AppUpdateNotice(kind: .ready, version: "2.0.0", automatic: true)
+        let panel = Model.make(empty, display: nil, strip: [])
+        XCTAssertEqual(panel.update, empty.update)
+        XCTAssertEqual(panel.state, .unavailable)
+    }
+
     func testAnEmptyLibraryHasNothingToShowOrSwitchTo() {
         let empty = input(displays: [display("primary")], active: false)
         let strip = draw(empty)

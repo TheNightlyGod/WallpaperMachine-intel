@@ -288,7 +288,13 @@ bundle is absent.
    stapled ticket; the `Applications` link and the window layout must be there.
    Only then is `WallpaperMachine-<version>-arm64.dmg.sha256` written, in the format
    `shasum -a 256 -c` reads: stapling changes the image's bytes, so a checksum
-   written earlier would not match the published file. The in-app updater depends on the image name; see
+   written earlier would not match the published file. Verification also reads the
+   mounted signed bundle's identifier, version, minimum macOS and executable architectures.
+   Packaging writes these to `WallpaperMachine-<version>-arm64.dmg.metadata.json`, with
+   the final image name, size and SHA-256. This internal build artifact lets the Linux
+   publish job generate compatibility fields without mounting a DMG or guessing from
+   source settings. The metadata sidecar is transferred with the image, not published
+   as a release asset. The in-app updater depends on the image name; see
    [release.md](release.md). The notices the bundle carries are listed in
    [../LICENSING.md](../LICENSING.md#notice-payload).
 7. **`--install`.** Copies the bundle to `~/Applications/WallpaperMachine.app`.

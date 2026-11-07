@@ -63,14 +63,14 @@ enum AppUpdateConfiguration {
 }
 
 enum AppUpdateErrorCode: String, Equatable, Sendable {
-    case network, rateLimited, configuration, verification, permission, unknown
+    case network, rateLimited, configuration, verification, permission, incompatible, unknown
 }
 
 enum AppUpdateOperation: String, Equatable, Sendable {
     case check, download, install
 }
 
-struct SemanticVersion: Comparable, Equatable, Sendable {
+struct SemanticVersion: Comparable, Equatable, Codable, Sendable {
     let major: Int
     let minor: Int
     let patch: Int
@@ -97,7 +97,7 @@ struct SemanticVersion: Comparable, Equatable, Sendable {
     }
 }
 
-struct GitHubReleaseAsset: Equatable, Sendable {
+struct GitHubReleaseAsset: Equatable, Codable, Sendable {
     let name: String
     let downloadURL: URL
     let size: Int64
@@ -105,7 +105,7 @@ struct GitHubReleaseAsset: Equatable, Sendable {
     var isDiskImage: Bool { name.lowercased().hasSuffix(".dmg") }
 }
 
-struct GitHubRelease: Equatable, Sendable {
+struct GitHubRelease: Equatable, Codable, Sendable {
     let version: SemanticVersion
     let htmlURL: URL
     let prerelease: Bool
@@ -115,15 +115,22 @@ struct GitHubRelease: Equatable, Sendable {
     /// The newest `CHANGELOG.md` sections in every translation, which only the update manifest
     /// carries; empty from the API and from manifests written before it did.
     let changelog: String
+    let minimumSystemVersion: String?
+    let architectures: [String]?
+    let bundleIdentifier: String?
 
     init(version: SemanticVersion, htmlURL: URL, prerelease: Bool, assets: [GitHubReleaseAsset],
-         notes: String = "", changelog: String = "") {
+         notes: String = "", changelog: String = "", minimumSystemVersion: String? = nil,
+         architectures: [String]? = nil, bundleIdentifier: String? = nil) {
         self.version = version
         self.htmlURL = htmlURL
         self.prerelease = prerelease
         self.assets = assets
         self.notes = notes
         self.changelog = changelog
+        self.minimumSystemVersion = minimumSystemVersion
+        self.architectures = architectures
+        self.bundleIdentifier = bundleIdentifier
     }
 }
 
@@ -337,7 +344,9 @@ enum GitHubReleaseParser {
         let releasePage = htmlURL.scheme == "https" && htmlURL.host?.lowercased() == "github.com"
             ? htmlURL : AppUpdateConfiguration.releasesURL
         return GitHubRelease(version: version, htmlURL: releasePage, prerelease: payload.prerelease,
-                             assets: assets, notes: payload.body ?? "", changelog: payload.changelog ?? "")
+                             assets: assets, notes: payload.body ?? "", changelog: payload.changelog ?? "",
+                             minimumSystemVersion: payload.minimumSystemVersion,
+                             architectures: payload.architectures, bundleIdentifier: payload.bundleIdentifier)
     }
 
     /// The disk image to download: only product-named `.dmg` assets qualify, so the
@@ -360,11 +369,16 @@ enum GitHubReleaseParser {
         let assets: [Asset]
         let body: String?
         let changelog: String?
+        let minimumSystemVersion: String?
+        let architectures: [String]?
+        let bundleIdentifier: String?
 
         enum CodingKeys: String, CodingKey {
             case tagName = "tag_name"
             case htmlURL = "html_url"
-            case prerelease, assets, body, changelog
+            case minimumSystemVersion = "minimum_system_version"
+            case bundleIdentifier = "bundle_identifier"
+            case prerelease, assets, body, changelog, architectures
         }
 
         struct Asset: Decodable {

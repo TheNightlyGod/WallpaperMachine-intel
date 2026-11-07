@@ -12,8 +12,29 @@ struct PanelBanners: View {
     let message = controller.errors.message ?? controller.errors.downloadMessage
     let drive = controller.libraryDriveMessage
     let held = controller.heldWallpapers
-    let hasContent = message != nil || drive != nil || !held.isEmpty
+    let update = AppUpdateNotice(store: controller.updater)
+    let showsUpdate = update != nil && !controller.updater.isDeferred
+      && (controller.updater.state.availableVersion == nil
+        || controller.updater.state.availableVersion != controller.updater.skippedVersion)
+    let hasContent = message != nil || drive != nil || !held.isEmpty || showsUpdate
     VStack(spacing: 8) {
+      if showsUpdate, let update {
+        BannerRow(systemImage: "arrow.down.circle", tint: Color.accentColor, message: update.title) {
+          Button("View update") {
+            controller.launch(PanelActionCoordinator.key("openUpdates")) {
+              try await controller.openSettings(.about)
+            }
+          }
+          Button(update.kind == .installed ? L("Dismiss") : L("Remind Me Later")) {
+            controller.launch(PanelActionCoordinator.key("deferUpdate")) {
+              if update.kind == .installed { try await controller.dismissRecentUpdate() }
+              else { try await controller.postponeUpdate() }
+            }
+          }
+        }
+        .controlSize(.small)
+        .accessibilityIdentifier("app-update-banner")
+      }
       if let message {
         ErrorBanner(message: message) { controller.dismissError() }
       }

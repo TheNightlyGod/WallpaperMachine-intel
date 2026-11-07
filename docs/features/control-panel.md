@@ -293,9 +293,13 @@ the rest opens in a popover from the ⓘ beside the title.
   links** disclosure (see [automation](automation.md)).
 - **About** opens with the app icon, name and version (`MARKETING_VERSION` in
   `project.yml`) and the Git revision. **Check for Updates** reads the latest GitHub
-  Release; download and restart-install happen only after confirmation, unless
-  **Automatically download and install updates** is on (see [updates](updates.md)). The application menu item **Check for Updates…** opens
-  this section. **Spread the word** has **Share WallpaperMachine…** and **Star on
+  Release. **Update mode** chooses notification only, automatic downloading with
+  manual restart, or full automatic installation while the Mac is locked/display
+  asleep. New installations default to full automatic; existing choices are preserved
+  (see [updates](updates.md)). The section shows the last successful check, localized
+  release history and progress/cancel/retry. **Remind Me Later** defers this version
+  for 24 hours across launches, and **Skip This Version** prevents its automatic update.
+  The application menu item **Check for Updates…** opens this section. **Spread the word** has **Share WallpaperMachine…** and **Star on
   GitHub** ([one-time prompts](first-run.md#star-prompt-the-performance-data-question-and-the-subscriptions-offer)).
   The section ends with the licence note and three links: **GNU General Public License
   v3**, **MMFoundation**, the website of the organization that makes the app
@@ -677,8 +681,17 @@ last, else the control panel's target display, else the main one. Below the pick
   **Show other wallpapers** then draws from that pool.
 - **Recently used**: the four wallpapers used on the display most recently, other than the one
   it shows; a click applies one again.
+- A passive **update row** when an update is available, downloading, verifying, ready,
+  deferred, needs attention or was just installed. It opens Settings → About after
+  dismissing the popover. It remains available even if no display can play a wallpaper;
+  progress follows the same update store as the main panel, with no additional polling.
 - **Control Panel**, which opens the window with this display as its target, **Settings** and
   **Quit WallpaperMachine**.
+
+The main control panel also keeps a passive update banner above its pages. Opening
+updates is a user action; background checks and installation results never activate
+another window. Dismiss the installed-result banner or postpone an available update;
+the menu bar and About remain reachable.
 
 Nothing of it runs while it is closed: it follows the stores, reads the stamps of the covers on
 show (from the Installed covers' cache, never a full-size preview or a live render) and reads

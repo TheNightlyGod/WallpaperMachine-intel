@@ -78,7 +78,7 @@ def changelog_sections(path, tag, limit=CHANGELOG_SECTIONS):
     return text[starts[0]:end].rstrip("\n") + "\n"
 
 
-def manifest(tag, repository, notes, image, changelog=None):
+def manifest(tag, repository, notes, image, changelog=None, metadata=None):
     """The manifest for one release, as a dict ready for JSON; `changelog` adds its sections."""
     match = VERSION_TAG.match(tag)
     if not match:
@@ -104,6 +104,22 @@ def manifest(tag, repository, notes, image, changelog=None):
     }
     if changelog is not None:
         content["changelog"] = changelog_sections(changelog, tag)
+    if metadata is not None:
+        facts = json.loads(Path(metadata).read_text(encoding="utf-8"))
+        expected_facts = {"image": image.name, "version": match.group(1), "size": image.stat().st_size,
+                          "sha256": content["assets"][0]["digest"].removeprefix("sha256:"),
+                          "bundle_identifier": "app.wallpapermachine"}
+        if any(facts.get(key) != value for key, value in expected_facts.items()):
+            raise ManifestError("Build metadata does not match the verified disk image and tag.")
+        minimum = facts.get("minimum_system_version")
+        architectures = facts.get("architectures")
+        if not isinstance(minimum, str) or not re.fullmatch(r"\d+(?:\.\d+){0,2}", minimum):
+            raise ManifestError("Build metadata has no valid minimum macOS version.")
+        if not isinstance(architectures, list) or "arm64" not in architectures or any(
+                arch not in ("arm64", "arm64e", "x86_64") for arch in architectures):
+            raise ManifestError("Build metadata has no supported architecture list.")
+        content.update(minimum_system_version=minimum, architectures=architectures,
+                       bundle_identifier=facts["bundle_identifier"])
     return content
 
 
@@ -113,13 +129,14 @@ def main(argv=None):
     parser.add_argument("--repository", required=True, help="owner/name of the repository the release is in.")
     parser.add_argument("--notes", required=True, help="Markdown file that becomes the release body.")
     parser.add_argument("--changelog", help=f"CHANGELOG.md whose newest {CHANGELOG_SECTIONS} sections the manifest carries.")
+    parser.add_argument("--metadata", help="Digest-bound metadata from the verified signed disk image; required by release CI.")
     parser.add_argument("image", help="The disk image the release publishes.")
     args = parser.parse_args(argv)
     for path in (args.notes, args.image, *([args.changelog] if args.changelog else [])):
         if not Path(path).is_file():
             raise ManifestError(f"Not a file: {path}")
     output = Path(args.image).with_name(MANIFEST_NAME)
-    content = manifest(args.tag, args.repository, args.notes, args.image, args.changelog)
+    content = manifest(args.tag, args.repository, args.notes, args.image, args.changelog, args.metadata)
     output.write_text(json.dumps(content, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(output)
     print(f"{MARK.ok} {output.name} for {args.tag}: {content['assets'][0]['digest']}", file=sys.stderr)

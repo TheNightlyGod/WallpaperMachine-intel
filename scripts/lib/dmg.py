@@ -387,7 +387,7 @@ def build(app, image, name, icon=None, background=BACKGROUND):
     return image
 
 
-def verify(image, version, contract=bundle_contract.verify_bundle):
+def verify(image, version, contract=bundle_contract.verify_bundle, metadata=None):
     """Mount `image` read-only and prove it installs `version` of this app.
 
     The checks are the ones a user relies on: the bundle is this app at that version,
@@ -419,6 +419,14 @@ def verify(image, version, contract=bundle_contract.verify_bundle):
                 warnings = contract(app)
             except bundle_contract.BundleContractError as error:
                 raise DiskImageError(f"{image.name}: {error}") from error
+            if metadata is not None:
+                architectures = _run(["/usr/bin/lipo", "-archs", app / "Contents/MacOS/WallpaperMachine"],
+                                     "Cannot read update architectures").decode("ascii").strip().split()
+                minimum = values.get("LSMinimumSystemVersion")
+                if not isinstance(minimum, str) or not minimum or "arm64" not in architectures:
+                    raise DiskImageError("The update must declare its minimum macOS version and contain arm64 code")
+                metadata.update(version=version, bundle_identifier=values["CFBundleIdentifier"],
+                                minimum_system_version=minimum, architectures=architectures)
             link = mount / APPLICATIONS_LINK
             if not link.is_symlink() or os.readlink(link) != "/Applications":
                 raise DiskImageError(f"{image.name} has no {APPLICATIONS_LINK} link to /Applications")

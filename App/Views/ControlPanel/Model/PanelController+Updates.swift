@@ -25,10 +25,24 @@ extension PanelController {
     try await run(.immediate) { updater.openReleases() }
   }
 
-  /// `setAutomaticallyInstallsUpdates`: whether unattended checks download an update themselves
-  /// and install it while nobody is at the Mac, instead of opening the update window.
-  func setAutomaticallyInstallsUpdates(_ on: Bool) async throws {
-    try await run(.immediate) { updater.automaticallyInstallsUpdates = on }
+  func setUpdateMode(_ mode: AppUpdateMode) async throws {
+    try await run(.immediate) { updater.mode = mode }
+  }
+
+  func postponeUpdate() async throws {
+    try await run(.immediate) { updater.postponeUpdate() }
+  }
+
+  func skipUpdate() async throws {
+    try await run(.immediate) { await updater.skipCurrentVersion() }
+  }
+
+  func dismissRecentUpdate() async throws {
+    try await run(.immediate) { await updater.dismissRecentUpdate() }
+  }
+
+  func retryUpdate() async throws {
+    try await run(.immediate) { _ = await updater.retryUpdate() }
   }
 
   /// `revealDownloadedUpdate`: the downloaded disk image in Finder.

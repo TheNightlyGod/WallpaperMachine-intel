@@ -284,6 +284,9 @@ final class StatusPanelController {
   func openSettings() -> Task<Void, Never> { dismissThen(.openSettings) }
 
   @discardableResult
+  func openUpdates() -> Task<Void, Never> { dismissThen(.openUpdates) }
+
+  @discardableResult
   func quit() -> Task<Void, Never> { dismissThen(.quit) }
 
   private func send(_ command: StatusPanelModel.Command) async throws {

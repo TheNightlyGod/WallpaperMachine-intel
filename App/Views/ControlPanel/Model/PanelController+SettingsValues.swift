@@ -155,8 +155,16 @@ extension PanelController {
 
   /// The About › Updates card for the updater's state. `locale` words the time a rate limit ends.
   func updatePresentation(locale: Locale = .current) -> UpdatePresentation {
-    UpdatePresentation(
+    var presentation = UpdatePresentation(
       state: updater.state, notes: updater.releaseNotes, rateLimitedUntil: updater.rateLimitedUntil,
       locale: locale)
+    presentation.isBusy = presentation.isBusy || updater.isChecking || updater.isRestoring
+    if updater.isVerifyingDownload { presentation.statusText = L("Verifying update…") }
+    if updater.hasDownloadedUpdate && !updater.state.isBusy {
+      presentation.action = updater.canInstallInPlace ? .installUpdate : nil
+      presentation.actionLabel = updater.canInstallInPlace ? L("Restart and Install") : ""
+      presentation.showsReveal = true
+    }
+    return presentation
   }
 }

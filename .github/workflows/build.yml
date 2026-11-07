@@ -260,7 +260,7 @@ jobs:
             ls -1 "${directory}"/*.dmg 2>/dev/null || true
             exit 1
           fi
-          cp "${directory}/${name}" "${directory}/${name}.sha256" "${RUNNER_TEMP}/release/"
+          cp "${directory}/${name}" "${directory}/${name}.sha256" "${directory}/${name}.metadata.json" "${RUNNER_TEMP}/release/"
           {
             echo "### \`${name}\`"
             echo ""
@@ -363,7 +363,8 @@ jobs:
         run: |
           set -euo pipefail
           manifest="$(python3 scripts/update_manifest.py --tag "$TAG" --repository "$REPOSITORY" \
-            --notes "${RUNNER_TEMP}/release/notes.md" --changelog "${RUNNER_TEMP}/release/CHANGELOG.md" "$IMAGE")"
+            --notes "${RUNNER_TEMP}/release/notes.md" --changelog "${RUNNER_TEMP}/release/CHANGELOG.md" \
+            --metadata "${IMAGE}.metadata.json" "$IMAGE")"
           echo "manifest=${manifest}" >> "$GITHUB_OUTPUT"
 
       - name: Publish the release

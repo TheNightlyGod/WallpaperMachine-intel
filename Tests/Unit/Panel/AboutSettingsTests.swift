@@ -30,10 +30,10 @@ final class AboutSettingsTests: SettingsBTestCase {
     XCTAssertTrue(controls(.idle(currentVersion: "1.0.0"), revealing: true).revealIsDisabled)
   }
 
-  func testDownloadingDisablesTheButtonThatSaysDownloadingPercent() {
+  func testDownloadingAllowsCancellation() {
     let downloading = controls(
       .downloading(currentVersion: "1.0.0", availableVersion: "1.1.0", percent: 40, transferred: 4, total: 10, bytesPerSecond: 1))
-    XCTAssertTrue(downloading.primaryIsDisabled)
+    XCTAssertFalse(downloading.primaryIsDisabled)
     XCTAssertTrue(downloading.isBusy)
   }
 

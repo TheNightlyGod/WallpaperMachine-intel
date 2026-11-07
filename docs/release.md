@@ -919,8 +919,8 @@ available, the app's update window shows from it each version newer than the
 installed one, in the app's language, and falls back to the release body when the
 field is missing, as in manifests from before it existed
 ([The update window](features/updates.md#the-update-window)). The app no longer
-bundles `CHANGELOG.md` or `Resources/ReleaseBanners`, and there is no window after
-an update. The app reads the manifest
+bundles `CHANGELOG.md` or `Resources/ReleaseBanners`. Updates and their results are
+passive entries in the control panel and menu bar; no window opens automatically. The app reads the manifest
 from `https://github.com/WallpaperMachine/WallpaperMachine/releases/latest/download/WallpaperMachine-update.json`,
 which github.com redirects to the file on the release marked Latest. A draft never
 resolves, and `publish_release.py` makes the release public only after the image,
@@ -928,6 +928,23 @@ sidecar and manifest are uploaded. The name is
 `AppUpdateConfiguration.manifestName`; renaming it changes both sides at once. The
 script refuses a tag that is not `vx.y.z`, a repository that is not `owner/name`
 and an image not named as below.
+
+New manifests additionally carry `bundle_identifier`, `minimum_system_version` and
+`architectures`. Packaging reads these from the verified signed app inside the DMG
+and writes `WallpaperMachine-<version>-arm64.dmg.metadata.json`, binding them to the
+image name, version, size and SHA-256. Build transfers this internal file to the
+publish job; `update_manifest.py --metadata <file>` verifies the binding before
+writing the manifest. The metadata sidecar is not a public release asset. CI requires
+it; the optional CLI flag remains available for testing legacy manifests. Older
+clients ignore these additive fields. New clients reject known incompatibility before
+downloading and also verify the actual signed application's target version, macOS
+minimum and architecture before installing, including when reading a legacy manifest.
+
+Before any GitHub mutation, `publish_release.py` verifies exactly the DMG, SHA-256
+sidecar and manifest, including the notes body and compatibility fields. After uploading,
+it checks the draft's asset names, lengths and any GitHub-supplied digests before
+promoting it. Missing or mismatched assets leave the release a draft. The existing
+publish lock, immutable live releases and final Latest comparison are unchanged.
 
 What a release must satisfy:
 
@@ -953,7 +970,8 @@ What a release must satisfy:
   privacy permissions;
 - the release body is the English notes above `<!-- release-notes-end -->`
   ([Release notes and the changelog](#release-notes-and-the-changelog)); the app
-  shows what is above the marker as **What's new** in About and ignores the rest;
+  uses it as a fallback when localized changelog sections are unavailable and
+  ignores the footer after the marker;
 - the manifest's `changelog` starts with the new version's section in the
   [layout above](#release-notes-and-the-changelog), so an install several versions
   behind sees every change it is about to receive.

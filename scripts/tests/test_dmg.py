@@ -202,9 +202,11 @@ class DiskImageRoundTripTests(unittest.TestCase):
         (app / "Contents/MacOS").mkdir(parents=True)
         with open(app / "Contents/Info.plist", "wb") as handle:
             plistlib.dump({"CFBundleIdentifier": dmg.BUNDLE_IDENTIFIER, "CFBundleExecutable": "WallpaperMachine",
-                           "CFBundlePackageType": "APPL", "CFBundleShortVersionString": VERSION}, handle)
+                           "CFBundlePackageType": "APPL", "CFBundleShortVersionString": VERSION,
+                           "LSMinimumSystemVersion": "15.0"}, handle)
         executable = app / "Contents/MacOS/WallpaperMachine"
-        shutil.copyfile("/usr/bin/true", executable)  # system files carry flags a copy may not keep
+        subprocess.run(["xcrun", "clang", "-arch", "arm64", "-x", "c", "-", "-o", executable],
+                       input="int main(void) { return 0; }", text=True, check=True, capture_output=True)
         executable.chmod(0o755)
         subprocess.run(["codesign", "--force", "--sign", "-", app], check=True, capture_output=True)
         # What a synced checkout's File Provider adds to the signed bundle in build/; the
@@ -239,6 +241,12 @@ class DiskImageRoundTripTests(unittest.TestCase):
         dmg.verify(self.image, VERSION, contract=self.accept)
         with self.assertRaisesRegex(dmg.DiskImageError, "not 9.9.9"):
             dmg.verify(self.image, "9.9.9", contract=self.accept)
+
+    def test_update_metadata_is_read_from_the_signed_app_in_the_image(self):
+        metadata = {}
+        dmg.verify(self.image, VERSION, contract=self.accept, metadata=metadata)
+        self.assertEqual(metadata, {"version": VERSION, "bundle_identifier": dmg.BUNDLE_IDENTIFIER,
+                                    "minimum_system_version": "15.0", "architectures": ["arm64"]})
 
     def test_the_contract_runs_on_the_app_inside_the_mounted_image(self):
         seen = []

@@ -52,6 +52,23 @@ class UpdateManifestTests(unittest.TestCase):
         self.assertEqual(asset["size"], self.image.stat().st_size)
         self.assertEqual(asset["digest"], "sha256:" + hashlib.sha256(self.image.read_bytes()).hexdigest())
 
+    def test_verified_metadata_is_digest_bound_and_additive(self):
+        metadata = self.root / "metadata.json"
+        facts = {"version": "1.4.0", "image": self.image.name,
+                 "size": self.image.stat().st_size, "sha256": hashlib.sha256(self.image.read_bytes()).hexdigest(),
+                 "bundle_identifier": "app.wallpapermachine", "minimum_system_version": "15.0", "architectures": ["arm64"]}
+        metadata.write_text(json.dumps(facts))
+        content = update_manifest.manifest("v1.4.0", "owner/app", self.notes, self.image, metadata=metadata)
+        self.assertEqual(content["minimum_system_version"], "15.0")
+        self.assertEqual(content["architectures"], ["arm64"])
+        self.assertEqual(content["tag_name"], "v1.4.0")
+        for key, bad in [("sha256", "wrong"), ("version", "1.4.1"), ("minimum_system_version", "new"),
+                         ("architectures", ["x86_64"]), ("bundle_identifier", "foreign.app")]:
+            with self.subTest(key=key):
+                metadata.write_text(json.dumps({**facts, key: bad}))
+                with self.assertRaises(update_manifest.ManifestError):
+                    update_manifest.manifest("v1.4.0", "owner/app", self.notes, self.image, metadata=metadata)
+
     def test_without_a_changelog_the_manifest_has_no_changelog_field(self):
         content = json.loads(self.run_main(str(self.image)).read_text(encoding="utf-8"))
         self.assertNotIn("changelog", content)

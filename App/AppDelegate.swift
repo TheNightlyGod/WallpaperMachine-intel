@@ -24,10 +24,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var finishedLaunching = false
     private(set) lazy var updates = AppUpdateCoordinator(
         updater: AppUpdateStore(),
-        promptInput: { [weak self] in
-            self?.updatePromptInput() ?? UpdatePromptGate.Input(
-                panelVisibleAndActive: false, globalPresentation: .running, hasSuspendedDisplay: false, shuttingDown: true)
-        },
         isShuttingDown: { [weak self] in
             guard let self else { return true }
             return self.shutdownInProgress || self.shutdownComplete
@@ -552,7 +548,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                             // Wallpapers presenting again is the moment an update alert held
                             // back by sleep, a lock or an app rule may appear, and sleep or a
                             // lock is the moment an automatic update installs.
-                            self.updates.retryHeldPrompt()
                             self.updates.installIfUnattended()
                             completion(.success(()))
                         } catch {
@@ -629,7 +624,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                             // produces no snapshot of its own.
                             self.sceneMediaSink?.reconcile()
                             // Leaving a full-screen app shows the hidden display again.
-                            if !suspended { self.updates.retryHeldPrompt() }
                             completion(.success(()))
                         } catch {
                             AppLog.error("""
@@ -1196,10 +1190,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     cancellation, restorationBudget: supervisor.budgets.restoration,
                     restoringPanel: panelWasVisible, updateWindow: updateWindowWasVisible)
                 sender.reply(toApplicationShouldTerminate: false)
-                presentQuitFailure(cancellation)
+                if !updates.updater.isAutomaticInstallation { presentQuitFailure(cancellation) }
                 // An installer waiting for this app to quit would replace it whenever it did. The
                 // helper takes up to two seconds to answer, which is why this comes last.
                 await updates.updater.cancelPendingInstall()
+                await updates.resumeAfterCancelledQuit()
                 rebuildMenu()
             case .proceed(let stalled):
                 completeQuit(sender, reason: reason, signal: signal, desktopUnrestored: false, stalled: stalled)
@@ -1540,11 +1535,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return ControlPanelWindow.clampedFrameSize(frameSize, for: sender)
     }
 
-    func windowDidBecomeKey(_ notification: Notification) {
-        guard let window = notification.object as? NSWindow, window === controlPanelWindow else { return }
-        updates.retryHeldPrompt()
-    }
-
     /// Closing the panel releases its controller; the stores and the navigation object outlive it,
     /// so opening it again builds a fresh view around them and resumes where it was.
     func windowWillClose(_ notification: Notification) {
@@ -1614,14 +1604,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard let store, !shutdownInProgress, !shutdownComplete, playbackSnapshotCurrent else { return }
         workshopStore.updates.checkIfDue(
             installed: store.librarySnapshot.wallpapers.map(\.id), library: ClientPaths.libraryURL)
-    }
-
-    private func updatePromptInput() -> UpdatePromptGate.Input {
-        UpdatePromptGate.Input(
-            panelVisibleAndActive: controlPanelWindow.map { $0.isVisible && $0.isKeyWindow } ?? false,
-            globalPresentation: presentationPolicy?.globalPresentation ?? .running,
-            hasSuspendedDisplay: presentationPolicy?.hiddenDisplayIDs.isEmpty == false,
-            shuttingDown: shutdownInProgress || shutdownComplete)
     }
 
     /// An error alert, shown from the main run loop: a modal run inside a main-actor task would
