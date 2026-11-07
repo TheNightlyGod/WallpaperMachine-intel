@@ -25,6 +25,15 @@ and moves whatever falls past ten verbatim into a monthly file under
 [archive/](archive/); promote anything durable before it goes. Editing an
 entry's recorded result is not allowed.
 
+## 2026-11-07 — Fullscreen Space presentation guard (#173)
+
+- Four focused regressions failed before the fix: early preview resume, cancelled swipes, hidden-display classification and Space-monitor arrival.
+- python3 scripts/test.py --only WallpaperPresentationPolicyTests --only WallpaperSpaceMonitorTests --only PlaybackPolicyCompositionTests --only ActiveDisplayTrackerTests: 101 passed, 0 failed, 0 skipped.
+- python3 scripts/test.py: Python checks passed; 4638 native tests passed, 0 failed, 66 skipped (opt-in media, live Steam and web reference rendering).
+- The full gate reported one main-thread runtime warning in AppUpdateTests.testSignatureCheckRefusesAnUnsignedOrAlteredCopy, outside the changed presentation code.
+- Restored the installed Xcode Metal Toolchain after the first test build could not find it.
+- Live Mission Control transitions and the reported foreground-window trails were not checked. No Release build or desktop run; no wallpaper-specific rendering changes.
+
 ## 2026-11-06 — Reduce redundant lighting, video and idle media work
 
 - Changed light packing to reuse exact per-draw arrays, preserving reflection camera ordering and rebuilding after simulation; no quality or cadence settings changed.
@@ -120,16 +129,3 @@ SDR display framing behind `scene_display_framing` under `[experimental]`, off b
 - With `WALLPAPER_MACHINE_SDR_FRAMING=1` a cropped scene's frames change as stated (3808922316 at 3456x2234@2) and an uncropped one stays identical (3808922316 at 3840x2160@2)
 - Cost figures (Miyabi 3784370784 at 3840x2160@2: render targets 508.5 → 437 MB, GPU about −6 to −16%; 16:9 scenes on 3456x2234@2: −3 to −5.5% memory, GPU within noise) come from the framing experiment, not rerun on this branch
 - Not run: full `python3 scripts/test.py`, a desktop run, a power measurement and a Release build
-
-## 2026-11-03 — Power and performance: byte-identical renderer savings, host idle work, frame pacing
-
-Branch t3/optimize-power-usage (PR #156) against the v1.8.2 renderer on an M5 Pro (macOS 27), on the local library's heaviest scenes at the developer's settings (render scale 0.75, 60 fps, display resolution, fill), surfaces 3840x2160@2 and 3456x2234@2.
-
-- `python3 scripts/check_rust.py`, `python3 scripts/check_renderer.py`, `python3 scripts/test.py` on the final tree — exit 0; test.py 4320 passed, 0 failed, 60 skipped
-- `python3 scripts/perf_bench.py identity` base vs final, 240 draws hashed every 30, both surfaces — 128/128 comparable frames identical on 3808922316, 3796026374, 3626305963, 3624257712, 3669681034, 3537671609, 3441873795, 3013702957; 3784370784 differs between two baseline runs (wall-clock text), covered by masked comparison and equal pass plans
-- Layer-local reuse signatures (`WALLPAPER_MACHINE_LAYER_LOCAL_SIGNATURES`) changed 2 pixels by one level on 3808922316 at 3456x2234 (merged render passes blend differently on Apple GPUs) — made opt-in; with it off the scene is identical
-- Deterministic counters, all optimisation switches off vs on, 3840x2160@2: memory read by loading render passes 3,187 → 1,543 MB per frame over seven scenes; 3808922316 blits 14 → 0, copies 17.1 → 0 MB per frame
-- Metal System Trace with `WALLPAPER_MACHINE_GPU_LABELS=1`: 3784370784 audio visualizer passes 0.81 → 0.01 ms per frame while silent
-- Back-to-back GPU ms per draw, off vs on, 3 rounds on battery with other GPU load — indicative only: -7 to -10 % on four scenes, within noise on three
-- Not run: `scripts/power_ab.py` desktop windows and the paired `perf_bench.py cost` energy run (machine on battery at 21–26 % and in use); frame pacing's on-screen gap distribution unverified on a real display
-- SDR display framing measured and not merged (interior not byte-identical); Wallpaper Engine reference frames captured for 3784370784, 3796026374, 3626305963, 3808922316

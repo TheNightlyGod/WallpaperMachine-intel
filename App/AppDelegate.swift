@@ -465,6 +465,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     self?.applyDesktopPicturePreference()
                 }
             }
+            // Seed the Space snapshot before presentation first evaluates, including a launch
+            // from a full-screen Space. Later topology changes re-evaluate the policy themselves.
+            let spaces = WallpaperSpaceMonitor.shared
+            desktopSpaces = spaces
+            spaces.start()
             let policy = WallpaperPresentationPolicy(
                 displaySleepAction: { preferences.displaySleepAction },
                 // Low Power Mode, a hot Mac and a Focus filter act exactly as app rules do, and so
@@ -481,6 +486,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 // "When another app is in front" learns from the probes' occlusion that the app in
                 // front minimized or closed the window over the desktop.
                 keepsCoverageProbes: { preferences.otherAppInFrontAction.watchesFrontmostApp },
+                nonDesktopDisplays: { spaces.nonDesktopDisplayIDs },
                 // Another display than the one the pointer is on, for those who chose to play only there.
                 inactiveDisplays: { known in
                     preferences.playsOnlyOnActiveDisplay ? activeDisplay.inactive(among: known) : []
@@ -643,9 +649,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             power.onChange = { [weak self] source in self?.powerSourceChanged(source) }
             power.start()
             policy.start()
-            let spaces = WallpaperSpaceMonitor.shared
-            desktopSpaces = spaces
-            spaces.start()
             // After the Space monitor, whose topology the auditor reads to tell a
             // full-screen Space from a wallpaper window that is missing.
             let auditor = WallpaperWindowAuditor(

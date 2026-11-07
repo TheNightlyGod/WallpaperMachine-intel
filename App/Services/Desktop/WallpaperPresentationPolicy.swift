@@ -71,6 +71,8 @@ final class WallpaperPresentationPolicy {
     private let desktopCoveredAction: @MainActor () -> DesktopCoveredAction
     private let keepsCoverageProbes: @MainActor () -> Bool
     private let coveredDisplays: @MainActor () -> Set<UInt32>
+    /// The last Space snapshot, not a window-server query during an occlusion callback.
+    private let nonDesktopDisplays: @MainActor () -> Set<UInt32>
     private let inactiveDisplays: @MainActor (Set<UInt32>) -> Set<UInt32>
     private let screenLayout: @MainActor () -> [NSRect]
     private let requestedQualityReductions: @MainActor () -> Set<QualityReduction>
@@ -186,6 +188,7 @@ final class WallpaperPresentationPolicy {
         desktopCoveredAction: (@MainActor () -> DesktopCoveredAction)? = nil,
         keepsCoverageProbes: (@MainActor () -> Bool)? = nil,
         coveredDisplays: (@MainActor () -> Set<UInt32>)? = nil,
+        nonDesktopDisplays: (@MainActor () -> Set<UInt32>)? = nil,
         inactiveDisplays: (@MainActor (Set<UInt32>) -> Set<UInt32>)? = nil,
         screenLayout: (@MainActor () -> [NSRect])? = nil,
         qualityReductions: (@MainActor () -> Set<QualityReduction>)? = nil,
@@ -219,6 +222,7 @@ final class WallpaperPresentationPolicy {
             self.coveredDisplays = { [] }
             probes = nil
         }
+        self.nonDesktopDisplays = nonDesktopDisplays ?? { [] }
         self.inactiveDisplays = inactiveDisplays ?? { _ in [] }
         self.screenLayout = screenLayout ?? { Self.systemScreenLayout() }
         requestedQualityReductions = qualityReductions ?? { [] }
@@ -272,6 +276,13 @@ final class WallpaperPresentationPolicy {
         // from every wallpaper window anyway.
         observers.append((windowCenter, windowCenter.addObserver(
             forName: NSWindow.didChangeOcclusionStateNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.evaluate() }
+        }))
+        // AppKit can expose a desktop preview before leaving a full-screen Space. Wait for
+        // the monitor's updated topology, then evaluate even if visibility never changes again.
+        observers.append((windowCenter, windowCenter.addObserver(
+            forName: WallpaperSpaceMonitor.didChangeNotification, object: nil, queue: .main
         ) { [weak self] _ in
             MainActor.assumeIsolated { self?.evaluate() }
         }))
@@ -388,6 +399,9 @@ final class WallpaperPresentationPolicy {
     /// pauses, other windows over that area.
     private func hiddenFromView(_ current: [WallpaperSurfaceVisibility]) -> Set<UInt32> {
         var hidden = Set(current.filter { !$0.isVisible }.map(\.displayID))
+        // A Mission Control preview is not an active desktop, even when AppKit calls its
+        // wallpaper visible. Keep its last frame until that display leaves the full-screen Space.
+        hidden.formUnion(nonDesktopDisplays())
         if desktopCoveredAction() == .pause { hidden.formUnion(coveredDisplays()) }
         return hidden
     }
@@ -482,8 +496,8 @@ final class WallpaperPresentationPolicy {
             AppLog.info("wallpaper audio \(audio ? "suppressed" : "restored")")
         }
         adopt(quality: quality)
-        // Resume instantly; delay only occlusion-driven suspension so a Space
-        // switch or a Mission Control pass does not freeze a visible wallpaper.
+        // Resume once both visibility and the Space snapshot allow it. Delay suspension so a
+        // brief occlusion or a Mission Control pass does not freeze a visible wallpaper.
         let revealed = suspendedDisplayIDs.subtracting(hidden)
         let newlyHidden = hidden.subtracting(suspendedDisplayIDs)
         if !revealed.isEmpty {

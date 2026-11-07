@@ -90,8 +90,10 @@ A kept wallpaper is let go, and loads again on its next visit, when:
 Each change to a display's list is logged with the app's memory footprint (`space parking:
 display … keeps … wallpapers`), and the renderer logs each scene it keeps or runs again.
 
-Fullscreen app Spaces are not listed and change nothing. Missing, malformed or ambiguous topology
-leaves the switch unavailable and automatic selection waiting; manual commands still work.
+Fullscreen app Spaces are not listed and do not change the selected wallpaper; their displays
+stay paused until the desktop returns ([playback](performance.md#playback)). Missing, malformed
+or ambiguous topology leaves the switch unavailable and automatic selection waiting; manual
+commands still work.
 
 ## Windows that stay on their desktop
 

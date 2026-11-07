@@ -48,6 +48,13 @@ final class WallpaperSpaceMonitor {
     private(set) var displays: [String: WallpaperDisplaySpaces] = [:]
     private(set) var available = false
 
+    /// Known full-screen (non-desktop) Spaces, from the last event-driven topology read.
+    /// Missing topology contributes no hold: occlusion remains the fallback.
+    var nonDesktopDisplayIDs: Set<UInt32> {
+        guard available else { return [] }
+        return Set(displays.compactMap { id, spaces in spaces.current == nil ? UInt32(id) : nil })
+    }
+
     init(defaults: UserDefaults? = nil, provider: @escaping Provider = { nil },
          workspaceCenter: NotificationCenter? = nil, displayCenter: NotificationCenter? = nil,
          displayConfiguration: @escaping @MainActor () -> DisplayConfiguration = DisplayConfiguration.current) {
