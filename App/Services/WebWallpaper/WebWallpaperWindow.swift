@@ -28,7 +28,8 @@ final class WebWallpaperWindow: NSWindow {
         isReleasedWhenClosed = false
         level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopWindow)))
         collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
-        isOpaque = true
+        isOpaque = false
+        alphaValue = Self.wallpaperVisibleAlpha
         hasShadow = false
         isMovable = false
         isRestorable = false

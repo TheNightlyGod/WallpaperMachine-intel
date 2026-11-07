@@ -307,7 +307,10 @@ fn open_native(display: &DisplayDesc, style: PlaceholderStyle) -> Result<NativeW
         );
         window.setCanHide(false);
     }
-    window.setOpaque(true);
+    // Keep the live window in Mission Control, but use translucent composition
+    // to avoid foreground trails during a fullscreen Space transition.
+    window.setOpaque(false);
+    window.setAlphaValue(0.995);
     window.setHasShadow(false);
     window.setMovable(false);
     window.setRestorable(false);

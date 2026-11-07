@@ -97,6 +97,12 @@ commands still work.
 
 ## Windows that stay on their desktop
 
+Wallpaper windows stay stationary in Mission Control so the current desktop
+can show a live wallpaper. Their windows use translucent composition to avoid
+foreground trails observed with fully opaque desktop windows during fullscreen
+Space transitions. When macOS excludes the live window, its desktop picture
+shows through.
+
 Wallpaper windows normally join every Space (`canJoinAllSpaces`), so the live wallpaper would be
 the picture of every desktop: Mission Control and the Spaces bar would show it on each one, and a
 swipe would carry the old wallpaper onto the next desktop until its own had loaded.

@@ -9,7 +9,8 @@ final class WallpaperAutomationController {
          focus: FocusFilterState, displays: @escaping @MainActor () -> [String],
          targetDisplay: @escaping @MainActor () -> String, canRun: @escaping @MainActor (String) -> Bool,
          playlistScheduler: PlaylistScheduler, spaceMonitor: WallpaperSpaceMonitor? = nil,
-         onSettled: @escaping @MainActor () -> Void = {}) {
+         onInputsChanged: @escaping @MainActor (Notification.Name) -> Void,
+         onSettled: @escaping @MainActor () -> Void) {
         scheduler = WallpaperAutomationScheduler(store: rules, focus: focus,
             displays: displays, targetDisplay: targetDisplay, canRun: canRun,
             capture: { display in
@@ -48,7 +49,7 @@ final class WallpaperAutomationController {
                 return spaceMonitor?.visit(for: physical)
             })
         scheduler.onSettled = { [weak playlistScheduler] in playlistScheduler?.evaluate(); onSettled() }
-        scheduler.onInputsChanged = onSettled
+        scheduler.onInputsChanged = onInputsChanged
         rules.manualChoice = { [weak scheduler = self.scheduler] display in scheduler?.noteManualChoice(display) }
     }
 

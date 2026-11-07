@@ -33,7 +33,7 @@ final class WallpaperAutomationScheduler {
     private var focusKey: String?
     private var focusDisplay: String?
     var onSettled: (() -> Void)?
-    var onInputsChanged: (() -> Void)?
+    var onInputsChanged: ((Notification.Name) -> Void)?
     private struct CachedResolution {
         let revision: UInt64
         let solar: WallpaperSolarSettings?
@@ -90,7 +90,11 @@ final class WallpaperAutomationScheduler {
 
     private func observe(_ center: NotificationCenter, name: Notification.Name, object: AnyObject?) {
         let token = center.addObserver(forName: name, object: object, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.resolutions.removeAll(); self?.evaluate(); self?.onInputsChanged?() }
+            MainActor.assumeIsolated {
+                self?.resolutions.removeAll()
+                self?.evaluate()
+                self?.onInputsChanged?(name)
+            }
         }
         observers.append((center, token))
     }

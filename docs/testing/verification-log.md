@@ -25,6 +25,19 @@ and moves whatever falls past ten verbatim into a monthly file under
 [archive/](archive/); promote anything durable before it goes. Editing an
 entry's recorded result is not allowed.
 
+## 2026-11-07 — Mission Control composition and desktop poster refresh
+
+PR #175, including author updates 070caaa7 and 2ce3da8d, capture-cancellation fixes and native exported-web scheduling.
+
+- `python3 scripts/build.py --renderer-only` — exit 0; renderer built and Swift bindings regenerated. The later author commits leave Renderer sources unchanged.
+- `python3 scripts/test.py` — exit 0 on the final integrated tree: 687 Python tests passed; 4,648 native tests passed, 0 failed, 66 skipped (4,714 total).
+- Native skips cover opt-in live Steam, media/device integration and Wallpaper Engine web-reference jobs. One runtime warning remains: a method called on the main thread may cause UI unresponsiveness.
+- `python3 scripts/check_rust.py` — exit 0; 2,476 passing tests. Five desktop-window tests explicitly excluded; desktop/media/network opt-ins disabled.
+- `cmake --build artifacts/renderer/bin --parallel 6` — exit 0; completed the cold build separately after the renderer check hit its 600-second build limit.
+- `python3 scripts/check_renderer.py --skip-build` — exit 0; all 109 registered binaries succeeded, with seven local-asset-dependent cases skipped. All 12 generated scenes matched between pooled and isolated rendering; eight projects completed two reload cycles.
+- Regression coverage checks final-settle publication over a black startup picture, intermediate-frame retention, appearance refresh precedence, cancellation of replaced timers, and cache reuse. Native exported web layers retain the existing 10/20 FPS and pause/resume assertions.
+- Live Mission Control transitions, cancelled swipes and multiple displays were not exercised. No desktop automation or Release app build.
+
 ## 2026-11-07 — Update cache ownership — final follow-up
 
 Final updater inspection added a cache-directory symlink guard and an explicit byte-count bound while rehashing a recovered package. The routine gate had already passed and was not repeated.
@@ -119,13 +132,3 @@ Build reuses the cached renderer build through scripts/source_times.py, compiles
 - python3 scripts/test.py: 4357 passed, 0 failed, 61 skipped of 4418; 2 runtime warnings in the result bundle, not examined.
 - Catalog: two new strings translated into pt-BR, ko, ja, zh-Hans, zh-Hant; localization catalog and panel localization checks pass.
 - Not checked: the grid playing in a real window (scrolling, many GIF tiles at once, Reduce Motion) and its CPU/energy cost; no desktop run, no Release build.
-
-## 2026-11-04 — Developer ID signing and Apple notarization for releases
-
-- Change: package.py signs every library, framework, the extension and the app with the hardened runtime and a secure timestamp for a Developer ID, has Apple notarize and staple the app and then the signed disk image, and writes the checksum last; build.yml imports the Developer ID certificate and an App Store Connect API key (five secrets, all present in the repository). The bundle contract enforces host entitlements, the runtime flag, no get-task-allow and one signing team.
-- Certificate: G2 Developer ID Application (SHA-1 2076E28E…2E62, expires 2027-12-02); its signature meets the requirement 1.8.0 shipped (codesign -R).
-- `python3 scripts/test.py` after rebasing onto main c32fb8d4: 4355 passed, 0 failed, 61 skipped. Upstream's scripts/tests/test_power_ab.py crashes on import on this Mac (dataclass in a module loaded without sys.modules; Python 3.13 and 3.14), though main's Checks pass it on Linux; the gate ran with a local, uncommitted `sys.modules` line in that test, restored afterwards. The Debug app carried a com.apple.FinderInfo attribute that made CodeSign refuse it; cleared.
-- Real artifact (Release build of 1.8.2 contents, signed with the G2 certificate): Apple's notary service held the app submission 575b4e21 for about 18 hours (2026-11-03 01:50Z to 19:57Z, new-team hold, as were the team's earlier submissions); then Accepted. `stapler staple` and `stapler validate` passed; `spctl --assess --type execute` reports source=Notarized Developer ID.
-- A fresh disk image of that app, signed with the Developer ID, was Accepted in about 2 minutes (a69de3ee, 20:02Z), so the 50-minute CI wait is enough again.
-- Local `notarytool submit --wait` lost its connection through this Mac's system proxy (TLS -1200); submitting without waiting and polling `notarytool info` worked. CI has no proxy.
-- Gap: this Mac has SIP and Gatekeeper assessments disabled, so library validation and first-launch behavior were not enforced here; the hardened runtime (Apple Events, system audio tap, lock screen including web wallpapers, SteamCMD) needs the 1.9.0 manual smoke on a Mac with both on. The full CI pipeline (package.py --notarize with the DMG step) runs for the first time on the 1.9.0 release.

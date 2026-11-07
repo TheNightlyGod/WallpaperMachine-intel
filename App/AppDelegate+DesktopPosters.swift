@@ -359,15 +359,24 @@ extension AppDelegate {
         })
     }
 
+    /// A Space change reuses the installed picture; other automation inputs may change its look.
+    func schedulePosterRefresh(after notification: Notification.Name) {
+        schedulePosterRefresh(capture: notification == WallpaperSpaceMonitor.didChangeNotification ? .missingPoster : .all)
+    }
+
     /// Apply callbacks run before BridgeStore releases its activation flag. Request scoped
     /// pixels on the next actor turn, after that flag and manual-choice bookkeeping settle.
-    func schedulePosterRefresh() {
-        guard posterRefreshTask == nil, !shutdownInProgress, !shutdownComplete else { return }
+    func schedulePosterRefresh(capture: DesktopWallpaperSync.CaptureRequest = .all) {
+        guard !shutdownInProgress, !shutdownComplete else { return }
+        pendingPosterCapture = max(pendingPosterCapture, capture)
+        guard posterRefreshTask == nil else { return }
         posterRefreshTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            defer { posterRefreshTask = nil }
+            let capture = pendingPosterCapture
+            pendingPosterCapture = .none
+            posterRefreshTask = nil
             guard !Task.isCancelled, !shutdownInProgress, !shutdownComplete else { return }
-            desktopWallpaperSync?.refresh()
+            desktopWallpaperSync?.refresh(capture: capture)
         }
     }
 }

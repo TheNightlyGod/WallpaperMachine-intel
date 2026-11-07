@@ -151,7 +151,10 @@ Each poster is a second decode of a few frames and is counted as
   `DesktopWallpaperSync.settleCaptureDelays` (3 s and 15 s), because intros, fades and
   settings that fade in are missed by the first frame. A wallpaper that resumes after
   a pause, a cover or display sleep settles the same way (`presentationResumed`),
-  unless its poster has settled (below).
+  unless its poster has settled (below). With periodic updates off, a wallpaper
+  shared across Spaces keeps its installed picture through intermediate samples.
+  The final sample replaces an intro or black first frame and can be cached for the
+  wallpaper's return; a startup frame is not treated as a settled poster.
 - **A wallpaper is moved on a display.** The inspector's Position sliders and **Center**
   change what the final pixels show, so a committed move requests the same capture as a
   new wallpaper (`BridgeStore.onDisplayFramingChanged`); moves that arrive close together
@@ -173,13 +176,21 @@ Each poster is a second decode of a few frames and is counted as
   back. A scene that loaded again meanwhile draws the saved look but stays held until the
   edit ends, so its poster is older, never unsaved.
 - **A Space change or wake.** The existing poster is applied at once, so a new Space
-  has one immediately. A fresh frame is requested only for a surface whose poster has
-  not settled (see the next item). Desktops that kept refusing posters are tried
-  again, and the Space monitor re-reads the topology first.
-- **A settled poster is kept until the wallpaper changes.** A Space change, a wake, a
-  resume (`presentationResumed`) and an engine snapshot that leaves every display as it
-  was retake only a surface whose poster has not settled: one taken before the last of
-  the settle captures could have landed, one a paused display answered with, or none
+  has one immediately. A Space change asks for a frame only when there is no poster
+  for the current scope, even if the existing poster is still settling. A wake can
+  retake an unsettled poster. Desktops that kept refusing posters are tried again,
+  and the Space monitor re-reads the topology first.
+- **Appearance and other automation inputs.** The scheduler passes the notification
+  that changed its inputs to the poster owner. Only a Space-topology notification
+  reuses the installed picture; appearance, clock, time-zone, rule and Focus changes
+  request a full refresh, even if no new wallpaper is selected. A full refresh wins
+  when it coalesces with Space notifications, so a page adapting to the system's
+  appearance does not leave its former look in the desktop picture.
+- **A settled poster is kept until the wallpaper changes.** An engine snapshot that
+  leaves every display as it was keeps its installed poster, as a Space change does.
+  A wake or resume (`presentationResumed`) retakes only a surface whose poster has not
+  settled: one taken before the last settle capture could have landed,
+  one a paused display answered with, or none
   at all. A surface that a settle capture is still to ask is left to it. Each display
   is judged on its own, and a settled poster stays however long ago it was taken,
   because every new frame of an animated wallpaper is a new file macOS keeps
@@ -194,7 +205,7 @@ Each poster is a second decode of a few frames and is counted as
   context) are not affected. The resume's settle captures cover only the surfaces that
   were retaken, and nothing is scheduled when none were. A frame that a paused or
   covered surface answers with is the one it kept, so it does not settle its poster: a
-  Space change or wake that asks such a surface while its display is paused leaves the
+  request that asks such a surface while its display is paused leaves the
   resume to retake it. The debug log notes the displays whose poster was kept.
 - **A frame nobody asked for.** A renderer sends its first frame unasked. On a surface
   whose poster has settled, and which no settle capture is still to ask, it is
@@ -226,9 +237,9 @@ Each poster is a second decode of a few frames and is counted as
   ([below](#a-new-file-for-every-new-frame)). Instead `DesktopSettledPosterStore`
   (in `App/Services/Desktop/DesktopSettledPosterStore.swift`) keeps the last settled
   poster of each wallpaper on each display, and a surface whose wallpaper comes back
-  with the same `DesktopPosterLook` gets that poster at once: nothing is asked, no
-  settle capture follows, and the JPEG is byte for byte the one the desktop had, so
-  the ledger names the same file and WallpaperAgent's cache does not grow. The look
+  with the same `DesktopPosterLook` gets that poster at once without a readback or
+  settle capture. The JPEG is the one the desktop had after settling, so the ledger
+  reuses that file and WallpaperAgent's cache does not grow. The look
   is the display (physical id) and wallpaper, and a digest of everything else that
   decides the picture: the display's scaling and factor, the screen's size and
   scale, the wallpaper's saved settings file (`<support>/wallpapers/<id>.json`:
@@ -254,10 +265,13 @@ Each poster is a second decode of a few frames and is counted as
   `WALLPAPER_MACHINE_DESKTOP_POSTER_REUSE=0` turns it off for an A/B comparison
   ([power benchmark](../testing/power-benchmark.md#ab-comparison-entry-points)).
 - **Periodically**, every `periodicRefreshInterval` (300 s), while the setting is on.
+  Turning it off also cancels a timer whose wait ended but whose capture has not run
+  yet. Replacing a settle sequence similarly prevents its cancelled timers from
+  requesting another frame.
 - Settling and periodic captures ask only displays whose wallpaper is presenting
   (`canCapture`: the presentation policy has not suspended playback globally or for
-  that display); a new wallpaper captures every surface, and a Space change and a
-  wake every surface whose poster is not kept.
+  that display); a new wallpaper captures every surface, and a Space change or wake
+  asks only for the surfaces that need a poster under the rules above.
 - A frame identical to the current poster costs a readback and a hash, and is neither
   encoded again nor rewritten. Bursts of refresh requests collapse so that at most one
   runs every 500 ms.

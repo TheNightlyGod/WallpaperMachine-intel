@@ -129,6 +129,13 @@ final class ScreenSaverWebSurface: NSObject, WKNavigationDelegate, WKUIDelegate 
     else { throw Failure.unavailable }
     Self.setInteger(webView, selector: "_setPageMuted:", value: 7)
     Self.setBool(webView, selector: "_setMediaCaptureEnabled:", value: false)
+    // The exported layer is shown by the native host, while its scheduling window is never
+    // ordered in. Window occlusion would throttle a visible exported page; the host owns
+    // suspension through setPaused instead, as the desktop host does for its web views.
+    let occlusionSelector = "_setWindowOcclusionDetectionEnabled:"
+    if webView.responds(to: NSSelectorFromString(occlusionSelector)) {
+      Self.setBool(webView, selector: occlusionSelector, value: false)
+    }
     let selector = NSSelectorFromString("_setOverrideDeviceScaleFactor:")
     typealias SetScale = @convention(c) (AnyObject, Selector, CGFloat) -> Void
     unsafeBitCast(webView.method(for: selector), to: SetScale.self)(webView, selector, scale)

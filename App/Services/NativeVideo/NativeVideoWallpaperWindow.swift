@@ -124,13 +124,17 @@ final class NativeVideoWallpaperWindow: NSWindow {
 }
 
 extension NSWindow {
+    /// Match the scene window’s translucent composition during Mission Control.
+    nonisolated static let wallpaperVisibleAlpha: CGFloat = 0.995
+
     /// What every window that carries a plain video on the desktop shares: a borderless window at
     /// the desktop level that follows the Spaces, takes no input and cannot be hidden with the app.
     func configureAsDesktopVideoWindow() {
         isReleasedWhenClosed = false
         level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopWindow)))
         collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
-        isOpaque = true
+        isOpaque = false
+        alphaValue = Self.wallpaperVisibleAlpha
         hasShadow = false
         isMovable = false
         isRestorable = false

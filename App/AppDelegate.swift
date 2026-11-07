@@ -94,6 +94,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private(set) var desktopSpaces: WallpaperSpaceMonitor?
     private var powerSourceResampler: PowerSourceResampler?
     var posterRefreshTask: Task<Void, Never>?
+    var pendingPosterCapture = DesktopWallpaperSync.CaptureRequest.none
     /// Putting the user's own desktop picture back after the Settings switch went off, or after
     /// a poster was found left behind.
     var restoringDesktopPicture: Task<Void, Never>?
@@ -482,7 +483,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 // "When another app is in front" learns from the probes' occlusion that the app in
                 // front minimized or closed the window over the desktop.
                 keepsCoverageProbes: { preferences.otherAppInFrontAction.watchesFrontmostApp },
-                nonDesktopDisplays: { spaces.nonDesktopDisplayIDs },
+                // A translucent wallpaper can play as soon as AppKit shows it in
+                // the incoming desktop preview, before that Space becomes active.
                 // Another display than the one the pointer is on, for those who chose to play only there.
                 inactiveDisplays: { known in
                     preferences.playsOnlyOnActiveDisplay ? activeDisplay.inactive(among: known) : []
@@ -859,6 +861,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return policy.suspendedDisplayIDs.contains(physical)
     }
 
+    /// Reconciles cached posters and window placement after automatic-selection inputs or results change.
+    private func updateAutomaticWallpaperContext() {
+        retainSpacePosters()
+        spacePinning?.update()
+        spaceParking?.update()
+    }
+
     /// Needs the playlist scheduler, the Space monitor and the memory-pressure monitor, all
     /// started before it.
     private func startAutomaticWallpapers(
@@ -870,11 +879,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             targetDisplay: { [weak self] in self?.controlPanelNavigation.targetDisplayID ?? "primary" },
             canRun: { [weak self] display in self?.ownSuspension(ofDisplay: display, store: store) == false },
             playlistScheduler: playlistScheduler, spaceMonitor: spaces,
+            onInputsChanged: { [weak self] notification in
+                self?.updateAutomaticWallpaperContext()
+                self?.schedulePosterRefresh(after: notification)
+            },
             onSettled: { [weak self] in
-                self?.retainSpacePosters()
+                self?.updateAutomaticWallpaperContext()
                 self?.schedulePosterRefresh()
-                self?.spacePinning?.update()
-                self?.spaceParking?.update()
             })
         automaticWallpapers = controller
         store.onUserWallpaperChoice = { [weak self, weak controller] wallpaper, display in

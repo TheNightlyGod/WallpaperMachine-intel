@@ -463,12 +463,9 @@ A wallpaper nobody can see — behind a full-screen app, on a hidden Space or un
 windows that leave no pixel of it — pauses automatically, per display. There is no
 control for that part.
 
-A display whose active Space is a full-screen app stays paused even if Mission Control
-temporarily reports its wallpaper visible. `WallpaperPresentationPolicy` reads the cached
-topology from `WallpaperSpaceMonitor` and re-evaluates when that snapshot changes: returning
-to a desktop can resume without another occlusion event, while a cancelled swipe keeps the
-last frame. This applies with **Keep running** too. Missing Space data falls back to AppKit
-visibility; the check adds no polling or window-server reads to visibility callbacks.
+A display can resume as soon as AppKit reports its wallpaper visible during a
+Mission Control transition, including before the incoming desktop becomes the
+active Space. A full-screen window still pauses the wallpaper while it covers it.
 
 Each display follows its own visibility even when both use the same wallpaper.
 Waking or unlocking re-evaluates every display in the same pass: one that is visible

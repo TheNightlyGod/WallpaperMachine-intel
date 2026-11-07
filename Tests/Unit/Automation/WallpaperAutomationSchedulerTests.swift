@@ -34,7 +34,8 @@ final class WallpaperAutomationSchedulerTests: XCTestCase {
     }
     private func settle() async { for _ in 0..<70 { await Task.yield() } }
     private func target(_ id: String, _ kind: WallpaperAutomationTarget.Kind = .wallpaper) -> WallpaperAutomationTarget { .init(kind: kind, id: id) }
-    private func scheduler() -> WallpaperAutomationScheduler {
+    private func scheduler(appearanceCenter: NotificationCenter = NotificationCenter(),
+                           spaceMonitor: WallpaperSpaceMonitor? = nil) -> WallpaperAutomationScheduler {
         WallpaperAutomationScheduler(store: rules, focus: focus, displays: { Array(self.states.keys) }, targetDisplay: { self.targetDisplay },
             canRun: { _ in self.running }, capture: { self.states[$0]! }, queue: { display, action in
                 try await self.queue.run(slot: BridgeStore.activationSlot(displayId: display), origin: .automation, action)
@@ -54,8 +55,26 @@ final class WallpaperAutomationSchedulerTests: XCTestCase {
                 self.states[display]?.playlist = original.playlist
                 if !preserve { self.states[display]?.wallpaperID = original.wallpaperID }
             }, dark: { self.dark }, now: { self.clock }, calendar: calendar,
-            appearanceCenter: NotificationCenter(), sleep: { _ in try await Task.sleep(for: .seconds(3600)) },
-            spaceVisit: { self.spaceVisits[$0] })
+            appearanceCenter: appearanceCenter, sleep: { _ in try await Task.sleep(for: .seconds(3600)) },
+            spaceMonitor: spaceMonitor, spaceVisit: { self.spaceVisits[$0] })
+    }
+
+    func testAppearanceAndSpaceInputsReportDistinctNotificationsWithoutChangingSelection() {
+        let appearanceCenter = NotificationCenter()
+        let spaceMonitor = WallpaperSpaceMonitor()
+        let scheduler = scheduler(appearanceCenter: appearanceCenter, spaceMonitor: spaceMonitor)
+        var received: [Notification.Name] = []
+        scheduler.onInputsChanged = { received.append($0) }
+        scheduler.start()
+        defer { scheduler.stop() }
+
+        let appearanceChanged = Notification.Name("AppleInterfaceThemeChangedNotification")
+        appearanceCenter.post(name: appearanceChanged, object: nil)
+        NotificationCenter.default.post(name: WallpaperSpaceMonitor.didChangeNotification, object: spaceMonitor)
+
+        XCTAssertEqual(received, [appearanceChanged, WallpaperSpaceMonitor.didChangeNotification])
+        XCTAssertEqual(states["primary"]?.wallpaperID, "original")
+        XCTAssertTrue(changes.isEmpty)
     }
 
     func testTimeRulesCatchUpOnceWaitWhenPausedAndRespectManualChoice() async throws {

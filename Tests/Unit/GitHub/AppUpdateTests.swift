@@ -1003,7 +1003,7 @@ final class AppUpdateTests: XCTestCase {
         await fixture.store.downloadUpdate()
         await fixture.store.installUpdate()
         fixture.scheduled[0]()
-        try? await Task.sleep(for: .milliseconds(80))
+        await waitForInstallFailure(fixture.store)
         XCTAssertEqual(fixture.store.state, .error(currentVersion: "1.0.0", operation: .install, code: .unknown, availableVersion: "1.1.0"))
         XCTAssertEqual(fixture.installer.installation.cancelCalls, 1)
     }
@@ -1092,7 +1092,7 @@ final class AppUpdateTests: XCTestCase {
         await fixture.store.downloadUpdate()
         await fixture.store.installUpdate()
         fixture.scheduled[0]()
-        try? await Task.sleep(for: .milliseconds(60))
+        await waitForInstallFailure(fixture.store)
         await fixture.store.installUpdate()
         XCTAssertEqual(fixture.scheduled.count, 1)
         XCTAssertEqual(fixture.installer.installCalls, 1)
@@ -1281,6 +1281,16 @@ final class AppUpdateTests: XCTestCase {
         XCTAssertEqual(upgraded.recentlyInstalledVersion, "1.1.0")
         XCTAssertFalse(upgraded.hasDownloadedUpdate)
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent(asset.name).path))
+    }
+
+    /// Join the watchdog's observable result, including its asynchronous helper cancellation.
+    private func waitForInstallFailure(_ store: AppUpdateStore) async {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while ContinuousClock.now < deadline {
+            if case .error(_, .install, _, _) = store.state { return }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        XCTFail("The install watchdog did not finish cancelling the helper")
     }
 
     private func expect(_ state: AppUpdateState, equals expected: AppUpdateState) {

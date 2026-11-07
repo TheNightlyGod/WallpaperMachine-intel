@@ -128,7 +128,8 @@ final class ScreenSaverWebSurfaceTests: XCTestCase {
     XCTAssertGreaterThan(color.greenComponent, 0.9)
     XCTAssertLessThan(color.blueComponent, 0.1)
     let before = try await state(surface)
-    try await Task.sleep(for: .milliseconds(150))
+    let frames = try XCTUnwrap(before["frames"] as? Int)
+    try await poll { (try await self.state(surface)["frames"] as? Int ?? 0) > frames }
     let after = try await state(surface)
     XCTAssertGreaterThan(try XCTUnwrap(after["frames"] as? Int), try XCTUnwrap(before["frames"] as? Int))
     XCTAssertEqual((after["general"] as? [String: Any])?["fps"] as? Int, 30)
@@ -240,7 +241,12 @@ final class ScreenSaverWebSurfaceTests: XCTestCase {
     try await poll { (try await self.state(surface)["gap"] as? Double ?? 0) >= 400 }
     try await poll { try await self.state(surface)["paused"] as? Bool == false }
     let before = try await state(surface)
-    try await Task.sleep(for: .milliseconds(100))
+    let ticks = try XCTUnwrap(before["ticks"] as? Int)
+    let frames = try XCTUnwrap(before["frames"] as? Int)
+    try await poll {
+      let current = try await self.state(surface)
+      return (current["ticks"] as? Int ?? 0) > ticks && (current["frames"] as? Int ?? 0) > frames
+    }
     let after = try await state(surface)
     XCTAssertGreaterThan(try XCTUnwrap(after["ticks"] as? Int), try XCTUnwrap(before["ticks"] as? Int))
     XCTAssertGreaterThan(try XCTUnwrap(after["frames"] as? Int), try XCTUnwrap(before["frames"] as? Int))
@@ -280,7 +286,8 @@ final class ScreenSaverWebSurfaceTests: XCTestCase {
     XCTAssertNil(failure, "a busy page is not a broken one")
     XCTAssertFalse(surface.isStopped)
     let before = try await state(surface)
-    try await Task.sleep(for: .milliseconds(100))
+    let frames = try XCTUnwrap(before["frames"] as? Int)
+    try await poll { (try await self.state(surface)["frames"] as? Int ?? 0) > frames }
     let after = try await state(surface)
     XCTAssertGreaterThan(try XCTUnwrap(after["frames"] as? Int), try XCTUnwrap(before["frames"] as? Int))
     surface.setPaused(true)

@@ -365,7 +365,7 @@ struct SystemPinnableWindow: WallpaperPinnableWindow {
 
     func setConcealed(_ concealed: Bool, fade: TimeInterval) {
         guard !concealed, fade > 0 else {
-            window.alphaValue = concealed ? 0 : 1
+            window.alphaValue = concealed ? 0 : NSWindow.wallpaperVisibleAlpha
             // A window's alpha reaches the screen with the next Core Animation commit, at the end
             // of this run loop turn, while a Space move takes effect at once: without the flush
             // the window would arrive on the new desktop opaque and show the old wallpaper.
@@ -374,7 +374,7 @@ struct SystemPinnableWindow: WallpaperPinnableWindow {
         }
         NSAnimationContext.runAnimationGroup { context in
             context.duration = fade
-            window.animator().alphaValue = 1
+            window.animator().alphaValue = NSWindow.wallpaperVisibleAlpha
         }
     }
 }

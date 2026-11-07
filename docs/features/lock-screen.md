@@ -282,6 +282,10 @@ through silence, and a visualiser that starts its idle animation only after the 
 otherwise never moves. Its `requestAnimationFrame` is held to the published frame rate,
 as on the desktop ([frame-rate limit](web-wallpapers.md#frame-rate-limit)), so a 30 fps
 cap or the reduced rate on battery applies here too instead of WebKit's cadence near 60.
+The page's scheduling window is never ordered on screen: the native host displays its
+exported layer tree. Where WebKit exposes window-occlusion control, the page ignores
+that hidden window and follows the host's explicit pause and resume instead, as a
+desktop web wallpaper does. The scheduling window must not throttle a visible exported page.
 The page is laid out in the display's device pixels as on the desktop
 ([device-pixel layout](web-wallpapers.md#device-pixel-layout)), so it keeps its layout when the
 Mac locks. Pausing or resuming waits on the page itself for at most
