@@ -25,6 +25,7 @@ This update makes the Library smoother to scroll and fixes several annoyances wi
 #### Bug Fixes
 
 - When a wallpaper pauses for an app in front, minimizing that app's screen-filling window now resumes playback at once, without a click on the desktop ([e013fe6](https://github.com/MMFoundation/WallpaperMachine/commit/e013fe6bcefcc6ff8e061843efd6113bccb6512e))
+- Wallpapers stay paused while Mission Control previews a fullscreen app's Space, then resume when the desktop becomes active (closes [#173](https://github.com/MMFoundation/WallpaperMachine/issues/173)) ([0fa20ce](https://github.com/MMFoundation/WallpaperMachine/commit/0fa20ce2a7a1b4f4540f419c68b6d45618c5033c))
 - Quit in the menu bar panel closes the app completely again, even before any wallpaper has started playing ([0c7a019](https://github.com/MMFoundation/WallpaperMachine/commit/0c7a01991a5707dcbe129552b8a9076f9f4e4569))
 - Square and portrait wallpaper covers in the menu bar panel no longer block clicks on the display picker (closes [#171](https://github.com/MMFoundation/WallpaperMachine/issues/171)) ([910768c](https://github.com/MMFoundation/WallpaperMachine/commit/910768c558a55d29ad94b7e771a93b3db64bc7ab))
 - The macOS desktop picture now updates to match a video wallpaper even while another app covers it, instead of waiting for the desktop to show (closes [#169](https://github.com/MMFoundation/WallpaperMachine/issues/169)) ([eac7c33](https://github.com/MMFoundation/WallpaperMachine/commit/eac7c333ddf379418d26b208fd0aadc8f7494283))
@@ -40,6 +41,7 @@ This update makes the Library smoother to scroll and fixes several annoyances wi
 #### 问题修复
 
 - 壁纸因前台应用而暂停时，最小化该应用占满屏幕的窗口即可立即恢复播放，无需再点按桌面 ([e013fe6](https://github.com/MMFoundation/WallpaperMachine/commit/e013fe6bcefcc6ff8e061843efd6113bccb6512e))
+- 在调度中心预览全屏应用的空间时，壁纸会保持暂停，并在桌面重新成为活动空间后恢复播放 (closes [#173](https://github.com/MMFoundation/WallpaperMachine/issues/173)) ([0fa20ce](https://github.com/MMFoundation/WallpaperMachine/commit/0fa20ce2a7a1b4f4540f419c68b6d45618c5033c))
 - 菜单栏面板中的“退出”按钮可以再次完整退出应用，即使壁纸尚未开始播放也是如此 ([0c7a019](https://github.com/MMFoundation/WallpaperMachine/commit/0c7a01991a5707dcbe129552b8a9076f9f4e4569))
 - 菜单栏面板中的方形和竖版壁纸封面不再挡住对显示器选择器的点按 (closes [#171](https://github.com/MMFoundation/WallpaperMachine/issues/171)) ([910768c](https://github.com/MMFoundation/WallpaperMachine/commit/910768c558a55d29ad94b7e771a93b3db64bc7ab))
 - 即使壁纸被其他应用遮挡，macOS 桌面图片也会及时更新为视频壁纸的画面，无需等到桌面露出 (closes [#169](https://github.com/MMFoundation/WallpaperMachine/issues/169)) ([eac7c33](https://github.com/MMFoundation/WallpaperMachine/commit/eac7c333ddf379418d26b208fd0aadc8f7494283))
@@ -55,6 +57,7 @@ This update makes the Library smoother to scroll and fixes several annoyances wi
 #### 버그 수정
 
 - 앞에 있는 앱 때문에 배경화면이 일시 정지된 경우 그 앱의 화면을 가득 채운 창을 최소화하면 바탕화면을 클릭하지 않아도 바로 다시 재생됩니다 ([e013fe6](https://github.com/MMFoundation/WallpaperMachine/commit/e013fe6bcefcc6ff8e061843efd6113bccb6512e))
+- Mission Control에서 전체 화면 앱의 Space를 미리 보는 동안 배경화면이 일시 정지 상태를 유지하고, 데스크탑이 활성 공간이 되면 다시 재생됩니다 (closes [#173](https://github.com/MMFoundation/WallpaperMachine/issues/173)) ([0fa20ce](https://github.com/MMFoundation/WallpaperMachine/commit/0fa20ce2a7a1b4f4540f419c68b6d45618c5033c))
 - 메뉴 막대 패널의 종료 버튼으로 앱이 다시 완전히 종료되며 배경화면이 아직 재생되기 전에도 마찬가지입니다 ([0c7a019](https://github.com/MMFoundation/WallpaperMachine/commit/0c7a01991a5707dcbe129552b8a9076f9f4e4569))
 - 메뉴 막대 패널의 정사각형 및 세로형 배경화면 커버가 더 이상 디스플레이 선택기 클릭을 가로막지 않습니다 (closes [#171](https://github.com/MMFoundation/WallpaperMachine/issues/171)) ([910768c](https://github.com/MMFoundation/WallpaperMachine/commit/910768c558a55d29ad94b7e771a93b3db64bc7ab))
 - 다른 앱이 배경화면을 가리고 있어도 macOS 데스크탑 사진이 비디오 배경화면에 맞게 바로 업데이트되며 바탕화면이 드러날 때까지 기다리지 않습니다 (closes [#169](https://github.com/MMFoundation/WallpaperMachine/issues/169)) ([eac7c33](https://github.com/MMFoundation/WallpaperMachine/commit/eac7c333ddf379418d26b208fd0aadc8f7494283))
