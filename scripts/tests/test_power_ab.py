@@ -22,6 +22,8 @@ sys.path.insert(0, str(SCRIPTS))
 SPEC = importlib.util.spec_from_file_location("power_ab", SCRIPTS / "power_ab.py")
 power_ab = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
+# Its dataclasses resolve their string annotations through sys.modules.
+sys.modules[SPEC.name] = power_ab
 SPEC.loader.exec_module(power_ab)
 
 WALLPAPER = "3784370784"
