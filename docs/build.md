@@ -371,7 +371,14 @@ The switch from the self-signed project certificate `WallpaperMachine Code Signi
 release therefore asks for those permissions again, and macOS asks once before it
 hands the pixiv and Steam sign-ins saved in the keychain to the new signature (a
 sign-in that is refused is asked for again). Updating from an ad-hoc build (1.0.1
-and older) did the same. Only copies from 1.8.0 on install a Developer ID release
+and older) did the same. The keychain asked far more often before: it keeps an item
+in the partition of the build that saved it, and `securityd` gives a partition to a
+team only for code under an Apple anchor (`teamid:DT6YQU64FF` for the Developer ID).
+A project-certificate release had its own partition, its code hash, so after every
+update between them macOS asked for the login keychain password before the new
+version could read a saved sign-in, at launch, even after **Always Allow**
+([#163](https://github.com/MMFoundation/WallpaperMachine/issues/163)); Developer ID
+releases share one. Only copies from 1.8.0 on install a Developer ID release
 from the in-app updater: `AppUpdateConfiguration.signingRequirement` accepts both
 the project certificate and the Developer ID from 1.8.0 on, while older copies refuse
 it as unverifiable and have to be updated by downloading the image

@@ -164,10 +164,15 @@ keychain (service `app.wallpapermachine.pixiv`) and sent, as a `Cookie` header
 added by hand, with every request to `https://www.pixiv.net` and nothing else:
 never to the image host, never logged, and never part of the panel's state.
 At launch the saved session is read off the main thread and confirmed in the
-background. Releases share one designated requirement (see
+background. Developer ID releases share one keychain partition (see
 [build](../build.md#release-signing)), so an update reads what the version
-before it saved; a locally built, ad-hoc signed app is a different app to the
-keychain, and macOS asks once whether it may read the item.
+before it saved; any other build, such as a locally built, ad-hoc signed app,
+has a partition of its own, and macOS asks for the login keychain password
+before it may read the item (**Always Allow** keeps that build from asking
+again); saving over it never asks. A save the keychain refuses is reported with
+the keychain's reason and not retried by deleting the item, which macOS refuses
+to another build anyway (`KeychainGenericPassword`, shared with the Steam
+sign-in).
 
 Signed in, the Mature (R-18) box can be ticked; ticking it adds R-18 works to
 search and the two R-18 rankings to the menu. Unticking it, or signing out,

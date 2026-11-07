@@ -25,6 +25,16 @@ and moves whatever falls past ten verbatim into a monthly file under
 [archive/](archive/); promote anything durable before it goes. Editing an
 entry's recorded result is not allowed.
 
+## 2026-11-07 — Preserve saved sign-ins when keychain updates fail
+
+- pixiv and Steam Community now share generic-password storage; refused updates preserve the saved item and the original keychain status.
+- `python3 scripts/test.py --only KeychainGenericPasswordTests --only PixivStoreTests --only SteamWebSessionTests --only WorkshopStoreTests` — exit 0; 34 passed, 0 failed, 0 skipped.
+- `python3 scripts/test.py` — exit 0; 682 Python tests across 32 modules passed; native: 4,641 passed, 0 failed, 66 skipped of 4,707.
+- The first targeted build failed because Debug products carried Finder extended attributes; the documented `xattr -cr build/Build/Products/Debug` recovery cleared the signing failure before the passing runs.
+- The full gate reported two main-thread runtime warnings, attributed to AppUpdateTests.testSignatureCheckRefusesAnUnsignedOrAlteredCopy and VideoFormatSupportTests.testTheOpenedFilesAreKeyedByTheFileAndForgetAChangedOne; both tests passed.
+- Keychain regressions use injected in-memory calls. Real keychain authorization prompts and signed-release upgrades remain unverified; no desktop/UI, live Steam or opt-in media run was requested.
+- No Rust or renderer changes; their additional gates were not run. No Release build or version release was requested.
+
 ## 2026-11-07 — Fullscreen Space presentation guard (#173)
 
 - Four focused regressions failed before the fix: early preview resume, cancelled swipes, hidden-display classification and Space-monitor arrival.
@@ -116,16 +126,3 @@ Developer decision: accept rare one-level texel differences from joined render p
 - `python3 scripts/check_renderer.py` — exit 0, including MetalSceneDraw.AMovingLayerBetweenTwoCardsIsReusedAndJoinsTheCardsRenderPasses
 - `python3 scripts/perf_bench.py identity` =0 against the default, 240 draws hashed every 30, both surfaces — identical on 3796026374 and 3624257712; 3808922316 at 3456x2234@2 differs in frame 149 (2 pixels, max channel 1), identical at 3840x2160@2
 - Saving (earlier Metal System Trace, 3808922316 at 3840x2160@2): 17 passes a frame left out, about 0.4 ms or 8 % of its GPU time
-
-## 2026-11-03 — Experimental switch: draw only the visible part of cropped scenes
-
-SDR display framing behind `scene_display_framing` under `[experimental]`, off by default; `WALLPAPER_MACHINE_SDR_FRAMING=1`/`=0` overrides it. Measured on an M5 Pro.
-
-- `python3 -m unittest scripts/tests/test_localization_catalogs.py scripts/tests/test_panel_localization.py scripts/tests/test_doc_links.py scripts/tests/test_perf_bench.py` — OK, 56 tests
-- `python3 scripts/check_rust.py` — exit 0 (core 419, bridge 935, shader 954 passed); AppKit window cases excluded without an authorized desktop run
-- `python3 scripts/check_renderer.py` — exit 0; `RasterWindow.*` (10) and `SdrDisplayFraming.*` (6) pass; local-project and corpus cases skipped (no corpus named)
-- `python3 scripts/test.py --only` PanelPerformanceSettingsTests, PanelSettingsResetTests, PanelEnergyRestartTests, DesktopSettledPosterStoreTests and the settings search, localization and render classes — 59 passed
-- `perf_bench.py identity` setting off against the branch point (3784370784, 3796026374, 3626305963, 3808922316 at 3840x2160@2 and 3456x2234@2): identical on comparable frames; the remaining verdicts repeat in base-against-base runs (3784370784 is nondeterministic in the base itself)
-- With `WALLPAPER_MACHINE_SDR_FRAMING=1` a cropped scene's frames change as stated (3808922316 at 3456x2234@2) and an uncropped one stays identical (3808922316 at 3840x2160@2)
-- Cost figures (Miyabi 3784370784 at 3840x2160@2: render targets 508.5 → 437 MB, GPU about −6 to −16%; 16:9 scenes on 3456x2234@2: −3 to −5.5% memory, GPU within noise) come from the framing experiment, not rerun on this branch
-- Not run: full `python3 scripts/test.py`, a desktop run, a power measurement and a Release build
