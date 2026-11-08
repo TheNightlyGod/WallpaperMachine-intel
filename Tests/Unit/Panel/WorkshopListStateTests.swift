@@ -66,7 +66,17 @@ final class WorkshopListStateTests: MediaPanelTestCase {
       "the field is hidden for an author, so its text cannot explain an empty page")
     XCTAssertEqual(
       empty(.creator(id: "76561198000000001", name: "A"), text: "aurora", filters: 2),
-      .noResults(.clearFilters(count: 2)))
+      .noResults(.refresh))
+  }
+
+  func testEmptyPersonalListsDoNotBlameFiltersThatDidNotHideAnything() {
+    XCTAssertEqual(
+      empty(.subscriptions, signedIn: true, filters: 2), .noResults(.browseWorkshop))
+    XCTAssertEqual(
+      empty(.favorites, signedIn: true, filters: 2), .noResults(.browseWorkshopForFavorites))
+    XCTAssertEqual(
+      empty(.subscriptions, signedIn: true, total: 336, pages: 12, filters: 2),
+      .noResults(.screened(isCollections: false, nextPage: 2)))
   }
 
   func testAPageScreenedAwayOffersTheNextPageAndTheFilters() {

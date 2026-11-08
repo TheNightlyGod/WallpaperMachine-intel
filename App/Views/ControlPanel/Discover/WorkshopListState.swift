@@ -59,20 +59,26 @@ enum WorkshopEmptyState: Equatable {
     if isLoading { return .loading }
     if let errorMessage { return .unavailable(errorMessage) }
 
-    let hasText =
-      source.isSearchable && !draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    // Personal, author and collection totals are read before local filtering. A zero total
+    // cannot be caused by the sidebar; its badge also counts choices that broaden the list.
+    if !source.isSearchable {
+      if totalCount > 0 {
+        return .noResults(.screened(isCollections: false, nextPage: page < totalPages ? page + 1 : nil))
+      }
+      if source.source == .subscriptions { return .noResults(.browseWorkshop) }
+      if source.source == .favorites { return .noResults(.browseWorkshopForFavorites) }
+      return .noResults(.refresh)
+    }
+    let hasText = !draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     if hasText && filterCount > 0 { return .noResults(.clearSearchAndFilters) }
     if hasText { return .noResults(.clearSearch) }
     if filterCount > 0 { return .noResults(.clearFilters(count: filterCount)) }
-    let screened = !source.isSearchable || source.source == .collections
-    if screened && totalCount > 0 {
+    if source.source == .collections && totalCount > 0 {
       return .noResults(
         .screened(
-          isCollections: source.source == .collections, nextPage: page < totalPages ? page + 1 : nil
+          isCollections: true, nextPage: page < totalPages ? page + 1 : nil
         ))
     }
-    if source.source == .subscriptions { return .noResults(.browseWorkshop) }
-    if source.source == .favorites { return .noResults(.browseWorkshopForFavorites) }
     return .noResults(.refresh)
   }
 }

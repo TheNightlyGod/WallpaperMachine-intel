@@ -87,6 +87,40 @@ final class WorkshopSourceTests: XCTestCase {
     XCTAssertEqual(past.total, 127)
   }
 
+  func testAnUnrecognizedSubscriptionsResponseNeverBecomesAnEmptyList() throws {
+    for html in [
+      "", "<html><title>Steam Community :: Error</title><p>Please try again later.</p></html>",
+      "<html><title>Steam Community :: Me :: Workshop Items</title><div>Loading…</div></html>",
+    ] {
+      XCTAssertThrowsError(try WorkshopService.decodeProfileListing(html)) {
+        XCTAssertTrue($0 is WorkshopFailure)
+      }
+    }
+  }
+
+  func testSubscriptionRowsAllowHTMLAttributeQuotesAndWhitespace() throws {
+    let listing = try WorkshopService.decodeProfileListing("""
+      <html><title>Steam Community :: Me :: Workshop Items</title>
+      <div id = 'Subscription300'></div><a data-publishedfileid = '100'></a>
+      <span onclick='UnsubscribeItem( "200", "431960" );'></span>
+      Showing 1-3 of 3 entries</html>
+      """)
+    XCTAssertEqual(listing.ids, ["300", "100", "200"])
+    XCTAssertEqual(listing.total, 3)
+  }
+
+  func testAnAnonymousPageCannotAnswerAPersonalList() throws {
+    let html = """
+      <html><title>Steam Community :: Me :: Workshop Items</title>
+      <script>g_steamID = false;</script>
+      <div class="inventory_msg_content">No matching files were found for Me.</div></html>
+      """
+    XCTAssertEqual(try WorkshopService.decodeProfileListing(html).ids, [])
+    XCTAssertThrowsError(try WorkshopService.decodeProfileListing(html, requiresSignIn: true)) {
+      XCTAssertTrue($0 is SteamSignInRequired)
+    }
+  }
+
   /// Every Steam page links to the sign-in page from its header, so only a page titled so means
   /// the session is gone; an author with nothing published is simply empty.
   func testOnlySteamsSignInPageMeansSigningInAgain() throws {
@@ -94,7 +128,9 @@ final class WorkshopSourceTests: XCTestCase {
       "<html><head><title>Sign In</title></head><a href=\"https://steamcommunity.com/login/home/\">Sign in</a></html>"
     )) { XCTAssertTrue($0 is SteamSignInRequired) }
     let empty = try WorkshopService.decodeProfileListing(
-      "<html><head><title>Steam Community :: Rabscuttle</title></head><a href=\"https://steamcommunity.com/login/home/?goto=\">Sign in</a></html>")
+      "<html><head><title>Steam Community :: Rabscuttle</title></head>"
+        + "<a href=\"https://steamcommunity.com/login/home/?goto=\">Sign in</a>"
+        + "<div class=\"inventory_msg_content\">No matching files were found for Rabscuttle.</div></html>")
     XCTAssertEqual(empty.ids, [])
     XCTAssertEqual(empty.total, 0)
     XCTAssertEqual(empty.name, "Rabscuttle")
@@ -221,6 +257,64 @@ final class WorkshopSourceTests: XCTestCase {
     let ids = try await fixture.service.subscribedIDs(account: session)
     XCTAssertEqual(ids, (1...32).map(String.init))
     XCTAssertEqual(fixture.cookies, ["steamLoginSecure=\(session.cookie)", "steamLoginSecure=\(session.cookie)"])
+  }
+
+  func testAnUnreadableRefreshKeepsKnownSubscriptionsAndCanBeRetried() async throws {
+    let store = fixture.store
+    fixture.subscriptionPages = [1: subscriptionsHTML(ids: ["1"], total: "1")]
+    fixture.details = ["1": detailsRow("1", tags: ["Scene", "Everyone"])]
+    try await store.signInToSteamWeb { WebSignInCookies(session: "\(Self.author)||0123456789abcdef0123") }
+    store.open(.subscriptions)
+    try await finished(store)
+    try await store.refreshSubscribedIDs()
+    XCTAssertEqual(store.items.map(\.id), ["1"])
+
+    fixture.subscriptionPages = [1: Data("<html><title>Steam Community :: Error</title></html>".utf8)]
+    store.search()
+    try await finished(store)
+    XCTAssertNotNil(store.errorMessage)
+    XCTAssertEqual(store.items.map(\.id), ["1"])
+    XCTAssertEqual(store.totalCount, 1)
+    XCTAssertNotNil(store.steamWebSession)
+    do {
+      try await store.refreshSubscribedIDs()
+      XCTFail("an unreadable response must not erase subscription marks")
+    } catch { XCTAssertTrue(error is WorkshopFailure) }
+    XCTAssertEqual(store.subscribedIDs, ["1"])
+
+    fixture.subscriptionPages = [1: subscriptionsHTML(ids: ["2"], total: "1")]
+    fixture.details = ["2": detailsRow("2", tags: ["Video", "Everyone"])]
+    store.retrySearch()
+    try await finished(store)
+    XCTAssertNil(store.errorMessage)
+    XCTAssertEqual(store.items.map(\.id), ["2"])
+  }
+
+  func testSubscriptionRatingsFollowSteamsTagsAndKeepTheUnfilteredCount() async throws {
+    fixture.subscriptionPages = [1: subscriptionsHTML(ids: ["1", "2", "3"], total: "3")]
+    fixture.details = [
+      "1": detailsRow("1", tags: ["Scene", "Everyone"]),
+      "2": detailsRow("2", tags: ["Web", "Mature"]),
+      "3": detailsRow("3", tags: ["Video", "Questionable"]),
+    ]
+    let store = fixture.store
+    try await store.signInToSteamWeb { WebSignInCookies(session: "\(Self.author)||0123456789abcdef0123") }
+    store.open(.subscriptions)
+    try await finished(store)
+    XCTAssertEqual(store.items.map(\.id), ["1"])
+    XCTAssertEqual(store.totalCount, 3)
+
+    store.excludedTags.removeAll { $0 == "Mature" }
+    store.search()
+    try await finished(store)
+    XCTAssertEqual(store.items.map(\.id), ["1", "2"])
+    XCTAssertEqual(store.totalCount, 3)
+
+    store.excludedTags.removeAll { $0 == "Questionable" }
+    store.search()
+    try await finished(store)
+    XCTAssertEqual(store.items.map(\.id), ["1", "2", "3"])
+    XCTAssertEqual(store.totalCount, 3)
   }
 
   // MARK: Store

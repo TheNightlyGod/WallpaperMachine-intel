@@ -256,7 +256,10 @@ them; Your favorites has an order menu of its own ([favorites](#favorites)). The
 and `WorkshopService.matching` applies the same rules to the other sources'
 pages, which can therefore show fewer than 30 tiles, or none while Steam's count
 says more exist; such a page says the filters hide everything on it and offers
-the next page. The line above the grid links **Open on Steam** to the Steam page
+the next page, even when filters differ from their defaults. A personal list whose
+unfiltered total is zero offers **Browse Workshop** instead of blaming the sidebar:
+the Filter badge counts changes from defaults, including allowing more age ratings.
+The line above the grid links **Open on Steam** to the Steam page
 listing what is on show (`WorkshopStore.browseURL`).
 The sources are `WorkshopSource` in `App/Services/Workshop/WorkshopSource.swift`.
 
@@ -345,8 +348,12 @@ That page lists rows rather than an author's tiles, so
 `WorkshopService.decodeProfileListing` reads an item's id from either layout: an
 author tile's `data-publishedfileid`, or a subscription row's own id
 (`id="Subscription<id>"`). A page whose paging line counts entries but none can be
-read is reported as unreadable instead of being shown as an empty list. Without a
-session, or when Steam answers with its sign-in page instead, the session is
+read is reported as unreadable instead of being shown as an empty list. So is an
+empty, truncated or unrecognized response: zero entries need an explicit zero count,
+a page beyond the end, or Steam's empty-list message. A failed refresh keeps the
+last loaded tiles, count and subscription marks and offers retry. Without a
+session, or when Steam answers with its sign-in page or an explicitly anonymous
+personal-list page instead, the session is
 forgotten and the grid is emptied, so the panel offers **Sign in to Steam…** and
 says it is separate from SteamCMD's sign-in.
 

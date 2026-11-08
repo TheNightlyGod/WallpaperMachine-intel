@@ -692,7 +692,7 @@ actor WorkshopService {
         }
         let html = try await communityPage(
             Self.profileURL(steamID: steamID, list: list, page: page), account: account)
-        let listing = try Self.decodeProfileListing(html)
+        let listing = try Self.decodeProfileListing(html, requiresSignIn: list != .items)
         let items = try await details(ids: listing.ids)
         let totalPages = max(1, (listing.total + Self.pageSize - 1) / Self.pageSize)
         return (WorkshopPage(items: items, page: max(1, page), totalPages: min(totalPages, Self.maxPages), totalCount: listing.total), listing.name)
@@ -707,7 +707,7 @@ actor WorkshopService {
             try Task.checkCancellation()
             let html = try await communityPage(
                 Self.profileURL(steamID: account.steamID, list: .subscriptions, page: page), account: account)
-            let listing = try Self.decodeProfileListing(html)
+            let listing = try Self.decodeProfileListing(html, requiresSignIn: true)
             ids += listing.ids.filter { !ids.contains($0) }
             pages = min(Self.maxPages, max(1, (listing.total + Self.pageSize - 1) / Self.pageSize))
             if listing.ids.isEmpty { break }
@@ -718,14 +718,16 @@ actor WorkshopService {
 
     /// The ids on a profile's Workshop items page, the number of entries in all, and the
     /// account's name. Steam's sign-in page instead means the session is gone.
-    static func decodeProfileListing(_ html: String) throws -> (ids: [String], total: Int, name: String?) {
+    static func decodeProfileListing(
+        _ html: String, requiresSignIn: Bool = false
+    ) throws -> (ids: [String], total: Int, name: String?) {
         var ids: [String] = []
         // An author's items are tiles carrying `data-publishedfileid`; subscriptions are rows,
         // `<div class="workshopItemSubscription " id="Subscription<id>">`, whose details and
         // Unsubscribe control (`UnsubscribeItem( '<id>', '<app>' )`) are not always in the
         // served page, so the row's own id is what names the item.
         let idPattern = try NSRegularExpression(
-            pattern: #"(?:data-publishedfileid="|id="(?:Subscription|UnsubscribeItemBtn)|UnsubscribeItem\(\s*')(\d+)["']"#)
+            pattern: #"(?:\bdata-publishedfileid\s*=\s*["']|\bid\s*=\s*["'](?:Subscription|UnsubscribeItemBtn)|UnsubscribeItem\(\s*["'])(\d+)["']"#)
         for match in idPattern.matches(in: html, range: NSRange(html.startIndex..., in: html)) {
             guard let range = Range(match.range(at: 1), in: html) else { continue }
             let id = String(html[range])
@@ -735,15 +737,27 @@ actor WorkshopService {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         // Every page links to the sign-in page in its header; only the page itself is titled so.
         if ids.isEmpty, title == "Sign In" { throw SteamSignInRequired() }
+        // A personal list can also arrive as an anonymous Community page after a session ends.
+        // The same page is valid for an author's public items, so only personal lists require it.
+        if requiresSignIn, firstMatch(#"\bg_steamID\s*=\s*(false)\s*;"#, in: html) != nil {
+            throw SteamSignInRequired()
+        }
         let paging = #"Showing\s+([\d,]+)\s*-\s*[\d,]+\s+of\s+([\d,]+)\s+entries"#
         let number = { (group: Int) in
             firstMatch(paging, in: html, group: group).flatMap { Int($0.replacingOccurrences(of: ",", with: "")) }
         }
-        let total = number(2) ?? ids.count
-        // Steam says this page holds entries yet none could be read: its markup has changed,
-        // which must not pass for an empty list.
-        if ids.isEmpty, total > 0, let first = number(1), first <= total {
-            throw WorkshopFailure(message: String(localized: "Steam returned an unreadable Workshop page. Try again or browse on Steam."))
+        let reportedTotal = number(2)
+        let total = reportedTotal ?? ids.count
+        if ids.isEmpty {
+            let pastLastPage = number(1).map { $0 > total } == true && reportedTotal != nil
+            let emptyMessage = firstMatch(
+                #"<div\b[^>]*class\s*=\s*["'][^"']*\binventory_msg_content\b[^"']*["'][^>]*>\s*(No matching files were found\b)"#,
+                in: html) != nil
+            // A blank, truncated, error or changed page is not proof of zero subscriptions.
+            // Steam must explicitly report zero, a page past the end, or its empty-list message.
+            guard reportedTotal == 0 || pastLastPage || (reportedTotal == nil && emptyMessage) else {
+                throw WorkshopFailure(message: String(localized: "Steam returned an unreadable Workshop page. Try again or browse on Steam."))
+            }
         }
         let name = firstMatch(#"^Steam Community :: (.+?)(?: :: [^:]*)?$"#, in: title).map(unescapeHTML)
         return (ids, max(total, ids.count), name)
