@@ -4028,10 +4028,10 @@ bool LoadImageEntry(ParseContext& context, std::size_t at, const nlohmann::json&
 
     // A card with the `perspective` flag in a 2D scene is seen through the scene's perspective
     // camera, as a particle system or a model with the flag is: bare, or by the pass that puts
-    // its effects' result onto the scene. A fullscreen layer fills the canvas whatever it says
-    // and a composition copies the screen behind it where the flat view puts it.
-    const bool perspective_card =
-        image.perspective && context.is_ortho && ! kind.fullscreen && ! kind.compose_model && ! composition;
+    // its effects' result onto the scene. A composition's closing card uses the same lens:
+    // its local effect buffer must not flatten a cover attached to a rotated model.
+    // A fullscreen layer still fills the canvas whatever the flag says.
+    const bool perspective_card = image.perspective && context.is_ortho && ! kind.fullscreen;
     // In a 3D scene the flag gives the card WE's far view of the scene camera.
     const bool perspective_card_3d = image.perspective && ! context.is_ortho && ! kind.fullscreen &&
                                      ! kind.compose_model && ! composition &&

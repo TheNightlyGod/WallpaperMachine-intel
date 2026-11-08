@@ -112,7 +112,16 @@ Playback, backend, host and startup areas are in
   `.ACardWithEffectsIsSeenThroughTheCameraByThePassThatPutsItOnTheScene`
   (the card's own `perspective` flag, drawn as it is and through an effect, on both
   renderers: it was drawn flat, 30 pixels where the camera gives 44.5, and a cover
-  laid on a model's face slid off it once a group turned them). The eye sat at 1000 units with a field of view derived from it, so a
+  laid on a model's face slid off it once a group turned them). In `model_parallax_test`,
+  `ModelParallax.ImageAndComposeCardsStayOnAModelFaceWhileItsParentTurns` compares the
+  model face with ordinary, effect and composition cards at seven successive group
+  rotations and alternating cursor positions. The model has nonuniform scale, and
+  the composition cases cover both copying the background and composing children.
+  Composition cards used to ignore `perspective`, leaving the cover smaller or
+  skewed relative to its model. Wallpaper Engine captures at three fixed orientations
+  confirm the shared closing projection; a separate colour-grid probe confirms that
+  the initial background sample keeps using the scene camera.
+  The eye sat at 1000 units with a field of view derived from it, so a
   particle 500 units out was twice its size and one past 1000 units was cut; the
   distance is the scene's own, in one helper (`FitCanvasPerspective`) that the
   parser, `Scene::FrameCanvas`, the scene zoom and `ApplyCameraFillMode` share.

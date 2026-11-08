@@ -79,8 +79,12 @@ point and field of view varied, probes pcam-a to pcam-f).
 In a 2D scene, a particle system, 3D model or image layer with the `perspective` flag
 is drawn through a perspective camera seated as Wallpaper Engine seats it (an image
 layer's effects still run in its own card; the pass that puts the result onto the
-scene is the one seen through it, and a fullscreen layer ignores the flag), so a
-cover laid on a model's face stays on it however a group turns them. Camera parallax
+scene is the one seen through it, and a fullscreen layer ignores the flag). This
+also applies to a composition layer's closing card, whether it copies the background
+or composes children, so a cover laid on a model's face stays on it however a group
+turns them. The composition's initial background sample still uses the scene camera;
+Wallpaper Engine's perspective flag changes the closing card's projection, not that
+sample. Camera parallax
 moves a model by its depth as it moves every other layer, a model under a group by the
 group's, so the cover stays on its face as the cursor moves too. Its field of view is
 the scene's `perspectiveoverridefov` (95 degrees when the file leaves it out, read from
