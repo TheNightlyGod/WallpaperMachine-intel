@@ -261,7 +261,8 @@ impl AppConfig {
     /// it is still connected. The new main display's own block, if it has one,
     /// then decides what the role shows: its wallpaper, or nothing while it is
     /// switched off or mirroring. A main display without a block of its own
-    /// keeps the role's wallpaper. Returns whether the role changed hands.
+    /// keeps the role's wallpaper. A saved mirror keeps its own block instead
+    /// of inheriting the role's temporary state. Returns whether the role changed hands.
     fn hand_over_primary_role(
         &mut self,
         role: &mut MonitorCfg,
@@ -302,10 +303,14 @@ impl AppConfig {
             }
         };
         let written_back = &mut self.monitors[index];
-        written_back.wallpaper.clone_from(&role.wallpaper);
-        written_back.enabled = true;
-        written_back.mode = "independent".into();
-        written_back.mirror_target = None;
+        // Becoming main does not change a physical display's saved mirror choice.
+        // Applying an independent wallpaper updates that block before handover.
+        if !written_back.mode.eq_ignore_ascii_case("mirror") {
+            written_back.wallpaper.clone_from(&role.wallpaper);
+            written_back.enabled = true;
+            written_back.mode = "independent".into();
+            written_back.mirror_target = None;
+        }
 
         let names_main = |selector: &SerializedSelector| match selector.to_selector() {
             DisplaySelector::Identity(identity) => identity.has_stable_match(&main.identity),

@@ -207,6 +207,77 @@ fn a_new_main_display_that_mirrors_shows_nothing_of_its_own() {
 }
 
 #[test]
+fn a_mirror_keeps_its_saved_choice_through_a_main_display_roundtrip() {
+    for target in [SerializedSelector::Primary, selector(&studio())] {
+        for wallpaper in [None, Some("basalt")] {
+            for disconnected in [false, true] {
+                let mut mirror = block(selector(&ultrafine()), wallpaper);
+                mirror.mode = "mirror".into();
+                mirror.mirror_target = Some(target.clone());
+                let mut other = block(selector(&projector()), None);
+                other.mode = "mirror".into();
+                other.mirror_target = Some(SerializedSelector::Primary);
+                let mut config = studio_was_main(mirror.clone());
+                config.monitors.push(other.clone());
+                let home = tempfile::tempdir().expect("temporary home");
+                let store = ConfigStore::open(home.path());
+
+                config.sync_known_monitors(&[ultrafine(), studio(), projector()]);
+                assert_eq!(wallpaper_of(&config, &SerializedSelector::Primary), None);
+                store.save_app_config(&config).expect("save while mirror is main");
+                config = store.load().expect("reload while mirror is main").config;
+
+                let mut returned = vec![studio(), projector()];
+                if !disconnected {
+                    returned.push(ultrafine());
+                }
+                config.sync_known_monitors(&returned);
+                store.save_app_config(&config).expect("save after handover");
+                config = store.load().expect("reload after handover").config;
+
+                assert_eq!(
+                    block_for(&config, &mirror.selector),
+                    Some(&mirror),
+                    "mirror choice survives handover: target={target:?}, disconnected={disconnected}"
+                );
+                assert_eq!(block_for(&config, &other.selector), Some(&other));
+                assert_eq!(
+                    wallpaper_of(&config, &SerializedSelector::Primary).as_deref(),
+                    Some("aurora")
+                );
+                config.sync_known_monitors(&[studio(), projector(), ultrafine()]);
+                assert_eq!(block_for(&config, &mirror.selector), Some(&mirror));
+                assert!(
+                    !config.sync_known_monitors(&[studio(), projector(), ultrafine()]),
+                    "a repeated refresh does not change the restored configuration"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_mirrors_saved_choice_takes_precedence_over_the_roles_wallpaper() {
+    let mut mirror = block(selector(&ultrafine()), Some("basalt"));
+    mirror.mode = "mirror".into();
+    mirror.mirror_target = Some(SerializedSelector::Primary);
+    let mut config = studio_was_main(mirror.clone());
+    config.sync_known_monitors(&[ultrafine(), studio()]);
+    config.ensure_monitor(SerializedSelector::Primary).wallpaper = Some("comet".into());
+
+    config.sync_known_monitors(&[studio(), ultrafine()]);
+
+    assert_eq!(
+        block_for(&config, &selector(&ultrafine())),
+        Some(&mirror)
+    );
+    assert_eq!(
+        wallpaper_of(&config, &SerializedSelector::Primary).as_deref(),
+        Some("aurora")
+    );
+}
+
+#[test]
 fn a_never_configured_main_display_starts_with_the_previous_main_displays_wallpaper() {
     let mut config = studio_was_main(block(selector(&ultrafine()), Some("basalt")));
 

@@ -7,6 +7,7 @@ use super::engine_release::EngineRelease;
 use super::fixture_observations::{expect_last_owner, settings_key};
 use super::fixture_values::identified;
 use crate::config::{AppConfig, ConfigStore, MonitorCfg, SerializedSelector, WallpaperConfig};
+use crate::display::DisplaySnapshotExt;
 use crate::engine::FakeEngineFacade;
 use crate::paths::BridgePaths;
 
@@ -53,4 +54,135 @@ async fn the_primary_wallpaper_moves_with_the_primary_display() {
         "primary",
         "the primary role must move to the display the engine now lists first"
     );
+}
+
+#[tokio::test]
+async fn mirrors_follow_later_wallpaper_changes_after_a_main_display_roundtrip() {
+    let root = tempdir().unwrap();
+    let home = tempdir().unwrap();
+    let store = ConfigStore::open(root.path());
+    let (main, left, right) = (
+        identified("main", 3, 60),
+        identified("left", 2, 60),
+        identified("right", 1, 60),
+    );
+    let mirror = |selector| MonitorCfg {
+        selector,
+        mode: "mirror".into(),
+        mirror_target: Some(SerializedSelector::Primary),
+        ..MonitorCfg::default()
+    };
+    let left_config = mirror(left.connected_selector());
+    let right_config = mirror(right.connected_selector());
+    store.save_app_config(&AppConfig {
+        primary_display: Some(main.connected_selector()),
+        monitors: vec![
+            MonitorCfg {
+                wallpaper: Some("300".into()),
+                ..MonitorCfg::default()
+            },
+            left_config.clone(),
+            right_config.clone(),
+        ],
+        ..AppConfig::default()
+    }).unwrap();
+    for id in ["300", "400"] {
+        store.save_wallpaper(&WallpaperConfig::new_for(id, "scene")).unwrap();
+    }
+    let engine = FakeEngineFacade::default();
+    let _release = EngineRelease::of(&engine);
+    engine.set_snapshot_after_refresh(vec![main.clone(), left.clone(), right.clone()]);
+    let bridge = crate::api::BridgeBuilder::new(engine.clone())
+        .with_config_store(store.clone())
+        .with_paths(BridgePaths::for_home(home.path()))
+        .build()
+        .unwrap();
+    for id in ["300", "400"] {
+        bridge.inject_scene_wallpaper_config_for_test(id, "Scene").await;
+    }
+    bridge.bootstrap().await.unwrap();
+    for id in [1, 2, 3] {
+        expect_last_owner(&engine, id, "300");
+    }
+
+    engine.set_snapshot_after_refresh(vec![right.clone(), main.clone(), left.clone()]);
+    bridge.refresh_displays().await.unwrap();
+    engine.set_snapshot_after_refresh(vec![main, left, right]);
+    bridge.refresh_displays().await.unwrap();
+    let saved = store.load().unwrap().config;
+    for expected in [&left_config, &right_config] {
+        assert_eq!(
+            saved.monitors.iter().find(|row| row.selector == expected.selector),
+            Some(expected),
+            "refresh saves each physical display's mirror choice"
+        );
+    }
+    for id in [1, 2, 3] {
+        expect_last_owner(&engine, id, "300");
+    }
+
+    bridge.set_display_config_enabled("400".into(), "primary".into(), true).await.unwrap();
+    bridge.apply_wallpaper_options("400".into(), false).await.unwrap();
+    for id in [1, 2, 3] {
+        expect_last_owner(&engine, id, "400");
+    }
+}
+
+#[tokio::test]
+async fn choosing_a_wallpaper_while_a_mirror_is_main_replaces_its_saved_mirror() {
+    let root = tempdir().unwrap();
+    let home = tempdir().unwrap();
+    let store = ConfigStore::open(root.path());
+    let (main, mirror) = (identified("main", 3, 60), identified("mirror", 1, 60));
+    let mirror_selector = mirror.connected_selector();
+    store.save_app_config(&AppConfig {
+        primary_display: Some(main.connected_selector()),
+        monitors: vec![
+            MonitorCfg {
+                wallpaper: Some("300".into()),
+                ..MonitorCfg::default()
+            },
+            MonitorCfg {
+                selector: mirror_selector.clone(),
+                mode: "mirror".into(),
+                mirror_target: Some(SerializedSelector::Primary),
+                ..MonitorCfg::default()
+            },
+        ],
+        ..AppConfig::default()
+    }).unwrap();
+    for id in ["300", "400"] {
+        store.save_wallpaper(&WallpaperConfig::new_for(id, "scene")).unwrap();
+    }
+    let engine = FakeEngineFacade::default();
+    let _release = EngineRelease::of(&engine);
+    engine.set_snapshot_after_refresh(vec![main.clone(), mirror.clone()]);
+    let bridge = crate::api::BridgeBuilder::new(engine.clone())
+        .with_config_store(store.clone())
+        .with_paths(BridgePaths::for_home(home.path()))
+        .build()
+        .unwrap();
+    for id in ["300", "400"] {
+        bridge.inject_scene_wallpaper_config_for_test(id, "Scene").await;
+    }
+    bridge.bootstrap().await.unwrap();
+    engine.set_snapshot_after_refresh(vec![mirror.clone(), main.clone()]);
+    bridge.refresh_displays().await.unwrap();
+
+    bridge.set_display_config_enabled("400".into(), "primary".into(), true).await.unwrap();
+    bridge.apply_wallpaper_options("400".into(), true).await.unwrap();
+    engine.set_snapshot_after_refresh(vec![main, mirror]);
+    bridge.refresh_displays().await.unwrap();
+
+    let saved = store.load().unwrap().config;
+    assert_eq!(
+        saved.monitors.iter().find(|row| row.selector == mirror_selector),
+        Some(&MonitorCfg {
+            selector: mirror_selector.clone(),
+            wallpaper: Some("400".into()),
+            ..MonitorCfg::default()
+        })
+    );
+    expect_last_owner(&engine, 1, "400");
+    expect_last_owner(&engine, 3, "300");
 }
