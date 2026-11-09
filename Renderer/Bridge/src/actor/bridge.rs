@@ -109,6 +109,7 @@ pub struct BridgeActor<E: EngineFacade> {
     /// Which wallpapers were being opened, so one that killed the app twice
     /// in a row is held back. See [`LoadJournal`].
     load_journal: LoadJournal,
+    desktop_preloads: BTreeMap<(u32, String), crate::engine::LoadTicket>,
     /// Scenes a position drag has shown at a position nobody committed, so
     /// that finishing the drag back where it began still puts the renderer on
     /// the saved position instead of being skipped as already held.
@@ -171,6 +172,7 @@ pub(super) fn assemble_actor<E: EngineFacade>(
         paths,
         mouse_polling,
         load_journal,
+        desktop_preloads: BTreeMap::new(),
         previewed_framing: HashSet::new(),
         previewed_properties: HashSet::new(),
     };
@@ -1072,8 +1074,11 @@ impl<E: EngineFacade + Clone> BridgeActor<E> {
             return Ok(Vec::new());
         }
         let displays = self.engine.display_snapshot();
-        self.activation_inputs(&displays, self.playback_paused())
-            .build_native_video()?
+        self.native_video_wallpapers_from(self.activation_inputs(&displays, self.playback_paused()))
+    }
+
+    fn native_video_wallpapers_from(&self, inputs: ActivationInputs<'_>) -> Result<Vec<BridgeNativeVideoWallpaper>, BridgeError> {
+        inputs.build_native_video()?
             .into_iter()
             .map(|desc| {
                 let title = self
@@ -1147,8 +1152,11 @@ impl<E: EngineFacade + Clone> BridgeActor<E> {
             return Ok(Vec::new());
         }
         let displays = self.engine.display_snapshot();
-        self.activation_inputs(&displays, self.playback_paused())
-            .build_web()?
+        self.web_wallpapers_from(self.activation_inputs(&displays, self.playback_paused()))
+    }
+
+    fn web_wallpapers_from(&self, inputs: ActivationInputs<'_>) -> Result<Vec<BridgeWebWallpaper>, BridgeError> {
+        inputs.build_web()?
             .into_iter()
             .map(|desc| {
                 let title = self
@@ -2404,10 +2412,66 @@ impl<E: EngineFacade + Clone> Message<SetDisplayParkedWallpapers> for BridgeActo
             .set_parked_scenes(display_id, scene_paths)
             .await
             .map_err(|error| BridgeError::engine(error.to_string()))?;
+        self.desktop_preloads.retain(|(display, wallpaper), _| *display != display_id || msg.wallpaper_ids.contains(wallpaper));
         log::info!(
             "display {display_id} keeps {} wallpaper(s) paused when it moves on",
             msg.wallpaper_ids.len()
         );
+        Ok(())
+    }
+}
+
+impl<E: EngineFacade + Clone> Message<messages::PreloadDesktopWallpaper> for BridgeActor<E> {
+    type Reply = Result<crate::api::BridgeDesktopPreload, BridgeError>;
+
+    async fn handle(&mut self, msg: messages::PreloadDesktopWallpaper, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
+        let empty = crate::api::BridgeDesktopPreload::default();
+        if self.state.presentation_unloaded || self.state.held_wallpapers.contains(&msg.wallpaper_id) { return Ok(empty); }
+        self.state.ensure_wallpaper_exists(&msg.wallpaper_id)?;
+        if !self.state.wallpaper_configs.contains_key(&msg.wallpaper_id) {
+            let config = self.config_store.as_ref().map(|store| store.load_wallpaper(&msg.wallpaper_id)).transpose()?
+                .unwrap_or_else(|| crate::config::WallpaperConfig::new_for(&msg.wallpaper_id, "scene"));
+            self.state.wallpaper_configs.insert(msg.wallpaper_id.clone(), config);
+        }
+        let displays = self.engine.display_snapshot();
+        if !displays.iter().any(|display| display.desc.display_id == msg.display_id) { return Ok(empty); }
+        // Resolve the saved rendering options through the ordinary activation builder, against a
+        // temporary assignment. Neither the user's selected item nor any persisted config changes.
+        let ticket = self.load_journal.begin(vec![(msg.wallpaper_id.clone(), msg.display_id)]);
+        let target = (msg.display_id, msg.wallpaper_id.clone());
+        let mut config = self.state.app_config.clone();
+        let selector = config.monitors.iter().find(|monitor| {
+            monitor.enabled && !monitor.mode.eq_ignore_ascii_case(MIRROR_DISPLAY_MODE)
+                && monitor.selector.to_selector().resolve_display(&displays)
+                    .is_some_and(|display| display.desc.display_id == msg.display_id)
+        }).map(|monitor| monitor.selector.clone()).map_or_else(
+            || self.resolve_operation_selector(&msg.display_id.to_string(), &displays), Ok)?;
+        config.monitors = vec![crate::config::MonitorCfg {
+            selector,
+            wallpaper: Some(msg.wallpaper_id), ..Default::default()
+        }];
+        let inputs = || ActivationInputs { app_config: &config, paused: true, audio_suppressed: true,
+            ..self.activation_inputs(&displays, true) };
+        if let Some(scene) = inputs().build()?.into_iter().next() {
+            let scene = live_scene(scene, self.active_target_fps_cap(), true);
+            self.engine.preload_scene(scene, f64::from(self.effective_render_scale())).await
+                .map_err(|error| BridgeError::engine(error.to_string()))?;
+        }
+        let result = crate::api::BridgeDesktopPreload {
+            web: self.web_wallpapers_from(inputs())?.into_iter().next(),
+            video: self.native_video_wallpapers_from(inputs())?.into_iter().next(),
+        };
+        self.desktop_preloads.insert(target, ticket);
+        Ok(result)
+    }
+}
+
+impl<E: EngineFacade + Clone> Message<messages::CompleteDesktopPreload> for BridgeActor<E> {
+    type Reply = Result<(), BridgeError>;
+    async fn handle(&mut self, msg: messages::CompleteDesktopPreload, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
+        if let Some(ticket) = self.desktop_preloads.remove(&(msg.display_id, msg.wallpaper_id)) {
+            if msg.succeeded { ticket.succeed(); }
+        }
         Ok(())
     }
 }

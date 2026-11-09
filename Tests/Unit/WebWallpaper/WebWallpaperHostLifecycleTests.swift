@@ -162,6 +162,49 @@ final class WebWallpaperHostLifecycleTests: XCTestCase {
 
   // MARK: Pages kept suspended for another desktop
 
+  func testAnUnvisitedPageCommitsItsFrameSuspendsAndIsReusedOnArrival() async throws {
+    let fixture = try Fixture(attachedSurfaces: true)
+    defer { fixture.close() }
+    fixture.host.setKeptWallpapers([7: ["wallpaper", "replacement"]])
+    await fixture.host.apply([fixture.descriptor])
+    try await wait { fixture.model.states.last?.phase == .ready }
+    let current = try XCTUnwrap(fixture.model.surfaces.last)
+    try await fixture.host.preload(fixture.replacement())
+    let prepared = try XCTUnwrap(fixture.model.surfaces.last)
+    try await wait { fixture.host.wallpaperIsReady("replacement", on: 7) }
+    XCTAssertTrue(prepared.page.hostSuspended)
+    XCTAssertFalse(current.page.hostSuspended)
+    XCTAssertEqual(fixture.host.keptWallpapers(on: 7), ["replacement"])
+    let count = fixture.model.surfaces.count
+    await fixture.host.apply([fixture.replacement()])
+    XCTAssertEqual(fixture.model.surfaces.count, count)
+    XCTAssertTrue(fixture.model.surfaces.last === prepared)
+    XCTAssertFalse(prepared.page.hostSuspended)
+    XCTAssertTrue(current.page.hostSuspended)
+  }
+
+  func testUnvisitedPageIsPreparedWithoutReplacingTheLivePageAndMemoryPressureRetiresIt() async throws {
+    let fixture = try Fixture()
+    defer { fixture.close() }
+    fixture.host.setKeptWallpapers([7: ["wallpaper", "replacement"]])
+    await fixture.host.apply([fixture.descriptor])
+    try await wait { fixture.model.states.last?.phase == .ready }
+    let current = try XCTUnwrap(fixture.model.surfaces.last)
+    try await fixture.host.preload(fixture.replacement())
+    let prepared = try XCTUnwrap(fixture.model.surfaces.last)
+    XCTAssertFalse(current === prepared)
+    XCTAssertFalse(current.retired)
+    XCTAssertFalse(current.page.hostSuspended)
+    XCTAssertTrue(fixture.host.containsWallpaper("replacement", on: 7))
+    XCTAssertEqual(fixture.model.states.last?.wallpaperID, "wallpaper", "preloading does not publish a live assignment")
+    let lateLoad = prepared.page.onLoaded
+    fixture.host.setKeptWallpapers([:])
+    lateLoad?()
+    XCTAssertTrue(prepared.retired)
+    XCTAssertFalse(current.retired)
+    XCTAssertFalse(fixture.host.containsWallpaper("replacement", on: 7))
+  }
+
   func testAPageTheDisplayKeepsIsSuspendedWhenItsDesktopIsLeftAndRunsOnWhenItComesBack() async throws {
     let fixture = try Fixture()
     defer { fixture.close() }
@@ -630,9 +673,18 @@ final class WebWallpaperHostLifecycleTests: XCTestCase {
   }
 
   func testASuspendedPageAnswersPosterRequestsFromItsSuspensionPoster() async throws {
+    try await checkSuspendedPoster(parked: false)
+  }
+
+  func testAPageKeptForAnotherDesktopSuppliesItsReplicaWithoutResuming() async throws {
+    try await checkSuspendedPoster(parked: true)
+  }
+
+  private func checkSuspendedPoster(parked: Bool) async throws {
     let fixture = try Fixture(attachedSurfaces: true, pageTiming: .init(firstFrameGrace: .zero))
     defer { fixture.close() }
     fixture.host.start()
+    if parked { fixture.host.setKeptWallpapers([7: ["wallpaper", "replacement"]]) }
     await fixture.host.apply([fixture.descriptor])
     let surface = try XCTUnwrap(fixture.model.surfaces.last)
     let page = surface.page
@@ -645,6 +697,7 @@ final class WebWallpaperHostLifecycleTests: XCTestCase {
     XCTAssertFalse(page.isInWindowTree)
     let poster = try XCTUnwrap(page.suspensionPoster)
     let expected = try XCTUnwrap(WebWallpaperHost.rgbaPixels(of: poster))
+    if parked { await fixture.host.apply([fixture.replacement()]) }
     // A snapshot of the detached view would now come out at another size, so
     // only the stored frame can produce the expected one.
     page.webView.setFrameSize(NSSize(width: 40, height: 30))
@@ -665,6 +718,8 @@ final class WebWallpaperHostLifecycleTests: XCTestCase {
     XCTAssertEqual(frames.first?.width, expected.width)
     XCTAssertEqual(frames.first?.height, expected.height)
     XCTAssertEqual(frames.first?.context, "space-change")
+    XCTAssertTrue(page.hostSuspended)
+    XCTAssertFalse(page.isInWindowTree)
   }
 
   func testAPosterRequestedBeforeThePageHasLoadedIsAnsweredOnceItHas() async throws {

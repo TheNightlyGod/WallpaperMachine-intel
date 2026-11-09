@@ -18,11 +18,11 @@ fn tokio() -> tokio::runtime::Runtime {
         .expect("test runtime")
 }
 
-fn path(wallpaper: &str) -> String {
+pub(super) fn path(wallpaper: &str) -> String {
     format!("/library/{wallpaper}/scene.json")
 }
 
-fn two_displays() -> EngineActor {
+pub(super) fn two_displays() -> EngineActor {
     let mut model = DisplayStateModel::from_config(crate::WallpaperEngineConfig::default())
         .expect("default model");
     model
@@ -33,7 +33,7 @@ fn two_displays() -> EngineActor {
 
 /// Shows `wallpaper` on the built-in display and marks the scene as having
 /// presented, as a real renderer would after its first frame.
-fn show(actor: &mut EngineActor, facade: &RuntimeFacade, display: &DisplayDesc, wallpaper: &str) {
+pub(super) fn show(actor: &mut EngineActor, facade: &RuntimeFacade, display: &DisplayDesc, wallpaper: &str) {
     facade
         .update(actor, |model| model.apply_reconcile(&[scene(display, wallpaper)]))
         .expect("reconcile");
@@ -56,7 +56,7 @@ fn mark_presented(actor: &mut EngineActor) {
 }
 
 /// The wallpapers the display keeps parked, with their handles and pauses.
-fn parked_on(actor: &EngineActor, display: &DisplayDesc) -> Vec<(String, SceneHandle, bool)> {
+pub(super) fn parked_on(actor: &EngineActor, display: &DisplayDesc) -> Vec<(String, SceneHandle, bool)> {
     actor
         .state
         .display_records
@@ -106,6 +106,53 @@ fn a_wallpaper_the_display_left_runs_again_without_a_load() {
     let scenes = actor.state.snapshot().scenes;
     let listed: Vec<_> = scenes.iter().map(|entry| (entry.handle, entry.parked)).collect();
     assert_eq!(listed, vec![(aurora, false), (basalt, true)]);
+}
+
+#[test]
+fn visiting_a_host_wallpaper_keeps_all_scene_desktops_ready() {
+    let tokio = tokio();
+    let _context = tokio.enter();
+    let mut actor = two_displays();
+    let facade = RuntimeFacade::default();
+    actor.set_parked_scenes(1, vec![path("aurora"), path("basalt")]).unwrap();
+    show(&mut actor, &facade, &builtin(), "aurora");
+    let aurora = running_on(&actor, &builtin()).1;
+    show(&mut actor, &facade, &builtin(), "basalt");
+    let basalt = running_on(&actor, &builtin()).1;
+    facade.forget();
+
+    // Video and web hosts own the current desktop, so reconciliation has no scene for it.
+    for _ in 0..2 {
+        facade.update(&mut actor, |model| model.apply_reconcile(&[])).unwrap();
+        assert_eq!(parked_on(&actor, &builtin()), vec![
+            (path("aurora"), aurora, true), (path("basalt"), basalt, true),
+        ], "the other desktops retain their own paused frames across host reconciliations");
+        assert!(actor.state.snapshot().displays.iter().all(|display| display.handle.is_none()));
+        assert_eq!(facade.closes.get(), 0);
+    }
+    show(&mut actor, &facade, &builtin(), "aurora");
+    assert_eq!(running_on(&actor, &builtin()).1, aurora);
+    show(&mut actor, &facade, &builtin(), "basalt");
+    assert_eq!(running_on(&actor, &builtin()).1, basalt);
+    assert!(facade.jobs.borrow().is_empty(), "returning to either scene loads nothing");
+
+    // Releasing the plan still frees every retained instance while a host is active.
+    facade.update(&mut actor, |model| model.apply_reconcile(&[])).unwrap();
+    actor.set_parked_scenes(1, Vec::new()).unwrap();
+    assert!(actor.state.snapshot().scenes.is_empty());
+}
+
+#[test]
+fn explicitly_destroying_a_display_releases_its_kept_desktops() {
+    let tokio = tokio();
+    let _context = tokio.enter();
+    let mut actor = two_displays();
+    let facade = RuntimeFacade::default();
+    actor.set_parked_scenes(1, vec![path("aurora"), path("basalt")]).unwrap();
+    show(&mut actor, &facade, &builtin(), "aurora");
+    show(&mut actor, &facade, &builtin(), "basalt");
+    actor.destroy_window_for(crate::DisplaySelector::Primary).unwrap();
+    assert!(actor.state.snapshot().scenes.is_empty());
 }
 
 #[test]

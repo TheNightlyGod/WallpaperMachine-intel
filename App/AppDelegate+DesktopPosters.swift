@@ -67,7 +67,7 @@ extension AppDelegate {
     /// Idle while the animated lock screen has the desktop: the switch is locked then, and the
     /// native provider journals the poster as its own original.
     func applyDesktopPicturePreference() {
-        // Pinned windows need posters: without them other desktops show the person's own picture.
+        // Poster writing is optional: prepared windows stay on their own desktops either way.
         defer { spacePinning?.update() }
         guard store != nil, !shutdownInProgress, !shutdownComplete, restoringDesktopPicture == nil,
               store?.lockScreenWallpaper?.claimsDesktopPicture != true else { return }
@@ -147,12 +147,11 @@ extension AppDelegate {
         ResolvedDisplayTitles.liveDisplayID(row.displayId, title: row.title).map(String.init)
     }
 
-    /// The displays whose wallpaper windows stay on their current desktop: those that follow
-    /// desktop Spaces while posters give every other desktop the picture of its own wallpaper.
+    /// Displays whose prepared wallpaper windows stay on their chosen desktops, with optional
+    /// posters as the fallback while a wallpaper is not ready.
     func spacePins() -> [UInt32: WallpaperSpacePin] {
         guard let store, let spaces = desktopSpaces, spaces.available,
               let scheduler = automaticWallpapers?.scheduler,
-              let sync = desktopWallpaperSync, !sync.isSuspended,
               store.lockScreenWallpaper?.isRequested != true,
               store.lockScreenWallpaper?.ownsDesktopProvider != true else { return [:] }
         var pins: [UInt32: WallpaperSpacePin] = [:]
@@ -200,6 +199,52 @@ extension AppDelegate {
         return spacePins().mapValues { Set($0.desktops.keys) }
     }
 
+    func desktopWallpaperIsLoaded(display: UInt32, wallpaper: String) -> Bool {
+        (store?.sceneWindows().contains { $0.displayId == display && $0.wallpaperId == wallpaper } ?? false)
+            || (webWallpaperHost?.containsWallpaper(wallpaper, on: display) ?? false)
+            || (nativeVideoHost?.containsWallpaper(wallpaper, on: display) ?? false)
+    }
+
+    /// No active assignment changes here. Only the bridge preparation takes the activation lane;
+    /// the first-frame wait yields to manual choices, desktop switches and memory-pressure cleanup.
+    func preloadDesktopWallpaper(display: UInt32, wallpaper: String) async throws {
+        guard let store else { throw CancellationError() }
+        do {
+            try await prepareDesktopWallpaper(display: display, wallpaper: wallpaper, store: store)
+            try await store.bridge.completeDesktopPreload(displayId: display, wallpaperId: wallpaper, succeeded: true)
+        } catch {
+            do { try await store.bridge.completeDesktopPreload(displayId: display, wallpaperId: wallpaper, succeeded: false) }
+            catch { AppLog.warn("space preload: could not close the load journal entry: \(error.localizedDescription)") }
+            throw error
+        }
+    }
+
+    private func prepareDesktopWallpaper(display: UInt32, wallpaper: String, store: BridgeStore) async throws {
+        let content = try await store.preloadDesktopWallpaperAsync(displayID: display, wallpaperID: wallpaper)
+        try Task.checkCancellation()
+        if let web = content.web { try await webWallpaperHost?.preload(web) }
+        if let video = content.video { try await nativeVideoHost?.preload(video) }
+        spacePinning?.update()
+        let deadline = ContinuousClock.now + .seconds(90)
+        while desktopWallpaperIsLoaded(display: display, wallpaper: wallpaper) {
+            try Task.checkCancellation()
+            let scene = store.sceneWindows().first { $0.displayId == display && $0.wallpaperId == wallpaper }
+            // A concurrent switch owns its own first-frame wait once it promotes this instance.
+            if scene?.parked == false || scene?.ready == true || webWallpaperHost?.wallpaperIsReady(wallpaper, on: display) == true
+                || nativeVideoHost?.wallpaperIsReady(wallpaper, on: display) == true {
+                spacePinning?.update()
+                return
+            }
+            guard ContinuousClock.now < deadline else { break }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        webWallpaperHost?.discardUnreadyWallpaper(wallpaper, on: display)
+        nativeVideoHost?.discardUnreadyWallpaper(wallpaper, on: display)
+        throw DesktopPreloadError.noFrame
+    }
+
+    private enum DesktopPreloadError: Error { case noFrame }
+
     /// The windows of wallpapers kept paused for desktops the person is not on: the scene windows
     /// the renderer reports as parked and the web and video hosts' own.
     func keptWallpaperWindows() -> Set<Int> {
@@ -211,10 +256,18 @@ extension AppDelegate {
 
     /// The wallpapers a display keeps paused, by id.
     private func keptWallpapers(on display: UInt32) -> Set<String> {
-        var ids = Set((store?.sceneWindows() ?? []).filter { $0.parked && $0.displayId == display }.map(\.wallpaperId))
+        var ids = Set((store?.sceneWindows() ?? []).filter { $0.parked && $0.ready && $0.displayId == display }.map(\.wallpaperId))
         ids.formUnion(webWallpaperHost?.keptWallpapers(on: display) ?? [])
         ids.formUnion(nativeVideoHost?.keptWallpapers(on: display) ?? [])
         return ids
+    }
+
+    /// Whether this exact scene window, or its page or clip host, has a picture.
+    func wallpaperWindowIsReady(number: Int, display: UInt32?, wallpaper: String?) -> Bool {
+        if store?.sceneWindows().contains(where: { Int($0.windowNumber) == number && $0.ready }) == true { return true }
+        guard let display, let wallpaper else { return false }
+        return webWallpaperHost?.wallpaperIsReady(wallpaper, on: display) == true
+            || nativeVideoHost?.wallpaperIsReady(wallpaper, on: display) == true
     }
 
     /// The wallpaper each wallpaper window shows, by window number.
@@ -224,6 +277,38 @@ extension AppDelegate {
         ids.merge(webWallpaperHost?.windowWallpapers ?? [:]) { $1 }
         ids.merge(nativeVideoHost?.windowWallpapers ?? [:]) { $1 }
         return ids
+    }
+
+    /// Only repeated wallpapers need extra Space-local pictures. Parking owns the lifetime,
+    /// including its memory-pressure and unload gates; system desktop-picture writing is separate.
+    func spaceReplicaPlan(keeping: WallpaperSpaceParking.Plan) -> WallpaperSpaceReplicas.Plan {
+        guard spacePinning?.isActive == true else { return [:] }
+        var plan: WallpaperSpaceReplicas.Plan = [:]
+        for (display, pin) in spacePins() {
+            for (wallpaper, spaces) in pin.desktops where spaces.count > 1 && keeping[display]?.contains(wallpaper) == true {
+                plan[.init(display: display, wallpaper: wallpaper)] = spaces
+            }
+        }
+        return plan
+    }
+
+    func spaceReplicaSources() -> [WallpaperSpaceReplicas.Source] {
+        let ids = wallpaperIDsByWindow()
+        let kept = keptWallpaperWindows()
+        let scenes = store?.sceneWindows() ?? []
+        let pins = spacePins()
+        return WallpaperPresentationPolicy.wallpaperWindows().compactMap { window in
+            let number = window.windowNumber
+            guard let wallpaper = ids[number],
+                  let display = SystemPinnableWindow(window: window).displayID,
+                  window.isVisible, let layer = window.contentView?.layer,
+                  scenes.contains(where: { Int($0.windowNumber) == number && $0.ready })
+                    || webWallpaperHost?.wallpaperIsReady(wallpaper, on: display) == true
+                    || nativeVideoHost?.wallpaperIsReady(wallpaper, on: display) == true else { return nil }
+            return .init(key: .init(display: display, wallpaper: wallpaper), window: number, layer: layer,
+                         frame: window.frame, revision: store?.wallpaperContentRevision ?? 0,
+                         parked: kept.contains(number), visit: pins[display]?.space)
+        }
     }
 
     /// Whether a switch on `display` brings back a wallpaper kept paused on the desktop the person

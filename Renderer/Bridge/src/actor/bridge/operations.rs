@@ -116,6 +116,12 @@ impl<E: EngineFacade> ReconcileWork<E> {
             .map(|(owner, scene)| (owner, scene.display.display_id))
             .collect();
         let ticket = self.journal.begin(openings);
+        // An empty scene list also means a video/web desktop now owns the display.
+        // Unload is stronger: release every prepared desktop independently of the
+        // host's asynchronous parking-plan update, then reconcile the empty slots.
+        if self.unloaded {
+            self.engine.close_all_scenes().await.map_err(engine_error)?;
+        }
         // The facade owns core/prune/readiness ordering. Keep the journal ticket
         // alive until every subsequent operation-layer poststep has succeeded.
         let results = self

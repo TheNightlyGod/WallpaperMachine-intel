@@ -67,6 +67,8 @@ pub struct SceneWindowEntry {
     pub window_number: Option<isize>,
     /// Kept paused rather than shown as the display's live scene.
     pub parked: bool,
+    /// A frame is available, including for a scene prepared before its first visit.
+    pub ready: bool,
 }
 
 impl SceneWindowEntry {
@@ -77,6 +79,7 @@ impl SceneWindowEntry {
             desc: runtime.desc.clone(),
             window_number: runtime.window_number(),
             parked,
+            ready: runtime.has_presented(),
         }
     }
 }
@@ -453,6 +456,10 @@ impl WallpaperEngine {
         scene_paths: Vec<String>,
     ) -> Result<(), EngineError> {
         self.ask_actor(messages::SetParkedScenes { display_id, scene_paths }).await
+    }
+
+    pub async fn preload_scene(&self, desc: SceneDesc, render_scale: f64) -> Result<(), EngineError> {
+        self.ask_actor(messages::PreloadScene { desc, render_scale }).await
     }
 
     #[cfg(test)]

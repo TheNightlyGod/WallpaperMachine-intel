@@ -1948,14 +1948,12 @@ struct MetalRender::Impl
         std::size_t history { 0 };
         float depth { 0 };
         bool marked { false };
-        bool bypasses_output { false };
     };
     std::vector<SortedDraw> sorted_draws;
     std::vector<SortedDraw> sorted_scratch;
     std::vector<std::vector<std::size_t>> sorted_owner_passes;
     std::vector<std::vector<std::size_t>> reflected_owner_passes;
     std::vector<std::size_t> sorted_owner_rank;
-    bool sorting_preserves_output { false };
     std::unordered_set<std::string> sorting_sample_targets;
     std::vector<std::size_t> sorting_slots;
     std::vector<std::size_t> reflected_sorting_slots;
@@ -2863,7 +2861,6 @@ void MetalRender::Impl::releaseGraph()
     sorted_owner_passes.clear();
     reflected_owner_passes.clear();
     sorted_owner_rank.clear();
-    sorting_preserves_output = false;
     sorting_sample_targets.clear();
     sorting_slots.clear();
     reflected_sorting_slots.clear();
@@ -7086,20 +7083,12 @@ void MetalRender::Impl::compileDrawOrder(Scene& scene)
     execution_order.resize(descriptions.size());
     execution_rank.resize(descriptions.size());
     for (std::size_t i = 0; i < descriptions.size(); ++i) execution_order[i] = execution_rank[i] = i;
-    const auto output = scene.ResolveRenderTargetName(SpecTex_Default);
-    for (const auto& desc : descriptions) {
-        if (desc.kind == MetalPassKind::CustomShader && desc.target_key == output) {
-            sorting_preserves_output = desc.load_action == MetalLoadAction::Load;
-            break;
-        }
-    }
     if (!scene.transparent_sorting) {
         refreshOrderedLoads(scene);
         return;
     }
     std::unordered_map<SceneNode*, std::size_t> groups;
-    // Keep omitted contenders as zero-pass groups. They can move ahead of the
-    // first visible draw and change its preserve/clear contract without a rebuild.
+    // Keep omitted contenders as zero-pass groups so their authored sorting slots survive.
     for (std::size_t i = 0; i < scene.transparent_order.size(); ++i) {
         const auto node = scene.transparent_order[i].lock();
         if (!node) continue;
@@ -7120,21 +7109,6 @@ void MetalRender::Impl::compileDrawOrder(Scene& scene)
     }
     if (scene.reflection.requested && scene.reflection_enabled)
         reflected_owner_passes.resize(sorted_draws.size());
-    const auto has_mesh = [](const auto& self, SceneNode* node) -> bool {
-        if (node->Mesh()) return true;
-        for (const auto& child : node->GetChildren()) if (child && self(self, child.get())) return true;
-        return false;
-    };
-    for (const auto& weak : scene.render_excluded_nodes) {
-        const auto node = weak.lock();
-        if (!node || !has_mesh(has_mesh, node.get())) continue;
-        for (auto* owner = node.get(); owner; owner = owner->Parent()) {
-            const auto found = groups.find(owner);
-            if (found == groups.end()) continue;
-            sorted_draws[found->second].bypasses_output = true;
-            break;
-        }
-    }
     for (std::size_t i = 0; i < descriptions.size(); ++i) {
         const auto& desc = descriptions[i];
         if (!desc.sort_owner || desc.depth_only) continue;
@@ -7170,16 +7144,6 @@ void MetalRender::Impl::refreshOrderedLoads(Scene& scene)
 {
     if (execution_order.empty()) return;
     const auto output = scene.ResolveRenderTargetName(SpecTex_Default);
-    if (!sorted_draws.empty()) {
-        sorting_preserves_output = false;
-        for (const auto& group : sorted_draws) {
-            sorting_preserves_output = sorting_preserves_output || group.bypasses_output;
-            const auto& passes = sorted_owner_passes[group.history];
-            if (std::any_of(passes.begin(), passes.end(), [&](auto pass) {
-                return descriptions[pass].target_key == output;
-            })) break;
-        }
-    }
     const auto reads = [](const ScenePassDescription& desc, const std::string& key) {
         return desc.source_key == key ||
             std::find(desc.texture_keys.begin(), desc.texture_keys.end(), key) != desc.texture_keys.end();
@@ -7226,8 +7190,10 @@ void MetalRender::Impl::refreshOrderedLoads(Scene& scene)
             const bool force = target && target->forceClear && !is_output;
             if (!state.written || force) {
                 const bool clear = is_output ? scene.clearEnabled : target && (target->allowReuse || target->forceClear);
-                const bool preserve = is_output && !scene.clearEnabled &&
-                    (is_reflection || sorting_preserves_output);
+                // A scene with clearing disabled keeps its previous image, including beneath
+                // partial or translucent draws. DontCare makes those reads undefined. A proven
+                // full overwrite still takes the existing clear-on-overwrite path when encoded.
+                const bool preserve = is_output && !scene.clearEnabled;
                 desc.load_action = clear ? MetalLoadAction::Clear : preserve ? MetalLoadAction::Load : MetalLoadAction::DontCare;
                 desc.samples = desc.force_single_sample ? 1 : samples;
             } else {

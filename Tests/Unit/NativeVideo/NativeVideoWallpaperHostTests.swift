@@ -474,6 +474,154 @@ final class NativeVideoWallpaperHostTests: XCTestCase {
 
     // MARK: Clips kept paused for another desktop
 
+    func testUnvisitedClipIsPreloadedMutedAndPausedWithoutReplacingTheCurrentClip() async throws {
+        let recorder = Recorder()
+        surfaceReadyAtBirth = true
+        let host = makeHost(wallpapers: [], recorder: recorder)
+        defer { host.shutdown() }
+        host.setKeptWallpapers([7: ["300", "301"]])
+        await host.apply([wallpaper(id: "300", admissionKey: 1)])
+        let current = try XCTUnwrap(surfacesMade[7])
+        try await host.preload(wallpaper(id: "301", admissionKey: 2))
+        let prepared = try XCTUnwrap(surfacesMade[7])
+        XCTAssertFalse(prepared === current)
+        XCTAssertTrue(current.isPlaying)
+        XCTAssertFalse(prepared.isPlaying)
+        XCTAssertTrue(prepared.muted)
+        XCTAssertEqual(host.keptWallpapers(on: 7), ["301"])
+        let count = recorder.made.count
+        await host.apply([wallpaper(id: "301", admissionKey: 2)])
+        XCTAssertEqual(recorder.made.count, count)
+        XCTAssertTrue(prepared.isPlaying)
+        XCTAssertFalse(current.isPlaying)
+        host.setKeptWallpapers([:])
+        XCTAssertTrue(current.isStopped)
+        XCTAssertFalse(prepared.isStopped)
+    }
+
+    func testAPromotedPreloadWithoutAFrameIsRestartedOnceThenReportedAsFailed() async throws {
+        let recorder = Recorder()
+        let descriptor = wallpaper(mediaPath: "/tmp/network/promoted.mp4")
+        let host = makeHost(
+            wallpapers: [], recorder: recorder,
+            storage: { $0.path == descriptor.mediaPath ? .networkVolume : .internalVolume },
+            manualLimits: true)
+        defer { host.shutdown() }
+        host.setKeptWallpapers([7: [descriptor.wallpaperId]])
+        try await host.preload(descriptor)
+        let surface = try XCTUnwrap(surfacesMade[7])
+        recorder.storageQueries.removeAll()
+
+        await host.apply([descriptor])
+        XCTAssertTrue(surface.isPlaying)
+        XCTAssertEqual(recorder.made.count, 1, "the preloaded player is promoted")
+        guard host.armedFirstFrameWatchCountForTest == 1 else {
+            return XCTFail("a promoted clip without a picture needs a first-frame deadline")
+        }
+        await sleeper.waitUntilPending()
+        XCTAssertEqual(recorder.storageQueries, [descriptor.mediaPath])
+        XCTAssertEqual(sleeper.requested.last, .seconds(90))
+
+        sleeper.fireNext()
+        await sleeper.waitUntilPending()
+        XCTAssertEqual(surface.restartReasons.count, 1)
+        XCTAssertTrue(recorder.rejected.isEmpty)
+        XCTAssertEqual(sleeper.requested.last, .seconds(90))
+
+        sleeper.fireNext()
+        await settle { surface.isStopped }
+        XCTAssertEqual(surface.restartReasons.count, 1)
+        XCTAssertEqual(recorder.rejected.map(\.id), [descriptor.wallpaperId])
+        XCTAssertTrue(host.isEmpty)
+    }
+
+    func testAPromotedPreloadWithAFrameNeedsNoFirstFrameDeadline() async throws {
+        let recorder = Recorder()
+        surfaceReadyAtBirth = true
+        let host = makeHost(wallpapers: [], recorder: recorder, manualLimits: true)
+        defer { host.shutdown() }
+        host.setKeptWallpapers([7: ["300"]])
+        try await host.preload(wallpaper())
+        let surface = try XCTUnwrap(surfacesMade[7])
+
+        await host.apply([wallpaper()])
+        XCTAssertTrue(surface.isPlaying)
+        XCTAssertEqual(recorder.made.count, 1)
+        XCTAssertEqual(recorder.states.last?.phase, .ready)
+        XCTAssertEqual(host.armedFirstFrameWatchCountForTest, 0)
+        XCTAssertTrue(surface.restartReasons.isEmpty)
+    }
+
+    func testAPreloadedClipAnswersAReplicaWithoutResumingOrOpeningAnotherPlayer() async throws {
+        let center = NotificationCenter()
+        let recorder = Recorder()
+        surfaceReadyAtBirth = true
+        let host = makeHost(wallpapers: [], recorder: recorder, frameCenter: center)
+        host.start()
+        defer { host.shutdown() }
+        host.setKeptWallpapers([7: ["300", "301"]])
+        await host.apply([wallpaper(id: "300")])
+        let live = try XCTUnwrap(surfacesMade[7])
+        try await host.preload(wallpaper(id: "301", admissionKey: 2))
+        let kept = try XCTUnwrap(surfacesMade[7])
+        kept.poster = Self.makeImage()
+        let made = recorder.made.count
+        let answered = expectation(description: "paused clip supplies the shared desktop picture")
+        let observer = center.addObserver(forName: DesktopPosterNotification.ready, object: kept.posterLayer,
+                                         queue: .main) { note in
+            XCTAssertEqual(DesktopPosterNotification.context(in: note.userInfo), "space-replica:test")
+            XCTAssertEqual(DesktopPosterFrame(userInfo: note.userInfo)?.width, 2)
+            answered.fulfill()
+        }
+        defer { center.removeObserver(observer) }
+        center.post(name: DesktopPosterNotification.request, object: kept.posterLayer,
+                    userInfo: [DesktopPosterNotification.Key.context: "space-replica:test"])
+        await fulfillment(of: [answered], timeout: 2)
+        XCTAssertFalse(kept.isPlaying)
+        XCTAssertTrue(live.isPlaying)
+        XCTAssertEqual(recorder.made.count, made)
+    }
+
+    func testAReleasedKeptClipsLateReplicaFrameIsDiscarded() async throws {
+        let center = NotificationCenter()
+        surfaceReadyAtBirth = true
+        let host = makeHost(wallpapers: [], recorder: Recorder(), frameCenter: center)
+        host.start()
+        defer { host.shutdown() }
+        host.setKeptWallpapers([7: ["300"]])
+        try await host.preload(wallpaper())
+        let kept = try XCTUnwrap(surfacesMade[7])
+        let gate = AsyncGate()
+        openedAtTeardown.append(gate)
+        kept.posterRead = { await gate.wait(); return Self.makeImage() }
+        let answered = expectation(description: "released clip does not publish stale pixels")
+        answered.isInverted = true
+        let observer = center.addObserver(forName: DesktopPosterNotification.ready, object: kept.posterLayer,
+                                         queue: .main) { _ in answered.fulfill() }
+        defer { center.removeObserver(observer) }
+        center.post(name: DesktopPosterNotification.request, object: kept.posterLayer,
+                    userInfo: [DesktopPosterNotification.Key.context: "space-replica:removed"])
+        await gate.waitUntilWaiting()
+        host.setKeptWallpapers([:])
+        gate.open()
+        await fulfillment(of: [answered], timeout: 0.1)
+        XCTAssertTrue(kept.isStopped)
+    }
+
+    func testMemoryPressureDiscardsAClipThatIsStillPreparingAndLateReadinessCannotReviveIt() async throws {
+        let host = makeHost(wallpapers: [], recorder: Recorder())
+        defer { host.shutdown() }
+        host.setKeptWallpapers([7: ["300"]])
+        try await host.preload(wallpaper())
+        let surface = try XCTUnwrap(surfacesMade[7])
+        XCTAssertTrue(host.keptWallpapers(on: 7).isEmpty)
+        host.setKeptWallpapers([:])
+        surface.isReadyForDisplay = true
+        surface.onReadyForDisplay?()
+        XCTAssertTrue(surface.isStopped)
+        XCTAssertFalse(host.containsWallpaper("300", on: 7))
+    }
+
     func testAClipTheDisplayKeepsIsPausedWhenItsDesktopIsLeftAndRunsOnWhenItComesBack() async throws {
         let recorder = Recorder()
         surfaceReadyAtBirth = true

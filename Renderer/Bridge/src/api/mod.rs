@@ -41,7 +41,7 @@ pub use types::{
     BridgeSliderMetadata, BridgeSnapshotBundle, BridgeStorageStatus, BridgeSurfaceCheck,
     BridgeVideoBackendReport, BridgeWallpaperEntry,
     BridgeWallpaperKind, BridgeWallpaperMutationBundle, BridgeWallpaperOptionsSnapshot,
-    BridgeSceneWindow, BridgeWebWallpaper,
+    BridgeDesktopPreload, BridgeSceneWindow, BridgeWebWallpaper,
 };
 
 impl From<crate::config::BatteryModeCfg> for BridgeBatteryMode {
@@ -806,6 +806,11 @@ impl EngineFacade for ArcEngineFacade {
 
     fn scene_windows(&self) -> Vec<wallpaper_core::SceneWindowEntry> {
         self.0.scene_windows()
+    }
+
+    fn preload_scene(&self, desc: wallpaper_core::project::SceneDesc, render_scale: f64)
+        -> Pin<Box<dyn Future<Output = Result<(), wallpaper_core::EngineError>> + Send>> {
+        self.0.preload_scene(desc, render_scale)
     }
 
     fn set_parked_scenes(
@@ -1994,6 +1999,15 @@ impl WallpaperBridge {
             .await
     }
 
+    /// Prepares one desktop's saved wallpaper without selecting it or changing display assignments.
+    pub async fn preload_desktop_wallpaper(&self, display_id: u32, wallpaper_id: String) -> Result<BridgeDesktopPreload, BridgeError> {
+        self.actor.ask(crate::actor::messages::PreloadDesktopWallpaper { display_id, wallpaper_id }).await
+    }
+
+    pub async fn complete_desktop_preload(&self, display_id: u32, wallpaper_id: String, succeeded: bool) -> Result<(), BridgeError> {
+        self.actor.ask(crate::actor::messages::CompleteDesktopPreload { display_id, wallpaper_id, succeeded }).await
+    }
+
     /// The window of every open scene wallpaper, live and parked, so the host
     /// can keep each one on the desktops that show its wallpaper. Web and
     /// video windows are the host's own and are not listed.
@@ -2015,6 +2029,7 @@ impl WallpaperBridge {
                     wallpaper_id,
                     window_number: i64::try_from(window.window_number?).ok()?,
                     parked: window.parked,
+                    ready: window.ready,
                 })
             })
             .collect()

@@ -174,6 +174,12 @@ device.
   bloom with `clearenabled: false`, bloom and colour options (two copies), colour
   options alone, HDR bloom, bloom over lenses (the scene's image a pooled trade's
   source, whose image set follows the trade) and 4x MSAA: same frames, no blits.
+  With scene clearing disabled, both the ordinary graph and reordered draws preserve
+  the output on its first partial or blended write; discarding that image reads undefined
+  pixels and makes even two runs of the same path disagree. Proven full overwrites still
+  elide their load. `TransparentSortingGpu.SortingAroundAnOmittedLayerPreservesTheUnclearedOutputWithoutRebuilding`
+  moves visible and omitted layers through the sorting order: the first draw keeps loading
+  the output, every pixel stays identical and the graph is never rebuilt.
   The copy trade's source must be single-sampled, in no pooled trade and not a layer
   composite, the copy's name at most a pooled source; nothing may touch the copy's
   name between the copy and the trade, and the source's next writer is a draw or
@@ -221,9 +227,15 @@ device.
   alpha 0 leave the draw out, the others draw it, and six frames match
   `MetalRender::SetSkipNoopDrawsForTests(false)`.
   `.ADrawThatIsNotProvenToLeaveItsTargetAsItIsIsDrawn`: alpha 0.5, a `normal` or
-  `multiply` blend, a colour or alpha from a varying and a colour of 1e60 are all
-  drawn, frames identical; letting a replacing blend through changes the frames, and
-  dropping the product bound leaves out the infinite colour.
+  `multiply` blend and a colour or alpha from a varying are all drawn, frames identical;
+  letting a replacing blend through changes the frames.
+  `.AnOverflowingColourAtZeroAlphaIsNotSkipped` multiplies finite uniform operands
+  (`1e30 * 1e30`) at runtime and verifies that the draw reaches the scene output with no
+  no-op skip. It makes no pixel-equivalence claim for non-finite results under Metal fast math;
+  dropping the CPU product bound leaves out that draw and fails the test.
+  `.AFiniteColourProductAtZeroAlphaIsSkippedAndKeepsEveryFrame`
+  uses the same product with finite results: only the two zero-alpha frames skip the draw,
+  and all six frames match the unoptimized path exactly.
   `.AHiddenLayersClearsAreLeftOutAndItsPictureComesBackAsItWas`: a panel through two
   effects hidden by script for four frames (one of them abandoned), targets shared and
   apart: each left-out clear takes its render pass with it and every frame matches
@@ -879,10 +891,29 @@ engine to redo, and when.
   `engine::actor::space_parking_tests` (parking a scene that has drawn instead of replacing it,
   running it again with its handle and no refresh job, replacing in place as before when nothing
   is kept, closing on a shorter list, a new size, an unplugged display and `close_all`, and a
-  global resume leaving it paused) and the bridge's `tests::space_parking` and
+  global resume leaving it paused, and video/web visits retaining all prepared scene windows
+  without loading them again) and the bridge's `tests::space_parking` and
   `engine::facade::first_frame_tests::a_wallpaper_the_display_keeps_parked_is_not_awaited`. A parked scene
   that came back is never waited on for a first frame it does not report again, which would end
-  in the 90-second rollback. Device-free; no window or desktop.
+  in the 90-second rollback. `WallpaperSpacePinningTests` also covers a loading hold not
+  following a Space change onto a prepared desktop, and preparation on a different desktop
+  remaining visible. Explicit display destruction and unload still release the retained windows;
+  `performance_settings::unload_reports_a_failure_to_release_prepared_desktops_and_can_retry`
+  covers release errors and retry. Device-free; no window or desktop.
+- **Preloaded scenes retain audio capability until activation** — core's
+  `engine::actor::space_preloading::tests::preloaded_audio_demand_is_retained_until_promotion_without_exposing_parked_commands`
+  delivers real actor notifications to a windowless runtime, checks that parked demand
+  neither enters the active observer nor enables ordinary commands, and promotes the same
+  handle without a load or another capability report. Stale renderer identities and unknown
+  handles are ignored; a current report can still withdraw demand after promotion. This
+  exercises capability retention and publication, not native capture or desktop behavior.
+- **Repeated desktop wallpapers have independent transition pictures** —
+  `WallpaperSpaceReplicasTests` covers A–B–A–B placement before presentation, A–B–C–D creating no
+  replicas, one shared image per wallpaper/display, event-only refresh, memory/choice cleanup,
+  bounded image memory, refused placement and stale/cancelled captures. Native video and web
+  lifecycle tests cover reading kept/preloaded instances without resuming or reopening them.
+  These inject the windows and Space mover: real WindowServer stacking, swipe smoothness and
+  compositor memory still require an explicitly authorized desktop check.
 - **Download-speed sampling** — `DownloadTelemetryTests` in `Tests/Unit/Workshop/`:
   real `nettop` streaming over a private PTY with local-socket traffic; CRLF and
   split line endings. LF-only fixtures do not verify live delivery.

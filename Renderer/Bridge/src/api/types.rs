@@ -142,6 +142,14 @@ pub struct BridgeSceneWindow {
     pub window_number: i64,
     /// Kept paused rather than shown as the display's live scene.
     pub parked: bool,
+    pub ready: bool,
+}
+
+/// Host-rendered content to prepare for an unvisited desktop; scenes are prepared by the engine.
+#[derive(Clone, Debug, Default, PartialEq, uniffi::Record)]
+pub struct BridgeDesktopPreload {
+    pub web: Option<BridgeWebWallpaper>,
+    pub video: Option<BridgeNativeVideoWallpaper>,
 }
 
 /// Committed inputs for a web wallpaper the host renders in a web view on one

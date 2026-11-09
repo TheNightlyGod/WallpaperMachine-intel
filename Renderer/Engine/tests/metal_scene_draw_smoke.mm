@@ -20306,6 +20306,23 @@ CopyTradeRun DrawWithCopyTrades(const std::filesystem::path& project, const std:
     return run;
 }
 
+std::string DescribePixelDifference(const std::vector<uint8_t>& on, const std::vector<uint8_t>& off)
+{
+    if (on == off) return {};
+    std::ostringstream message;
+    std::size_t changed = 0;
+    int maximum = 0;
+    for (std::size_t i = 0; i < std::min(on.size(), off.size()); ++i) {
+        if (on[i] == off[i]) continue;
+        if (changed < 8) message << " (" << (i / 4) % 384 << ',' << (i / 4) / 384 << ",c" << i % 4
+                                 << ":" << int(off[i]) << "->" << int(on[i]) << ')';
+        ++changed;
+        maximum = std::max(maximum, std::abs(int(on[i]) - int(off[i])));
+    }
+    message << "; changed bytes=" << changed << ", maximum difference=" << maximum;
+    return message.str();
+}
+
 /// Both runs drew every frame alike.
 void ExpectSameFrames(const CopyTradeRun& off, const CopyTradeRun& on, std::size_t frames)
 {
@@ -20313,7 +20330,8 @@ void ExpectSameFrames(const CopyTradeRun& off, const CopyTradeRun& on, std::size
     ASSERT_EQ(on.frames.size(), frames);
     for (std::size_t frame = 0; frame < frames; ++frame) {
         ASSERT_FALSE(off.frames[frame].empty());
-        EXPECT_EQ(on.frames[frame], off.frames[frame]) << "frame " << frame << " changed with the copy trades";
+        EXPECT_EQ(on.frames[frame], off.frames[frame]) << "frame " << frame << " changed with the copy trades"
+            << DescribePixelDifference(on.frames[frame], off.frames[frame]);
     }
     EXPECT_NE(off.frames.front(), off.frames.back()) << "the scene did not animate";
 }
@@ -20658,7 +20676,8 @@ void ExpectSameFrames(const InvisibleWorkRun& off, const InvisibleWorkRun& on, s
     ASSERT_EQ(on.frames.size(), frames);
     for (std::size_t frame = 0; frame < frames; ++frame) {
         ASSERT_FALSE(off.frames[frame].empty());
-        EXPECT_EQ(on.frames[frame], off.frames[frame]) << "frame " << frame << " changed with the work left out";
+        EXPECT_EQ(on.frames[frame], off.frames[frame]) << "frame " << frame << " changed with the work left out"
+            << DescribePixelDifference(on.frames[frame], off.frames[frame]);
     }
 }
 
@@ -20736,9 +20755,8 @@ TEST_F(MetalSceneDraw, ALayerFadedOutToNothingIsLeftOutAndEveryFrameStaysTheSame
 
 TEST_F(MetalSceneDraw, ADrawThatIsNotProvenToLeaveItsTargetAsItIsIsDrawn)
 {
-    // Each variant would at best leave the picture as it is; none is proven to, so every one is
-    // drawn, and the frames are the same either way. A colour of 1e60 is infinite in a float,
-    // and infinity times an alpha of 0 is not 0.
+    // None of these finite variants is proven to preserve its destination, so every one is
+    // drawn and the frames are identical with the optimization enabled or disabled.
     RestoreInvisibleWorkSwitches restore;
     constexpr int kFrames = 4;
     struct Variant
@@ -20751,7 +20769,6 @@ TEST_F(MetalSceneDraw, ADrawThatIsNotProvenToLeaveItsTargetAsItIsIsDrawn)
         { "multiplying blend", "vec4(g_Color, g_Alpha)", "multiply", "0.2 0.4 0.6", "0.0" },
         { "colour from a varying", "vec4(g_Color * v_TexCoord.x, g_Alpha)", "translucent", "0.2 0.4 0.6", "0.0" },
         { "alpha from a varying", "vec4(g_Color, g_Alpha * v_TexCoord.y)", "translucent", "0.2 0.4 0.6", "0.0" },
-        { "infinite colour", "vec4(g_Color * 1e30 * 1e30, g_Alpha)", "translucent", "1 1 1", "0.0" },
     };
     for (std::size_t k = 0; k < std::size(variants); ++k) {
         const auto& variant = variants[k];
@@ -20763,6 +20780,44 @@ TEST_F(MetalSceneDraw, ADrawThatIsNotProvenToLeaveItsTargetAsItIsIsDrawn)
         const auto on  = DrawWithInvisibleWorkSwitches(project, root / "cache-on", true, true, kFrames);
         ExpectSameFrames(off, on, kFrames);
         for (const auto& counts : on.counts) EXPECT_EQ(counts.noop_draws, 0u);
+    }
+}
+
+TEST_F(MetalSceneDraw, AnOverflowingColourAtZeroAlphaIsNotSkipped)
+{
+    // The product is not finite, so the CPU must decline to omit its draw. Production Metal
+    // fast math does not promise a stable pixel value for Inf/NaN: check draw admission here,
+    // and keep exact pixel comparisons in the finite cases below.
+    RestoreInvisibleWorkSwitches restore;
+    constexpr int frames = 4;
+    const auto root = root_ / "overflow-product-fade";
+    const auto project = WriteFadeFixture(root, "vec4(g_Color * g_Color, g_Alpha)",
+        "translucent", "1e30 1e30 1e30", FadeScript("0.0"));
+    const auto on = DrawWithInvisibleWorkSwitches(project, root / "cache-on", true, true, frames);
+    ASSERT_EQ(on.frames.size(), std::size_t(frames));
+    ASSERT_EQ(on.counts.size(), std::size_t(frames));
+    for (int frame = 0; frame < frames; ++frame) {
+        SCOPED_TRACE(frame);
+        EXPECT_FALSE(on.frames[frame].empty());
+        EXPECT_EQ(on.counts[frame].noop_draws, 0u);
+        EXPECT_GT(on.counts[frame].scene_output_passes, 0u);
+    }
+}
+
+TEST_F(MetalSceneDraw, AFiniteColourProductAtZeroAlphaIsSkippedAndKeepsEveryFrame)
+{
+    RestoreInvisibleWorkSwitches restore;
+    constexpr int frames = 6;
+    const auto root = root_ / "finite-product-fade";
+    const auto project = WriteFadeFixture(root, "vec4(g_Color * g_Color, g_Alpha)",
+        "translucent", "1 1 1", FadeScript("0.0"));
+    const auto off = DrawWithInvisibleWorkSwitches(project, root / "cache-off", false, true, frames);
+    const auto on = DrawWithInvisibleWorkSwitches(project, root / "cache-on", true, true, frames);
+    ExpectSameFrames(off, on, frames);
+    ASSERT_EQ(on.counts.size(), std::size_t(frames));
+    for (int frame = 0; frame < frames; ++frame) {
+        EXPECT_EQ(on.counts[frame].noop_draws, frame == 2 || frame == 3 ? 1u : 0u);
+        EXPECT_EQ(off.counts[frame].noop_draws, 0u);
     }
 }
 

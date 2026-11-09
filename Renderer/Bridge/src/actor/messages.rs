@@ -271,6 +271,9 @@ pub struct SetDisplayParkedWallpapers {
     pub wallpaper_ids: Vec<String>,
 }
 
+pub struct PreloadDesktopWallpaper { pub display_id: u32, pub wallpaper_id: String }
+pub struct CompleteDesktopPreload { pub display_id: u32, pub wallpaper_id: String, pub succeeded: bool }
+
 pub struct SetAudioSuppressed {
     pub suppressed: bool,
 }

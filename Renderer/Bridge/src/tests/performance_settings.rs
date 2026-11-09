@@ -673,6 +673,30 @@ async fn unload_closes_scenes_and_host_lists_and_reload_restores_them() {
 }
 
 #[tokio::test]
+async fn unload_reports_a_failure_to_release_prepared_desktops_and_can_retry() {
+    let temp = tempfile::tempdir().unwrap();
+    let engine = FakeEngineFacade::default();
+    engine.set_snapshot(vec![display(7, Some(1))]);
+    let bridge = bridge_with(&engine, &temp);
+    commit(&bridge, "100", "Scene",
+        r#"{"type":"scene","title":"Scene","file":"scene.pkg","description":""}"#, "7").await;
+    let active = bridge.app_snapshot().await.unwrap().active_wallpaper_ids;
+    engine.fail_next_close();
+    assert!(bridge.set_presentation_unloaded(true).await.is_err(),
+        "unload cannot succeed when releasing prepared desktop windows fails");
+    assert!(!engine.rendered_scenes().is_empty());
+    assert_eq!(bridge.app_snapshot().await.unwrap().active_wallpaper_ids, active);
+    bridge.set_presentation_unloaded(true).await.unwrap();
+    // The failed operation schedules a repair of the old assignment. If it was
+    // already in flight, its stale completion schedules a repair of the new unload.
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while !engine.rendered_scenes().is_empty() { tokio::task::yield_now().await; }
+    }).await.expect("the retry and any stale repair must leave every desktop unloaded");
+    bridge.set_presentation_unloaded(false).await.unwrap();
+    assert!(!engine.rendered_scenes().is_empty());
+}
+
+#[tokio::test]
 async fn audio_suppression_mutes_live_and_restores_the_saved_mute() {
     let temp = tempfile::tempdir().unwrap();
     let engine = FakeEngineFacade::default();

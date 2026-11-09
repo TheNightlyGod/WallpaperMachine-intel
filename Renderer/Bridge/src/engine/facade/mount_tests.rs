@@ -18,6 +18,42 @@ use wallpaper_core::{
 
 const GRACE: Duration = Duration::from_secs(90);
 
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_preload_frame_before_the_checkpoint_is_rechecked_after_promotion() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    for same_handle in [true, false] {
+        let turn = Mutex::new(());
+        let audio = Mutex::new(());
+        let (readiness, callback, _) = observer();
+        let target = scene(7, "preloaded-scene");
+        let handle = SceneHandle::new(91);
+        callback(handle); // The renderer reports once, before a wait has a checkpoint.
+        let promoted = Arc::new(AtomicBool::new(false));
+        let snapshot_promotion = promoted.clone();
+        let snapshot_scene = target.clone();
+        let mut operation = Box::pin(reconcile_with_readiness(
+            &turn, &audio, &readiness, vec![target],
+            move || {
+                let ready = snapshot_promotion.load(Ordering::SeqCst);
+                (Vec::new(), vec![wallpaper_core::SceneWindowEntry {
+                    display_id: 7, handle: if same_handle { handle } else { SceneHandle::new(92) },
+                    desc: snapshot_scene.clone(), window_number: Some(1), parked: !ready, ready,
+                }])
+            },
+            move |_| async move {
+                promoted.store(true, Ordering::SeqCst);
+                Ok(vec![SceneResult::new(7, handle, 0)])
+            },
+            || async { Ok(()) },
+        ));
+        if !same_handle {
+            pending(operation.as_mut());
+            callback(handle);
+        }
+        assert_eq!(completed(operation.as_mut()).unwrap()[0].handle, handle);
+    }
+}
+
 fn step<F: Future>(future: Pin<&mut F>) -> Poll<F::Output> {
     future.poll(&mut Context::from_waker(
         futures_util::task::noop_waker_ref(),
@@ -331,16 +367,33 @@ async fn fm04_shared_turn_excludes_snapshot_core_and_stale_handle_evidence() {
     ));
     pending(first.as_mut());
     pending(second.as_mut());
-    assert_eq!(*trace.lock().unwrap(), ["a-snapshot"]);
+    {
+        let trace = trace.lock().unwrap();
+        assert!(trace.contains(&"a-snapshot"), "the first turn took its baseline");
+        assert!(!trace.contains(&"b-snapshot"));
+        assert!(!trace.contains(&"b-core"));
+        assert!(trace.iter().all(|event| *event == "a-snapshot"),
+            "the second turn cannot inspect or mutate the scene while the first waits");
+    }
     callback(a.handle);
     pending(second.as_mut());
-    assert_eq!(*trace.lock().unwrap(), ["a-snapshot"]);
+    {
+        let trace = trace.lock().unwrap();
+        assert!(trace.contains(&"a-snapshot"), "the first turn still owns its baseline");
+        assert!(!trace.contains(&"b-snapshot"));
+        assert!(!trace.contains(&"b-core"));
+        assert!(trace.iter().all(|event| *event == "a-snapshot"),
+            "the first turn still owns the scene until it consumes readiness");
+    }
     assert_eq!(completed(first.as_mut()).unwrap(), vec![a]);
     pending(second.as_mut());
-    assert_eq!(
-        *trace.lock().unwrap(),
-        ["a-snapshot", "b-snapshot", "b-core"]
-    );
+    {
+        let trace = trace.lock().unwrap();
+        let snapshot = trace.iter().position(|event| *event == "b-snapshot").unwrap();
+        let core = trace.iter().position(|event| *event == "b-core").unwrap();
+        assert!(snapshot < core, "the second turn reads its baseline before mutation");
+        assert!(trace[..snapshot].iter().all(|event| *event == "a-snapshot"));
+    }
     tokio::time::advance(Duration::from_secs(89)).await;
     pending(second.as_mut());
     callback(b.handle);
@@ -567,7 +620,7 @@ async fn fm07_real_retained_predicate_and_mounted_readiness_agree() {
             &audio,
             &readiness,
             vec![requested],
-            move || (baseline, Vec::new()),
+            move || (baseline.clone(), Vec::new()),
             move |scenes| async move {
                 assert_eq!(scenes, vec![expected_scene]);
                 Ok(vec![returned])

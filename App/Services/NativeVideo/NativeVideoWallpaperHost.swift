@@ -226,7 +226,64 @@ final class NativeVideoWallpaperHost {
     var keptWindowNumbers: Set<Int> { Set(kept.values.flatMap(\.values).map(\.surface.windowNumber)) }
 
     /// The wallpapers the display keeps paused for its other desktops.
-    func keptWallpapers(on displayID: UInt32) -> Set<String> { Set((kept[displayID] ?? [:]).keys) }
+    func keptWallpapers(on displayID: UInt32) -> Set<String> {
+        Set((kept[displayID] ?? [:]).filter { $0.value.surface.isReadyForDisplay }.keys)
+    }
+
+    func containsWallpaper(_ wallpaper: String, on display: UInt32) -> Bool {
+        descriptors[display]?.wallpaperId == wallpaper || kept[display]?[wallpaper] != nil
+    }
+
+    func wallpaperIsReady(_ wallpaper: String, on display: UInt32) -> Bool {
+        if descriptors[display]?.wallpaperId == wallpaper { return surfaces[display]?.isReadyForDisplay == true }
+        return kept[display]?[wallpaper]?.surface.isReadyForDisplay == true
+    }
+
+    func discardUnreadyWallpaper(_ wallpaper: String, on display: UInt32) {
+        guard let clip = kept[display]?[wallpaper], !clip.surface.isReadyForDisplay else { return }
+        kept[display]?[wallpaper] = nil
+        clip.surface.stop()
+    }
+
+    /// Admission and rendering options are identical to an ordinary open, but the window is
+    /// registered among the kept clips before presentation so pinning places it on its own desktop.
+    func preload(_ wallpaper: BridgeNativeVideoWallpaper) async throws {
+        let display = wallpaper.displayId
+        guard !stopped, keepPlan[display]?.contains(wallpaper.wallpaperId) == true,
+              !containsWallpaper(wallpaper.wallpaperId, on: display) else { return }
+        let url = URL(fileURLWithPath: wallpaper.mediaPath)
+        if let refusal = await admission(for: url, wallpaper: wallpaper, load: nil) {
+            AppLog.warn("space preload: video \(wallpaper.wallpaperId) could not prepare: \(refusal.reason)")
+            throw PreloadError.refused
+        }
+        try Task.checkCancellation()
+        guard !stopped, keepPlan[display]?.contains(wallpaper.wallpaperId) == true,
+              !containsWallpaper(wallpaper.wallpaperId, on: display), let frame = currentFrame(of: display) else { return }
+        surfaceGeneration += 1
+        let key = RuntimeSurfaceKey(kind: .desktopNativeVideo, displayID: display, generation: surfaceGeneration)
+        let surface = makeSurface(url, frame, key, true)
+        surface.setVolume(wallpaper.volume, muted: true)
+        applyAppearance(to: surface, wallpaper: wallpaper)
+        surface.setUserPaused(true)
+        kept[display, default: [:]][wallpaper.wallpaperId] = KeptClip(surface: surface, descriptor: wallpaper, load: nil)
+        surface.onReadyForDisplay = { [weak self, weak surface] in
+            guard let self, let surface, self.kept[display]?[wallpaper.wallpaperId]?.surface === surface else { return }
+            surface.setUserPaused(true)
+            self.notifySurfacesChanged()
+        }
+        surface.onPreparationFailure = { [weak self, weak surface] _, detail, _ in
+            guard let self, let surface, self.kept[display]?[wallpaper.wallpaperId]?.surface === surface else { return }
+            self.kept[display]?[wallpaper.wallpaperId] = nil
+            surface.stop()
+            AppLog.warn("space preload: video \(wallpaper.wallpaperId) failed: \(detail)")
+            self.notifySurfacesChanged()
+        }
+        guard kept[display]?[wallpaper.wallpaperId]?.surface === surface else { throw PreloadError.refused }
+        notifySurfacesChanged()
+        surface.present()
+    }
+
+    private enum PreloadError: Error { case refused }
 
     /// The wallpaper each of this host's windows shows, live and kept, by window number.
     var windowWallpapers: [Int: String] {
@@ -579,6 +636,42 @@ final class NativeVideoWallpaperHost {
         notifySurfacesChanged()
     }
 
+    private func installCallbacks(on surface: NativeVideoSurface, wallpaper: BridgeNativeVideoWallpaper, displayID: UInt32) {
+        // Admission read metadata; this covers the asset failing when it is
+        // actually played. The generation is checked on the way back in, so a
+        // failure from a surface that has since been replaced cannot condemn
+        // its successor.
+        surface.onPreparationFailure = { [weak self, weak surface] _, detail, settled in
+            guard let surface else { return }
+            self?.handlePreparationFailure(
+                displayID: displayID, surface: surface, detail: detail, settled: settled)
+        }
+        surface.onAudioDropped = { [weak self, weak surface] detail in
+            guard let self, let surface, self.surfaces[displayID] === surface else { return }
+            AppLog.warn(
+                "native video wallpaper \(wallpaper.wallpaperId): the platform player could not "
+                    + "play the clip with its audio (\(detail)); playing it without sound",
+                load: self.logLoads[displayID])
+        }
+        surface.onReadyForDisplay = { [weak self, weak surface] in
+            guard let self, let surface, self.surfaces[displayID] === surface,
+                  let current = self.descriptors[displayID] else { return }
+            self.cancelFirstFrameWatch(displayID)
+            self.recordState(current, phase: .ready)
+            // The clip has a picture: the held one, if this window carries it, goes. A window
+            // that carries none does not mind.
+            self.switchHold?.contentReady(displayID: displayID)
+            if let request = self.posterRequests[displayID] {
+                if request.reading { request.readyDuringRead = true }
+                else { self.readPoster(displayID: displayID, surface: surface, request: request) }
+            }
+        }
+        surface.onHealthEvent = { [weak self, weak surface] event in
+            guard let self, let surface, self.surfaces[displayID] === surface else { return }
+            self.record(health: event, displayID: displayID, surface: surface)
+        }
+    }
+
     /// Records the offers for displays this host cannot see, and says so the
     /// first time each one is met.
     ///
@@ -746,39 +839,7 @@ final class NativeVideoWallpaperHost {
         let surface = makeSurface(url, frame, key, wallpaper.paused)
         surfaces[displayID] = surface
         descriptors[displayID] = wallpaper
-        // Admission read metadata; this covers the asset failing when it is
-        // actually played. The generation is checked on the way back in, so a
-        // failure from a surface that has since been replaced cannot condemn
-        // its successor.
-        surface.onPreparationFailure = { [weak self, weak surface] _, detail, settled in
-            guard let surface else { return }
-            self?.handlePreparationFailure(
-                displayID: displayID, surface: surface, detail: detail, settled: settled)
-        }
-        surface.onAudioDropped = { [weak self, weak surface] detail in
-            guard let self, let surface, self.surfaces[displayID] === surface else { return }
-            AppLog.warn(
-                "native video wallpaper \(wallpaper.wallpaperId): the platform player could not "
-                    + "play the clip with its audio (\(detail)); playing it without sound",
-                load: self.logLoads[displayID])
-        }
-        surface.onReadyForDisplay = { [weak self, weak surface] in
-            guard let self, let surface, self.surfaces[displayID] === surface,
-                  let current = self.descriptors[displayID] else { return }
-            self.cancelFirstFrameWatch(displayID)
-            self.recordState(current, phase: .ready)
-            // The clip has a picture: the held one, if this window carries it, goes. A window
-            // that carries none does not mind.
-            self.switchHold?.contentReady(displayID: displayID)
-            if let request = self.posterRequests[displayID] {
-                if request.reading { request.readyDuringRead = true }
-                else { self.readPoster(displayID: displayID, surface: surface, request: request) }
-            }
-        }
-        surface.onHealthEvent = { [weak self, weak surface] event in
-            guard let self, let surface, self.surfaces[displayID] === surface else { return }
-            self.record(health: event, displayID: displayID, surface: surface)
-        }
+        installCallbacks(on: surface, wallpaper: wallpaper, displayID: displayID)
         // Installing the callback can deliver a failure the player was already
         // holding, and that runs the failure synchronously — closing this
         // surface and removing it from the registry before the next line.
@@ -1188,6 +1249,17 @@ final class NativeVideoWallpaperHost {
                     + "\(wallpaper.framing.panX),\(wallpaper.framing.panY)",
                 load: logLoads[displayID])
         }
+        applyAppearance(to: surface, wallpaper: wallpaper)
+        // The descriptor carries the user's pause and this display's suspension.
+        surface.setUserPaused(wallpaper.paused)
+        surface.setPresentationSuspended(suspended || suspendedDisplays.contains(displayID))
+        if surface.isReadyForDisplay { recordState(wallpaper, phase: .ready) }
+        else if let prior = states[displayID], prior.startupRevision != wallpaper.startupRevision {
+            recordState(wallpaper, phase: prior.phase, message: prior.message)
+        }
+    }
+
+    private func applyAppearance(to surface: NativeVideoSurface, wallpaper: BridgeNativeVideoWallpaper) {
         surface.setScaling(
             wallpaper.scalingMode, factor: wallpaper.scalingFactor,
             pan: .init(x: wallpaper.framing.panX, y: wallpaper.framing.panY))
@@ -1197,14 +1269,6 @@ final class NativeVideoWallpaperHost {
             WallpaperEngineOptions(wallpaper.engineOptions),
             lut: wallpaper.lutPath.flatMap { VideoLutLoader.load(URL(fileURLWithPath: $0)) },
             borderColor: wallpaper.borderColor.map(\.cgColor))
-        // The descriptor's paused flag already carries the user's own choice
-        // and this display's suspension, as the activation rules combined them.
-        surface.setUserPaused(wallpaper.paused)
-        surface.setPresentationSuspended(suspended || suspendedDisplays.contains(displayID))
-        if surface.isReadyForDisplay { recordState(wallpaper, phase: .ready) }
-        else if let prior = states[displayID], prior.startupRevision != wallpaper.startupRevision {
-            recordState(wallpaper, phase: prior.phase, message: prior.message)
-        }
     }
 
     private func recordState(
@@ -1256,7 +1320,7 @@ final class NativeVideoWallpaperHost {
     }
 
     /// Makes the clip the display keeps for `wallpaper` its live one again, when it is the same
-    /// file: no admission, no new window, no wait for a first picture.
+    /// file: no admission or new window.
     private func resumeKept(_ wallpaper: BridgeNativeVideoWallpaper, displayID: UInt32) -> Bool {
         guard let clip = kept[displayID]?[wallpaper.wallpaperId] else { return false }
         kept[displayID]?[wallpaper.wallpaperId] = nil
@@ -1268,8 +1332,15 @@ final class NativeVideoWallpaperHost {
         surfaces[displayID] = clip.surface
         descriptors[displayID] = clip.descriptor
         logLoads[displayID] = clip.load
+        installCallbacks(on: clip.surface, wallpaper: wallpaper, displayID: displayID)
+        guard surfaces[displayID] === clip.surface else { return true }
         if let frame = currentFrame(of: displayID) { clip.surface.setScreenFrame(frame) }
         update(surface: clip.surface, with: wallpaper, displayID: displayID)
+        if !clip.surface.isReadyForDisplay {
+            armFirstFrameWatch(
+                displayID: displayID, surface: clip.surface,
+                url: URL(fileURLWithPath: clip.descriptor.mediaPath), restarted: false)
+        }
         AppLog.info("native video wallpaper \(wallpaper.wallpaperId): runs again on "
             + "\(DiagnosticEnvironment.display(displayID)) without opening", load: clip.load)
         return true
@@ -1390,9 +1461,22 @@ final class NativeVideoWallpaperHost {
     /// Answers a desktop poster request from the player that is already running. An empty
     /// answer while the clip prepares waits for readiness, without resuming it or polling.
     private func answerPosterRequest(_ notification: Notification) {
-        guard !stopped, let layer = notification.object as? CALayer,
-            let (displayID, surface) = surfaces.first(where: { $0.value.posterLayer === layer })
-        else { return }
+        guard !stopped, let layer = notification.object as? CALayer else { return }
+        // Space replicas ask the paused instances too, before their desktop is visited. They
+        // must not overwrite the live display's pending poster request or resume a player.
+        guard let (displayID, surface) = surfaces.first(where: { $0.value.posterLayer === layer }) else {
+            guard let clip = kept.values.lazy.flatMap({ $0.values }).first(where: { $0.surface.posterLayer === layer }) else { return }
+            let surface = clip.surface
+            let context = DesktopPosterNotification.context(in: notification.userInfo)
+            Task { @MainActor [weak self] in
+                guard let image = await surface.posterImage(), let self, !self.stopped,
+                      self.surfaces.values.contains(where: { $0 === surface })
+                        || self.kept.values.contains(where: { $0.values.contains(where: { $0.surface === surface }) }),
+                      let frame = DesktopPosterFrame.rgba(image) else { return }
+                frame.publish(for: layer, to: self.frameCenter, context: context)
+            }
+            return
+        }
         let request = PosterRequest(layer: layer, context: DesktopPosterNotification.context(in: notification.userInfo))
         posterRequests[displayID] = request
         readPoster(displayID: displayID, surface: surface, request: request)

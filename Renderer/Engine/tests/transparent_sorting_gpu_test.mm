@@ -71,7 +71,7 @@ TEST(TransparentSortingGpu, ACameraDirectionChangeReordersPreparedDrawsAndReturn
     EXPECT_EQ(scene.LastFramePasses().total(),0u);
 }
 
-TEST(TransparentSortingGpu, AnOmittedContenderCanMoveTheFirstOutputsPreserveAction) {
+TEST(TransparentSortingGpu, SortingAroundAnOmittedLayerPreservesTheUnclearedOutputWithoutRebuilding) {
     WE_SKIP_WITHOUT_METAL();
     ScenePackage package;MakeSortingScene(package);
     GpuScene scene(package,{.width=128,.height=128});
@@ -84,13 +84,15 @@ TEST(TransparentSortingGpu, AnOmittedContenderCanMoveTheFirstOutputsPreserveActi
     }
     ASSERT_TRUE(scene.Rebuild());
     const auto rebuilds=scene.RebuildCount();
-    ASSERT_TRUE(scene.Step());
+    const auto expected=scene.Run(1);
+    // The material preserves destination alpha; without a scene clear that starts at zero.
+    ASSERT_TRUE(ExpectRegionAverage(expected,48,48,32,32,{255,0,0,0},0));
     EXPECT_EQ(scene.renderer().FirstSceneOutputLoadForTests(),wallpaper::metal::MetalLoadAction::Load);
     ASSERT_TRUE(scene.runtime()->SetNodeTranslate("red",{0,0,-30}));
-    ASSERT_TRUE(scene.Step());
-    EXPECT_EQ(scene.renderer().FirstSceneOutputLoadForTests(),wallpaper::metal::MetalLoadAction::DontCare);
+    EXPECT_EQ(scene.Run(1).rgba,expected.rgba);
+    EXPECT_EQ(scene.renderer().FirstSceneOutputLoadForTests(),wallpaper::metal::MetalLoadAction::Load);
     ASSERT_TRUE(scene.runtime()->SetNodeTranslate("green",{0,0,-40}));
-    ASSERT_TRUE(scene.Step());
+    EXPECT_EQ(scene.Run(1).rgba,expected.rgba);
     EXPECT_EQ(scene.renderer().FirstSceneOutputLoadForTests(),wallpaper::metal::MetalLoadAction::Load);
     EXPECT_EQ(scene.RebuildCount(),rebuilds);
 }

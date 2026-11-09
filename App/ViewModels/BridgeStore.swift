@@ -1350,6 +1350,14 @@ final class BridgeStore {
         }
     }
 
+    func preloadDesktopWallpaperAsync(displayID: UInt32, wallpaperID: String) async throws -> BridgeDesktopPreload {
+        var result = BridgeDesktopPreload(web: nil, video: nil)
+        try await updatePlaybackEnvironment {
+            result = try await bridge.preloadDesktopWallpaper(displayId: displayID, wallpaperId: wallpaperID)
+        }
+        return result
+    }
+
     /// The window of every open scene wallpaper, live and kept paused, read without a round trip.
     func sceneWindows() -> [BridgeSceneWindow] {
         bridge.sceneWindows()

@@ -70,6 +70,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// Keeps the windows of a display that follows desktop Spaces on its current desktop only.
     private(set) var spacePinning: WallpaperSpacePinning?
     private var spaceParking: WallpaperSpaceParking?
+    private(set) var spaceReplicas: WallpaperSpaceReplicas?
     /// The last poster of each wallpaper a desktop Space is set to, for the desktops not on screen.
     let spacePosters = DesktopSpacePosterCache()
     /// The settled poster each wallpaper last had on each display, given back when it returns.
@@ -904,11 +905,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             controller?.scheduler.noteManualChoice(display)
         }
         controller.scheduler.start()
+        let mover = SystemSpaceWindowMover()
+        let replicas = WallpaperSpaceReplicas(
+            plan: { [weak self] in self?.spaceReplicaPlan(keeping: self?.spaceParking?.current ?? [:]) ?? [:] },
+            sources: { [weak self] in self?.spaceReplicaSources() ?? [] }, mover: mover)
+        spaceReplicas = replicas
         let pinning = WallpaperSpacePinning(
-            windows: { [weak self] in SystemPinnableWindow.all(wallpaperIDs: self?.wallpaperIDsByWindow() ?? [:]) },
+            windows: { [weak self] in
+                SystemPinnableWindow.all(wallpaperIDs: self?.wallpaperIDsByWindow() ?? [:]) { number, display, wallpaper in
+                    self?.wallpaperWindowIsReady(number: number, display: display, wallpaper: wallpaper) ?? false
+                }
+            },
             pins: { [weak self] in self?.spacePins() ?? [:] },
             holding: { [weak self] display in self?.switchHold?.isHolding(display) ?? false },
-            mover: SystemSpaceWindowMover())
+            mover: mover)
+        pinning.onUpdated = { [weak replicas] in replicas?.update() }
         spacePinning = pinning
         pinning.start()
         let parking = WallpaperSpaceParking(
@@ -919,6 +930,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             hosts: { [weak self] plan in
                 self?.webWallpaperHost?.setKeptWallpapers(plan)
                 self?.nativeVideoHost?.setKeptWallpapers(plan)
+                self?.spaceReplicas?.update()
+            },
+            prepared: { [weak self] display, wallpaper in
+                self?.desktopWallpaperIsLoaded(display: display, wallpaper: wallpaper) ?? true
+            },
+            preload: { [weak self] display, wallpaper in
+                try await self?.preloadDesktopWallpaper(display: display, wallpaper: wallpaper)
             })
         spaceParking = parking
         parking.setUnderPressure(pressure.underPressure)
@@ -1306,6 +1324,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         wakeRevalidator = nil
         memoryPressureMonitor?.stop()
         memoryPressureMonitor = nil
+        spaceReplicas?.stop()
+        spaceReplicas = nil
         spacePinning?.stop()
         spacePinning = nil
         spaceParking?.stop()

@@ -639,7 +639,15 @@ impl SceneRuntime {
         actor: WeakActorRef<EngineActor>,
     ) -> Result<Self, EngineError> {
         Self::open_in_registry_with(&SceneRegistry::shared(), || {
-            Self::prepare_open(backend, first_frame_callback, handle, desc, state, actor)
+            Self::prepare_open(backend, first_frame_callback, handle, desc, state, actor, false)
+        })
+    }
+
+    pub fn open_preloaded(backend: OweBackend, first_frame_callback: FirstFrameCallback,
+        handle: SceneHandle, desc: &SceneDesc, state: SceneRuntimeState, actor: WeakActorRef<EngineActor>,
+    ) -> Result<Self, EngineError> {
+        Self::open_in_registry_with(&SceneRegistry::shared(), || {
+            Self::prepare_open(backend, first_frame_callback, handle, desc, state, actor, true)
         })
     }
 
@@ -650,11 +658,18 @@ impl SceneRuntime {
         desc: &SceneDesc,
         state: SceneRuntimeState,
         actor: WeakActorRef<EngineActor>,
+        preloaded: bool,
     ) -> Result<Self, EngineError> {
         // The window comes first, then the relays and the renderer. Anything
         // that fails afterwards drops what was built, which closes the window,
         // stops the relays and shuts the half-built renderer down.
-        let window = WallpaperWindow::builder(desc.display.clone()).open()?;
+        let mut builder = WallpaperWindow::builder(desc.display.clone());
+        if preloaded {
+            let id = std::path::Path::new(&desc.scene_path).parent().and_then(std::path::Path::file_name)
+                .and_then(std::ffi::OsStr::to_str).ok_or_else(|| EngineError::InvalidInput("preload scene has no wallpaper id".into()))?;
+            builder = builder.preloaded_wallpaper(id.to_owned());
+        }
+        let window = builder.open()?;
         let opened = OpenedRenderer::open(
             backend,
             &first_frame_callback,
@@ -688,7 +703,7 @@ impl SceneRuntime {
         previous: &mut Self,
     ) -> Result<Self, EngineError> {
         Self::open_replacement_with(previous,
-            || Self::prepare_open(backend, first_frame_callback, handle, desc, state, actor),
+            || Self::prepare_open(backend, first_frame_callback, handle, desc, state, actor, false),
             |renderer, scale| renderer.set_render_scale(scale))
     }
 
@@ -1362,6 +1377,13 @@ impl SceneRuntime {
             failure_relay,
         };
         Ok(Self::assemble(None, opened, handle, desc, state, Arc::new(|_| {}), actor, 1))
+    }
+
+    /// Enables the normal report lifetime/identity checks without a native window.
+    #[cfg(test)]
+    pub(crate) fn enable_audio_reports_for_test(&mut self) -> Arc<()> {
+        self.window = Some(WallpaperWindow::windowless_for_test());
+        self.audio_relay.renderer_instance.clone()
     }
 }
 

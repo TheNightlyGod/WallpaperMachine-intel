@@ -248,7 +248,7 @@ TEST(RenderGraph, aHiddenFirstWriterLeftOutKeepsTheSceneOutputsLoadAndClear) {
             const auto& first = observed.draw("first_drawn_writer");
             REQUIRE(first.output == SpecTex_Default);
             EXPECT_EQ(first.clear_on_first_use, clear);
-            EXPECT_EQ(first.preserve_target_contents, ! clear && hidden_first);
+            EXPECT_EQ(first.preserve_target_contents, ! clear);
         }
     }
 }

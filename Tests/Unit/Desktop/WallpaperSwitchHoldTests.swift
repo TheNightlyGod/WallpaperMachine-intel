@@ -224,6 +224,20 @@ final class WallpaperSwitchHoldTests: XCTestCase {
         XCTAssertNil(rig.state())
     }
 
+    func testAPreloadDoesNotTakeThePictureHeldForTheActiveDesktop() async throws {
+        let rig = HoldRig()
+        defer { rig.finish() }
+        await rig.hold.begin(displays: [7])
+        let preloaded = HoldRig.screenLayer()
+        rig.announce(preloaded, display: 7, reason: "preload")
+        XCTAssertNil(rig.veil(on: preloaded))
+        XCTAssertEqual(rig.state(), .armed)
+        let active = HoldRig.screenLayer()
+        rig.announce(active, display: 7, reason: "open")
+        XCTAssertNotNil(rig.veil(on: active))
+        XCTAssertEqual(rig.state(), .onScene)
+    }
+
     func testReplacingASceneMovesTheVeilOntoTheNewLayerUntilTheEngineSettles() async throws {
         let rig = HoldRig()
         defer { rig.finish() }

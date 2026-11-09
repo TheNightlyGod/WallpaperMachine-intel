@@ -267,7 +267,7 @@ TEST(RenderGraph, forceClearDoesNotChangeDefaultOutputPreservation) {
     append(s, "first");
     append(s, "second");
     Observation g(s);
-    requirePolicy(g.draw("first"), false, false);
+    requirePolicy(g.draw("first"), false, true);
     requirePolicy(g.draw("second"), false, true);
 }
 TEST(RenderGraph, renderTargetSampleCountPropagatesToCustomPassDesc) {

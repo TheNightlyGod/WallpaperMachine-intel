@@ -347,12 +347,19 @@ Swift; the bridge excludes them from engine reconciliation and reports them thro
 `webWallpapers()` and `nativeVideoWallpapers()`. Every wallpaper window joins every Space,
 except on a display with a [different wallpaper for each desktop](features/spaces.md#windows-that-stay-on-their-desktop),
 where `WallpaperSpacePinning` keeps each window on the desktops chosen for its wallpaper through
-optional private CoreGraphics calls. Such a display keeps the wallpapers of the desktops the person
-left loaded and paused in their windows (`WallpaperSpaceParking`): each engine slot holds one live
+optional private CoreGraphics calls. Such a display prepares unvisited desktops’ wallpapers in the background and keeps them
+loaded and paused in their windows (`WallpaperSpaceParking`): preparation is serial, first frames are muted, and memory pressure
+releases the other desktops’ instances. Each engine slot holds one live
 scene and the scenes it parked, each with its own window and handle, and only the live one is in
 the slot's snapshot entry, the handle index, the pause, audio, pointer and counter passes and the
 reconcile results; `scene_windows` lists all of them with their window numbers. The web and video
-hosts keep paused pages and clips the same way. Every wallpaper window sets `canHide = false`,
+hosts keep paused pages and clips the same way. Repeated wallpapers also get single-Space still
+windows beneath the shared live window (`WallpaperSpaceReplicas`), because multi-Space membership
+alone does not supply every sliding desktop's picture. They share one captured image per display
+and wallpaper, never another renderer; the parking plan owns their lifetime and memory-pressure
+cleanup. Their window class is excluded from live-surface discovery, audio, input, poster ownership
+and visibility policy. [Spaces](features/spaces.md#windows-that-stay-on-their-desktop) describes
+the event-driven capture, bounded memory and fallback limits. Every wallpaper window sets `canHide = false`,
 so hiding the app (Cmd-H, or the panel hiding itself after an activation) hides only the panel;
 with AppKit's default the wallpaper windows left the screen too and occlusion suspended every
 display.
@@ -376,12 +383,14 @@ ordered front, and once from each layer swap right after the new layer is under 
 shaped, before any renderer exists. `object` is the new `CAMetalLayer`; `userInfo` carries
 `displayID` (an `NSNumber`, the CoreGraphics display id, `DisplayDesc.display_id`) and `reason`
 (an `NSString`): `open` for a new window, `replace` for a scene replacement
-(`rebuild_for_desc`), `reconfigure` for a display reconfigure (`update_layer`). A `reconfigure`
+(`rebuild_for_desc`), `reconfigure` for a display reconfigure (`update_layer`). A background desktop
+preload instead announces `preload` and includes its `wallpaperID` string: pinning places it on
+the chosen desktops before ordering it in, and the switch hold ignores it. A `reconfigure`
 can reach a scene that has not presented its first frame, because the engine actor serves
 display refreshes while the apply waits for it, and that scene has no picture to carry over:
 an observer that put content on the layer it replaces has to follow it, as
 `WallpaperSwitchHold` does with its veil. A host observer
-matches the name, the keys and the three strings literally and nothing checks that at compile
+matches the name, the keys and the reason strings literally and nothing checks that at compile
 time, so `window::tests` pins them on the Rust side. The observer runs inside the window
 operation that posts it, which is inside a main-thread dispatch the engine actor is waiting on,
 so it must stay cheap and must not call back into the bridge. Nothing is posted when a swap is
@@ -791,7 +800,11 @@ verdict.
 Each renderer also reports whether its committed scene reads system audio through
 `owe_scene_wallpaper_set_audio_requirement_callback`. The report travels like pointer
 capability: a latest-value relay per renderer object into the core actor, an observer on
-snapshot publication, and a bridge relay that re-evaluates capture. The system-audio tap runs
+snapshot publication, and a bridge relay that re-evaluates capture. Audio capability reports
+also update parked and preloaded runtimes, with the same renderer-instance validation;
+only active handles enter the observer's demand set. Promoting a prepared scene therefore
+publishes its retained capability without another native report, while parked handles stay
+unavailable to ordinary commands. The system-audio tap runs
 only for `audio_response_enabled && scene reads audio && !paused`, or for a subscribed web page,
 so plain video wallpapers never open it; see [audio response](features/audio-response.md).
 

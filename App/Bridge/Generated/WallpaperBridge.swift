@@ -669,6 +669,8 @@ public protocol WallpaperBridgeProtocol : AnyObject {
      */
     func clearShaderCache() async throws  -> BridgeSettingsSnapshot
     
+    func completeDesktopPreload(displayId: UInt32, wallpaperId: String, succeeded: Bool) async throws 
+    
     /**
      * Every retained media event as a JSON array, in replay order, or `None`
      * when nothing has been submitted yet.
@@ -828,6 +830,11 @@ public protocol WallpaperBridgeProtocol : AnyObject {
      * wallpaper scenes.
      */
     func pollMousePosition() async throws 
+    
+    /**
+     * Prepares one desktop's saved wallpaper without selecting it or changing display assignments.
+     */
+    func preloadDesktopWallpaper(displayId: UInt32, wallpaperId: String) async throws  -> BridgeDesktopPreload
     
     /**
      * Shows a wallpaper at a position on one display while a drag toward it
@@ -1887,6 +1894,23 @@ open func clearShaderCache()async throws  -> BridgeSettingsSnapshot {
         )
 }
     
+open func completeDesktopPreload(displayId: UInt32, wallpaperId: String, succeeded: Bool)async throws  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_wallpaper_bridge_fn_method_wallpaperbridge_complete_desktop_preload(
+                    self.uniffiClonePointer(),
+                    FfiConverterUInt32.lower(displayId),FfiConverterString.lower(wallpaperId),FfiConverterBool.lower(succeeded)
+                )
+            },
+            pollFunc: ffi_wallpaper_bridge_rust_future_poll_void,
+            completeFunc: ffi_wallpaper_bridge_rust_future_complete_void,
+            freeFunc: ffi_wallpaper_bridge_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeBridgeError.lift
+        )
+}
+    
     /**
      * Every retained media event as a JSON array, in replay order, or `None`
      * when nothing has been submitted yet.
@@ -2258,6 +2282,26 @@ open func pollMousePosition()async throws  {
             completeFunc: ffi_wallpaper_bridge_rust_future_complete_void,
             freeFunc: ffi_wallpaper_bridge_rust_future_free_void,
             liftFunc: { $0 },
+            errorHandler: FfiConverterTypeBridgeError.lift
+        )
+}
+    
+    /**
+     * Prepares one desktop's saved wallpaper without selecting it or changing display assignments.
+     */
+open func preloadDesktopWallpaper(displayId: UInt32, wallpaperId: String)async throws  -> BridgeDesktopPreload {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_wallpaper_bridge_fn_method_wallpaperbridge_preload_desktop_wallpaper(
+                    self.uniffiClonePointer(),
+                    FfiConverterUInt32.lower(displayId),FfiConverterString.lower(wallpaperId)
+                )
+            },
+            pollFunc: ffi_wallpaper_bridge_rust_future_poll_rust_buffer,
+            completeFunc: ffi_wallpaper_bridge_rust_future_complete_rust_buffer,
+            freeFunc: ffi_wallpaper_bridge_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeBridgeDesktopPreload.lift,
             errorHandler: FfiConverterTypeBridgeError.lift
         )
 }
@@ -4350,6 +4394,75 @@ public func FfiConverterTypeBridgeComboOption_lift(_ buf: RustBuffer) throws -> 
 #endif
 public func FfiConverterTypeBridgeComboOption_lower(_ value: BridgeComboOption) -> RustBuffer {
     return FfiConverterTypeBridgeComboOption.lower(value)
+}
+
+
+/**
+ * Host-rendered content to prepare for an unvisited desktop; scenes are prepared by the engine.
+ */
+public struct BridgeDesktopPreload {
+    public var web: BridgeWebWallpaper?
+    public var video: BridgeNativeVideoWallpaper?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(web: BridgeWebWallpaper?, video: BridgeNativeVideoWallpaper?) {
+        self.web = web
+        self.video = video
+    }
+}
+
+
+
+extension BridgeDesktopPreload: Equatable, Hashable {
+    public static func ==(lhs: BridgeDesktopPreload, rhs: BridgeDesktopPreload) -> Bool {
+        if lhs.web != rhs.web {
+            return false
+        }
+        if lhs.video != rhs.video {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(web)
+        hasher.combine(video)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeBridgeDesktopPreload: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> BridgeDesktopPreload {
+        return
+            try BridgeDesktopPreload(
+                web: FfiConverterOptionTypeBridgeWebWallpaper.read(from: &buf), 
+                video: FfiConverterOptionTypeBridgeNativeVideoWallpaper.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: BridgeDesktopPreload, into buf: inout [UInt8]) {
+        FfiConverterOptionTypeBridgeWebWallpaper.write(value.web, into: &buf)
+        FfiConverterOptionTypeBridgeNativeVideoWallpaper.write(value.video, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeBridgeDesktopPreload_lift(_ buf: RustBuffer) throws -> BridgeDesktopPreload {
+    return try FfiConverterTypeBridgeDesktopPreload.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeBridgeDesktopPreload_lower(_ value: BridgeDesktopPreload) -> RustBuffer {
+    return FfiConverterTypeBridgeDesktopPreload.lower(value)
 }
 
 
@@ -8076,6 +8189,7 @@ public struct BridgeSceneWindow {
      * Kept paused rather than shown as the display's live scene.
      */
     public var parked: Bool
+    public var ready: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -8085,11 +8199,12 @@ public struct BridgeSceneWindow {
          */windowNumber: Int64, 
         /**
          * Kept paused rather than shown as the display's live scene.
-         */parked: Bool) {
+         */parked: Bool, ready: Bool) {
         self.displayId = displayId
         self.wallpaperId = wallpaperId
         self.windowNumber = windowNumber
         self.parked = parked
+        self.ready = ready
     }
 }
 
@@ -8109,6 +8224,9 @@ extension BridgeSceneWindow: Equatable, Hashable {
         if lhs.parked != rhs.parked {
             return false
         }
+        if lhs.ready != rhs.ready {
+            return false
+        }
         return true
     }
 
@@ -8117,6 +8235,7 @@ extension BridgeSceneWindow: Equatable, Hashable {
         hasher.combine(wallpaperId)
         hasher.combine(windowNumber)
         hasher.combine(parked)
+        hasher.combine(ready)
     }
 }
 
@@ -8131,7 +8250,8 @@ public struct FfiConverterTypeBridgeSceneWindow: FfiConverterRustBuffer {
                 displayId: FfiConverterUInt32.read(from: &buf), 
                 wallpaperId: FfiConverterString.read(from: &buf), 
                 windowNumber: FfiConverterInt64.read(from: &buf), 
-                parked: FfiConverterBool.read(from: &buf)
+                parked: FfiConverterBool.read(from: &buf), 
+                ready: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -8140,6 +8260,7 @@ public struct FfiConverterTypeBridgeSceneWindow: FfiConverterRustBuffer {
         FfiConverterString.write(value.wallpaperId, into: &buf)
         FfiConverterInt64.write(value.windowNumber, into: &buf)
         FfiConverterBool.write(value.parked, into: &buf)
+        FfiConverterBool.write(value.ready, into: &buf)
     }
 }
 
@@ -11676,6 +11797,30 @@ fileprivate struct FfiConverterOptionTypeBridgeEngineOptions: FfiConverterRustBu
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeBridgeNativeVideoWallpaper: FfiConverterRustBuffer {
+    typealias SwiftType = BridgeNativeVideoWallpaper?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeBridgeNativeVideoWallpaper.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeBridgeNativeVideoWallpaper.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeBridgeRgb: FfiConverterRustBuffer {
     typealias SwiftType = BridgeRgb?
 
@@ -11764,6 +11909,30 @@ fileprivate struct FfiConverterOptionTypeBridgeWallpaperOptionsSnapshot: FfiConv
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeBridgeWallpaperOptionsSnapshot.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeBridgeWebWallpaper: FfiConverterRustBuffer {
+    typealias SwiftType = BridgeWebWallpaper?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeBridgeWebWallpaper.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeBridgeWebWallpaper.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -12519,6 +12688,9 @@ private var initializationResult: InitializationResult = {
     if (uniffi_wallpaper_bridge_checksum_method_wallpaperbridge_clear_shader_cache() != 31799) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_wallpaper_bridge_checksum_method_wallpaperbridge_complete_desktop_preload() != 17264) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_wallpaper_bridge_checksum_method_wallpaperbridge_current_system_media_state() != 5722) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -12565,6 +12737,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_wallpaper_bridge_checksum_method_wallpaperbridge_poll_mouse_position() != 3037) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_wallpaper_bridge_checksum_method_wallpaperbridge_preload_desktop_wallpaper() != 3647) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_wallpaper_bridge_checksum_method_wallpaperbridge_preview_display_position() != 55563) {

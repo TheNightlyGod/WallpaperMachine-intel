@@ -145,8 +145,6 @@ public:
                 m_picture_scene.clear();
                 m_picture_first_buffer.clear();
                 m_reflection_pass=false;
-                m_screen_has_content=false;
-                m_phantom_first_draw=false;
                 m_cleared.clear();
             } else m_sorted_prefix_size = m_emitted_passes.size();
             walk(m_scene.sceneGraph);
@@ -261,24 +259,6 @@ private:
     }
 
     bool leftOut(SceneNode* node) { return ! producing(node) && hiddenForGood(node); }
-
-    static bool subtreeHasMesh(SceneNode* node) {
-        if (node->Mesh() != nullptr) return true;
-        for (const auto& child : node->GetChildren()) {
-            if (child != nullptr && subtreeHasMesh(child.get())) return true;
-        }
-        return false;
-    }
-
-    void noteWrite(const std::string& key) {
-        if (key == (m_reflection_pass ? kReflectionTarget : SpecTex_Default)) m_screen_has_content = true;
-    }
-
-    // A hidden layer that would have been the first thing drawn onto the scene output
-    // is remembered: the output then has to keep what it already holds.
-    void noteBypassedContender(SceneNode* node) {
-        if (! m_screen_has_content && subtreeHasMesh(node)) m_phantom_first_draw = true;
-    }
 
     // ---- walking the tree --------------------------------------------------------
 
@@ -406,7 +386,6 @@ private:
         }
         if (leftOut(node)) {
             m_scene.render_excluded_nodes.push_back(handle);
-            noteBypassedContender(node);
             return;
         }
         // Wallpaper Engine keeps alpha MAX on for everything drawn while a layer
@@ -581,7 +560,6 @@ private:
                 b.write(b.createTexNode(texDesc(key, true), true));
             });
         recordPass(pass->ID());
-        noteWrite(key);
     }
 
     void drawChain(SceneNode* owner, SceneImageEffectLayer* layer) {
@@ -686,7 +664,6 @@ private:
                                 b.write(b.createTexNode(texDesc(atlas, true), true));
                             });
                         recordPass(pass->ID());
-                        noteWrite(atlas);
                     }
                 }
             }
@@ -896,7 +873,6 @@ private:
         recordPass(node->ID());
         for (const auto& [index, layer] : links)
             m_consumers.push_back({ node->ID(), index, layer, source.image_id });
-        noteWrite(route.dest);
         recordPicture(source, route, first_route, written);
     }
 
@@ -936,7 +912,6 @@ private:
                 if (written != nullptr) *written = out;
             });
         recordPass(node->ID());
-        noteWrite(destination);
         return node;
     }
 
@@ -1208,8 +1183,7 @@ private:
         if (! state.written || force) {
             if (output) {
                 desc.clear_on_first_use = m_scene.clearEnabled;
-                desc.preserve_target_contents =
-                    ! m_scene.clearEnabled && (m_phantom_first_draw || desc.reflection_pass);
+                desc.preserve_target_contents = ! m_scene.clearEnabled;
             } else {
                 desc.clear_on_first_use = record != nullptr && (record->allowReuse || record->forceClear);
             }
@@ -1240,8 +1214,6 @@ private:
     std::unordered_set<const void*>            m_cleared;
     std::unordered_set<std::string>            m_logged;
 
-    bool m_screen_has_content { false };
-    bool m_phantom_first_draw { false };
     bool m_mip_frame_sampled { false };
     std::vector<std::weak_ptr<SceneNode>> m_next_transparent_order;
     std::size_t m_snapshot_count { 0 };
