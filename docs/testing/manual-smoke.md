@@ -444,6 +444,38 @@ describes what should happen and the log lines to read afterwards.
 
 ## Native desktop posters and Mission Control
 
+- [ ] Stage Manager frame continuity: import the asset-free
+      [test wallpaper](../../Tests/UI/Fixtures/WebFrameContinuity/project.json)
+      (the folder contains WebGL, Canvas 2D and CSS moving strips), enable Stage
+      Manager and leave the Library panel and inspector open.
+      Record the playback rules and power source first. Use Keep running for
+      the foreground-app and covered-desktop rules during the continuity check,
+      then restore them: an intentional Pause on battery hold is not this stutter.
+      Click the exposed desktop, then the panel, at least ten times. Watch the wallpaper
+      throughout each transition: it must keep advancing, without holding a frame
+      and jumping forward afterwards. Repeat with the library filtered to one tile,
+      and with the panel closed while switching between another app and the desktop.
+      Also switch among three apps through Stage Manager: start in one app, select
+      a second app, select the wallpaper app's panel, then return to the first app.
+      Repeat this sequence at least ten times; desktop/panel clicks alone do not
+      cover app-to-app transitions.
+      Keep the same wallpaper selected during each trial: changing it creates a
+      new window and invalidates any temporary window configuration under test.
+      One smooth attempt is insufficient: this regression can be intermittent.
+      Confirm that the unchanged baseline still fails the same sequence before
+      attributing a smooth trial to a candidate fix. If both are smooth, the
+      comparison is inconclusive.
+      Record the display, refresh rate, power source and Stage Manager state for
+      each trial. Repeat the baseline after a display change or sleep/wake; a
+      smooth trial on an external display does not validate the built-in display.
+      For the final build, relaunch and reapply the wallpaper before repeating
+      both sequences, so the result covers newly created windows rather than a
+      temporary debugger setting. Also repeat after changing display geometry;
+      AppKit's live-resize completion can reset the transition composition policy.
+      Repeat with the reported wallpaper and restore the previous settings after the run.
+      Show Desktop shortcuts are not a substitute for these clicks. If recording
+      `requestAnimationFrame` timestamps, compare them with the visible result:
+      healthy callback timing does not prove that WindowServer presents the frames.
 - [ ] Create multiple Desktops, apply a video, and immediately open Mission
       Control **without** switching Desktops.
 - [ ] Apply a different scene and repeat, including rapid A→B→C changes. All

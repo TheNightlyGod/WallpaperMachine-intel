@@ -1,0 +1,31 @@
+<!doctype html>
+<meta charset="utf-8">
+<style>
+html,body{margin:0;background:#111;color:white;font:24px system-ui;overflow:hidden}
+section{position:absolute;width:100%;height:33.333%;overflow:hidden}
+canvas{width:100%;height:100%;display:block}
+.label{position:absolute;top:15px;left:25px;background:#111d;padding:8px}
+#two{top:33.333%}#three{top:66.666%;background:#18372c}
+#cssbar{position:absolute;height:100%;width:10%;background:#63efa9;animation:sweep 3s linear infinite alternate}
+@keyframes sweep{from{left:0}to{left:90%}}
+</style>
+<section><canvas id="gl"></canvas><div class="label">WebGL <span id="clock"></span></div></section>
+<section id="two"><canvas id="flat"></canvas><div class="label">Canvas 2D</div></section>
+<section id="three"><div id="cssbar"></div><div class="label">CSS animation</div></section>
+<script>
+const a=document.getElementById('gl'),b=document.getElementById('flat');
+const gl=a.getContext('webgl'),ctx=b.getContext('2d');
+function resize(){a.width=b.width=innerWidth;a.height=b.height=Math.ceil(innerHeight/3);gl.viewport(0,0,a.width,a.height)}
+addEventListener('resize',resize);resize();
+let first=0,count=0;
+function frame(now){
+ if(!first)first=now;
+ const phase=(now-first)%6000/3000, x=(phase<1?phase:2-phase)*.9*innerWidth;
+ gl.disable(gl.SCISSOR_TEST);gl.clearColor(.18,.08,.20,1);gl.clear(gl.COLOR_BUFFER_BIT);
+ gl.enable(gl.SCISSOR_TEST);gl.scissor(Math.round(x),0,Math.ceil(innerWidth*.1),a.height);gl.clearColor(1,.3,.8,1);gl.clear(gl.COLOR_BUFFER_BIT);
+ ctx.fillStyle='#162538';ctx.fillRect(0,0,b.width,b.height);ctx.fillStyle='#55bfff';ctx.fillRect(x,0,innerWidth*.1,b.height);
+ document.getElementById('clock').textContent=(now/1000).toFixed(2)+'s / '+(++count);
+ requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>

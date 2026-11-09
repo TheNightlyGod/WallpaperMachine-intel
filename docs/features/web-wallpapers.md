@@ -334,6 +334,20 @@ property name of 1 to 256.
   with the committed frame-rate limit and render scale on every `load()`),
   property/pause delivery,
   host-side suspension and content-process recovery.
+- **Desktop transition composition:** each web desktop window opts out of
+  WindowServer's transition surface flattening (tag 55,
+  `kCGSNeverFlattenSurfacesDuringSwipesTagBit`). During Stage Manager switches,
+  a flattened window can hold a picture while both WebKit callbacks and native
+  Core Animation keep advancing. `WebWallpaperWindowComposition` sets only this
+  tag at window creation; AppKit clears it after a live resize, so the window
+  reapplies it on the next main-queue turn after `didEndLiveResize`. This is
+  window-lifecycle work, with no timer, additional rendering pass or page change.
+  The optional SkyLight entry points are resolved once; an unavailable API or
+  rejected change is logged and leaves the normal window usable. This relies on
+  a private macOS interface, so new OS versions require the manual transition
+  check below. The [native API example](https://gist.github.com/avaidyam/d3c76df710651edbf4da56bad3fea9d2)
+  documents the tag and resize behavior; the latter was also checked against
+  AppKit on macOS 27.
 - **Suspension** does not rely on the page cooperating. `setPaused` is an optional
   listener callback, so a page can ignore it; alongside it the host suspends all
   media playback (suspend and unsuspend, so media the user had paused is not
@@ -686,6 +700,14 @@ there with a fake window, and the wait for its first committed frame in
 `WebWallpaperFrameConfirmationTests`; how much of a real project's picture that frame shows,
 and how long the system picture shows while a page's window is replaced, need
 an authorized desktop run, listed in [manual smoke](../testing/manual-smoke.md#wallpaper-switching).
+Stage Manager's desktop/panel click transitions need the visible-frame check in
+[manual smoke](../testing/manual-smoke.md#native-desktop-posters-and-mission-control):
+the page can continue receiving animation callbacks while its visible picture is
+frozen. Callback timing alone is not evidence of smooth presentation.
+`WebWallpaperWindowCompositionTests` reads the policy accepted by WindowServer
+for an unordered, asset-free web window, including after AppKit's live-resize
+cycle, and checks that applying it preserves other window tags. It never opens a
+desktop window and does not claim to observe visible transition frames.
 Show Desktop and Space transition smoothness,
 real hover and window-server routing on a desktop, how flicks and parallax pages feel
 with a real high-rate mouse, that the hover exit still lands after the last move,

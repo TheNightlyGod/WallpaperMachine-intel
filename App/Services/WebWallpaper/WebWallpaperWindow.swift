@@ -50,6 +50,19 @@ final class WebWallpaperWindow: NSWindow {
         container.autoresizesSubviews = true
         contentView = container
         page.attach(to: container)
+        WebWallpaperWindowComposition.preserveLiveSurfaces(in: self)
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(restoreTransitionComposition),
+            name: NSWindow.didEndLiveResizeNotification, object: self)
+    }
+
+    @objc private func restoreTransitionComposition(_ notification: Notification) {
+        // AppKit clears the transition tag after posting didEndLiveResize.
+        // Wait for that call to finish, without introducing idle or frame work.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            WebWallpaperWindowComposition.preserveLiveSurfaces(in: self)
+        }
     }
 
     override var canBecomeKey: Bool { false }

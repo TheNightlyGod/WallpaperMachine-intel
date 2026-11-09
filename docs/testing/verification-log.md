@@ -38,6 +38,54 @@ entry's recorded result is not allowed.
 - Asset-dependent renderer cases were skipped; desktop/media/network opt-ins, real Space animations, WindowServer stacking and Wallpaper Engine reference comparisons were not checked. No Release app was built or installed.
 - Gitleaks scans of 1,278 existing commits, candidate staged differences and full staged files found no leaks; agent paths, private assets and build output are excluded.
 
+## 2026-11-09 — Web transition composition final review (#177)
+
+- Reviewed the web-window transition policy and live-resize restoration against current main; retained the general fix without wallpaper-specific behavior or per-frame work.
+- python3 scripts/test.py --only WebWallpaperWindowCompositionTests: 3 passed, 0 failed, 0 skipped; reads WindowServer policy on unordered windows and exercises an AppKit live-resize cycle.
+- python3 scripts/test.py: all 32 Python suites passed; 4,667 native passed, 0 failed, 66 skipped. The skipped asset, media, network and desktop-dependent checks are not passing coverage.
+- One runtime warning in AppUpdateTests.testSignatureCheckRefusesAnUnsignedOrAlteredCopy: a method called on the main thread may cause unresponsiveness; unrelated to web transition composition.
+- python3 scripts/build.py --swift-only --configuration Release: passed; built build/Build/Products/Release/WallpaperMachine.app. Existing linker deployment-target warnings remain.
+- Prior same-window Belle manual trials recorded smooth playback with tag 55 set, stutter after clearing it, and smooth playback after setting it again; the prior rebuilt app readback also showed the flag set automatically.
+- Final rebuilt-app visual acceptance remains unconfirmed. No desktop automation, wallpaper changes or app restart were performed during this final review. No valid Wallpaper Engine frame comparison is available.
+
+## 2026-11-08 — Issue 177: rejected candidates and visible-frame regression
+
+Issue #177 remains unresolved. The user rejected the delivered candidate after repeating the Stage Manager desktop transition; passing callback timing and unit checks did not establish smooth visible playback.
+
+- The `isVisible` override and its offscreen-only regression were removed; they did not fix the reported desktop behavior.
+- A Release candidate adding `canJoinAllApplications` also still froze with original Belle. That source change was reverted.
+- That candidate's checks passed: `python3 scripts/test.py --only WebWallpaperSuspensionTests` (24 passed), `python3 scripts/test.py` (32 Python suites; 4,658 native passed, 66 skipped, 0 failed; 3 runtime warnings), and `python3 scripts/build.py --swift-only --configuration Release`. These results are not a fix verification.
+- During a user-confirmed 90-second freeze reproduction, animation callbacks continued with no visibility changes; after startup, the largest recorded callback gap was 29 ms. Callback timing does not measure screen presentation.
+- The asset-free WebGL, Canvas 2D and CSS [continuity fixture](../../Tests/UI/Fixtures/WebFrameContinuity/project.json) also froze, including with the control panel closed. A one-tile library did not prevent the freeze. The [manual regression](manual-smoke.md#native-desktop-posters-and-mission-control) requires repeated visible transitions because the failure is intermittent.
+- Raising the web window one level, with coverage probes moved above it, failed a controlled repeat: the same window retained its raised level while the user observed freezes. An earlier smooth run was inconclusive because wallpapers changed during it. Original levels were restored.
+- Wallpaper Engine comparison was **not done**: the available VM's captures did not show Belle, so they cannot serve as reference frames. The VM was suspended again.
+- `python3 scripts/tests/test_doc_links.py` passed 11 tests. No fix was committed.
+
+## 2026-11-08 — Belle Release build and Stage Manager retest
+
+Requested Release build and repeat desktop test for [issue #177](https://github.com/MMFoundation/WallpaperMachine/issues/177). The candidate visibility change remains uncommitted; the reported Stage Manager stutter is **not verified as resolved**.
+
+- `python3 scripts/build.py --swift-only --configuration Release` — exit 0; built and ran `build/Build/Products/Release/WallpaperMachine.app`, binary UUID `C60DA559-5CD2-3C21-BE10-2ED77F3A5D02`. The installed app was not overwritten.
+- Five automated panel-focus / Show Desktop cycles in installed 1.9.3 and five in the updated build on macOS 27.0.1, external 3840×2160 @2x / 120 Hz, wallpaper 60 fps / scale 1.0. A disposable copy measured animation callbacks and calls into the wallpaper's drawing function; production code contains no wallpaper detection.
+- Longest measured draw gap during the automated cycle intervals: baseline 95 ms, updated 113 ms. Neither reproduced the reported approximately 600 ms hold. No page visibility changes or forwarded desktop clicks were recorded in those intervals; these cycles are not the exact mouse-click reproduction.
+- The user reported visible stuttering in reply to the baseline question after the updated app had started. That observation lacks a timestamp identifying the binary/transition, and no separate updated-build manual verdict was received. Page callback timing cannot exclude a compositor-held frame. Current main also includes earlier changes absent from installed 1.9.3, so this is not an isolated patch A/B.
+- The unchanged candidate code previously passed the full routine gate: 32 Python suites, XcodeGen, 4,659 native passed, zero failed, 66 skipped. The gate was not repeated for this build/test-only follow-up. Wallpaper Engine comparison remains **not done**: the available VM's captures did not contain Belle; no pixel metrics are claimed.
+- Restored Lost Tower on the primary display and Stage Manager off, retained the internal display wallpaper, moved the temporary import to Trash and cleared the search. The updated Release build remains running. No commit, push or issue closure.
+
+## 2026-11-08 — Desktop web scheduling during window visibility changes
+
+Investigation of [issue #177](https://github.com/MMFoundation/WallpaperMachine/issues/177). The change repairs an independently reproduced window-visibility scheduling gap; its connection to the reporter's exact Stage Manager transition remains unconfirmed.
+
+- The attached video holds different last frames for roughly 0.6 s on repeated returns to the desktop. The attached logs show no matching host presentation suspension; the CPU sample was taken later with another wallpaper active.
+- WebKit checks window visibility separately from occlusion. An attached desktop page now remains schedulable until the host suspends it; no wallpaper identification, timer, polling loop or extra render pass was added.
+- Before the fix, `python3 scripts/test.py --only WebWallpaperSuspensionTests/testDesktopPageSchedulingFollowsHostSuspensionWithoutAnOrderedWindow` failed: zero animation frames while the host permitted playback.
+- After the fix, `python3 scripts/test.py --only WebWallpaperSuspensionTests --only WebWallpaperHostLifecycleTests --only WebWallpaperFramePacingTests` passed: 74 tests, no failures or skips. The regression also measures stopped frames during explicit suspension and resumed frames without reloading.
+- `python3 scripts/test.py` passed: all 32 Python suites, XcodeGen, and 4,659 native tests; zero failures, 66 skipped of 4,725. Skips: 62 opt-in video/media asset cases, one live Steam install, two Workshop cases and the opt-in web reference renderer.
+- One runtime warning came from `AppUpdateTests.testSignatureCheckRefusesAnUnsignedOrAlteredCopy()`: a method called on the main thread may cause UI unresponsiveness. No warning was attributed to the new scheduling regression.
+- Wallpaper Engine comparison **not done**. The Windows VM was available, but two muted `scripts/we_reference.py capture` attempts produced a black desktop with the Start menu, not Belle. The attempted native reference render also failed with `DecodingError.typeMismatch`; no valid before/after pixel metrics are claimed.
+- Authorized desktop probing of installed 1.9.3 on macOS 27.0.1 did not reproduce the reporter's repeatable macOS 27.2 stall. This is not confirmation of the changed app's visual behavior. The previous wallpaper and Stage Manager setting were restored, the temporary import was removed, and the VM was suspended again.
+- Updated the [web runtime description](../features/web-wallpapers.md#runtime-shape) and [test coverage](coverage.md#webwallpaper). No renderer/Rust changes or corresponding gates; no Release build, installation, commit or push.
+
 ## 2026-11-07 — Mission Control composition and desktop poster refresh
 
 PR #175, including author updates 070caaa7 and 2ce3da8d, capture-cancellation fixes and native exported-web scheduling.
@@ -89,51 +137,3 @@ Existing updater retained: three modes, conservative migration, per-version post
 - The full gate reported one main-thread runtime warning in AppUpdateTests.testSignatureCheckRefusesAnUnsignedOrAlteredCopy, outside the changed presentation code.
 - Restored the installed Xcode Metal Toolchain after the first test build could not find it.
 - Live Mission Control transitions and the reported foreground-window trails were not checked. No Release build or desktop run; no wallpaper-specific rendering changes.
-
-## 2026-11-06 — Reduce redundant lighting, video and idle media work
-
-- Changed light packing to reuse exact per-draw arrays, preserving reflection camera ordering and rebuilding after simulation; no quality or cadence settings changed.
-- Shader updater regression suite: 32 passed; 20 passes plus 20 reuse-key reads pack each light family 40 times without a draw scope and once within it, with identical bytes and hashes.
-- AppleScript fallback has no timer while Music and Spotify are absent; launch/exit observation preserves immediate recovery and the existing 1 Hz live cadence.
-- Filtered WebM reuses one compatible output format description; regression checks cover timing, pixels and changed dimensions.
-- Targeted native tests: AppleScriptMediaProviderTests, FallbackSystemMediaProviderTests and WebMFilteredVideoSinkTests; 23 passed, none skipped.
-- python3 scripts/test.py passed: Python checks plus 4622 native tests passed, 66 skipped, no failures; one main-thread runtime warning was reported.
-- python3 scripts/check_rust.py --output artifacts/power-efficiency/rust-unsandboxed passed; desktop/media/network opt-ins remained disabled. Initial sandbox run could not access cache and IOSurface services.
-- python3 scripts/check_renderer.py passed: 12 generated pooled/isolated pixel comparisons equal, zero diagnostic errors, reload cycles passed; local asset-dependent checks explicitly skipped.
-- Missing Xcode Metal Toolchain component installed before native verification; no desktop run, Wallpaper Engine comparison or hardware battery/power measurement. No Release build or commit.
-
-## 2026-11-05 — Nine features adopted from rival Mac wallpaper apps
-
-Menu bar Now Playing panel, inactivity pause, playlist wait for a clip's end, hev1 HEVC from a retagged copy, broader Installed search and Last used, library-drive follow, Workshop search translation, Hide Desktop Icons and the notch strip, and the stalled audio-tap rebuild. Each was reviewed independently, plus once across all nine, and fixed in two verified rounds.
-
-- `python3 scripts/test.py` — exit 0; 4653 tests: 4587 passed, 66 skipped
-- `python3 scripts/check_rust.py` — exit 0; desktop/media/network opt-ins off
-- `python3 scripts/check_renderer.py` — exit 0; generated probes pixel-equal, corpus and local-energy cases skipped
-- `python3 scripts/build.py --configuration Release` — exit 0
-- Offscreen captures (light and dark) of the menu bar panel and of Settings › General, Playback & Power and Desktop & Lock Screen; hover, popover attachment and active control colours unverified
-- Not run on the desktop: status-item click routing, real idle detection, Finder restart and the notch strip's look, a real drive eject and remount, the Translation framework with real language packs (macOS 15 hand-off untested), a real hev1 Workshop clip, a real stalled audio tap
-- Not compared with Wallpaper Engine: no change to how a scene is drawn
-
-## 2026-11-05 — Battery: scene pass merge and opt-in battery choices
-
-Scene draws that only their object order or depth attachment kept apart share one render pass (WALLPAPER_MACHINE_SCENE_PASS_MERGE); When another app is in front gains Pause on battery, the menu bar an On Battery submenu, and the panel a one-time battery question. M5 Pro, macOS 27.
-
-- `python3 scripts/test.py` — exit 0; 4396 passed, 0 failed, 61 skipped
-- `python3 scripts/check_renderer.py` — exit 0; generated cases pixels_equal=True, reload cycles 0; local-corpus tests skipped (no environment)
-- Sweep of 91 installed scenes (metal_scene_draw_smoke, WE_TEST_METAL_TIMING, 3456x2234@2): every scene draws; 11 change structurally, e.g. 3808922316 32 → 11 scene render passes, 958 → 213 MB loaded a frame
-- `perf_bench.py identity` base vs merge — identical on every compared frame of 7 changed scenes; 3 not comparable (base differs from itself)
-- `perf_bench.py cost` base vs merge, 60 fps, 3456x2234@2, 5 ABBA pairs — GPU 4.36 → 3.84 W on 3808922316 (saving, CI −0.56 to −0.50 W); 3226487183 −0.71 W and 3662790108 −0.82 W in every pair taken but short of a verdict (thermal rejections); 2 scenes within spread
-- `perf_bench.py cost` Reduced quality (30 fps, 75 %) vs full, 3 pairs — GPU 1.60 → 0.41 W (3802900973), 2.27 → 0.56 W (3413921910)
-- `python3 scripts/build.py --configuration Release` — OK
-- Not verified: a real unplug or plug-in, WindowServer and whole-desktop power (need an authorized desktop run), native review of the new translations
-
-## 2026-11-05 — Faster, rehearsable release pipeline
-
-Build reuses the cached renderer build through scripts/source_times.py, compiles beside the app-icon job instead of after it, checks the signing secrets before building, and gains a rehearsal mode (rehearsal.yml); CodeQL stops saving C++ object caches, and Warm caches becomes the daily writer of the caches a release restores. CI behaviour is not yet observed: nothing was pushed.
-
-- Local clone, cargo after a fresh checkout over a cached Renderer/target: 4 crates in 17.7 s today; with source_times.py restore: 0 crates (0.09 s) for the same commit, wallpaper-bridge only (9.2 s) for a Swift-only commit, core + bridge (11.0 s) for a Core change, one C++ compile for an engine change; an added and a removed msdfgen source both reran CMake and the archive followed
-- Local clone, `scripts/build.py --configuration Release --no-app-icon` then `--install-app-icon`: AppIcon.icns, CFBundleIconName and the compiled Assets.car present; `codesign --verify --deep --strict` passed
-- Icon wait loop against a fake gh: artifact after polls exit 0; failed API calls retried; failed icon job exit 1
-- `actionlint` with shellcheck on every workflow: no findings besides the existing `queue` key it does not know
-- `python3 scripts/test.py` — exit 0; Python script tests all OK (test_source_times 9, test_build new cases); native 4424: 4363 passed, 0 failed, 61 skipped
-- Not run: any GitHub Actions run (Rehearsal, Warm caches, a release); Developer ID signing and notarization unchanged and unexercised locally

@@ -537,7 +537,10 @@ across Spaces (needs a desktop run); see
   settings (2D scene resolution, scene quality, MetalFX) as conditions of a scene's
   rating and not of a video's, older-version ratings still read and replaced rather
   than averaged, the rating recorder, and the recorder asking nothing while parked; two `testKernelCounters…` cases read the test process's real
-  kernel counters.
+  kernel counters. The GPU-work case depends on asynchronous kernel energy
+  attribution: its first nonzero reading can fall below the 10 mW assertion even
+  when GPU work completed. Record that failure and check the isolated case before
+  rerunning the failed gate; an isolated pass does not replace a full gate pass.
 
 Log line format, retention and the verbose setting are covered in Rust; see
 [diagnostics](../features/diagnostics.md#verification).
@@ -1702,7 +1705,7 @@ preparation and main-actor latency.
 ## WebWallpaper
 
 `Tests/Unit/WebWallpaper/` runs real offscreen `WKWebView`s and injected hosts,
-with no desktop window. It covers the page contract (`WebWallpaperPageTests`,
+without presenting a desktop window. It covers the page contract (`WebWallpaperPageTests`,
 `WebWallpaperLocalRequestTests`, which also covers the file-request fixes in iframe,
 `srcdoc` and script-created frames), property payloads and file staging
 (`WebWallpaperPropertyPayloadTests`), the author API (`WebWallpaperAuthorAPITests`:
@@ -1730,7 +1733,12 @@ following (`WebWallpaperRenderScaleTests`, plus the render-scale cases of
 builds (`WebWallpaperErrorStackTests`), the Windows font names a page asks for drawn in macOS
 faces (`WebWallpaperFontAliasTests`), the layout in the display's device pixels that
 Wallpaper Engine gives a page (`WebWallpaperDeviceLayoutTests`) and the screen-saver surface
-(`ScreenSaverWebSurfaceTests`). `WebWallpaperReferenceRenderTests` is not a check: it skips
+(`ScreenSaverWebSurfaceTests`). `WebWallpaperWindowCompositionTests` reads
+WindowServer's transition policy on an unordered web window, including after a
+real AppKit live-resize cycle, and verifies preservation of unrelated window tags.
+Visible Stage Manager continuity still needs the
+[manual smoke check](manual-smoke.md#native-desktop-posters-and-mission-control).
+`WebWallpaperReferenceRenderTests` is not a check: it skips
 unless `scripts/we_reference.py render` hands it real pages to draw. Detail and limits:
 [web wallpapers](../features/web-wallpapers.md#verification).
 

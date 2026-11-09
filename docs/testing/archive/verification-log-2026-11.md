@@ -9,6 +9,54 @@ level.
 These are historical results about the trees they were taken on. They are not
 evidence about the current tree and must never be cited as such.
 
+## 2026-11-06 — Reduce redundant lighting, video and idle media work
+
+- Changed light packing to reuse exact per-draw arrays, preserving reflection camera ordering and rebuilding after simulation; no quality or cadence settings changed.
+- Shader updater regression suite: 32 passed; 20 passes plus 20 reuse-key reads pack each light family 40 times without a draw scope and once within it, with identical bytes and hashes.
+- AppleScript fallback has no timer while Music and Spotify are absent; launch/exit observation preserves immediate recovery and the existing 1 Hz live cadence.
+- Filtered WebM reuses one compatible output format description; regression checks cover timing, pixels and changed dimensions.
+- Targeted native tests: AppleScriptMediaProviderTests, FallbackSystemMediaProviderTests and WebMFilteredVideoSinkTests; 23 passed, none skipped.
+- python3 scripts/test.py passed: Python checks plus 4622 native tests passed, 66 skipped, no failures; one main-thread runtime warning was reported.
+- python3 scripts/check_rust.py --output artifacts/power-efficiency/rust-unsandboxed passed; desktop/media/network opt-ins remained disabled. Initial sandbox run could not access cache and IOSurface services.
+- python3 scripts/check_renderer.py passed: 12 generated pooled/isolated pixel comparisons equal, zero diagnostic errors, reload cycles passed; local asset-dependent checks explicitly skipped.
+- Missing Xcode Metal Toolchain component installed before native verification; no desktop run, Wallpaper Engine comparison or hardware battery/power measurement. No Release build or commit.
+
+## 2026-11-05 — Nine features adopted from rival Mac wallpaper apps
+
+Menu bar Now Playing panel, inactivity pause, playlist wait for a clip's end, hev1 HEVC from a retagged copy, broader Installed search and Last used, library-drive follow, Workshop search translation, Hide Desktop Icons and the notch strip, and the stalled audio-tap rebuild. Each was reviewed independently, plus once across all nine, and fixed in two verified rounds.
+
+- `python3 scripts/test.py` — exit 0; 4653 tests: 4587 passed, 66 skipped
+- `python3 scripts/check_rust.py` — exit 0; desktop/media/network opt-ins off
+- `python3 scripts/check_renderer.py` — exit 0; generated probes pixel-equal, corpus and local-energy cases skipped
+- `python3 scripts/build.py --configuration Release` — exit 0
+- Offscreen captures (light and dark) of the menu bar panel and of Settings › General, Playback & Power and Desktop & Lock Screen; hover, popover attachment and active control colours unverified
+- Not run on the desktop: status-item click routing, real idle detection, Finder restart and the notch strip's look, a real drive eject and remount, the Translation framework with real language packs (macOS 15 hand-off untested), a real hev1 Workshop clip, a real stalled audio tap
+- Not compared with Wallpaper Engine: no change to how a scene is drawn
+
+## 2026-11-05 — Battery: scene pass merge and opt-in battery choices
+
+Scene draws that only their object order or depth attachment kept apart share one render pass (WALLPAPER_MACHINE_SCENE_PASS_MERGE); When another app is in front gains Pause on battery, the menu bar an On Battery submenu, and the panel a one-time battery question. M5 Pro, macOS 27.
+
+- `python3 scripts/test.py` — exit 0; 4396 passed, 0 failed, 61 skipped
+- `python3 scripts/check_renderer.py` — exit 0; generated cases pixels_equal=True, reload cycles 0; local-corpus tests skipped (no environment)
+- Sweep of 91 installed scenes (metal_scene_draw_smoke, WE_TEST_METAL_TIMING, 3456x2234@2): every scene draws; 11 change structurally, e.g. 3808922316 32 → 11 scene render passes, 958 → 213 MB loaded a frame
+- `perf_bench.py identity` base vs merge — identical on every compared frame of 7 changed scenes; 3 not comparable (base differs from itself)
+- `perf_bench.py cost` base vs merge, 60 fps, 3456x2234@2, 5 ABBA pairs — GPU 4.36 → 3.84 W on 3808922316 (saving, CI −0.56 to −0.50 W); 3226487183 −0.71 W and 3662790108 −0.82 W in every pair taken but short of a verdict (thermal rejections); 2 scenes within spread
+- `perf_bench.py cost` Reduced quality (30 fps, 75 %) vs full, 3 pairs — GPU 1.60 → 0.41 W (3802900973), 2.27 → 0.56 W (3413921910)
+- `python3 scripts/build.py --configuration Release` — OK
+- Not verified: a real unplug or plug-in, WindowServer and whole-desktop power (need an authorized desktop run), native review of the new translations
+
+## 2026-11-05 — Faster, rehearsable release pipeline
+
+Build reuses the cached renderer build through scripts/source_times.py, compiles beside the app-icon job instead of after it, checks the signing secrets before building, and gains a rehearsal mode (rehearsal.yml); CodeQL stops saving C++ object caches, and Warm caches becomes the daily writer of the caches a release restores. CI behaviour is not yet observed: nothing was pushed.
+
+- Local clone, cargo after a fresh checkout over a cached Renderer/target: 4 crates in 17.7 s today; with source_times.py restore: 0 crates (0.09 s) for the same commit, wallpaper-bridge only (9.2 s) for a Swift-only commit, core + bridge (11.0 s) for a Core change, one C++ compile for an engine change; an added and a removed msdfgen source both reran CMake and the archive followed
+- Local clone, `scripts/build.py --configuration Release --no-app-icon` then `--install-app-icon`: AppIcon.icns, CFBundleIconName and the compiled Assets.car present; `codesign --verify --deep --strict` passed
+- Icon wait loop against a fake gh: artifact after polls exit 0; failed API calls retried; failed icon job exit 1
+- `actionlint` with shellcheck on every workflow: no findings besides the existing `queue` key it does not know
+- `python3 scripts/test.py` — exit 0; Python script tests all OK (test_source_times 9, test_build new cases); native 4424: 4363 passed, 0 failed, 61 skipped
+- Not run: any GitHub Actions run (Rehearsal, Warm caches, a release); Developer ID signing and notarization unchanged and unexercised locally
+
 ## 2026-11-04 — Library previews play on every tile on screen; hover-only is a setting
 
 - Change: Installed tiles on screen all play their animated preview through LivePreviewScheduler (six loading at once, grid order); Settings › General › Play Library previews only on hover (off by default, WallpaperMachine.libraryPreviewsOnHover) restores the one hovered/focused tile.

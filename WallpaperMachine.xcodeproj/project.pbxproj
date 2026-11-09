@@ -54,6 +54,7 @@
 		098FF008DD1275892693CE5B /* PowerSourceMonitorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D41F7005770CF2C284071CCE /* PowerSourceMonitorTests.swift */; };
 		099CE606BD00EFA7781C5A8C /* ClientPaths.swift in Sources */ = {isa = PBXBuildFile; fileRef = 07CD7B6FE9163C43AB1B7C54 /* ClientPaths.swift */; };
 		09AA77A95EFDFFC0D2AB712A /* TranslationSessionHostTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E047613ABA7DF4649DC5531C /* TranslationSessionHostTests.swift */; };
+		09E74DFEC01FB04E6013B968 /* index.html in Resources */ = {isa = PBXBuildFile; fileRef = 70E0B2D692DCC159C17110CD /* index.html */; };
 		09EDD3C0BC1579840AEF7689 /* LockScreenWallpaperServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A9757D0416CA268E63594FB /* LockScreenWallpaperServiceTests.swift */; };
 		09F15EB4A7B8F2CD80818CF0 /* StatusPanelRenderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9BE2E3D451CBA99E687C06BB /* StatusPanelRenderTests.swift */; };
 		0ACC0D8642BAA6C71F41A0C4 /* PanelPropertyAsset.swift in Sources */ = {isa = PBXBuildFile; fileRef = 747E27AB0B1051EB60FF3DBB /* PanelPropertyAsset.swift */; };
@@ -146,6 +147,7 @@
 		1EC7FF72093D0E9CF21D6D1D /* UniformTypeIdentifiers.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 2F8555891255B7D3068B37E3 /* UniformTypeIdentifiers.framework */; };
 		1ECC7B8121305996947729E8 /* DisplayTransferTestBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4A808F299779A2AD897D313 /* DisplayTransferTestBridge.swift */; };
 		1ECF03CA329CFEA07896B0CC /* PerformanceEnergyReadout.swift in Sources */ = {isa = PBXBuildFile; fileRef = 25CF88258007CBFFEBE0DCD6 /* PerformanceEnergyReadout.swift */; };
+		1ED3D914605A68F49E478022 /* WebWallpaperWindowComposition.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0988EDF389A47B52AA2E3620 /* WebWallpaperWindowComposition.swift */; };
 		1F0A57175B4C08866869B13C /* WebSignInCookies.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6A37AF44750CDB836A288420 /* WebSignInCookies.swift */; };
 		1F7F0340CCCCF2F4D1B07D58 /* SettingsEntryControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF2FAA9ADA990EA627755082 /* SettingsEntryControls.swift */; };
 		1F9AEBDF94FC8AAD54B208DD /* StorageSettingsModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A8B7FD7C97A32558F677F05 /* StorageSettingsModelTests.swift */; };
@@ -501,6 +503,7 @@
 		6D88E4C2C5E5D0AB8FB66847 /* PanelController+Displays.swift in Sources */ = {isa = PBXBuildFile; fileRef = 156583D77B2FEDB6434950DD /* PanelController+Displays.swift */; };
 		6DDF55C5BCB8479BB6A4C707 /* AccentPalette.swift in Sources */ = {isa = PBXBuildFile; fileRef = F7977BC6BF21272B418DF7FA /* AccentPalette.swift */; };
 		6E076EED9645FE89D09BA4A2 /* LibrarySelection.swift in Sources */ = {isa = PBXBuildFile; fileRef = AEAEDA5F5903EE9C3BCBFAD6 /* LibrarySelection.swift */; };
+		6E6D485BB2520B6EA0A66F5D /* project.json in Resources */ = {isa = PBXBuildFile; fileRef = C8BA6ADB08D8D9E8F52867B2 /* project.json */; };
 		6EB8A0117F0C441852D38CC4 /* PanelSupportPromptTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E48D7C622BCDE50CBBB793A4 /* PanelSupportPromptTests.swift */; };
 		6EBD94225A8843425D6CE0A3 /* PanelController+Letterbox.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6604F944757214EC02F990AC /* PanelController+Letterbox.swift */; };
 		6EE0A64A953485D6518090AF /* DownloaderSessionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F714FB5E9A5B1F0185D8210 /* DownloaderSessionTests.swift */; };
@@ -621,6 +624,7 @@
 		8B2E46CD0015496172FA3246 /* WallpaperMachineExtension.appex in Embed ExtensionKit Extensions */ = {isa = PBXBuildFile; fileRef = 06C762182CE14CCFAE5FEDA1 /* WallpaperMachineExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		8BA0E783E82AC422CA77ACFE /* PanelTestCase.swift in Sources */ = {isa = PBXBuildFile; fileRef = D424EC39D00879B5392E651C /* PanelTestCase.swift */; };
 		8BACA536AEFA565A965F2D20 /* LibraryMetricsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0EC8F26EEAEC3C347AC30E6A /* LibraryMetricsTests.swift */; };
+		8BEDA6BBB3C4029DDD883666 /* WebWallpaperWindowCompositionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4FC3834AC608691D3EB99039 /* WebWallpaperWindowCompositionTests.swift */; };
 		8BEF60A3AD9F9E2F34144970 /* InstalledBrowserFixtures.swift in Sources */ = {isa = PBXBuildFile; fileRef = D52EACA762C5FCFD0E355256 /* InstalledBrowserFixtures.swift */; };
 		8C0FD1D9138C9378877BD82E /* PowerSourceResampler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 07B725B421F1A97C2D4D91AB /* PowerSourceResampler.swift */; };
 		8C3D72E3605B97446C0ABCAC /* StatusMenuModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4FB152B7CAD3019706CCC2F4 /* StatusMenuModel.swift */; };
@@ -1239,6 +1243,7 @@
 		09297EF2CE797AA7EDC51260 /* SettingsSwitchControl.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsSwitchControl.swift; sourceTree = "<group>"; };
 		095365CB5AC439860D3B4413 /* InspectorOptions+EngineOptions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "InspectorOptions+EngineOptions.swift"; sourceTree = "<group>"; };
 		096C8959FB876DB1BD2EC129 /* NativeVideoStoragePolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeVideoStoragePolicy.swift; sourceTree = "<group>"; };
+		0988EDF389A47B52AA2E3620 /* WebWallpaperWindowComposition.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebWallpaperWindowComposition.swift; sourceTree = "<group>"; };
 		099BE160DE5A0DA7C520E9C4 /* LibraryPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryPresentation.swift; sourceTree = "<group>"; };
 		09D6A4B7D122BC9C9BCCB1FC /* WebMOpening.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebMOpening.swift; sourceTree = "<group>"; };
 		0A021AF465EA630EEE493659 /* DragDrivers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DragDrivers.swift; sourceTree = "<group>"; };
@@ -1536,6 +1541,7 @@
 		4F8A857317D13809F075F07F /* WebWallpaperAudioPump.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebWallpaperAudioPump.swift; sourceTree = "<group>"; };
 		4F9DC4BED69EC070AE3355FD /* StatusMenuModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusMenuModelTests.swift; sourceTree = "<group>"; };
 		4FB152B7CAD3019706CCC2F4 /* StatusMenuModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusMenuModel.swift; sourceTree = "<group>"; };
+		4FC3834AC608691D3EB99039 /* WebWallpaperWindowCompositionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebWallpaperWindowCompositionTests.swift; sourceTree = "<group>"; };
 		4FC85CED588C1BCB31461CD4 /* GlobalHotKeysTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlobalHotKeysTests.swift; sourceTree = "<group>"; };
 		4FFEF27402C5E93DFE6F109D /* WallpaperSpaceMonitorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WallpaperSpaceMonitorTests.swift; sourceTree = "<group>"; };
 		507738E52F80D7CEC99159C4 /* WorkshopBrowserModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkshopBrowserModel.swift; sourceTree = "<group>"; };
@@ -1673,6 +1679,7 @@
 		709733CDF8CF0B7174EDCAD4 /* MemoryPressureMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemoryPressureMonitor.swift; sourceTree = "<group>"; };
 		70B1662F855F7E90CE25177F /* env.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = env.h; sourceTree = "<group>"; };
 		70B62679495FD4E065F09AAD /* PixivTestSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PixivTestSupport.swift; sourceTree = "<group>"; };
+		70E0B2D692DCC159C17110CD /* index.html */ = {isa = PBXFileReference; lastKnownFileType = text.html; path = index.html; sourceTree = "<group>"; };
 		70F99B245FF1D2D710BF22EB /* WorkshopStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkshopStoreTests.swift; sourceTree = "<group>"; };
 		714AFA34F2A650F401261A7B /* TelemetryServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TelemetryServiceTests.swift; sourceTree = "<group>"; };
 		7177E21F75086DFB7A46E553 /* PanelController+Properties.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "PanelController+Properties.swift"; sourceTree = "<group>"; };
@@ -2035,6 +2042,7 @@
 		C82F965E8454CAC6C590E8B5 /* WorkshopFooter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkshopFooter.swift; sourceTree = "<group>"; };
 		C853889B979F4B1175FA0B73 /* PerformanceQualityControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerformanceQualityControls.swift; sourceTree = "<group>"; };
 		C89234C5CAB7120620E7D86E /* SteamWebSessionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SteamWebSessionTests.swift; sourceTree = "<group>"; };
+		C8BA6ADB08D8D9E8F52867B2 /* project.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = project.json; sourceTree = "<group>"; };
 		C8D9E1B7E6B2917C7E75B5ED /* WallpaperActivationRecoveryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WallpaperActivationRecoveryTests.swift; sourceTree = "<group>"; };
 		C8ED962623E9D268391AEF06 /* FirstRunModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FirstRunModelTests.swift; sourceTree = "<group>"; };
 		C907D1144F8455913DECB7A1 /* StatusPanelModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusPanelModel.swift; sourceTree = "<group>"; };
@@ -2303,6 +2311,14 @@
 			path = Playlist;
 			sourceTree = "<group>";
 		};
+		012997474869DA3FD0938EA9 /* Fixtures */ = {
+			isa = PBXGroup;
+			children = (
+				1842D831AE6BC026022A784D /* WebFrameContinuity */,
+			);
+			path = Fixtures;
+			sourceTree = "<group>";
+		};
 		0192C0DA47948D02CF267615 /* Desktop */ = {
 			isa = PBXGroup;
 			children = (
@@ -2358,6 +2374,7 @@
 			isa = PBXGroup;
 			children = (
 				BB8D61A1E95FAC6CE7E1A262 /* WallpaperMachineUITests.swift */,
+				012997474869DA3FD0938EA9 /* Fixtures */,
 			);
 			name = UI;
 			path = Tests/UI;
@@ -2373,6 +2390,15 @@
 				1537B17F0B579033F2712CD9 /* WallpaperEditorState.swift */,
 			);
 			path = ViewModels;
+			sourceTree = "<group>";
+		};
+		1842D831AE6BC026022A784D /* WebFrameContinuity */ = {
+			isa = PBXGroup;
+			children = (
+				70E0B2D692DCC159C17110CD /* index.html */,
+				C8BA6ADB08D8D9E8F52867B2 /* project.json */,
+			);
+			path = WebFrameContinuity;
 			sourceTree = "<group>";
 		};
 		1A6176FD3855FBDB2675DAC2 /* Lifecycle */ = {
@@ -3716,6 +3742,7 @@
 				0D2F52E979627634A3C87E53 /* WebWallpaperMouseForwarder.swift */,
 				BC972898437FBF43DDFCE1B0 /* WebWallpaperPageDiagnostics.swift */,
 				688F4E980B136CA89A7A3372 /* WebWallpaperWindow.swift */,
+				0988EDF389A47B52AA2E3620 /* WebWallpaperWindowComposition.swift */,
 			);
 			path = WebWallpaper;
 			sourceTree = "<group>";
@@ -3894,6 +3921,7 @@
 				0D470D9562F439D94395ED04 /* WebWallpaperReferenceRenderTests.swift */,
 				8B78CB4489C4C0EDA11D42AC /* WebWallpaperRenderScaleTests.swift */,
 				7852ABA48B66BA2F88F25C4F /* WebWallpaperSuspensionTests.swift */,
+				4FC3834AC608691D3EB99039 /* WebWallpaperWindowCompositionTests.swift */,
 			);
 			path = WebWallpaper;
 			sourceTree = "<group>";
@@ -4147,6 +4175,7 @@
 			buildConfigurationList = 95DCFD4A6C88BBA6350BBFED /* Build configuration list for PBXNativeTarget "WallpaperMachineUITests" */;
 			buildPhases = (
 				3A5BA5FC9F3F92960495411E /* Sources */,
+				D7971BEA0A217BDD8D21954D /* Resources */,
 			);
 			buildRules = (
 			);
@@ -4264,6 +4293,15 @@
 				FBDD1671070B998019613095 /* Localizable.xcstrings in Resources */,
 				C5887E02E1F99E7834F7949E /* Phosphene-LICENSE.txt in Resources */,
 				DBF4F8723214D0345334EF34 /* preview.jpg in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D7971BEA0A217BDD8D21954D /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				09E74DFEC01FB04E6013B968 /* index.html in Resources */,
+				6E6D485BB2520B6EA0A66F5D /* project.json in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -4750,6 +4788,7 @@
 				5E326F7ED97E923E59048D38 /* WebWallpaperReferenceRenderTests.swift in Sources */,
 				F5EB708D1BD4F55C0B3B69A6 /* WebWallpaperRenderScaleTests.swift in Sources */,
 				441BD9AB7633DDF7CC98AF53 /* WebWallpaperSuspensionTests.swift in Sources */,
+				8BEDA6BBB3C4029DDD883666 /* WebWallpaperWindowCompositionTests.swift in Sources */,
 				A037861283CAD6F0C98D5825 /* WelcomeRenderHarness.swift in Sources */,
 				A55FDCF289B99DFD5D364172 /* WelcomeRenderTests.swift in Sources */,
 				FA725115933463D36AD33995 /* WorkshopApplyOnArrivalTests.swift in Sources */,
@@ -5351,6 +5390,7 @@
 				15DA31D7D561041703462B0B /* WebWallpaperProtocol.swift in Sources */,
 				DC000AA8C69989BE8FC8FEE7 /* WebWallpaperUserScripts.swift in Sources */,
 				544E378483D36B5AED043412 /* WebWallpaperWindow.swift in Sources */,
+				1ED3D914605A68F49E478022 /* WebWallpaperWindowComposition.swift in Sources */,
 				48B90D2D6DFD7ECAE1AC3347 /* WelcomeActionRow.swift in Sources */,
 				0006109FBFD2C2F1EE3D1818 /* WelcomeDrafts.swift in Sources */,
 				934078B9B0174A087FD94FF2 /* WelcomeGuide.swift in Sources */,
