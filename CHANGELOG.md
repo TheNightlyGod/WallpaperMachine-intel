@@ -12,6 +12,68 @@ app's update window shows the sections of every version newer than the installed
 one, in the app's language; the GitHub Release body repeats only the English notes.
 See [docs/release.md](docs/release.md) for how a version is cut.
 
+## [1.9.4](https://github.com/MMFoundation/WallpaperMachine/compare/v1.9.3...v1.9.4) (2026-11-09)
+
+### English
+
+This release makes switching between desktops feel quicker and fixes a range of display, Workshop and sign-in problems
+
+#### Improvements
+
+- Switching to another desktop shows its wallpaper sooner, as scene, video and web wallpapers are now prepared in the background beforehand ([56878b5](https://github.com/MMFoundation/WallpaperMachine/commit/56878b5a7414924b2c061f86162a58414e6fe71e))
+
+#### Bug Fixes
+
+- Mission Control no longer leaves trails of foreground windows across the desktop, and wallpapers keep playing during the transition (closes [#173](https://github.com/MMFoundation/WallpaperMachine/issues/173)) ([83f07dd](https://github.com/MMFoundation/WallpaperMachine/commit/83f07ddcb7354a0283f4bc550aee35bd550cd992))
+- Your Steam Workshop subscriptions no longer appear empty when loading fails, an error is shown instead and the already loaded list stays in place ([a73a03d](https://github.com/MMFoundation/WallpaperMachine/commit/a73a03dd64df3903e05beb2b0f54d39c22b172bd))
+- Displays that mirror another display's wallpaper keep that setting after waking from sleep, even when macOS briefly makes them the main display (closes [#179](https://github.com/MMFoundation/WallpaperMachine/issues/179)) ([3178c20](https://github.com/MMFoundation/WallpaperMachine/commit/3178c20445e8e2d78c16e41f992af6868349eaa1))
+- Saved pixiv and Steam Community sign-ins are no longer lost when the macOS keychain refuses to update them ([ac52120](https://github.com/MMFoundation/WallpaperMachine/commit/ac52120f25518f73e28cef53e8b6e5b522070764))
+- Song titles and artwork on wallpapers catch up after a missed track change instead of staying on the previous song ([cbe854b](https://github.com/MMFoundation/WallpaperMachine/commit/cbe854bbef664aab9919bcb01d26c85f0ef7115f))
+- Album covers in scene wallpapers stay attached to rotating models instead of drifting away from them ([db4a9b6](https://github.com/MMFoundation/WallpaperMachine/commit/db4a9b65e0ee4ab0764fe857caf177f1f6fd53f3))
+- Scene wallpapers that paint over their previous image no longer lose it beneath partly drawn or blended layers ([56878b5](https://github.com/MMFoundation/WallpaperMachine/commit/56878b5a7414924b2c061f86162a58414e6fe71e))
+
+Thanks to [@judyofficer](https://github.com/judyofficer) and [@DenseFLoe](https://github.com/DenseFLoe) for contributing to this release.
+
+### 简体中文
+
+本次更新让切换桌面更加迅速，并修复了显示器、创意工坊和登录方面的一系列问题
+
+#### 改进
+
+- 切换桌面时壁纸会更快出现，场景、视频和网页壁纸现在会提前在后台准备好 ([56878b5](https://github.com/MMFoundation/WallpaperMachine/commit/56878b5a7414924b2c061f86162a58414e6fe71e))
+
+#### 问题修复
+
+- 打开调度中心时，前台窗口不再在桌面上留下残影，壁纸在过渡期间也会继续播放 (closes [#173](https://github.com/MMFoundation/WallpaperMachine/issues/173)) ([83f07dd](https://github.com/MMFoundation/WallpaperMachine/commit/83f07ddcb7354a0283f4bc550aee35bd550cd992))
+- Steam 创意工坊订阅加载失败时不再显示为空，而是提示错误，并保留已加载的列表 ([a73a03d](https://github.com/MMFoundation/WallpaperMachine/commit/a73a03dd64df3903e05beb2b0f54d39c22b172bd))
+- 镜像其他显示器壁纸的显示器在从睡眠中唤醒后会保留该设置，即使 macOS 曾短暂将其设为主显示器 (closes [#179](https://github.com/MMFoundation/WallpaperMachine/issues/179)) ([3178c20](https://github.com/MMFoundation/WallpaperMachine/commit/3178c20445e8e2d78c16e41f992af6868349eaa1))
+- 当 macOS 钥匙串拒绝更新时，已保存的 pixiv 和 Steam 社区登录信息不会再丢失 ([ac52120](https://github.com/MMFoundation/WallpaperMachine/commit/ac52120f25518f73e28cef53e8b6e5b522070764))
+- 错过曲目切换后，壁纸上的歌曲信息和封面会自动更新，不再停留在上一首歌 ([cbe854b](https://github.com/MMFoundation/WallpaperMachine/commit/cbe854bbef664aab9919bcb01d26c85f0ef7115f))
+- 场景壁纸中的专辑封面会紧贴旋转的模型，不再与模型脱离 ([db4a9b6](https://github.com/MMFoundation/WallpaperMachine/commit/db4a9b65e0ee4ab0764fe857caf177f1f6fd53f3))
+- 在上一帧画面上继续绘制的场景壁纸，不再在部分绘制或混合的图层下丢失原有画面 ([56878b5](https://github.com/MMFoundation/WallpaperMachine/commit/56878b5a7414924b2c061f86162a58414e6fe71e))
+
+感谢 [@judyofficer](https://github.com/judyofficer) 和 [@DenseFLoe](https://github.com/DenseFLoe) 为本版本做出的贡献。
+
+### 한국어
+
+이번 업데이트로 데스크탑 전환이 더 빨라지고 디스플레이, 창작마당, 로그인 관련 여러 문제가 수정되었습니다
+
+#### 개선 사항
+
+- 장면, 비디오, 웹 배경화면을 미리 백그라운드에서 준비하므로 다른 데스크탑으로 전환할 때 배경화면이 더 빨리 표시됩니다 ([56878b5](https://github.com/MMFoundation/WallpaperMachine/commit/56878b5a7414924b2c061f86162a58414e6fe71e))
+
+#### 버그 수정
+
+- Mission Control 전환 중 앞쪽 윈도우가 데스크탑에 잔상을 남기지 않으며 배경화면도 계속 재생됩니다 (closes [#173](https://github.com/MMFoundation/WallpaperMachine/issues/173)) ([83f07dd](https://github.com/MMFoundation/WallpaperMachine/commit/83f07ddcb7354a0283f4bc550aee35bd550cd992))
+- Steam 창작마당 구독 목록을 불러오지 못해도 더 이상 비어 보이지 않으며, 오류를 알리고 이미 불러온 목록을 유지합니다 ([a73a03d](https://github.com/MMFoundation/WallpaperMachine/commit/a73a03dd64df3903e05beb2b0f54d39c22b172bd))
+- 다른 디스플레이의 배경화면을 미러링하는 디스플레이는 macOS가 잠자기에서 깨어날 때 잠시 주 디스플레이로 바꾸더라도 그 설정을 유지합니다 (closes [#179](https://github.com/MMFoundation/WallpaperMachine/issues/179)) ([3178c20](https://github.com/MMFoundation/WallpaperMachine/commit/3178c20445e8e2d78c16e41f992af6868349eaa1))
+- macOS 키체인이 업데이트를 거부해도 저장된 pixiv 및 Steam 커뮤니티 로그인 정보가 더 이상 사라지지 않습니다 ([ac52120](https://github.com/MMFoundation/WallpaperMachine/commit/ac52120f25518f73e28cef53e8b6e5b522070764))
+- 곡 변경을 놓친 경우에도 배경화면의 곡 정보와 앨범 아트가 다시 갱신되어 이전 곡에 머무르지 않습니다 ([cbe854b](https://github.com/MMFoundation/WallpaperMachine/commit/cbe854bbef664aab9919bcb01d26c85f0ef7115f))
+- 장면 배경화면의 앨범 커버가 회전하는 모델에서 벗어나지 않고 그대로 붙어 있습니다 ([db4a9b6](https://github.com/MMFoundation/WallpaperMachine/commit/db4a9b65e0ee4ab0764fe857caf177f1f6fd53f3))
+- 이전 화면 위에 덧그리는 장면 배경화면이 부분적으로 그려지거나 혼합된 레이어 아래의 기존 이미지를 더 이상 잃지 않습니다 ([56878b5](https://github.com/MMFoundation/WallpaperMachine/commit/56878b5a7414924b2c061f86162a58414e6fe71e))
+
+이번 릴리스에 기여해 주신 [@judyofficer](https://github.com/judyofficer), [@DenseFLoe](https://github.com/DenseFLoe) 님께 감사드립니다.
+
 ## [1.9.3](https://github.com/MMFoundation/WallpaperMachine/compare/v1.9.2...v1.9.3) (2026-11-07)
 
 ### English
