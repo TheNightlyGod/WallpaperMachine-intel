@@ -1,5 +1,6 @@
 import AppKit
 import Darwin
+import Metal
 import ObjectiveC
 import QuartzCore
 import XCTest
@@ -34,6 +35,94 @@ final class WebWallpaperWindowCompositionTests: XCTestCase {
     let window = makeWindow()
     defer { window.close() }
     try await assertLiveSurfaces(window)
+  }
+
+  func testDesktopBackgroundHasASubmittedFrameRatherThanAnEmptyMetalQueue() async throws {
+    let window = makeWindow()
+    defer { window.close() }
+    try await assertSubmittedBackground(window)
+  }
+
+  func testLiveResizePreservesTheBackgroundFrameAndFitsTheWebView() async throws {
+    let window = makeWindow()
+    defer { window.close() }
+    try await assertSubmittedBackground(window)
+    let background = try XCTUnwrap(window.contentView?.layer as? CAMetalLayer)
+    let contents = try XCTUnwrap(background.contents) as AnyObject
+    try invokeLiveResize("_startLiveResize", on: window)
+    window.setScreenFrame(NSRect(x: 0, y: 0, width: 320, height: 240))
+    try invokeLiveResize("_endLiveResize", on: window)
+    try await assertLiveSurfaces(window)
+    try await assertSubmittedBackground(window)
+    XCTAssertTrue(window.contentView?.layer === background)
+    XCTAssertTrue(background.contents as AnyObject? === contents)
+    XCTAssertEqual(background.drawableSize, CGSize(width: 1, height: 1))
+    XCTAssertEqual(background.bounds.size, CGSize(width: 320, height: 240))
+    XCTAssertEqual(window.page.webView.frame, window.contentView?.bounds)
+  }
+
+  func testWithoutMetalTheContainerStillHostsThePageOnBlack() throws {
+    let container = WebWallpaperBackgroundView(
+      frame: NSRect(x: 0, y: 0, width: 160, height: 120), device: nil)
+    let page = WebWallpaperPage(projectURL: project, entryFile: "index.html")
+    page.attach(to: container)
+    defer { page.stop() }
+    XCTAssertTrue(page.webView.superview === container)
+    XCTAssertEqual(page.webView.frame, container.bounds)
+    XCTAssertEqual(container.layer?.backgroundColor, NSColor.black.cgColor)
+  }
+
+  func testSuspensionAndResumeKeepTheSubmittedBackground() async throws {
+    let window = makeWindow()
+    defer { window.page.stop(); window.close() }
+    try await assertSubmittedBackground(window)
+    let background = try XCTUnwrap(window.posterLayer)
+    let contents = try XCTUnwrap(background.contents) as AnyObject
+    window.page.setPresentationSuspended(true)
+    let deadline = Date().addingTimeInterval(5)
+    while window.page.isInWindowTree && Date() < deadline {
+      try await Task.sleep(for: .milliseconds(20))
+    }
+    XCTAssertFalse(window.page.isInWindowTree)
+    XCTAssertTrue(window.posterLayer === background)
+    try await assertSubmittedBackground(window)
+    window.page.setPresentationSuspended(false)
+    XCTAssertTrue(window.page.isInWindowTree)
+    XCTAssertTrue(window.posterLayer === background)
+    XCTAssertTrue(background.contents as AnyObject? === contents)
+    try await assertSubmittedBackground(window)
+  }
+
+  private func assertSubmittedBackground(_ window: NSWindow) async throws {
+    guard MTLCreateSystemDefaultDevice() != nil else {
+      throw XCTSkip("Metal frame inspection requires a Metal device")
+    }
+    let background = try XCTUnwrap(window.contentView?.layer as? CAMetalLayer)
+    XCTAssertEqual(background.drawableSize, CGSize(width: 1, height: 1),
+      "The background must not allocate a display-sized render target")
+    let contents = try XCTUnwrap(background.contents) as CFTypeRef
+    typealias QueueType = @convention(c) () -> CFTypeID
+    typealias LatestTime = @convention(c) (CFTypeRef) -> Double
+    guard let framework = dlopen(
+      "/System/Library/Frameworks/QuartzCore.framework/QuartzCore", RTLD_LAZY)
+    else { throw XCTSkip("Core Animation frame inspection is unavailable") }
+    defer { dlclose(framework) }
+    guard let typeSymbol = dlsym(framework, "CAImageQueueGetTypeID"),
+          let timeSymbol = dlsym(framework, "CAImageQueueGetLatestTime")
+    else { throw XCTSkip("Core Animation frame inspection is unavailable") }
+    let queueType = unsafeBitCast(typeSymbol, to: QueueType.self)
+    let latestTime = unsafeBitCast(timeSymbol, to: LatestTime.self)
+    XCTAssertEqual(CFGetTypeID(contents), queueType())
+    guard CFGetTypeID(contents) == queueType() else { return }
+    // An empty Metal layer also has an image queue, but returns -1 here.
+    // Wait for the real GPU submission; no desktop window is presented.
+    let deadline = Date().addingTimeInterval(2)
+    while latestTime(contents) < 0 && Date() < deadline {
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    XCTAssertGreaterThanOrEqual(latestTime(contents), 0,
+      "An empty Metal layer does not prevent Stage Manager's frozen transition")
+    XCTAssertFalse(window.isVisible)
   }
 
   func testLiveResizeDoesNotLeaveTheDesktopSurfaceFlattenable() async throws {

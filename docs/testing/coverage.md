@@ -1736,8 +1736,13 @@ Wallpaper Engine gives a page (`WebWallpaperDeviceLayoutTests`) and the screen-s
 (`ScreenSaverWebSurfaceTests`). `WebWallpaperWindowCompositionTests` reads
 WindowServer's transition policy on an unordered web window, including after a
 real AppKit live-resize cycle, and verifies preservation of unrelated window tags.
-Visible Stage Manager continuity still needs the
-[manual smoke check](manual-smoke.md#native-desktop-posters-and-mission-control).
+It also reads the background's Core Animation image queue to require a submitted
+Metal frame, preserves that frame and the fixed 1×1 drawable through live resize,
+checks web-view sizing and suspension/resume, and exercises the black fallback
+without a Metal device.
+The submitted-frame regressions fail against the earlier tag-only implementation;
+an empty Metal layer is not sufficient. Visible Stage Manager continuity still
+needs the [manual smoke check](manual-smoke.md#native-desktop-posters-and-mission-control).
 `WebWallpaperReferenceRenderTests` is not a check: it skips
 unless `scripts/we_reference.py render` hands it real pages to draw. Detail and limits:
 [web wallpapers](../features/web-wallpapers.md#verification).

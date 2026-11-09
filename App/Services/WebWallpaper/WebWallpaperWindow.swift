@@ -44,9 +44,7 @@ final class WebWallpaperWindow: NSWindow {
         // content view itself: suspension removes it from the window tree, and
         // the desktop poster sync identifies this surface by the content
         // layer, which must survive that.
-        let container = NSView(frame: NSRect(origin: .zero, size: frame.size))
-        container.wantsLayer = true
-        container.layer?.backgroundColor = NSColor.black.cgColor
+        let container = WebWallpaperBackgroundView(frame: NSRect(origin: .zero, size: frame.size))
         container.autoresizesSubviews = true
         contentView = container
         page.attach(to: container)

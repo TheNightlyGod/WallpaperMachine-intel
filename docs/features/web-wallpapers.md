@@ -334,20 +334,30 @@ property name of 1 to 256.
   with the committed frame-rate limit and render scale on every `load()`),
   property/pause delivery,
   host-side suspension and content-process recovery.
-- **Desktop transition composition:** each web desktop window opts out of
-  WindowServer's transition surface flattening (tag 55,
-  `kCGSNeverFlattenSurfacesDuringSwipesTagBit`). During Stage Manager switches,
-  a flattened window can hold a picture while both WebKit callbacks and native
-  Core Animation keep advancing. `WebWallpaperWindowComposition` sets only this
-  tag at window creation; AppKit clears it after a live resize, so the window
-  reapplies it on the next main-queue turn after `didEndLiveResize`. This is
-  window-lifecycle work, with no timer, additional rendering pass or page change.
-  The optional SkyLight entry points are resolved once; an unavailable API or
-  rejected change is logged and leaves the normal window usable. This relies on
-  a private macOS interface, so new OS versions require the manual transition
-  check below. The [native API example](https://gist.github.com/avaidyam/d3c76df710651edbf4da56bad3fea9d2)
-  documents the tag and resize behavior; the latter was also checked against
-  AppKit on macOS 27.
+- **Desktop transition composition:** `WebWallpaperBackgroundView` supplies the
+  desktop window's black background through a `CAMetalLayer`. When AppKit creates
+  that backing layer, it submits one opaque black 1×1 drawable, stretched behind
+  the web view. It keeps the submitted surface through resizing and page
+  suspension, with no display link, timer, repeated GPU submission or CPU wait
+  for GPU completion. The ordinary black layer remains the fallback if Metal is
+  unavailable; failures to submit the frame are logged.
+  A live Metal surface prevents the Stage Manager transition from holding a
+  frozen picture of this window on macOS 27. An empty Metal layer or image queue
+  is insufficient: the frame must actually be submitted. This uses a small,
+  bounded Metal allocation and one GPU submission per backing layer. Battery
+  impact has not been measured.
+  `WebWallpaperWindowComposition` also preserves WindowServer's transition
+  surface policy (tag 55, `kCGSNeverFlattenSurfacesDuringSwipesTagBit`) at creation
+  and after live resize. AppKit clears the tag after `didEndLiveResize`, so it is
+  reapplied on the next main-queue turn. Optional SkyLight entry points are
+  resolved once; an unavailable API or rejected tag is logged. The
+  [native API example](https://gist.github.com/avaidyam/d3c76df710651edbf4da56bad3fea9d2)
+  documents the tag and resize behavior, also checked on macOS 27. The tag alone
+  and `NSCGSWindow.allowsFlattening = false` did not resolve #177; the latter is
+  not used. New OS versions still need the visible transition check below.
+  Distinguish a live web view from a suspension poster before attributing a hold
+  to WindowServer: the covered-desktop pause rule can detach the web view while
+  its window remains visible.
 - **Suspension** does not rely on the page cooperating. `setPaused` is an optional
   listener callback, so a page can ignore it; alongside it the host suspends all
   media playback (suspend and unsuspend, so media the user had paused is not
@@ -706,8 +716,12 @@ the page can continue receiving animation callbacks while its visible picture is
 frozen. Callback timing alone is not evidence of smooth presentation.
 `WebWallpaperWindowCompositionTests` reads the policy accepted by WindowServer
 for an unordered, asset-free web window, including after AppKit's live-resize
-cycle, and checks that applying it preserves other window tags. It never opens a
-desktop window and does not claim to observe visible transition frames.
+cycle, and checks that applying it preserves other window tags. It also reads
+the Metal background image queue to distinguish a submitted frame from an
+empty layer, verifies that resizing preserves its 1×1 backing and web-view
+layout, keeps it during page suspension and resume, and checks that the page
+still attaches over black when Metal is unavailable. It never opens a desktop window and does not claim to observe
+visible transition frames.
 Show Desktop and Space transition smoothness,
 real hover and window-server routing on a desktop, how flicks and parallax pages feel
 with a real high-rate mouse, that the hover exit still lands after the last move,
