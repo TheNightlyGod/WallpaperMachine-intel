@@ -58,6 +58,29 @@ struct UpdatePresentation: Equatable {
 
   var showsAction: Bool { action != nil }
 
+  /// The kind of news the status line brings, which the mark beside it shows.
+  enum Mark: Equatable, Sendable {
+    /// Nothing to install: up to date, or nothing published yet.
+    case current
+    /// A newer version is on offer, on its way or ready.
+    case update
+    /// A check or an installation is under way.
+    case working
+    case failed
+    /// Not checked yet, or a build that does not update itself.
+    case neutral
+  }
+
+  var mark: Mark {
+    switch status {
+    case .upToDate, .noRelease: .current
+    case .available, .manual, .downloading, .ready: .update
+    case .checking, .preparing: .working
+    case .error: .failed
+    case .idle, .unsupported: .neutral
+    }
+  }
+
   /// Whether the "What's new" disclosure has anything to show: some section carries an item.
   var hasNotes: Bool { notes.contains { !$0.items.isEmpty } }
 

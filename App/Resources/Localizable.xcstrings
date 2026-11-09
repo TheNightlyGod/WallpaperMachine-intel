@@ -6576,8 +6576,8 @@
     "What’s new" : {
       "localizations" : {"pt-BR" : {"stringUnit" : {"state" : "translated", "value" : "Novidades"}}, "ko" : {"stringUnit" : {"state" : "translated", "value" : "새로운 내용"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "変更内容"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "更新内容"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "更新內容"}}}
     },
-    "What’s new in %@" : {
-      "localizations" : {"pt-BR" : {"stringUnit" : {"state" : "translated", "value" : "Novidades da versão %@"}}, "ko" : {"stringUnit" : {"state" : "translated", "value" : "%@의 새로운 내용"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "%@の変更内容"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "%@ 的更新内容"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "%@ 的更新內容"}}}
+    "Earlier versions" : {
+      "localizations" : {"pt-BR" : {"stringUnit" : {"state" : "translated", "value" : "Versões anteriores"}}, "ko" : {"stringUnit" : {"state" : "translated", "value" : "이전 버전"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "以前のバージョン"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "更早的版本"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "更早的版本"}}}
     },
     "Breaking changes" : {
       "extractionState" : "manual",

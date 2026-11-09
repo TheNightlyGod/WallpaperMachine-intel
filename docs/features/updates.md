@@ -103,9 +103,20 @@ and About words each one, with **Retry** and **Open GitHub Releases**.
 
 ### Release notes in About
 
-The Updates group and explicit update window share localized release history and
-its English / 简体中文 / 한국어 selector. While updating, they show the available
-history newer than the installed version; otherwise About keeps the latest release.
+The Updates group opens with one status row: a mark for the kind of news (up to
+date, update on offer, working, failed), the status line, the last successful check
+under it, and the next action (**Check Again**, **Download Update**, **Restart and
+Install**, **Cancel**, **Retry**) at its trailing edge. **Remind Me Later**, **Skip
+This Version**, **Open GitHub Releases** or **Show in Finder** sit in a row beneath
+it when they apply, then **Update mode**. **Release notes** is its own card below
+Updates, with the English / 简体中文 / 한국어 menu at its title (this page only,
+never the app's language; a new app language brings its own translation again). Its
+newest version is open; the versions before it fold behind **Earlier versions**,
+which names their range. Both the card and the update window draw a version with
+`ReleaseNotesEntryView`: the number links its GitHub comparison and the date is
+written in the panel's language; About leaves out the issue and commit references
+the window links. While updating, they show the available history newer than the
+installed version; otherwise About keeps the latest release.
 At most 20 recent versions are available from the manifest, not an unlimited history.
 Missing or unreadable history falls back to the English release body. A body with
 nothing to say produces no notes in About and an explicit empty state in the window.
@@ -258,7 +269,7 @@ available!** and **WallpaperMachine x.y.z is now available—you have a.b.c. Wou
 like to download it now?** Below that, a scrolling box lists every release above the
 running version up to the available one that the manifest carries (its 20 newest
 changelog sections), newest first: each opens with its version
-as a linked badge (the comparison with the previous version on GitHub) and its date,
+as a link (the comparison with the previous version on GitHub) and its date,
 then its sections (**Highlights**, **Breaking Changes**, **Features**,
 **Improvements**, **Bug Fixes**) and bullets, with each bullet's issue and commit
 references as links. Links open only through `ExternalLink`, so only GitHub's.

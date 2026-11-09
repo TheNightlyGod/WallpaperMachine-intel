@@ -296,8 +296,9 @@ the rest opens in a popover from the ⓘ beside the title.
   Release. **Update mode** chooses notification only, automatic downloading with
   manual restart, or full automatic installation while the Mac is locked/display
   asleep. New installations default to full automatic; existing choices are preserved
-  (see [updates](updates.md)). The section shows the last successful check, localized
-  release history and progress/cancel/retry. **Remind Me Later** defers this version
+  (see [updates](updates.md)). The Updates card shows the status with the last
+  successful check and progress/cancel/retry; **Release notes** is a card of its own,
+  the newest version open and earlier ones folded. **Remind Me Later** defers this version
   for 24 hours across launches, and **Skip This Version** prevents its automatic update.
   The application menu item **Check for Updates…** opens this section. **Spread the word** has **Share WallpaperMachine…** and **Star on
   GitHub** ([one-time prompts](first-run.md#star-prompt-the-performance-data-question-and-the-subscriptions-offer)).

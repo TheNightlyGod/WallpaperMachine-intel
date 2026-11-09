@@ -97,14 +97,19 @@ final class SettingsBHost {
   let hosting: NSHostingController<SettingsBRoot>
   let controller: PanelController
 
-  init(panel: PanelFixture, language: String = "en", dark: Bool = false) {
-    controller = panel.controller
+  /// - Parameter controller: One the test built over the fixture's stores
+  ///   (`buildSettingsController`), instead of the fixture's own.
+  init(
+    panel: PanelFixture, controller: PanelController? = nil, language: String = "en", dark: Bool = false
+  ) {
+    let controller = controller ?? panel.controller
+    self.controller = controller
     // Settings is the page from the first pass: the shell's toolbar changes between pages, and a
     // window that has to change it at the narrowest width is not what these tests are about.
     panel.navigation.selection = .settings
     // The panel's strings follow this store, which fixes the language without touching preferences.
     PanelLocale.shared.bind(to: AppLanguageStore(defaults: panel.defaults, systemLanguages: [language]))
-    hosting = NSHostingController(rootView: SettingsBRoot(controller: panel.controller))
+    hosting = NSHostingController(rootView: SettingsBRoot(controller: controller))
     hosting.sizingOptions = []
     hosting.sceneBridgingOptions = [.toolbars, .title]
     window = ControlPanelWindow.make(contentViewController: hosting, delegate: nil)

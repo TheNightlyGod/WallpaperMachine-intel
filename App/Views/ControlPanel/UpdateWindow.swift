@@ -229,8 +229,8 @@ struct UpdateWindowView: View {
   }
 }
 
-/// The scrolling box of release notes: each version as a linked badge with its date, then its
-/// sections and bullets, issue and commit references linked.
+/// The scrolling box of release notes: each version's linked number and date, then its sections
+/// and bullets, issue and commit references linked (`ReleaseNotesEntryView`, as About draws them).
 struct UpdateNotesBox: View {
   let releases: [AppReleaseHistory.Entry]
   let language: AppReleaseHistory.Language
@@ -238,9 +238,9 @@ struct UpdateNotesBox: View {
 
   var body: some View {
     ScrollView {
-      LazyVStack(alignment: .leading, spacing: 28) {
+      LazyVStack(alignment: .leading, spacing: 24) {
         ForEach(releases, id: \.version.display) { release in
-          block(release)
+          ReleaseNotesEntryView(release: release, language: language, style: .full)
         }
       }
       .padding(20)
@@ -255,61 +255,5 @@ struct UpdateNotesBox: View {
         .strokeBorder(theme.surface.line.color))
     .accessibilityElement(children: .contain)
     .accessibilityLabel(Text("Release notes"))
-  }
-
-  private func block(_ release: AppReleaseHistory.Entry) -> some View {
-    VStack(alignment: .leading, spacing: 12) {
-      badge(release)
-      ForEach(Array(release.notes(language: language).sections.enumerated()), id: \.offset) { _, section in
-        VStack(alignment: .leading, spacing: 6) {
-          if !section.title.isEmpty {
-            // Known headings (Features, Bug Fixes) are translated; any other reads as given.
-            Text(verbatim: PanelLocale.shared.catalogString(section.title))
-              .font(.system(size: 14, weight: .semibold))
-              .foregroundStyle(
-                section.isHighlights ? theme.accent.accent.color : theme.surface.text.color)
-          }
-          ForEach(Array(section.markdown.enumerated()), id: \.offset) { _, item in
-            if section.isList {
-              HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(verbatim: "•").foregroundStyle(theme.surface.faint.color)
-                Text(UpdateWindow.inlineNotes(item))
-              }
-            } else {
-              Text(UpdateWindow.inlineNotes(item))
-            }
-          }
-          .font(.system(size: 13))
-          .foregroundStyle(theme.surface.text.color)
-          .textSelection(.enabled)
-          .fixedSize(horizontal: false, vertical: true)
-        }
-      }
-    }
-  }
-
-  private func badge(_ release: AppReleaseHistory.Entry) -> some View {
-    HStack(spacing: 0) {
-      Group {
-        if let url = release.url, ExternalLink.isAllowed(url) {
-          Link(destination: url) { Text(verbatim: release.version.display) }
-        } else {
-          Text(verbatim: release.version.display)
-        }
-      }
-      .foregroundStyle(theme.accent.accent.color)
-      if let date = release.date {
-        Text(verbatim: " (\(date))").foregroundStyle(theme.surface.text.color)
-      }
-    }
-    .font(.system(size: 17, weight: .bold))
-    .padding(.horizontal, 10)
-    .padding(.vertical, 5)
-    .background(theme.surface.raised.color, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-    .overlay(
-      RoundedRectangle(cornerRadius: 6, style: .continuous)
-        .strokeBorder(theme.surface.line.color))
-    .accessibilityElement(children: .combine)
-    .accessibilityAddTraits(.isHeader)
   }
 }

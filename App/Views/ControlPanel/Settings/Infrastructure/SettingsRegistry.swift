@@ -23,6 +23,7 @@ enum SettingsRegistry {
     QuickSettingsSection.unofferedItems(controller)
       .union(PlaybackSettingsSection.unofferedItems(controller))
       .union(PerformanceSettingsSection.unofferedItems(controller))
+      .union(AboutSettingsSection.unofferedItems(controller))
   }
 
   /// What is wrong with a list of items, one line per problem; empty when it is sound. Ids are
