@@ -369,6 +369,7 @@ impl BridgeActorState {
         &self,
         wallpaper_id: &str,
         primary_identity_selector: Option<&SerializedSelector>,
+        user_initiated: bool,
     ) -> Result<PreparedApply, BridgeError> {
         state_values::prepare_apply(
             &self.library,
@@ -377,6 +378,7 @@ impl BridgeActorState {
             &self.wallpaper_drafts,
             wallpaper_id,
             primary_identity_selector,
+            user_initiated,
         )
     }
 

@@ -208,7 +208,8 @@ async fn an_automatic_apply_while_a_mirror_is_main_keeps_its_saved_mirror() {
         ..MonitorCfg::default()
     };
     let left_config = mirror(left.connected_selector());
-    let right_config = mirror(right.connected_selector());
+    let mut right_config = mirror(right.connected_selector());
+    right_config.wallpaper = Some("400".into());
     store.save_app_config(&AppConfig {
         primary_display: Some(main.connected_selector()),
         monitors: vec![
@@ -242,6 +243,12 @@ async fn an_automatic_apply_while_a_mirror_is_main_keeps_its_saved_mirror() {
     bridge.refresh_displays().await.unwrap();
     bridge.set_display_config_enabled("400".into(), "primary".into(), true).await.unwrap();
     bridge.apply_wallpaper_options("400".into(), false).await.unwrap();
+    assert_eq!(
+        store.load().unwrap().config.monitors.iter()
+            .find(|row| row.selector == right_config.selector),
+        Some(&right_config),
+        "the automatic apply preserves the mirror and its earlier wallpaper before handover"
+    );
 
     // The real main display takes the role back.
     engine.set_snapshot_after_refresh(vec![main, left, right]);

@@ -462,7 +462,7 @@ fn m10_publication_owns_baseline_but_refresh_owns_live_ids_and_membership_is_rec
         original.wallpaper_drafts[A].effective_enabled_displays(&original.enabled_selectors(A));
     for active_from_config in [false, true] {
         let mut state = original.clone();
-        let prepared = state.prepare_apply(A, None).unwrap();
+        let prepared = state.prepare_apply(A, None, true).unwrap();
         let app = prepared.app_config().clone();
         let map = prepared.wallpaper_configs().clone();
         state
@@ -506,7 +506,7 @@ fn m10_publication_owns_baseline_but_refresh_owns_live_ids_and_membership_is_rec
         assert_eq!(state.active_wallpaper_ids, state.configured_ids());
     }
     let mut removed = original.clone();
-    let prepared = removed.prepare_apply(A, None).unwrap();
+    let prepared = removed.prepare_apply(A, None, true).unwrap();
     removed.replace_library(vec![entry(B, BridgeWallpaperKind::ProjectScene)]);
     let before = removed.clone();
     assert_eq!(
@@ -1466,7 +1466,7 @@ async fn apply_save_case(reconcile: bool, fault: SaveFault) {
     }
     let captured =
         before.wallpaper_drafts[A].effective_enabled_displays(&before.enabled_selectors(A));
-    let prepared = before.prepare_apply(A, None).unwrap();
+    let prepared = before.prepare_apply(A, None, true).unwrap();
     assert_eq!(prepared.requires_reconcile(), reconcile);
     let candidate_app = prepared.app_config().clone();
     let candidate_map = prepared.wallpaper_configs().clone();

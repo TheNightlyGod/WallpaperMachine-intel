@@ -154,6 +154,7 @@ pub(crate) fn prepare_apply(
     drafts: &BTreeMap<String, WallpaperOptionsDraft>,
     id: &str,
     primary_identity: Option<&SerializedSelector>,
+    user_initiated: bool,
 ) -> Result<PreparedApply, BridgeError> {
     ensure_present(library, id)?;
     let fallback;
@@ -166,10 +167,25 @@ pub(crate) fn prepare_apply(
     };
     let active = enabled_selectors(config, id);
     let reconcile = draft.requires_reconcile(&active);
-    let effective_enabled = draft.effective_enabled_displays(&active);
+    // The draft can name both the primary role and its physical alias. An
+    // automatic change must preserve a temporary main display's saved mirror
+    // through both assignment and the primary-role copy below.
+    let preserve_primary_mirror = !user_initiated
+        && primary_identity.is_some_and(|identity| {
+            config.monitors.iter().any(|row| {
+                &row.selector == identity && row.mode.eq_ignore_ascii_case("mirror")
+            })
+        });
+    let mut effective_enabled = draft.effective_enabled_displays(&active);
+    if preserve_primary_mirror {
+        effective_enabled.retain(|selector| Some(selector) != primary_identity);
+    }
     let mut app = config.clone();
     let mut wallpaper = draft.current().clone();
     for row in &mut app.monitors {
+        if preserve_primary_mirror && Some(&row.selector) == primary_identity {
+            continue;
+        }
         if row.wallpaper.as_deref() == Some(id) {
             row.wallpaper = None;
         }
@@ -180,7 +196,7 @@ pub(crate) fn prepare_apply(
         row.mode = "independent".to_owned();
         row.wallpaper = Some(id.to_owned());
     }
-    if let Some(identity) = primary_identity {
+    if let Some(identity) = primary_identity.filter(|_| !preserve_primary_mirror) {
         if let Some(mut row) = app
             .monitors
             .iter()
@@ -456,7 +472,7 @@ mod tests {
         let committed_before = draft.committed().clone();
         let effective_before = draft.effective_enabled_displays(&active);
         let drafts = BTreeMap::from([("aurora".to_owned(), draft)]);
-        let prepared = prepare_apply(&entries, &config, &saved, &drafts, "aurora", None).unwrap();
+        let prepared = prepare_apply(&entries, &config, &saved, &drafts, "aurora", None, true).unwrap();
         let rows = &prepared.app_config().monitors;
         assert_eq!(rows.len(), 7);
         assert_eq!(rows[0].wallpaper.as_deref(), Some("aurora"));
@@ -507,7 +523,7 @@ mod tests {
         draft.set_display_enabled(selector(7), true, &baseline_enabled);
         let drafts = BTreeMap::from([("aurora".to_owned(), draft)]);
         let prepared =
-            prepare_apply(&entries, &config, &BTreeMap::new(), &drafts, "aurora", None).unwrap();
+            prepare_apply(&entries, &config, &BTreeMap::new(), &drafts, "aurora", None, true).unwrap();
         assert_eq!(
             prepared.effective_enabled,
             vec![selector(6), selector(6), selector(7)]
@@ -597,6 +613,7 @@ mod tests {
                         &BTreeMap::new(),
                         "aurora",
                         Some(&identity),
+                        true,
                     )
                     .unwrap();
                     let mut expected_app = config.clone();
@@ -662,6 +679,7 @@ mod tests {
             &drafts,
             "aurora",
             Some(&selector(33)),
+            true,
         )
         .unwrap();
         assert!(prepared.requires_reconcile());
@@ -713,6 +731,7 @@ mod tests {
                 &drafts,
                 "aurora",
                 Some(&selector(42)),
+                true,
             )
             .unwrap();
             assert!(!prepared.requires_reconcile());
@@ -746,6 +765,7 @@ mod tests {
             &drafts,
             "aurora",
             Some(&selector(62)),
+            true,
         )
         .unwrap();
         owned_send(&prepared);
@@ -767,6 +787,7 @@ mod tests {
             &drafts,
             "aurora",
             Some(&selector(62)),
+            true,
         )
         .unwrap();
         let (app, map, baseline) = prepared.into_publication(&entries, "aurora").unwrap();
@@ -785,6 +806,7 @@ mod tests {
             &drafts,
             "aurora",
             Some(&selector(62)),
+            true,
         )
         .unwrap()
         .into_app_config();
