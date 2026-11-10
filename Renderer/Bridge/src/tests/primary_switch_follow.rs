@@ -193,6 +193,12 @@ async fn choosing_a_wallpaper_while_a_mirror_is_main_replaces_its_saved_mirror()
 /// must follow the main display again once it is back.
 #[tokio::test]
 async fn an_automatic_apply_while_a_mirror_is_main_keeps_its_saved_mirror() {
+    for earlier in [None, Some("400")] {
+        assert_automatic_apply_preserves_saved_mirror(earlier).await;
+    }
+}
+
+async fn assert_automatic_apply_preserves_saved_mirror(earlier: Option<&str>) {
     let root = tempdir().unwrap();
     let home = tempdir().unwrap();
     let store = ConfigStore::open(root.path());
@@ -209,7 +215,7 @@ async fn an_automatic_apply_while_a_mirror_is_main_keeps_its_saved_mirror() {
     };
     let left_config = mirror(left.connected_selector());
     let mut right_config = mirror(right.connected_selector());
-    right_config.wallpaper = Some("400".into());
+    right_config.wallpaper = earlier.map(str::to_owned);
     store.save_app_config(&AppConfig {
         primary_display: Some(main.connected_selector()),
         monitors: vec![
