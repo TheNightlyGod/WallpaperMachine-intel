@@ -3,12 +3,14 @@ import SwiftUI
 /// The wallpapers the target display showed recently, newest first, from the Now Playing card.
 ///
 /// A row applies its wallpaper to the target display (the popover stays open, so a few can be tried
-/// in a row); the one on show is marked Active. Clear history forgets this display's list and
-/// leaves every other display and every file alone. Titles are the authors', so they are drawn as
-/// text, never read as a localization key.
+/// in a row); the one on show is marked Active. Clear history, once confirmed, forgets this
+/// display's list and leaves every other display and every file alone. Titles are the authors', so
+/// they are drawn as text, never read as a localization key.
 struct RecentlyUsedPopover: View {
   @Environment(PanelController.self) private var controller
   @Environment(\.panelTheme) private var theme
+  /// Clear history was clicked and waits for its answer. Gone with the popover.
+  @State private var confirmsClear = false
 
   private static let rowHeight: CGFloat = 46
   private static let maxListHeight: CGFloat = 322
@@ -77,26 +79,52 @@ struct RecentlyUsedPopover: View {
     .padding(.vertical, 10)
   }
 
+  /// Clearing asks first, in place: it cannot be undone, and it also forgets when each wallpaper
+  /// was last used on this display, which Installed's Last used order is sorted by.
   private func footer(_ shell: ShellModel, hasRows: Bool, isUsable: Bool) -> some View {
     HStack(alignment: .firstTextBaseline, spacing: 8) {
-      Text("Keeps the last 50 wallpapers used on this display.")
-        .font(.system(size: 11))
-        .foregroundStyle(theme.surface.muted.color)
-        .frame(maxWidth: .infinity, alignment: .leading)
-      if hasRows {
-        Button("Clear history") { shell.clearHistory() }
+      if hasRows && confirmsClear {
+        Text("Clear this display’s history? Its wallpapers also lose their place in the Last used order.")
+          .font(.system(size: 11))
+          .foregroundStyle(theme.surface.text.color)
+          .frame(maxWidth: .infinity, alignment: .leading)
+        Button("Cancel") { confirmsClear = false }
           .buttonStyle(.link)
           .font(.system(size: 11.5))
-          .disabled(
-            !isUsable
-              || controller.isBusy(
-                PanelActionCoordinator.key("historyClear", displayID: controller.targetDisplayID))
-          )
-          .accessibilityIdentifier("history-clear")
+          .accessibilityIdentifier("history-clear-cancel")
+        Button("Clear history") {
+          confirmsClear = false
+          shell.clearHistory()
+        }
+        .buttonStyle(.link)
+        .font(.system(size: 11.5))
+        .foregroundStyle(theme.surface.danger.color)
+        .disabled(!canClear(isUsable: isUsable))
+        .accessibilityIdentifier("history-clear-confirm")
+      } else {
+        Text("Keeps the last 50 wallpapers used on this display.")
+          .font(.system(size: 11))
+          .foregroundStyle(theme.surface.muted.color)
+          .frame(maxWidth: .infinity, alignment: .leading)
+        if hasRows {
+          Button("Clear history") { confirmsClear = true }
+            .buttonStyle(.link)
+            .font(.system(size: 11.5))
+            .disabled(!canClear(isUsable: isUsable))
+            .accessibilityIdentifier("history-clear")
+        }
       }
     }
     .padding(.horizontal, 14)
     .padding(.vertical, 10)
+    // The question is about the display the popover opened for.
+    .onChange(of: controller.targetDisplayID) { confirmsClear = false }
+  }
+
+  private func canClear(isUsable: Bool) -> Bool {
+    isUsable
+      && !controller.isBusy(
+        PanelActionCoordinator.key("historyClear", displayID: controller.targetDisplayID))
   }
 }
 

@@ -79,6 +79,12 @@ extension PanelController {
   /// The library is being read for the first time or rescanned.
   var isLibraryLoading: Bool { store.libraryLoadState == .loading }
 
+  /// Why the last read of the library failed; nil while it is being read or was read.
+  var libraryLoadFailure: String? {
+    if case .failed(let message) = store.libraryLoadState { return message }
+    return nil
+  }
+
   /// Whether the preview window exists to open (it does not in a headless run).
   var previewAvailable: Bool { store.openPreview != nil }
 

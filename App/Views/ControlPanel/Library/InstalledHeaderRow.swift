@@ -220,7 +220,7 @@ private struct SelectButton: View {
       model.isSelecting
         ? L("Leave selection mode")
         : L(
-          "Select wallpapers to move to Trash. Holding a tile and dragging across others selects them too."
+          "Select wallpapers to add to a playlist or a collection, or to move to Trash. Holding a tile and dragging across others selects them too."
         )
     )
     .accessibilityLabel(model.isSelecting ? Text("Done") : Text("Select"))
@@ -235,16 +235,25 @@ private struct RefreshButton: View {
   @Environment(PanelController.self) private var controller
 
   var body: some View {
+    // The rescan can take a while on a large library: the button shows it is running, and the bar
+    // under the grid says what it found (`InstalledBrowserModel.refreshLibrary`).
+    let isRefreshing = controller.isBusy(PanelActionCoordinator.key("refresh"))
     Button {
       controller.library.refreshLibrary()
     } label: {
-      Image(systemName: "arrow.clockwise")
-        .font(.system(size: 11.5, weight: .semibold))
-        .frame(width: 14)
+      Group {
+        if isRefreshing {
+          ProgressRing(value: nil, lineWidth: 1.75).frame(width: 12, height: 12)
+        } else {
+          Image(systemName: "arrow.clockwise")
+            .font(.system(size: 11.5, weight: .semibold))
+        }
+      }
+      .frame(width: 14)
     }
     .buttonStyle(HeaderCapsuleStyle(tier: tier))
-    .disabled(controller.isLibraryLoading)
-    .help(L("Refresh library"))
+    .disabled(controller.isLibraryLoading || isRefreshing)
+    .help(isRefreshing ? L("Refreshing your library…") : L("Refresh library"))
     .accessibilityLabel(Text("Refresh library"))
     .accessibilityIdentifier("installed-refresh")
   }

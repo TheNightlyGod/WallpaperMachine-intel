@@ -9,6 +9,16 @@ struct PlaylistPlanRow: Identifiable, Equatable, Sendable {
   let displayCount: Int
 }
 
+/// What adding wallpapers to a display's list did.
+struct PlaylistAddition: Equatable, Sendable {
+  /// How many of them were not on the list before.
+  var added: Int
+  /// Whether the display's playlist rotates through its list now, so what was added will be shown.
+  /// A playlist that is off, follows day and night, or plays the library, the favorites or a
+  /// collection keeps the list without playing it.
+  var isPlayed: Bool
+}
+
 extension PanelController {
   // MARK: Derived state
 
@@ -56,10 +66,21 @@ extension PanelController {
   }
 
   /// `playlistAdd`: the installed wallpapers of `ids`, each once, appended to the display's list.
-  func addToPlaylist(_ ids: [String], display: String? = nil) async throws {
+  /// Answers what that did, for the notice that follows: the list is only one of the things a
+  /// playlist can play, and a display's playlist is off until it is turned on.
+  @discardableResult
+  func addToPlaylist(_ ids: [String], display: String? = nil) async throws -> PlaylistAddition {
+    var addition = PlaylistAddition(added: 0, isPlayed: false)
     try await changePlaylist(display) { display in
-      playlists.add(try installedWallpaperIDs(ids), to: display)
+      let ids = try installedWallpaperIDs(ids)
+      let listed = Set(playlists.playlist(for: display).wallpaperIDs)
+      playlists.add(ids, to: display)
+      let playlist = playlists.playlist(for: display)
+      addition = PlaylistAddition(
+        added: ids.filter { !listed.contains($0) }.count,
+        isPlayed: playlist.mode == .rotate && playlist.source == .list)
     }
+    return addition
   }
 
   /// `playlistRemove`: the wallpaper leaves the display's list. It need not be installed.

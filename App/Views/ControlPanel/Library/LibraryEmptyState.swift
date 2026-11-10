@@ -5,6 +5,9 @@ import Foundation
 enum LibraryEmptyState: Equatable {
   /// The first read of the library, or a rescan that left nothing to show yet.
   case loading
+  /// The library could not be read, so nothing is known to be installed: say why and offer to
+  /// read it again. Not `emptyLibrary`, which would invite someone to import what they already have.
+  case failed(message: String)
   /// Nothing is installed: import something or find it on the Workshop.
   case emptyLibrary
   /// A collection that holds nothing. It is empty, not filtered away.
@@ -31,18 +34,22 @@ enum LibraryEmptyState: Equatable {
   /// - Parameters:
   ///   - rowCount: How many rows pass the filter.
   ///   - isLoading: The library is being read.
+  ///   - loadFailure: Why the last read of the library failed, when it did.
   ///   - libraryIsEmpty: Nothing is installed at all.
   ///   - collection: The collection on show and how many ids it holds, stale ones included.
   ///   - isInstalled: Whether the library holds the wallpaper of this id.
   ///   - textIsWhole: The search text was pasted, dropped, confirmed with Return or restored,
   ///     rather than being typed (`InstalledBrowserModel.isTextWhole`).
   static func make(
-    rowCount: Int, isLoading: Bool, libraryIsEmpty: Bool,
+    rowCount: Int, isLoading: Bool, loadFailure: String? = nil, libraryIsEmpty: Bool,
     collection: (name: String, memberCount: Int)?, filter: LibraryFilter,
     isInstalled: (String) -> Bool, textIsWhole: Bool
   ) -> LibraryEmptyState? {
     guard rowCount == 0 else { return nil }
     if isLoading { return .loading }
+    // A read that failed leaves the wallpapers it had before on show; with none, the grid is
+    // empty because of the failure, whatever the search and filters say.
+    if libraryIsEmpty, let loadFailure { return .failed(message: loadFailure) }
     if libraryIsEmpty { return .emptyLibrary }
     if let collection, collection.memberCount == 0 {
       return .emptyCollection(name: collection.name)

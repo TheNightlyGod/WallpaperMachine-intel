@@ -381,7 +381,9 @@ the saved value.
 **Wallpaper properties → Save current…** stores a named preset of the currently
 applied authored properties; pending edits must first be applied or reverted.
 Choose a preset and **Apply**, rename or delete it, or export/import its versioned
-JSON document. Import saves a new preset and never applies it automatically. These
+JSON document. Import saves a new preset and never applies it automatically; a pick that
+is not a regular file (an alias, a folder) or is larger than 48 MB is refused with a
+message saying what a preset file has to be. These
 are wallpaper-specific property presets, not the Performance quality tiers.
 
 Application validates every saved property against current types, limits and

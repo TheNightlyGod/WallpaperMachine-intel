@@ -157,17 +157,25 @@ final class LibraryTileRulesTests: PanelTestCase {
   func testTheEmptyStateNamesWhatHidesTheTilesInTheOrderOfTheRecovery() {
     func state(
       loading: Bool = false, empty: Bool = false, collection: (String, Int)? = nil,
-      text: String = "", tags: [String] = [], collectionID: String? = nil, whole: Bool = true
+      text: String = "", tags: [String] = [], collectionID: String? = nil, whole: Bool = true,
+      failure: String? = nil
     ) -> LibraryEmptyState? {
       var filter = LibraryFilter(text: text, requiredTags: tags)
       filter.collectionID = collectionID
       return LibraryEmptyState.make(
-        rowCount: 0, isLoading: loading, libraryIsEmpty: empty,
+        rowCount: 0, isLoading: loading, loadFailure: failure, libraryIsEmpty: empty,
         collection: collection.map { (name: $0.0, memberCount: $0.1) }, filter: filter,
         isInstalled: { $0 == "2077200001" }, textIsWhole: whole)
     }
     XCTAssertEqual(state(loading: true, empty: true), .loading)
     XCTAssertEqual(state(empty: true, text: "x"), .emptyLibrary)
+    XCTAssertEqual(
+      state(empty: true, text: "x", failure: "disk gone"), .failed(message: "disk gone"),
+      "a library that could not be read is not an empty one, whatever the search")
+    XCTAssertEqual(state(loading: true, empty: true, failure: "disk gone"), .loading, "reading again comes first")
+    XCTAssertEqual(
+      state(text: "x", failure: "disk gone"), .search(text: "x"),
+      "wallpapers read before a failed rescan are still there to search")
     XCTAssertEqual(
       state(collection: ("Night", 0), text: "x", collectionID: "n"), .emptyCollection(name: "Night"),
       "an empty collection is empty, not filtered away")

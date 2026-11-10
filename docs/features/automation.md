@@ -31,7 +31,9 @@ A wallpaper target turns that display's playlist off after successful activation
 A saved playlist copies its current settings, then the existing playlist scheduler
 takes over. Editing a saved plan does not update an already applied copy. Mirrored
 and disabled displays do not accept rules. Disconnected displays keep their settings
-and catch up when eligible again.
+and catch up when eligible again. **Remove** on a time rule asks in the row (**Remove this
+rule?**, **Cancel** or **Remove**) before the rule is gone, as deleting a display layout or
+a saved playlist does.
 
 Time rules use the Mac's time zone. The latest due rule wins; equal timestamps
 choose the later rule in the list. A daylight-saving gap moves a nonexistent time

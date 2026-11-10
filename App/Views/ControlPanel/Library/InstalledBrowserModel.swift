@@ -57,8 +57,16 @@ final class InstalledBrowserModel {
   var armingID: String?
   /// The name being typed for a new collection made from the selection; nil when not asked for.
   var newCollectionName: String?
-  /// The last batch result, shown beside the selection's tools for five seconds.
+  /// The last result worth saying (a batch, a refresh), shown in the bar under the grid for five
+  /// seconds.
   var notice: String?
+  /// Where a notice can take the user, when what it says is something to act on.
+  enum NoticeLink: Equatable {
+    /// Settings › Displays, where the target display's playlist is turned on and told what to play.
+    case playlistSettings
+  }
+  /// The link offered beside `notice`; it goes when the notice does.
+  var noticeLink: NoticeLink?
   /// How a sentence reaches VoiceOver. A seam: tests record it.
   @ObservationIgnored var announce: @MainActor (String) -> Void = {
     AccessibilityNotification.Announcement($0).post()
@@ -457,7 +465,7 @@ final class InstalledBrowserModel {
     let collection = shownCollection
     return LibraryEmptyState.make(
       rowCount: rowCount, isLoading: controller.isLibraryLoading,
-      libraryIsEmpty: controller.libraryRows.isEmpty,
+      loadFailure: controller.libraryLoadFailure, libraryIsEmpty: controller.libraryRows.isEmpty,
       collection: collection.map { ($0.name, $0.count) }, filter: effectiveFilter,
       isInstalled: { controller.libraryRow(id: $0) != nil }, textIsWhole: isTextWhole)
   }

@@ -462,11 +462,11 @@ final class PanelLibraryActionsTests: PanelTestCase {
       XCTAssertEqual(asked.count, 2, "without a rotation Next never asks the scheduler")
       XCTAssertEqual(bridge.assignments["primary"], "b")
 
-      // With nothing else to take it does nothing.
+      // With nothing else to take it says so, as a rotating playlist does, and changes nothing.
       panel.store.librarySnapshot.wallpapers.removeAll { $0.id != "b" }
-      try await controller.nextWallpaper()
+      let nothingElse = await banner(panel) { try await controller.nextWallpaper() }
+      XCTAssertNotNil(nothingElse, "a Next that cannot move says why")
       XCTAssertEqual(bridge.assignments["primary"], "b")
-      XCTAssertNil(controller.errors.message)
 
       bridge.mirrors["secondary"] = "primary"
       try await panel.store.refreshAllAsync()
@@ -519,6 +519,50 @@ final class PanelLibraryActionsTests: PanelTestCase {
     panel.bridge.snapshot = nil
     let message = await banner(panel) { try await controller.refresh() }
     XCTAssertNotNil(message, "a library that cannot be read is shown until it is dismissed or recurs")
+  }
+
+  /// The library's Refresh says what the rescan found, since one that found nothing looks like
+  /// nothing happened; and a library that could not be read at all is not shown as an empty one.
+  func testRefreshSaysWhatItFoundAndAnUnreadableLibraryIsNotAnEmptyOne() async throws {
+    let panel = try makeController()
+    defer { Task { await panel.shutdown() } }
+    let store = panel.store
+    let model = panel.controller.library
+    func serve(_ ids: [String]) {
+      var library = store.librarySnapshot
+      library.wallpapers = ids.map { wallpaper($0) }
+      let bundle = BridgeSnapshotBundle(
+        app: store.appSnapshot, library: library, wallpaperOptions: nil,
+        monitorInformation: store.monitorInformationSnapshot, settings: store.settingsSnapshot)
+      panel.bridge.bundleProvider = { bundle }
+      panel.bridge.snapshot = bundle
+    }
+
+    serve(["a"])
+    await model.refreshLibrary().value
+    XCTAssertEqual(model.notice, L("Library refreshed: \(1) added, \(0) removed."))
+    await model.refreshLibrary().value
+    XCTAssertEqual(model.notice, L("Your library is up to date."))
+    serve(["b", "c"])
+    await model.refreshLibrary().value
+    XCTAssertEqual(model.notice, L("Library refreshed: \(2) added, \(1) removed."))
+    XCTAssertNil(model.noticeLink)
+
+    // The read fails with wallpapers on show: they stay, and the banner says why.
+    panel.bridge.bundleProvider = nil
+    panel.bridge.snapshot = nil
+    await model.refreshLibrary().value
+    XCTAssertNil(model.emptyState, "what was read before is still shown")
+
+    // It fails with nothing read: the grid says the library could not be read.
+    store.librarySnapshot.wallpapers = []
+    await model.refreshLibrary().value
+    guard case .failed = model.emptyState else {
+      return XCTFail("an unreadable library is \(String(describing: model.emptyState)), not empty")
+    }
+    serve([])
+    await model.refreshLibrary().value
+    XCTAssertEqual(model.emptyState, .emptyLibrary, "read and found empty, it is an empty library")
   }
 
   func testOnlyAnEnabledDisplayThatShowsItsOwnWallpaperCanBecomeTheTarget() async throws {

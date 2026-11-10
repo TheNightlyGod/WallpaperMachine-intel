@@ -18,6 +18,21 @@ struct InstalledEmptyState: View {
           description: "Reading your wallpaper library."
         )
         .textSelectable()
+      case .failed(let message):
+        // An error keeps its symbol whatever the season, and its reason is the service's own words.
+        PanelEmptyState(
+          verbatim: L("Your wallpaper library could not be read"),
+          systemImage: "exclamationmark.triangle", description: message
+        ) {
+          Button {
+            model.refreshLibrary()
+          } label: {
+            Label("Try again", systemImage: "arrow.clockwise")
+          }
+          .buttonStyle(.panelSecondary)
+          .disabled(controller.isBusy(PanelActionCoordinator.key("refresh")))
+        }
+        .textSelectable()
       case .emptyLibrary:
         PanelEmptyState(
           "Your wallpaper library is empty", systemImage: "photo.on.rectangle.angled",

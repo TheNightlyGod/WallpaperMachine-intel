@@ -15,8 +15,9 @@ struct InstalledFooter: View {
   var body: some View {
     let model = controller.library
     let selected = model.selectedIDs.count
-    // An empty grid says what is wrong itself; a count of zero under it adds nothing.
-    if controller.isLibraryLoading || selected > 0
+    // An empty grid says what is wrong itself; a count of zero under it adds nothing. What an
+    // action just did is still said under it.
+    if controller.isLibraryLoading || selected > 0 || model.notice != nil
       || (model.emptyState == nil && IdleBar.hasContent(controller))
     {
       VStack(spacing: 0) {
@@ -80,6 +81,7 @@ private struct IdleBar: View {
   static func hasContent(_ controller: PanelController) -> Bool {
     let model = controller.library
     return model.narrowsView || controller.workshopUpdates.count > 0 || model.isSelecting
+      || model.notice != nil
   }
 
   var body: some View {
@@ -88,7 +90,9 @@ private struct IdleBar: View {
     let updates = controller.workshopUpdates.count
     VStack(alignment: .leading, spacing: 6) {
       TagFlow(spacing: 12) {
-        if model.narrowsView {
+        // Under an empty grid the bar is only here for a notice: the grid says why it is empty,
+        // and a count of zero adds nothing.
+        if model.narrowsView && count > 0 {
           if count == 1 { Text("\(count) wallpaper") } else { Text("\(count) wallpapers") }
         }
         if updates > 0 {
@@ -114,8 +118,32 @@ private struct IdleBar: View {
           Button("Select all") { model.selectAllVisible() }
             .modifier(FooterLink())
         }
+        FooterNotice()
       }
       if model.isSelecting && model.showsSweepTip { SweepTip() }
+    }
+  }
+}
+
+/// What the last action did (`InstalledBrowserModel.say`), and the link that goes with it: a
+/// playlist that does not play the list the wallpapers were just added to is one click from the
+/// settings that make it.
+private struct FooterNotice: View {
+  @Environment(PanelController.self) private var controller
+
+  var body: some View {
+    let model = controller.library
+    if let notice = model.notice {
+      Text(verbatim: notice)
+        .accessibilityAddTraits(.updatesFrequently)
+      if model.noticeLink == .playlistSettings {
+        Button("Playlist settings") {
+          controller.launch(PanelActionCoordinator.key("openSettings")) {
+            try await controller.openSettings(.displays)
+          }
+        }
+        .modifier(FooterLink())
+      }
     }
   }
 }
@@ -172,10 +200,7 @@ private struct SelectionBar: View {
         .disabled(!model.canTrash)
         .help(count == 1 ? L("Move to Trash") : L("Move \(count) to Trash"))
         .accessibilityIdentifier("installed-trash")
-        if let notice = model.notice {
-          Text(verbatim: notice)
-            .accessibilityAddTraits(.updatesFrequently)
-        }
+        FooterNotice()
       }
       if model.showsSweepTip { SweepTip() }
     }

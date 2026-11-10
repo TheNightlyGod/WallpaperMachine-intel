@@ -224,6 +224,8 @@ private struct DisplaysScheduleRows: View {
 
   @Environment(PanelController.self) private var controller
   @Environment(\.panelTheme) private var theme
+  /// The rule whose Remove was clicked and waits for its answer.
+  @State private var removalArmed: String?
 
   /// A display keeps at most this many rules.
   private static let ruleLimit = 64
@@ -276,15 +278,27 @@ private struct DisplaysScheduleRows: View {
           .lineLimit(2)
       }
       .frame(maxWidth: .infinity, alignment: .leading)
-      Button("Edit…") { model.beginRule(display: display.id, editing: rule) }
-        .focused(focus, equals: .editRule(display: display.id, id: rule.id))
+      if removalArmed == rule.id {
+        // A rule is removed for good, so it asks first, in the row, as deleting a layout or a
+        // saved playlist does.
+        Text("Remove this rule?")
+          .font(.system(size: 12))
+        Button("Cancel") { removalArmed = nil }
+        Button("Remove") {
+          removalArmed = nil
+          controller.launch(
+            PanelActionCoordinator.key("automationRuleRemove", id: display.id, detail: rule.id)
+          ) { try await model.removeRule(rule.id, display: display.id) }
+        }
+        .foregroundStyle(theme.surface.danger.color)
         .disabled(locked)
-      Button("Remove") {
-        controller.launch(
-          PanelActionCoordinator.key("automationRuleRemove", id: display.id, detail: rule.id)
-        ) { try await model.removeRule(rule.id, display: display.id) }
+      } else {
+        Button("Edit…") { model.beginRule(display: display.id, editing: rule) }
+          .focused(focus, equals: .editRule(display: display.id, id: rule.id))
+          .disabled(locked)
+        Button("Remove") { removalArmed = rule.id }
+          .disabled(locked)
       }
-      .disabled(locked)
     }
     .padding(.horizontal, 12)
     .padding(.vertical, 8)

@@ -807,6 +807,36 @@ final class InstalledBrowserModelTests: PanelTestCase {
     XCTAssertEqual(model.selectedIDs, ["w02", "w00"], "the selection stays")
   }
 
+  /// Adding says how many were added. A playlist that is off, or plays something other than its
+  /// list, will not show them, so the notice says that too and offers the playlist's settings.
+  func testAddToPlaylistSaysWhatItDidAndWhetherThePlaylistPlaysTheList() async throws {
+    let panel = try makeController()
+    defer { Task { await panel.shutdown() } }
+    let model = panel.controller.library
+    try await installNames(panel, count: 4)
+    model.toggleChecked("w00")
+    model.toggleChecked("w01")
+    await model.addSelectionToPlaylist()?.value
+    XCTAssertEqual(
+      model.notice, L("Added \(2) wallpapers to this display’s list. Its playlist is not playing the list."))
+    XCTAssertEqual(model.noticeLink, .playlistSettings, "a playlist that is off is one click from its settings")
+
+    panel.playlists.update("primary") {
+      $0.mode = .rotate
+      $0.source = .list
+    }
+    model.toggleChecked("w02")
+    await model.addSelectionToPlaylist()?.value
+    XCTAssertEqual(model.notice, L("Added 1 wallpaper to this display’s list."))
+    XCTAssertNil(model.noticeLink, "a playlist that rotates through its list needs no settings")
+    await model.addSelectionToPlaylist()?.value
+    XCTAssertEqual(model.notice, L("Already on this display’s list."))
+
+    panel.playlists.update("primary") { $0.source = .all }
+    await model.addSelectionToPlaylist()?.value
+    XCTAssertEqual(model.noticeLink, .playlistSettings, "it plays the whole library, not the list")
+  }
+
   func testAddToPlaylistNeedsADisplayThatCanHaveOne() async throws {
     let panel = try makeController()
     defer { Task { await panel.shutdown() } }

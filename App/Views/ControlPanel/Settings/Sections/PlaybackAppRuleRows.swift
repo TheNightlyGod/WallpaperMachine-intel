@@ -56,6 +56,9 @@ struct PlaybackAppRuleRow: View {
   let rule: AppRule
 
   @Environment(PanelController.self) private var controller
+  @Environment(\.panelTheme) private var theme
+  /// The minus was clicked and waits for its answer.
+  @State private var confirmsRemoval = false
 
   var body: some View {
     let settings = controller.settings
@@ -77,17 +80,31 @@ struct PlaybackAppRuleRow: View {
         options: AppRuleAction.allCases.map { SettingsMenuOption(value: $0, title: $0.title) }
       ) { try await controller.updateAppRule(rule.id, action: $0) }
       .accessibilityLabel(Text(verbatim: L("Action for \(name)")))
-      Button {
-        settings.perform("rule-\(rule.id)-remove") { try await controller.removeAppRule(rule.id) }
-      } label: {
-        Image(systemName: "minus.circle")
-          .font(.system(size: 14))
+      if confirmsRemoval {
+        // A rule is removed for good, so the second click is the one that removes it.
+        Button("Cancel") { confirmsRemoval = false }
+          .buttonStyle(.borderless)
+        Button("Remove") {
+          confirmsRemoval = false
+          settings.perform("rule-\(rule.id)-remove") { try await controller.removeAppRule(rule.id) }
+        }
+        .buttonStyle(.borderless)
+        .foregroundStyle(theme.surface.danger.color)
+        .disabled(settings.isLocked("rule-\(rule.id)-remove", whileRunning: true))
+        .accessibilityLabel(Text(verbatim: L("Remove the rule for \(name)")))
+      } else {
+        Button {
+          confirmsRemoval = true
+        } label: {
+          Image(systemName: "minus.circle")
+            .font(.system(size: 14))
+        }
+        .buttonStyle(.borderless)
+        .foregroundStyle(.secondary)
+        .disabled(settings.isLocked("rule-\(rule.id)-remove", whileRunning: true))
+        .help(L("Remove"))
+        .accessibilityLabel(Text(verbatim: L("Remove the rule for \(name)")))
       }
-      .buttonStyle(.borderless)
-      .foregroundStyle(.secondary)
-      .disabled(settings.isLocked("rule-\(rule.id)-remove", whileRunning: true))
-      .help(L("Remove"))
-      .accessibilityLabel(Text("Remove"))
     }
     .padding(.horizontal, 12)
     .padding(.vertical, 6)

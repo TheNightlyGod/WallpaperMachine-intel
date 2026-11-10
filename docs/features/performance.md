@@ -789,7 +789,9 @@ Focus filters and app rules stay on their own rows and are not named under **On
 battery**: they act whatever the power source, so they override every choice on the
 page alike, and they are things the user turned on for the moment (a Focus, an app
 in use) rather than a state of the Mac's power. The **Focus** row says which filter is
-in effect now; the **App rules** rows do not yet say which rule is engaged.
+in effect now; the **App rules** rows do not yet say which rule is engaged. A rule's minus
+button asks before it removes the rule: it turns into **Cancel** and **Remove**, and
+VoiceOver names the app the rule is for.
 
 **Pause on battery** is the one app-in-front choice scoped to the battery, and it is
 presented as a choice of its own row, **When another app is in front**, whose label and
