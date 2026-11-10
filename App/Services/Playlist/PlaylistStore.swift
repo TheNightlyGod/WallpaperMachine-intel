@@ -14,6 +14,7 @@ final class PlaylistStore {
     nonisolated static let plansKey = "WallpaperMachine.playlistPlans"
     private static let holdsKey = "WallpaperMachine.playlistHolds"
     private static let roundsKey = "WallpaperMachine.playlistRounds"
+    private static let settledKey = "WallpaperMachine.playlistSettledPeriods"
     /// The most wallpapers one saved round keeps. A round holds each wallpaper of the playlist
     /// at most once, so only a very large library gets near it.
     private static let roundLimit = 2048
@@ -44,6 +45,16 @@ final class PlaylistStore {
     /// kept apart from `recent`: a display's own playlist round and its Random round never
     /// disturb each other. Saved with the shuffle rounds, and left out of backups the same way.
     private(set) var randomRounds: [String: [String]] = [:]
+    /// The boundary each day and night display is settled up to: its period's wallpaper was put
+    /// there, or one chosen by hand stays until then (`PlaylistScheduler`). Saved with the day and
+    /// night settings it was settled under, so a relaunch inside the period leaves a manual choice
+    /// alone while one made after another wallpaper or time was chosen does not. Run state, left
+    /// out of backups.
+    private struct SettledPeriod: Codable, Equatable {
+        var until: Date
+        var settings: String
+    }
+    private var settled: [String: SettledPeriod] = [:]
     private(set) var revisions: [String: UInt64] = [:]
     struct SkippedWallpaper: Equatable {
         let message: String
@@ -78,6 +89,8 @@ final class PlaylistStore {
         let saved = Self.savedRounds(in: defaults)
         recent = Self.shuffleRounds(in: saved, for: playlists)
         randomRounds = Self.randomRounds(in: saved)
+        settled = defaults.data(forKey: Self.settledKey)
+            .flatMap { try? JSONDecoder().decode([String: SettledPeriod].self, from: $0) } ?? [:]
     }
 
     func playlist(for display: String) -> DisplayPlaylist {
@@ -225,6 +238,39 @@ final class PlaylistStore {
         // when the wait ends: the scheduler dates a fresh interval then.
         if hold != nil { nextChange[display] = nil }
         persist()
+    }
+
+    /// The boundary a day and night display was settled up to, when it was settled under the day
+    /// and night settings it has now; nil for any other display, or once those settings changed.
+    func settledPeriod(on display: String) -> Date? {
+        guard let saved = settled[display], let settings = Self.dayNightSettings(of: playlist(for: display)),
+              saved.settings == settings else { return nil }
+        return saved.until
+    }
+
+    /// Notes the boundary `display` is settled up to, or that it is not (nil). Saved at once and
+    /// without a notification, like a shuffle round: nothing on screen depends on it, and the
+    /// scheduler sets it on every evaluation, so the value it already has writes nothing.
+    func setSettledPeriod(_ until: Date?, on display: String) {
+        let next = until.flatMap { until in
+            Self.dayNightSettings(of: playlist(for: display)).map { SettledPeriod(until: until, settings: $0) }
+        }
+        guard settled[display] != next else { return }
+        settled[display] = next
+        if settled.isEmpty {
+            defaults.removeObject(forKey: Self.settledKey)
+        } else if let data = try? JSONEncoder().encode(settled) {
+            defaults.set(data, forKey: Self.settledKey)
+        }
+    }
+
+    /// What a settled period belongs to: the two start times and the two wallpapers. Nil for a
+    /// playlist that does not follow day and night.
+    private static func dayNightSettings(of playlist: DisplayPlaylist) -> String? {
+        guard playlist.mode == .dayNight else { return nil }
+        return [String(playlist.dayStart), String(playlist.nightStart),
+                playlist.dayWallpaperID ?? "", playlist.nightWallpaperID ?? ""]
+            .map { "\($0.utf8.count):\($0)" }.joined()
     }
 
     /// Remembers a pick for shuffle; see `PlaylistPlanner.remember(_:in:candidates:)`. A shuffled

@@ -47,6 +47,29 @@ final class PanelPlaylistActionsTests: PanelTestCase {
     XCTAssertEqual(panel.playlists.playlist(for: "primary").nightStart, 1439)
   }
 
+  /// A day that starts when the night does would never come: the edit is refused and the times
+  /// stay as they were.
+  func testDayAndNightCannotStartAtTheSameTime() async throws {
+    let panel = try makePanel()
+    defer { Task { await panel.shutdown() } }
+    let controller = panel.controller
+    try await controller.editPlaylist(.dayStart(try minute(420)), display: "primary")
+    try await controller.editPlaylist(.nightStart(try minute(1140)), display: "primary")
+
+    do {
+      try await controller.editPlaylist(.nightStart(try minute(420)), display: "primary")
+      XCTFail("the night cannot start when the day does")
+    } catch is WallpaperActionError {}
+    do {
+      try await controller.editPlaylist(.dayStart(try minute(1140)), display: "primary")
+      XCTFail("the day cannot start when the night does")
+    } catch is WallpaperActionError {}
+
+    let playlist = panel.playlists.playlist(for: "primary")
+    XCTAssertEqual(playlist.dayStart, 420)
+    XCTAssertEqual(playlist.nightStart, 1140)
+  }
+
   func testWaitingForVideosIsStoredForTheNamedDisplayAndOffForANewPlaylist() async throws {
     let panel = try makePanel()
     defer { Task { await panel.shutdown() } }

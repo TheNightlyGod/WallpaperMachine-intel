@@ -420,6 +420,86 @@ final class PlaylistSchedulerTests: XCTestCase {
         XCTAssertEqual(store.nextChange["primary"], calendar.date(from: DateComponents(year: 2027, month: 1, day: 16, hour: 7)))
     }
 
+    /// A relaunch inside the same half of the day (an app update, the library's drive coming
+    /// back) is not a new period: the wallpaper applied by hand before it stays until the next.
+    func testAManualChoiceOnADayAndNightDisplaySurvivesARelaunchUntilTheNextPeriod() async {
+        store.update("primary") {
+            $0.mode = .dayNight
+            $0.dayWallpaperID = "b"
+            $0.nightWallpaperID = "c"
+        }
+        let first = makeScheduler()
+        first.start()
+        await settle()
+        XCTAssertEqual(applied, ["b"])
+        shown["primary"] = "a"
+        first.stop()
+
+        store = PlaylistStore(defaults: defaults)
+        clock = calendar.date(from: DateComponents(year: 2027, month: 1, day: 15, hour: 13))!
+        let second = makeScheduler()
+        second.start()
+        defer { second.stop() }
+        await settle()
+        XCTAssertEqual(applied, ["b"], "the day wallpaper is not put back over the manual choice")
+        XCTAssertEqual(shown["primary"], "a")
+
+        clock = calendar.date(from: DateComponents(year: 2027, month: 1, day: 15, hour: 20))!
+        second.evaluate()
+        await settle()
+        XCTAssertEqual(applied, ["b", "c"], "the night still takes over at its time")
+    }
+
+    /// What a relaunch keeps is the period settled under the day and night settings as they
+    /// were: a day wallpaper chosen just before quitting is applied when the app starts again.
+    func testADayWallpaperChosenBeforeARelaunchIsAppliedAfterIt() async {
+        store.update("primary") {
+            $0.mode = .dayNight
+            $0.dayWallpaperID = "b"
+        }
+        let first = makeScheduler()
+        first.start()
+        await settle()
+        XCTAssertEqual(applied, ["b"])
+        first.stop()
+        store.update("primary") { $0.dayWallpaperID = "c" }
+
+        store = PlaylistStore(defaults: defaults)
+        let second = makeScheduler()
+        second.start()
+        defer { second.stop() }
+        await settle()
+        XCTAssertEqual(applied, ["b", "c"])
+    }
+
+    /// A wallpaper that keeps failing is left out of the shuffle while it cools down, and the
+    /// round is over once every wallpaper that can be shown has been: the next round shows each
+    /// of them again before any repeats.
+    func testAShuffleRoundEndsWithoutTheWallpaperThatKeepsFailing() async {
+        store.update("primary") { $0.mode = .rotate; $0.order = .shuffle; $0.interval = 60 }
+        let scheduler = makeScheduler(library: ["a", "b", "c", "x"])
+        scheduler.start()
+        defer { scheduler.stop() }
+        await settle()
+        store.recordFailure(
+            "x", on: "primary", message: "Fixture failed",
+            retryAfter: clock.addingTimeInterval(PlaylistScheduler.failureCooldown))
+
+        for _ in 0..<3 {
+            scheduler.skip("primary")
+            await settle()
+        }
+        XCTAssertEqual(Set(applied), ["a", "b", "c"], "the first round shows every wallpaper that works")
+        XCTAssertEqual(store.recent["primary"], [], "and is over without the one that does not")
+
+        applied = []
+        for _ in 0..<3 {
+            scheduler.skip("primary")
+            await settle()
+        }
+        XCTAssertEqual(Set(applied), ["a", "b", "c"], "so the next round shows each again before one repeats")
+    }
+
     func testChoosingADifferentDayWallpaperAppliesAtOnce() async {
         store.update("primary") {
             $0.mode = .dayNight

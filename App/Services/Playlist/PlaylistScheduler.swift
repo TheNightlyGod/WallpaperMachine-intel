@@ -60,8 +60,12 @@ final class PlaylistScheduler {
     private var requestedWhileInFlight = Set<String>()
     /// The day or night period each display was last brought into line with, and the playlist
     /// it was brought into line under: a wallpaper the user applies by hand stays until the next
-    /// period, and choosing a different day or night wallpaper applies at once.
+    /// period, and choosing a different day or night wallpaper applies at once. The store keeps
+    /// the period across launches (`settle`), so a relaunch inside it is not a new period either.
     private var settledPeriods: [String: (period: Date, revision: UInt64)] = [:]
+    /// The displays whose saved period this scheduler has looked up: once each, at the first
+    /// evaluation that asks, when the displays and their playlists are known.
+    private var restoredSettledPeriods = Set<String>()
     /// The rotating displays that changed while out of sight, with the playlist revision they
     /// changed under. Such a display does not change again until it shows, and showing again
     /// counts a whole interval from then. A playlist edited meanwhile applies at once.
@@ -206,7 +210,25 @@ final class PlaylistScheduler {
         let playlist = store.playlist(for: display)
         guard playlist.mode == .dayNight else { return }
         let phase = PlaylistPlanner.phase(at: now(), dayStart: playlist.dayStart, nightStart: playlist.nightStart, calendar: calendar)
-        settledPeriods[display] = (phase.until, store.revisions[display] ?? 0)
+        settle(display, (phase.until, store.revisions[display] ?? 0))
+    }
+
+    /// Notes the period `display` is settled up to, here and in the store, which keeps it for the
+    /// next launch (`PlaylistStore.setSettledPeriod`).
+    private func settle(_ display: String, _ value: (period: Date, revision: UInt64)?) {
+        settledPeriods[display] = value
+        store.setSettledPeriod(value?.period, on: display)
+    }
+
+    /// The period `display` is settled up to. What an earlier launch, or an earlier scheduler over
+    /// the same store, settled under the day and night settings the display still has counts as
+    /// settled under its playlist as it is now.
+    private func settledPeriod(_ display: String) -> (period: Date, revision: UInt64)? {
+        if restoredSettledPeriods.insert(display).inserted, settledPeriods[display] == nil,
+           let period = store.settledPeriod(on: display) {
+            settledPeriods[display] = (period, store.revisions[display] ?? 0)
+        }
+        return settledPeriods[display]
     }
 
     /// The longest a rotating display leaves a wallpaper the user just applied alone, whatever
@@ -267,7 +289,7 @@ final class PlaylistScheduler {
                     // Nothing is due while the display waits, so no deadline or timer exists, and
                     // an unlock does not fill it, nor change what is put there before it ends.
                     store.schedule(display, at: nil)
-                    settledPeriods[display] = nil
+                    settle(display, nil)
                     answerUnlock(display)
                     continue
                 }
@@ -275,7 +297,7 @@ final class PlaylistScheduler {
                 if playlist.mode == .dayNight {
                     let until = PlaylistPlanner.phase(
                         at: date, dayStart: playlist.dayStart, nightStart: playlist.nightStart, calendar: calendar).until
-                    settledPeriods[display] = (until, store.revisions[display] ?? 0)
+                    settle(display, (until, store.revisions[display] ?? 0))
                 }
                 store.setHold(nil, on: display)
                 AppLog.info("playlist: display \(display) has a wallpaper again, so its playlist carries on")
@@ -283,9 +305,9 @@ final class PlaylistScheduler {
             switch playlist.mode {
             case .off:
                 store.schedule(display, at: nil)
-                settledPeriods[display] = nil
+                settle(display, nil)
             case .rotate where playlist.trigger == .unlock:
-                settledPeriods[display] = nil
+                settle(display, nil)
                 // No timer: a rotation that waits for the unlock has nothing dated.
                 store.schedule(display, at: nil)
                 if let unlock, handledUnlock[display] != unlock.id, running, !inFlight.contains(display) {
@@ -293,7 +315,7 @@ final class PlaylistScheduler {
                     rotate(display, playlist: playlist, answering: unlock.id)
                 }
             case .rotate:
-                settledPeriods[display] = nil
+                settle(display, nil)
                 let revision = store.revisions[display] ?? 0
                 // Showing again ends the stretch out of sight a change was made in.
                 let changedOutOfSight = (running ? changedUnseen.removeValue(forKey: display) : changedUnseen[display]) == revision
@@ -330,7 +352,7 @@ final class PlaylistScheduler {
                     at: date, dayStart: playlist.dayStart, nightStart: playlist.nightStart, calendar: calendar)
                 store.schedule(display, at: until)
                 earliest = min(earliest ?? until, until)
-                let settled = settledPeriods[display]
+                let settled = settledPeriod(display)
                 guard settled?.period != until || settled?.revision != (store.revisions[display] ?? 0) else { continue }
                 guard running || isUnseen(display), !inFlight.contains(display) else { continue }
                 follow(display, phase: phase, period: until, playlist: playlist)
@@ -429,7 +451,7 @@ final class PlaylistScheduler {
     /// nothing for a display that is not waiting.
     func resume(_ display: String) {
         guard store.holds[display] != nil else { return }
-        settledPeriods[display] = nil
+        settle(display, nil)
         store.setHold(nil, on: display)
         AppLog.info("playlist: display \(display) resumed after its wallpaper was removed")
         if store.playlist(for: display).mode == .rotate, skip(display) { return }
@@ -493,7 +515,12 @@ final class PlaylistScheduler {
                     }
                     if let applied, (store.revisions[display] ?? 0) == revision {
                         store.clearFailure(applied, on: display)
-                        store.recordPick(applied, on: display, candidates: self.candidates(for: store.playlist(for: display)))
+                        // The round counts the wallpapers it can pick from: one that keeps failing
+                        // is left out while it cools down, or the round would never end and every
+                        // later pick would be a plain random one.
+                        store.recordPick(
+                            applied, on: display,
+                            candidates: self.availableCandidates(for: store.playlist(for: display), on: display))
                         AppLog.info("playlist changed display \(display) to \(applied)")
                     }
                     // A nil result means superseded or ineligible, never an instruction to retry.
@@ -518,7 +545,7 @@ final class PlaylistScheduler {
         let revision = store.revisions[display] ?? 0
         let target = phase == .day ? playlist.dayWallpaperID : playlist.nightWallpaperID
         guard let target, library().contains(target), current(display) != target else {
-            settledPeriods[display] = (period, revision)
+            settle(display, (period, revision))
             return
         }
         inFlight.insert(display)
@@ -529,7 +556,7 @@ final class PlaylistScheduler {
                 // A day or night switch never answers a rotation someone asked for meanwhile.
                 if requestedWhileInFlight.remove(display) != nil { skip(display) }
                 if (attempted || isRunning(display) || isUnseen(display)), (store.revisions[display] ?? 0) == revision {
-                    settledPeriods[display] = (period, revision)
+                    settle(display, (period, revision))
                 }
                 evaluate()
             }

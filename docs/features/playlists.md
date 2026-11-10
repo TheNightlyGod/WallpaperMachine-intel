@@ -35,7 +35,9 @@ left the library or cannot run on macOS is skipped. In order moves to the one
 after the wallpaper on screen and wraps; Shuffle shows every wallpaper once, in a
 new random order each round, and never picks the one on screen, and a relaunch
 carries on with the round it was in (see [Storage](#storage)). A day that starts
-after its night (say day 22:00, night 06:00) wraps past midnight. Times are local
+after its night (say day 22:00, night 06:00) wraps past midnight. The two times must
+differ: a day that started when the night does would have no length, so choosing the
+other one's time is refused with a message and both times stay as they were. Times are local
 clock times, so a daylight-saving day still switches at the time on the clock.
 
 **Change now** moves a rotating display along at once and starts a fresh
@@ -135,7 +137,9 @@ display, or is running there, the playlist's change (Change now included) gives 
 at once, is not retried, and the rotation tries again one interval later. It does
 not queue up behind your Apply, which would replace the wallpaper you just got. In Day and night, a wallpaper the
 user applies by hand stays until the next half of the day, and choosing a
-different day or night wallpaper applies at once.
+different day or night wallpaper applies at once. A relaunch inside the same half of
+the day (an app update, the library's drive coming back) is not a new period, so the
+wallpaper applied by hand is still left alone (see [Storage](#storage)).
 
 A wallpaper you apply to a rotating display is also left alone for a while: the
 rotation's next change waits at least `min(interval, 5 minutes)` from your choice
@@ -153,7 +157,9 @@ automatic rule's never count as a choice.
 A rotating playlist skips a wallpaper whose application throws an error and tries
 another in the same change, at most five distinct wallpapers. Failed items wait
 15 minutes before becoming candidates again; they do not count as successful
-shuffle picks. A successful choice starts the usual interval. If nothing succeeds,
+shuffle picks, and a shuffle round is over once every wallpaper that can be picked has
+been shown, so one that keeps failing does not hold the round open and turn every later
+pick into a plain random one. A successful choice starts the usual interval. If nothing succeeds,
 the next attempt waits for that interval instead of looping through the library.
 Cancellation, a replaced playlist, a disconnected display, or a newer command for
 that display ends retries. If a failed operation nevertheless changed the reported
@@ -294,6 +300,14 @@ existed does not wait, and an interval outside 1–10,080 minutes falls back to 
 nor skips a change that fell due while the app was closed. A display whose playlist is
 waiting after the user removed its wallpaper is kept in `WallpaperMachine.playlistHolds`,
 so a relaunch leaves it empty.
+
+The half of the day a Day and night display is settled for (its wallpaper was applied, or
+one chosen by hand stays until the next boundary) is kept in
+`WallpaperMachine.playlistSettledPeriods`, with the two start times and the two wallpapers
+it was settled under. A relaunch picks it up only while the display still has those, so a
+manual choice survives a relaunch inside the period, and a day or night wallpaper or time
+changed just before quitting still applies when the app starts again. It is written only
+when it changes, and it is run state like the hold: it is not part of a backup.
 
 A saved playlist (plan) this build cannot read, one saved by a newer build or damaged, does
 not take the others with it: the readable ones load, and saving, renaming or deleting a plan

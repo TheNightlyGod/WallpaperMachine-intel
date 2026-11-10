@@ -237,11 +237,19 @@ extension PanelController {
     case .nightWallpaper(let id):
       let id = try playableWallpaperID(id)
       playlists.update(display) { $0.nightWallpaperID = id }
+    // A day that starts when the night does has no length: the planner would call every minute
+    // night and put the night wallpaper back each day.
     case .dayStart(let start):
+      guard start.minutes != playlists.playlist(for: display).nightStart else { throw Self.sameStartTimes() }
       playlists.update(display) { $0.dayStart = start.minutes }
     case .nightStart(let start):
+      guard start.minutes != playlists.playlist(for: display).dayStart else { throw Self.sameStartTimes() }
       playlists.update(display) { $0.nightStart = start.minutes }
     }
+  }
+
+  private static func sameStartTimes() -> WallpaperActionError {
+    WallpaperActionError(message: L("Day and night need different start times."))
   }
 
   /// `playlist` rotating through `source`. Throws when the source is a collection that is gone.
