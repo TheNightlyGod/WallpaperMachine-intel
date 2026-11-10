@@ -12,6 +12,119 @@ app's update window shows the sections of every version newer than the installed
 one, in the app's language; the GitHub Release body repeats only the English notes.
 See [docs/release.md](docs/release.md) for how a version is cut.
 
+## [1.10.0](https://github.com/MMFoundation/WallpaperMachine/compare/v1.9.4...v1.10.0) (2026-11-10)
+
+### English
+
+This release makes the Library quicker to work with and keeps automatic wallpaper changes, web wallpapers and your saved settings dependable
+
+#### Highlights
+
+- The Library gains a right-click menu, drag-and-drop import and keyboard shortcuts for faster wallpaper management ([7025ba3](https://github.com/MMFoundation/WallpaperMachine/commit/7025ba39f4c92f6c1af221aa3060c62aefb0e2a2))
+- Web wallpapers stay animated through Stage Manager instead of freezing (closes [#177](https://github.com/MMFoundation/WallpaperMachine/issues/177)) ([0b05669](https://github.com/MMFoundation/WallpaperMachine/commit/0b056694495d0e8bc808908905d53b17a3d670cc), [e89ee04](https://github.com/MMFoundation/WallpaperMachine/commit/e89ee04186cc5f4263e7f95cb18b14272f26ead2))
+- Playlists, Focus wallpapers and mirrored displays now change wallpapers reliably through wakes, restarts and interruptions (closes [#179](https://github.com/MMFoundation/WallpaperMachine/issues/179), closes [#181](https://github.com/MMFoundation/WallpaperMachine/issues/181)) ([de5f3bc](https://github.com/MMFoundation/WallpaperMachine/commit/de5f3bc866ec9bdd1c1a2fa4914acb8f40b26b73), [2f6edf1](https://github.com/MMFoundation/WallpaperMachine/commit/2f6edf11d0d362f818c7dc16cf8e275a1fb1452d), [46945f2](https://github.com/MMFoundation/WallpaperMachine/commit/46945f22c6813b0a5bcb9a06dd38a812c63c951a), [70ae180](https://github.com/MMFoundation/WallpaperMachine/commit/70ae1805780858c812501ac6e206dada8ce45aad), [2bb19f9](https://github.com/MMFoundation/WallpaperMachine/commit/2bb19f92c9b400a039d13dfd4909a4c590a6f532))
+- Your saved rules, playlists and collections are no longer wiped out when one entry cannot be read ([38cc583](https://github.com/MMFoundation/WallpaperMachine/commit/38cc5830a1f26aabd0b073f0fd9f791af6c47e95))
+
+#### Features
+
+- Right-click a wallpaper in the Library to apply it, use it on all displays, favorite it, show it in Finder, add it to a playlist, reinstall or trash it ([7025ba3](https://github.com/MMFoundation/WallpaperMachine/commit/7025ba39f4c92f6c1af221aa3060c62aefb0e2a2))
+- Drop wallpaper files and folders onto the Library to import them ([7025ba3](https://github.com/MMFoundation/WallpaperMachine/commit/7025ba39f4c92f6c1af221aa3060c62aefb0e2a2))
+- Keyboard shortcuts speed up the Library: Command-Return applies the focused wallpaper, Command-Delete trashes it, and the File menu adds Import (Command-O) and Refresh Library (Command-R) ([7025ba3](https://github.com/MMFoundation/WallpaperMachine/commit/7025ba39f4c92f6c1af221aa3060c62aefb0e2a2))
+- A favorite button in the selection bar adds every selected wallpaper to your favorites, or removes them all when they already are ([7025ba3](https://github.com/MMFoundation/WallpaperMachine/commit/7025ba39f4c92f6c1af221aa3060c62aefb0e2a2))
+
+#### Improvements
+
+- Library actions now report their result: Add to playlist says how many it added or why they won't play, while Refresh and Next wallpaper say what happened ([0207e6d](https://github.com/MMFoundation/WallpaperMachine/commit/0207e6d107df85ad68eadb5f9fe9440ebb609818))
+- Clearing history, which also resets the Last used order, and removing a time or app rule now ask for confirmation first ([0207e6d](https://github.com/MMFoundation/WallpaperMachine/commit/0207e6d107df85ad68eadb5f9fe9440ebb609818))
+- Settings › About › Updates now shows status, last check and the next step in one row, with release notes in their own card and earlier versions folded away ([7d57bed](https://github.com/MMFoundation/WallpaperMachine/commit/7d57bedd58318f85350cea000bf0c19243e29fca))
+- A Library that cannot be read now explains why and offers Try again instead of looking empty, and thumbnails that fail to load show a mark ([0207e6d](https://github.com/MMFoundation/WallpaperMachine/commit/0207e6d107df85ad68eadb5f9fe9440ebb609818))
+
+#### Bug Fixes
+
+- Web wallpapers keep animating and no longer freeze when Stage Manager switches between the desktop and apps (closes [#177](https://github.com/MMFoundation/WallpaperMachine/issues/177)) ([0b05669](https://github.com/MMFoundation/WallpaperMachine/commit/0b056694495d0e8bc808908905d53b17a3d670cc), [e89ee04](https://github.com/MMFoundation/WallpaperMachine/commit/e89ee04186cc5f4263e7f95cb18b14272f26ead2))
+- Saved rules, playlists, collections and app rules are no longer erased when a single entry cannot be read, such as after returning to an older app version ([38cc583](https://github.com/MMFoundation/WallpaperMachine/commit/38cc5830a1f26aabd0b073f0fd9f791af6c47e95))
+- A mirrored display keeps following its source when a playlist, rule or schedule changes the wallpaper as the Mac wakes, instead of getting stuck on one wallpaper (closes [#179](https://github.com/MMFoundation/WallpaperMachine/issues/179)) ([de5f3bc](https://github.com/MMFoundation/WallpaperMachine/commit/de5f3bc866ec9bdd1c1a2fa4914acb8f40b26b73), [2f6edf1](https://github.com/MMFoundation/WallpaperMachine/commit/2f6edf11d0d362f818c7dc16cf8e275a1fb1452d))
+- Playlist rotation resumes after an interrupted change or an empty collection, and restarts with a full interval when you return to the desktop (closes [#181](https://github.com/MMFoundation/WallpaperMachine/issues/181)) ([46945f2](https://github.com/MMFoundation/WallpaperMachine/commit/46945f22c6813b0a5bcb9a06dd38a812c63c951a))
+- Focus wallpapers, and the wallpaper that returns when a Focus ends, are no longer skipped when a Workshop update or scene retry reloads the display at that moment ([2bb19f9](https://github.com/MMFoundation/WallpaperMachine/commit/2bb19f92c9b400a039d13dfd4909a4c590a6f532))
+- Signing in to Steam again while subscriptions are still loading no longer signs out the new session and removes it from this Mac ([dd555eb](https://github.com/MMFoundation/WallpaperMachine/commit/dd555eb31e6746888f45688daca10cb0d6ec0ec2))
+- A wallpaper you apply by hand on a day and night display now stays until the next half of the day, even if the app restarts ([70ae180](https://github.com/MMFoundation/WallpaperMachine/commit/70ae1805780858c812501ac6e206dada8ce45aad))
+- Shuffle again shows every wallpaper once per round when one wallpaper keeps failing to load, instead of repeating random picks ([70ae180](https://github.com/MMFoundation/WallpaperMachine/commit/70ae1805780858c812501ac6e206dada8ce45aad))
+- Day and night can no longer be set to start at the same time, which kept the night wallpaper on all day ([70ae180](https://github.com/MMFoundation/WallpaperMachine/commit/70ae1805780858c812501ac6e206dada8ce45aad))
+
+### 简体中文
+
+本次更新让壁纸库用起来更顺手，并让自动更换壁纸、网页壁纸和已保存的设置更加可靠
+
+#### 亮点
+
+- 壁纸库新增右键菜单、拖放导入和键盘快捷键，管理壁纸更快捷 ([7025ba3](https://github.com/MMFoundation/WallpaperMachine/commit/7025ba39f4c92f6c1af221aa3060c62aefb0e2a2))
+- 使用台前调度时，网页壁纸持续播放，不再卡住 (closes [#177](https://github.com/MMFoundation/WallpaperMachine/issues/177)) ([0b05669](https://github.com/MMFoundation/WallpaperMachine/commit/0b056694495d0e8bc808908905d53b17a3d670cc), [e89ee04](https://github.com/MMFoundation/WallpaperMachine/commit/e89ee04186cc5f4263e7f95cb18b14272f26ead2))
+- 播放列表、专注模式壁纸和镜像显示器在唤醒、重启或中断后也能可靠地更换壁纸 (closes [#179](https://github.com/MMFoundation/WallpaperMachine/issues/179), closes [#181](https://github.com/MMFoundation/WallpaperMachine/issues/181)) ([de5f3bc](https://github.com/MMFoundation/WallpaperMachine/commit/de5f3bc866ec9bdd1c1a2fa4914acb8f40b26b73), [2f6edf1](https://github.com/MMFoundation/WallpaperMachine/commit/2f6edf11d0d362f818c7dc16cf8e275a1fb1452d), [46945f2](https://github.com/MMFoundation/WallpaperMachine/commit/46945f22c6813b0a5bcb9a06dd38a812c63c951a), [70ae180](https://github.com/MMFoundation/WallpaperMachine/commit/70ae1805780858c812501ac6e206dada8ce45aad), [2bb19f9](https://github.com/MMFoundation/WallpaperMachine/commit/2bb19f92c9b400a039d13dfd4909a4c590a6f532))
+- 某一项无法读取时，已保存的规则、播放列表和合集不会再被整体清空 ([38cc583](https://github.com/MMFoundation/WallpaperMachine/commit/38cc5830a1f26aabd0b073f0fd9f791af6c47e95))
+
+#### 新功能
+
+- 在壁纸库中右键点按壁纸，无需先选中即可应用、应用到所有显示器、收藏、在访达中显示、加入播放列表、重新安装或移到废纸篓 ([7025ba3](https://github.com/MMFoundation/WallpaperMachine/commit/7025ba39f4c92f6c1af221aa3060c62aefb0e2a2))
+- 将壁纸文件或文件夹拖到壁纸库即可导入 ([7025ba3](https://github.com/MMFoundation/WallpaperMachine/commit/7025ba39f4c92f6c1af221aa3060c62aefb0e2a2))
+- 壁纸库支持键盘快捷键：Command-Return 应用当前选中的壁纸，Command-Delete 将其移到废纸篓，“文件”菜单新增“导入”（Command-O）和“刷新壁纸库”（Command-R） ([7025ba3](https://github.com/MMFoundation/WallpaperMachine/commit/7025ba39f4c92f6c1af221aa3060c62aefb0e2a2))
+- 选择栏新增收藏按钮，可一次收藏所有选中的壁纸，若已全部收藏则一并取消 ([7025ba3](https://github.com/MMFoundation/WallpaperMachine/commit/7025ba39f4c92f6c1af221aa3060c62aefb0e2a2))
+
+#### 改进
+
+- 壁纸库操作现在会告诉你结果，“添加到播放列表”会说明添加了几张或为何不会播放，“刷新”和“下一张壁纸”也会说明情况 ([0207e6d](https://github.com/MMFoundation/WallpaperMachine/commit/0207e6d107df85ad68eadb5f9fe9440ebb609818))
+- 清除历史记录（同时会重置“最近使用”排序）以及删除时间规则或应用规则前，现在都会先请你确认 ([0207e6d](https://github.com/MMFoundation/WallpaperMachine/commit/0207e6d107df85ad68eadb5f9fe9440ebb609818))
+- “设置 › 关于 › 更新”现在用一行显示状态、上次检查时间和下一步操作，更新说明有独立卡片，旧版本默认折叠 ([7d57bed](https://github.com/MMFoundation/WallpaperMachine/commit/7d57bedd58318f85350cea000bf0c19243e29fca))
+- 无法读取壁纸库时会显示原因和“重试”，不再显示为空，无法载入的缩略图也会显示标记而非空白 ([0207e6d](https://github.com/MMFoundation/WallpaperMachine/commit/0207e6d107df85ad68eadb5f9fe9440ebb609818))
+
+#### 问题修复
+
+- 使用台前调度在桌面与应用之间切换时，网页壁纸会持续播放，不再卡住 (closes [#177](https://github.com/MMFoundation/WallpaperMachine/issues/177)) ([0b05669](https://github.com/MMFoundation/WallpaperMachine/commit/0b056694495d0e8bc808908905d53b17a3d670cc), [e89ee04](https://github.com/MMFoundation/WallpaperMachine/commit/e89ee04186cc5f4263e7f95cb18b14272f26ead2))
+- 当某一项无法读取时（例如退回旧版本后），已保存的规则、播放列表、合集和应用规则不再被全部清空 ([38cc583](https://github.com/MMFoundation/WallpaperMachine/commit/38cc5830a1f26aabd0b073f0fd9f791af6c47e95))
+- Mac 唤醒期间若播放列表、规则或日程更换了壁纸，镜像显示器仍会跟随源显示器，不再停留在某张壁纸上 (closes [#179](https://github.com/MMFoundation/WallpaperMachine/issues/179)) ([de5f3bc](https://github.com/MMFoundation/WallpaperMachine/commit/de5f3bc866ec9bdd1c1a2fa4914acb8f40b26b73), [2f6edf1](https://github.com/MMFoundation/WallpaperMachine/commit/2f6edf11d0d362f818c7dc16cf8e275a1fb1452d))
+- 播放列表轮换在更换被中断或合集为空后会继续进行，回到桌面时重新计算完整的间隔 (closes [#181](https://github.com/MMFoundation/WallpaperMachine/issues/181)) ([46945f2](https://github.com/MMFoundation/WallpaperMachine/commit/46945f22c6813b0a5bcb9a06dd38a812c63c951a))
+- 当创意工坊更新或场景重试恰好重新载入显示器时，专注模式壁纸及专注模式结束后恢复的壁纸不再被跳过 ([2bb19f9](https://github.com/MMFoundation/WallpaperMachine/commit/2bb19f92c9b400a039d13dfd4909a4c590a6f532))
+- 在订阅内容仍在读取时重新登录 Steam，新的登录不再被注销并从这台 Mac 上移除 ([dd555eb](https://github.com/MMFoundation/WallpaperMachine/commit/dd555eb31e6746888f45688daca10cb0d6ec0ec2))
+- 在按昼夜切换的显示器上手动应用的壁纸，现在会保留到下一次昼夜交替，即使应用中途重启也是如此 ([70ae180](https://github.com/MMFoundation/WallpaperMachine/commit/70ae1805780858c812501ac6e206dada8ce45aad))
+- 即使有一张壁纸持续载入失败，随机播放也会恢复为每轮将每张壁纸各显示一次，不再重复挑选 ([70ae180](https://github.com/MMFoundation/WallpaperMachine/commit/70ae1805780858c812501ac6e206dada8ce45aad))
+- 昼夜不能再设为相同的开始时间，夜间壁纸不会再整天显示 ([70ae180](https://github.com/MMFoundation/WallpaperMachine/commit/70ae1805780858c812501ac6e206dada8ce45aad))
+
+### 한국어
+
+이번 업데이트로 보관함을 더 빠르게 다룰 수 있고, 자동 배경화면 변경, 웹 배경화면, 저장된 설정이 더 안정적으로 동작합니다
+
+#### 주요 변경 사항
+
+- 보관함에 오른쪽 클릭 메뉴, 끌어다 놓기 가져오기, 키보드 단축키가 추가되어 배경화면을 더 빠르게 관리할 수 있습니다 ([7025ba3](https://github.com/MMFoundation/WallpaperMachine/commit/7025ba39f4c92f6c1af221aa3060c62aefb0e2a2))
+- 스테이지 매니저를 사용해도 웹 배경화면이 멈추지 않고 계속 움직입니다 (closes [#177](https://github.com/MMFoundation/WallpaperMachine/issues/177)) ([0b05669](https://github.com/MMFoundation/WallpaperMachine/commit/0b056694495d0e8bc808908905d53b17a3d670cc), [e89ee04](https://github.com/MMFoundation/WallpaperMachine/commit/e89ee04186cc5f4263e7f95cb18b14272f26ead2))
+- 재생 목록, 집중 모드 배경화면, 미러링된 디스플레이가 잠자기 해제, 재시작, 중단 후에도 배경화면을 안정적으로 바꿉니다 (closes [#179](https://github.com/MMFoundation/WallpaperMachine/issues/179), closes [#181](https://github.com/MMFoundation/WallpaperMachine/issues/181)) ([de5f3bc](https://github.com/MMFoundation/WallpaperMachine/commit/de5f3bc866ec9bdd1c1a2fa4914acb8f40b26b73), [2f6edf1](https://github.com/MMFoundation/WallpaperMachine/commit/2f6edf11d0d362f818c7dc16cf8e275a1fb1452d), [46945f2](https://github.com/MMFoundation/WallpaperMachine/commit/46945f22c6813b0a5bcb9a06dd38a812c63c951a), [70ae180](https://github.com/MMFoundation/WallpaperMachine/commit/70ae1805780858c812501ac6e206dada8ce45aad), [2bb19f9](https://github.com/MMFoundation/WallpaperMachine/commit/2bb19f92c9b400a039d13dfd4909a4c590a6f532))
+- 항목 하나를 읽을 수 없어도 저장된 규칙, 재생 목록, 컬렉션이 더 이상 통째로 지워지지 않습니다 ([38cc583](https://github.com/MMFoundation/WallpaperMachine/commit/38cc5830a1f26aabd0b073f0fd9f791af6c47e95))
+
+#### 새로운 기능
+
+- 보관함에서 배경화면을 오른쪽 클릭하면 선택하지 않고도 적용, 모든 디스플레이에 적용, 즐겨찾기, Finder에서 보기, 재생 목록에 추가, 재설치, 휴지통으로 이동을 할 수 있습니다 ([7025ba3](https://github.com/MMFoundation/WallpaperMachine/commit/7025ba39f4c92f6c1af221aa3060c62aefb0e2a2))
+- 배경화면 파일이나 폴더를 보관함으로 끌어다 놓으면 가져올 수 있습니다 ([7025ba3](https://github.com/MMFoundation/WallpaperMachine/commit/7025ba39f4c92f6c1af221aa3060c62aefb0e2a2))
+- 보관함에서 키보드 단축키를 쓸 수 있어 Command-Return으로 배경화면을 적용하고 Command-Delete로 휴지통에 버리며, 파일 메뉴에 가져오기(Command-O)와 보관함 새로 고침(Command-R)이 추가되었습니다 ([7025ba3](https://github.com/MMFoundation/WallpaperMachine/commit/7025ba39f4c92f6c1af221aa3060c62aefb0e2a2))
+- 선택 막대의 즐겨찾기 버튼으로 선택한 배경화면을 한꺼번에 즐겨찾기에 추가하거나, 이미 모두 추가된 경우 한꺼번에 해제할 수 있습니다 ([7025ba3](https://github.com/MMFoundation/WallpaperMachine/commit/7025ba39f4c92f6c1af221aa3060c62aefb0e2a2))
+
+#### 개선 사항
+
+- 보관함 작업이 이제 결과를 알려 주어, 재생 목록에 추가는 추가한 개수나 재생되지 않는 이유를, 새로 고침과 다음 배경화면도 무슨 일이 있었는지 보여 줍니다 ([0207e6d](https://github.com/MMFoundation/WallpaperMachine/commit/0207e6d107df85ad68eadb5f9fe9440ebb609818))
+- 기록 지우기(최근 사용 순서도 초기화됨)와 시간 규칙 또는 앱 규칙 삭제 전에 이제 먼저 확인을 요청합니다 ([0207e6d](https://github.com/MMFoundation/WallpaperMachine/commit/0207e6d107df85ad68eadb5f9fe9440ebb609818))
+- 설정 › 정보 › 업데이트에서 상태, 마지막 확인 시각, 다음 동작을 한 줄로 보여 주며, 릴리스 노트는 별도 카드에 표시되고 이전 버전은 접혀 있습니다 ([7d57bed](https://github.com/MMFoundation/WallpaperMachine/commit/7d57bedd58318f85350cea000bf0c19243e29fca))
+- 보관함을 읽을 수 없으면 비어 보이는 대신 이유와 다시 시도 버튼을 보여 주고, 불러오지 못한 썸네일에는 빈칸 대신 표시가 나타납니다 ([0207e6d](https://github.com/MMFoundation/WallpaperMachine/commit/0207e6d107df85ad68eadb5f9fe9440ebb609818))
+
+#### 버그 수정
+
+- 스테이지 매니저로 데스크탑과 앱 사이를 전환해도 웹 배경화면이 멈추지 않고 계속 움직입니다 (closes [#177](https://github.com/MMFoundation/WallpaperMachine/issues/177)) ([0b05669](https://github.com/MMFoundation/WallpaperMachine/commit/0b056694495d0e8bc808908905d53b17a3d670cc), [e89ee04](https://github.com/MMFoundation/WallpaperMachine/commit/e89ee04186cc5f4263e7f95cb18b14272f26ead2))
+- 이전 버전으로 되돌린 경우처럼 항목 하나를 읽을 수 없어도 저장된 규칙, 재생 목록, 컬렉션, 앱 규칙이 더 이상 모두 지워지지 않습니다 ([38cc583](https://github.com/MMFoundation/WallpaperMachine/commit/38cc5830a1f26aabd0b073f0fd9f791af6c47e95))
+- Mac이 깨어나는 동안 재생 목록, 규칙 또는 일정이 배경화면을 바꿔도 미러링된 디스플레이가 한 배경화면에 머무르지 않고 원본 디스플레이를 계속 따릅니다 (closes [#179](https://github.com/MMFoundation/WallpaperMachine/issues/179)) ([de5f3bc](https://github.com/MMFoundation/WallpaperMachine/commit/de5f3bc866ec9bdd1c1a2fa4914acb8f40b26b73), [2f6edf1](https://github.com/MMFoundation/WallpaperMachine/commit/2f6edf11d0d362f818c7dc16cf8e275a1fb1452d))
+- 배경화면 변경이 중단되거나 컬렉션이 비어 있어도 재생 목록 순환이 다시 이어지며, 데스크탑으로 돌아오면 간격 전체를 처음부터 셉니다 (closes [#181](https://github.com/MMFoundation/WallpaperMachine/issues/181)) ([46945f2](https://github.com/MMFoundation/WallpaperMachine/commit/46945f22c6813b0a5bcb9a06dd38a812c63c951a))
+- 창작마당 업데이트나 장면 재시도로 디스플레이가 다시 로드되어도 집중 모드 배경화면과 집중 모드가 끝난 뒤 돌아오는 배경화면이 더 이상 건너뛰어지지 않습니다 ([2bb19f9](https://github.com/MMFoundation/WallpaperMachine/commit/2bb19f92c9b400a039d13dfd4909a4c590a6f532))
+- 구독 항목을 불러오는 중에 Steam에 다시 로그인해도 새 로그인 세션이 로그아웃되거나 이 Mac에서 삭제되지 않습니다 ([dd555eb](https://github.com/MMFoundation/WallpaperMachine/commit/dd555eb31e6746888f45688daca10cb0d6ec0ec2))
+- 낮과 밤에 따라 바뀌는 디스플레이에 직접 적용한 배경화면이 앱이 다시 시작되어도 다음 낮 또는 밤이 시작될 때까지 유지됩니다 ([70ae180](https://github.com/MMFoundation/WallpaperMachine/commit/70ae1805780858c812501ac6e206dada8ce45aad))
+- 배경화면 하나가 계속 로드되지 않아도 무작위 재생이 다시 한 회차에 모든 배경화면을 한 번씩 보여 주며 같은 배경화면을 반복하지 않습니다 ([70ae180](https://github.com/MMFoundation/WallpaperMachine/commit/70ae1805780858c812501ac6e206dada8ce45aad))
+- 낮과 밤의 시작 시각을 더 이상 같게 설정할 수 없어 밤 배경화면이 하루 종일 표시되는 문제가 사라졌습니다 ([70ae180](https://github.com/MMFoundation/WallpaperMachine/commit/70ae1805780858c812501ac6e206dada8ce45aad))
+
 ## [1.9.4](https://github.com/MMFoundation/WallpaperMachine/compare/v1.9.3...v1.9.4) (2026-11-09)
 
 ### English
