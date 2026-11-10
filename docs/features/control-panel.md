@@ -837,6 +837,8 @@ exists. Neither wallpaper reloads: the scenes stay on their displays.
 If a mirror temporarily becomes the main display and no independent wallpaper is
 chosen for it, its saved mirror source and any earlier wallpaper survive the handover
 back. It resumes following that source, including subsequent wallpaper changes.
+A playlist, rule or schedule changing the main display's wallpaper in that window
+counts as no choice: only the user's own apply replaces the mirror.
 
 The renderer titles displays by CoreGraphics vendor and model numbers
 (`Vendor 1552 - Model 41055 (1 - Primary)`). `DisplayTitleResolver`

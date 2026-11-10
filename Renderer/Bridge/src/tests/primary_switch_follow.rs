@@ -186,3 +186,85 @@ async fn choosing_a_wallpaper_while_a_mirror_is_main_replaces_its_saved_mirror()
     expect_last_owner(&engine, 1, "400");
     expect_last_owner(&engine, 3, "300");
 }
+
+/// #179, playlist case: a playlist rotation lands on `primary` while macOS
+/// briefly makes a mirrored display main during wake. That apply is not the
+/// user's choice, so the mirror's saved block must survive it and the mirror
+/// must follow the main display again once it is back.
+#[tokio::test]
+async fn an_automatic_apply_while_a_mirror_is_main_keeps_its_saved_mirror() {
+    let root = tempdir().unwrap();
+    let home = tempdir().unwrap();
+    let store = ConfigStore::open(root.path());
+    let (main, left, right) = (
+        identified("main", 3, 60),
+        identified("left", 2, 60),
+        identified("right", 1, 60),
+    );
+    let mirror = |selector| MonitorCfg {
+        selector,
+        mode: "mirror".into(),
+        mirror_target: Some(SerializedSelector::Primary),
+        ..MonitorCfg::default()
+    };
+    let left_config = mirror(left.connected_selector());
+    let right_config = mirror(right.connected_selector());
+    store.save_app_config(&AppConfig {
+        primary_display: Some(main.connected_selector()),
+        monitors: vec![
+            MonitorCfg {
+                wallpaper: Some("300".into()),
+                ..MonitorCfg::default()
+            },
+            left_config.clone(),
+            right_config.clone(),
+        ],
+        ..AppConfig::default()
+    }).unwrap();
+    for id in ["300", "400", "500"] {
+        store.save_wallpaper(&WallpaperConfig::new_for(id, "scene")).unwrap();
+    }
+    let engine = FakeEngineFacade::default();
+    let _release = EngineRelease::of(&engine);
+    engine.set_snapshot_after_refresh(vec![main.clone(), left.clone(), right.clone()]);
+    let bridge = crate::api::BridgeBuilder::new(engine.clone())
+        .with_config_store(store.clone())
+        .with_paths(BridgePaths::for_home(home.path()))
+        .build()
+        .unwrap();
+    for id in ["300", "400", "500"] {
+        bridge.inject_scene_wallpaper_config_for_test(id, "Scene").await;
+    }
+    bridge.bootstrap().await.unwrap();
+
+    // Wake: the right display is main for a moment, and the playlist advances.
+    engine.set_snapshot_after_refresh(vec![right.clone(), main.clone(), left.clone()]);
+    bridge.refresh_displays().await.unwrap();
+    bridge.set_display_config_enabled("400".into(), "primary".into(), true).await.unwrap();
+    bridge.apply_wallpaper_options("400".into(), false).await.unwrap();
+
+    // The real main display takes the role back.
+    engine.set_snapshot_after_refresh(vec![main, left, right]);
+    bridge.refresh_displays().await.unwrap();
+
+    let saved = store.load().unwrap().config;
+    for expected in [&left_config, &right_config] {
+        assert_eq!(
+            saved.monitors.iter().find(|row| row.selector == expected.selector),
+            Some(expected),
+            "an automatic apply while a mirror is main must not replace its saved mirror"
+        );
+    }
+    // The real main display's own block takes the role back, and both
+    // mirrors follow it again.
+    for id in [1, 2, 3] {
+        expect_last_owner(&engine, id, "300");
+    }
+
+    // A later rotation still reaches every mirror.
+    bridge.set_display_config_enabled("500".into(), "primary".into(), true).await.unwrap();
+    bridge.apply_wallpaper_options("500".into(), false).await.unwrap();
+    for id in [1, 2, 3] {
+        expect_last_owner(&engine, id, "500");
+    }
+}

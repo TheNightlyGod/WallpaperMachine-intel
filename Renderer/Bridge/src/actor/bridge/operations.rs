@@ -470,9 +470,23 @@ impl<E: EngineFacade + Clone> Message<ApplyWallpaperOptions> for BridgeActor<E> 
         ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         let displays = self.operation_engine().display_snapshot();
-        let primary = displays
-            .first()
-            .and_then(|display| display.stable_identity_selector());
+        let primary = {
+            let app = self.operation_app();
+            displays
+                .first()
+                .and_then(|display| display.stable_identity_selector())
+                // macOS can make a mirrored display main for a moment during
+                // wake (#179). An automatic apply (playlist, rule, schedule)
+                // then changes only what the main role shows: the mirror's own
+                // saved block stays, so the handover back can keep it. The
+                // user's own apply still replaces it.
+                .filter(|identity| {
+                    msg.user_initiated
+                        || !app.monitors.iter().any(|row| {
+                            &row.selector == identity && row.mode.eq_ignore_ascii_case("mirror")
+                        })
+                })
+        };
         let candidate = match self
             .operation_values()
             .prepare_apply(&msg.wallpaper_id, primary.as_ref())
