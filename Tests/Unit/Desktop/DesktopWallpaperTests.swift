@@ -1405,7 +1405,7 @@ final class DesktopWallpaperTests: XCTestCase {
             store: WallpaperAutomationStore(defaults: defaults), focus: FocusFilterState(defaults: defaults),
             displays: { [] }, targetDisplay: { "1" }, canRun: { _ in true },
             capture: { _ in .init(playlist: .init(), wallpaperID: "same-wallpaper") },
-            queue: { _, action in try await action(); return true },
+            queue: { _, action in try await action(); return .ran },
             apply: { _, _ in XCTFail("An appearance change without a rule must not select another wallpaper") },
             restore: { _, _, _ in XCTFail("No Focus choice to restore") },
             dark: { false }, center: NotificationCenter(), appearanceCenter: appearance)

@@ -16,7 +16,8 @@ final class WallpaperAutomationController {
             capture: { display in
                 .init(playlist: playlists.playlist(for: display), wallpaperID: bridge.shownWallpaperID(on: display))
             }, queue: { display, operation in
-                try await bridge.commands.run(slot: BridgeStore.activationSlot(displayId: display), origin: .automation, operation)
+                try await bridge.commands.runReporting(
+                    slot: BridgeStore.activationSlot(displayId: display), origin: .automation, operation)
             }, apply: { target, display in
                 try await Self.apply(target, to: display, bridge: bridge, playlists: playlists, collections: collections)
             }, restore: { state, display, preserveWallpaper in

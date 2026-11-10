@@ -97,6 +97,35 @@ final class UserCommandQueueTests: XCTestCase {
         XCTAssertEqual(log.entries, ["chosen", "later"])
     }
 
+    /// A command that did not run says who took its place: an automatic change has to know
+    /// whether the user chose something instead, or another automatic command merely got in first.
+    func testACommandThatDidNotRunSaysWhoTookItsPlace() async throws {
+        let queue = UserCommandQueue()
+        let gate = Gate()
+        let running = Task { try await queue.run(slot: "activate:2") { await gate.wait() } }
+        await until { queue.isBusy }
+
+        let rule = Task { try await queue.runReporting(slot: "activate:1", subject: "rule", origin: .automation) {} }
+        await until { queue.waiting.map(\.subject) == ["rule"] }
+        let reload = Task { try await queue.runReporting(slot: "activate:1", subject: "reload", origin: .updateReload) {} }
+        await until { queue.waiting.map(\.subject) == ["reload"] }
+        let ruleOutcome = try await rule.value
+        XCTAssertEqual(ruleOutcome, .replacedByAutomatic)
+
+        let chosen = Task { try await queue.runReporting(slot: "activate:1", subject: "chosen") {} }
+        await until { queue.waiting.map(\.subject) == ["chosen"] }
+        let reloadOutcome = try await reload.value
+        XCTAssertEqual(reloadOutcome, .replacedByUser)
+
+        let late = try await queue.runReporting(slot: "activate:1", subject: "late", origin: .playlist) {}
+        XCTAssertEqual(late, .yieldedToUser)
+
+        gate.open()
+        _ = try await running.value
+        let chosenOutcome = try await chosen.value
+        XCTAssertEqual(chosenOutcome, .ran)
+    }
+
     func testAutomaticCommandStillWaitsBehindACommandThatIsNotTheUsersChoiceInItsSlot() async throws {
         let queue = UserCommandQueue()
         let log = Log()

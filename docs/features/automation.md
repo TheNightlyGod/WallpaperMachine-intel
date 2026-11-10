@@ -40,7 +40,12 @@ After sleep, lock, pause, a covered display or a display that is not in use, onl
 when playback can run again. Manual wallpaper and playlist choices mark the current
 event handled, including across relaunch. A rule that comes due while your own
 Apply is waiting on that display, or running there, gives way to it and is not
-applied afterwards; it counts as handled, like a manual choice. Saving changed rules creates a new event
+applied afterwards; it counts as handled, like a manual choice. Another automatic command
+taking its place in the line is different: an update reloading the display's files, or a
+playlist change, replaces a rule or Focus change that was still waiting its turn, and
+because nothing the user chose stands in its place it stays due and is asked for again
+(`UserCommandQueue.Outcome`). A Focus wallpaper, or the restoration after a Focus, is
+therefore never lost to an update that happened to reload the display meanwhile. Saving changed rules creates a new event
 and may apply it immediately. A failed event is reported in the display's section
 and waits for **Retry automatic change** or a later event.
 

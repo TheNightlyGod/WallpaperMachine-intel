@@ -3,7 +3,10 @@ import AppKit
 /// Resolves one automatic choice per display; all mutations share the user's command queue.
 @MainActor
 final class WallpaperAutomationScheduler {
-    typealias Queue = @MainActor (String, @escaping @MainActor () async throws -> Void) async throws -> Bool
+    /// Runs the change in the display's command slot and says how that ended: whether it ran, and
+    /// when it did not, whether a choice of the user's or another automatic command took its place.
+    typealias Queue = @MainActor (String, @escaping @MainActor () async throws -> Void) async throws
+        -> UserCommandQueue.Outcome
     typealias Apply = @MainActor (WallpaperAutomationTarget, String) async throws -> Void
     typealias Restore = @MainActor (WallpaperAutomationDisplayState, String, Bool) async throws -> Void
 
@@ -242,7 +245,7 @@ final class WallpaperAutomationScheduler {
             defer { inFlight.remove(display); tasks[display] = nil; evaluate(); onSettled?() }
             var performed = false
             do {
-                let admitted = try await queue(display) { [self] in
+                let outcome = try await queue(display) { [self] in
                     try Task.checkCancellation()
                     guard self.started, self.displays().contains(display) else { return }
                     let resolution = self.desired(on: display)
@@ -260,11 +263,15 @@ final class WallpaperAutomationScheduler {
                         self.store.markHandled(event.key, on: display)
                     }
                 }
-                if !admitted, !performed {
-                    // A later command took this display's slot. Do not enqueue another copy
-                    // ahead of the user's accepted choice while that command is starting.
+                if !performed, outcome == .yieldedToUser || outcome == .replacedByUser {
+                    // The user's command took this display's slot. Do not enqueue another copy
+                    // ahead of that accepted choice while it is starting.
                     store.markHandled(key, on: display)
                 }
+                // Replaced by another automatic command (an update reloading the files, a playlist
+                // change): nothing the user chose stands in this change's place, so it is left
+                // unhandled and the evaluation that follows asks for it again. Marking it handled
+                // would drop a Focus wallpaper, or the restoration after one, for good.
             } catch is CancellationError {
                 return
             } catch {
