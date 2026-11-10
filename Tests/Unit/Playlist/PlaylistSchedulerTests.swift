@@ -344,6 +344,135 @@ final class PlaylistSchedulerTests: XCTestCase {
         XCTAssertEqual(applied, ["b", "c"])
     }
 
+    func testACoveredRotationInterruptedBeforeSelectionRetriesWhenPlaybackResumes() async {
+        store.update("primary") { $0.mode = .rotate; $0.interval = 5 }
+        var interrupt = true
+        let scheduler = makeScheduler(activate: { display, choose in
+            if interrupt {
+                // Sleep or a global playback pause can arrive after the timer fired but
+                // before the command gets to choose a wallpaper.
+                interrupt = false
+                self.unseen = false
+            }
+            guard let id = choose() else { return nil }
+            self.shown[display] = id
+            self.applied.append(id)
+            return id
+        })
+        scheduler.start()
+        defer { scheduler.stop() }
+        running = false
+        unseen = true
+        clock.addTimeInterval(5 * 60)
+        scheduler.evaluate()
+        await settle()
+        XCTAssertTrue(applied.isEmpty)
+
+        unseen = true
+        scheduler.evaluate()
+        await settle()
+        XCTAssertEqual(applied, ["b"], "an unmade change must not count as the covered display's change")
+        XCTAssertEqual(store.nextChange["primary"], clock.addingTimeInterval(5 * 60))
+    }
+
+    func testACoveredRotationThatFinishesDuringAPauseStillCountsAsItsHiddenChange() async throws {
+        store.update("primary") { $0.mode = .rotate; $0.interval = 5 }
+        let activation = AsyncGate()
+        let scheduler = makeScheduler(activate: { display, choose in
+            guard let id = choose() else { return nil }
+            await activation.wait()
+            self.shown[display] = id
+            self.applied.append(id)
+            return id
+        })
+        scheduler.start()
+        defer { activation.open(); scheduler.stop() }
+        running = false
+        unseen = true
+        clock.addTimeInterval(5 * 60)
+        scheduler.evaluate()
+        try await waitUntil { activation.waitingCount == 1 }
+
+        // A global pause or lock makes both eligibility queries false without
+        // revealing the desktop. The already-selected switch still succeeds.
+        unseen = false
+        scheduler.evaluate()
+        activation.open()
+        try await waitUntil { applied == ["b"] }
+
+        unseen = true
+        clock.addTimeInterval(5 * 60)
+        scheduler.evaluate()
+        await settle()
+        XCTAssertEqual(applied, ["b"], "resuming behind the same windows must not rotate again")
+        clock.addTimeInterval(3 * 60 * 60)
+        scheduler.evaluate()
+        await settle()
+        XCTAssertEqual(applied, ["b"], "the successful hidden change lasts until the desktop shows")
+
+        running = true
+        unseen = false
+        scheduler.evaluate()
+        XCTAssertEqual(store.nextChange["primary"], clock.addingTimeInterval(5 * 60))
+        clock.addTimeInterval(5 * 60)
+        scheduler.evaluate()
+        await settle()
+        XCTAssertEqual(applied, ["b", "c"])
+    }
+
+    func testACoveredRotationWithoutAnotherCandidateRetriesAtTheNextInterval() async throws {
+        let collection = try collections.create(name: "Rotation", wallpaperIDs: ["a"])
+        store.update("primary") {
+            $0.mode = .rotate; $0.interval = 5
+            $0.source = .collection; $0.collectionID = collection.id
+        }
+        let timer = ManualSleeper()
+        let scheduler = makeScheduler(sleep: { try await timer.sleep(.seconds($0)) })
+        scheduler.start()
+        defer { scheduler.stop() }
+        try await waitUntil { timer.pendingCount == 1 }
+        running = false
+        unseen = true
+        clock.addTimeInterval(5 * 60)
+        XCTAssertTrue(timer.fireNext())
+        try await waitUntil { timer.pendingCount == 1 }
+        XCTAssertTrue(applied.isEmpty)
+        XCTAssertEqual(store.nextChange["primary"], clock.addingTimeInterval(5 * 60))
+
+        try collections.add(["b"], to: collection.id)
+        clock.addTimeInterval(5 * 60)
+        XCTAssertTrue(timer.fireNext())
+        try await waitUntil { applied == ["b"] }
+        XCTAssertEqual(applied, ["b"], "new candidates can recover a rotation that has not changed yet")
+    }
+
+    func testShowingACoveredRotationBeforeItsDeadlineStartsAFullInterval() async {
+        store.update("primary") { $0.mode = .rotate; $0.interval = 5 }
+        let scheduler = makeScheduler()
+        scheduler.start()
+        defer { scheduler.stop() }
+        running = false
+        unseen = true
+        clock.addTimeInterval(5 * 60)
+        scheduler.evaluate()
+        await settle()
+        XCTAssertEqual(applied, ["b"])
+
+        clock.addTimeInterval(4 * 60)
+        running = true
+        unseen = false
+        scheduler.evaluate()
+        XCTAssertEqual(store.nextChange["primary"], clock.addingTimeInterval(5 * 60))
+        clock.addTimeInterval(60)
+        scheduler.evaluate()
+        await settle()
+        XCTAssertEqual(applied, ["b"], "the old deadline must not shorten the visible interval")
+        clock.addTimeInterval(4 * 60)
+        scheduler.evaluate()
+        await settle()
+        XCTAssertEqual(applied, ["b", "c"])
+    }
+
     func testAPlanAppliedToADisplayOutOfSightAppliesAtOnce() async throws {
         store.update("source") { $0.mode = .rotate; $0.interval = 5; $0.wallpaperIDs = ["c"]; $0.source = .list }
         let plan = try store.savePlan(from: "source", name: "Only c")

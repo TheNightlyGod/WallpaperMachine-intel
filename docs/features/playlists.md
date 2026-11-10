@@ -119,7 +119,14 @@ instead of switching in front of you. It changes once while it stays out of sigh
 a long full-screen session does not load a wallpaper every interval; when it shows
 again, the next change is a whole interval later rather than at once. A saved
 playlist chosen meanwhile still applies at once, and an edited one may change it
-again. Day and night switches at its boundary in the same way. A rotation set to
+again. Only a successful switch counts as that out-of-sight change: if playback
+pauses before selection, the due change waits until playback can resume, even if
+the display remains covered. A switch selected while covered that succeeds during
+a global pause or lock still counts as the hidden change; resuming behind the
+same windows does not allow another rotation. If no alternative is available or every attempt
+fails, the rotation tries again after its interval. Returning to the desktop
+starts a full interval even when the previous deadline is still in the future.
+Day and night switches at its boundary in the same way. A rotation set to
 change when the Mac is unlocked still waits for the display to show (see
 [below](#each-time-the-mac-is-unlocked)).
 

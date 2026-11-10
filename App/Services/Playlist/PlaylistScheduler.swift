@@ -326,15 +326,15 @@ final class PlaylistScheduler {
                     earliest = min(earliest ?? next, next)
                     continue
                 }
-                if due > date {
-                    earliest = min(earliest ?? due, due)
-                } else if inFlight.contains(display) {
-                    // The change under way dates the next one.
-                } else if running, changedOutOfSight {
+                if running, changedOutOfSight {
                     // What the user sees now is new to them: it gets a whole interval.
                     let next = date.addingTimeInterval(interval)
                     store.schedule(display, at: next)
                     earliest = min(earliest ?? next, next)
+                } else if due > date {
+                    earliest = min(earliest ?? due, due)
+                } else if inFlight.contains(display) {
+                    // The change under way dates the next one.
                 } else if running {
                     if let until = clipWait(on: display, playlist: playlist, due: due, revision: revision, at: date) {
                         waitingForClip.insert(display)
@@ -343,7 +343,6 @@ final class PlaylistScheduler {
                         rotate(display, playlist: playlist)
                     }
                 } else if !changedOutOfSight, isUnseen(display) {
-                    changedUnseen[display] = revision
                     AppLog.info("playlist: display \(display) is out of sight, so it changes behind the windows")
                     rotate(display, playlist: playlist)
                 }
@@ -482,8 +481,11 @@ final class PlaylistScheduler {
                 }
                 if remade {
                     // That change schedules the next interval once it is made.
-                } else if playlist.hasTimer, (attempted || isRunning(display)), (store.revisions[display] ?? 0) == revision,
+                } else if playlist.hasTimer, (attempted || isRunning(display) || isUnseen(display)),
+                          (store.revisions[display] ?? 0) == revision,
                           store.holds[display] == nil {
+                    // An eligible display with no alternative still needs another deadline.
+                    // Otherwise its next attempt would depend on an unrelated notification.
                     store.schedule(display, at: now().addingTimeInterval(Self.seconds(playlist.interval)))
                 } else {
                     evaluate()
@@ -492,6 +494,7 @@ final class PlaylistScheduler {
             var tried = Set<String>()
             for _ in 0..<Self.maximumAttempts {
                 var selected: String?
+                var selectedOutOfSight = false
                 var command: UInt64?
                 var candidates: [String] = []
                 do {
@@ -509,11 +512,18 @@ final class PlaylistScheduler {
                         selected = PlaylistPlanner.next(
                             after: current(display), in: candidates, order: latest.order,
                             recent: store.recent[display] ?? [], using: &random)
+                        selectedOutOfSight = !isRunning(display) && isUnseen(display)
                         command = commandRevision(display)
                         attempted = attempted || selected != nil
                         return selected
                     }
                     if let applied, (store.revisions[display] ?? 0) == revision {
+                        // Only a completed switch counts as the change made out of sight.
+                        // A global pause during activation makes isUnseen false without
+                        // showing the desktop, so keep the state from selection as well.
+                        if !isRunning(display), selectedOutOfSight || isUnseen(display) {
+                            changedUnseen[display] = revision
+                        }
                         store.clearFailure(applied, on: display)
                         // The round counts the wallpapers it can pick from: one that keeps failing
                         // is left out while it cools down, or the round would never end and every
