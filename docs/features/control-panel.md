@@ -56,7 +56,7 @@ title bar is one colour across the whole window, the page's, inspector included
 | Name | Beside the traffic lights: the app's mark, **WallpaperMachine** and the version, as the web panel had them. Under 960 points only the mark stays, with the name and version as its tooltip; VoiceOver reads "WallpaperMachine" and the version |
 | Tabs | In the middle of the title bar: **Library** (Installed), **Steam Workshop**, **pixiv** and **Settings**, each as wide as its name; in a window under 960 points they show their symbols alone, with the names as tooltips and VoiceOver labels, so the toolbar's tools keep their places. The page on show is tinted with the accent; VoiceOver reads them as buttons, that one as selected, in a group named **Main navigation** ([Pages and Settings](#pages-and-settings)) |
 | Toolbar | The window title, not drawn in the title bar (the tabs stand for it) but used by the Window menu and Mission Control, names the place on show: **All wallpapers**, **Favorites**, the collection's name, **Steam Workshop**, **pixiv**, or the Settings section's name (**Search results** while searching Settings). The subtitle counts All wallpapers (with the number of updates), Favorites and a collection, and says nothing while the library loads. On the right: activity pills while there is something to report (an import in progress or a result not yet looked at, which opens Import; SteamCMD setup in progress; pixiv saves, which lead to the pixiv page), the target-display menu (named by the screen alone; its items, tooltip and VoiceOver value keep the renderer's full title, and two screens of one name keep it on the button too), the downloads button and **Wallpaper details**, which shows and hides the inspector; Settings shows neither the menu nor **Wallpaper details**. The downloads button appears once there is download activity, rings itself with the batch's mean progress while anything transfers, and carries the batch summary (status, percent, network speed, time left, **needs attention**) as its label and tooltip. |
-| Page | Installed, Steam Workshop and pixiv open with one full-width search bar at the top (Command-F puts the keyboard in it), which stays in place when moving between them; VoiceOver names it for what it searches (**Search installed wallpapers**, **Search Steam Workshop**, **Search pixiv by tag**). Settings' search field heads its section list instead. **Installed**: a row of view chips, **All wallpapers** (its count, and an accent dot while Workshop updates exist, whose tooltip and VoiceOver value say how many) and **Favorites** (its count; it is Installed's own Favorite filter), lit for the view on show, plus the shown collection's chip, which puts the collection away ([Local collections](#local-collections)), and at the row's end **Play**, sharing one capsule with its order menu, which names the order (**In order** or **Shuffle**); they make the target display rotate through the view on show ([playlists](playlists.md#playing-from-installed)); then a header row (**Filter** with its count, the sort menu and its direction, then **Select**, **Refresh** and **Import**; in a narrow column the controls keep their places and drop their words, which stay as tooltips and VoiceOver names), the tile grid and a footer (how many a search or filter leaves, **Update N wallpapers**, the selection tools, the drag-select tip, what the last action did, or *Loading your library…*; with none of these it is not shown, since the subtitle counts the view). **Refresh** shows a progress ring while it rescans and the footer then says what it found (**Your library is up to date.**, or how many wallpapers were added and removed). A library that could not be read at all shows **Your wallpaper library could not be read** with the reason and **Try again**, never the empty-library invitation to import; a failed rescan of a library that was read before leaves its wallpapers on show and reports in the banner. **Steam Workshop** (the Discover page): a header with its lists (**Wallpapers**, **Collections**, **Your subscriptions**; one menu in the narrowest column), Filter, sort and Refresh (it searches from the page's search bar, which an author's or a collection's list leaves out); then the grid and a footer with the result summary and the pager (Previous, an editable page number with the number of pages, Next). A Workshop page is one Steam page of 30 tiles, at most 1,000 pages. **pixiv**: see [pixiv](pixiv.md#browsing) |
+| Page | Installed, Steam Workshop and pixiv open with one full-width search bar at the top (Command-F puts the keyboard in it), which stays in place when moving between them; VoiceOver names it for what it searches (**Search installed wallpapers**, **Search Steam Workshop**, **Search pixiv by tag**). Settings' search field heads its section list instead. **Installed**: a row of view chips, **All wallpapers** (its count, and an accent dot while Workshop updates exist, whose tooltip and VoiceOver value say how many) and **Favorites** (its count; it is Installed's own Favorite filter), lit for the view on show, plus the shown collection's chip, which puts the collection away ([Local collections](#local-collections)), and at the row's end **Play**, sharing one capsule with its order menu, which names the order (**In order** or **Shuffle**); they make the target display rotate through the view on show ([playlists](playlists.md#playing-from-installed)); then a header row (**Filter** with its count, the sort menu and its direction, then **Select**, **Refresh** and **Import**; in a narrow column the controls keep their places and drop their words, which stay as tooltips and VoiceOver names), the tile grid and a footer (how many a search or filter leaves, **Update N wallpapers**, the selection tools, the drag-select tip, what the last action did, or *Loading your library…*; with none of these it is not shown, since the subtitle counts the view). **Refresh** (also **File › Refresh Library**, `Command`-`R`) shows a progress ring while it rescans and the footer then says what it found (**Your library is up to date.**, or how many wallpapers were added and removed). A library that could not be read at all shows **Your wallpaper library could not be read** with the reason and **Try again**, never the empty-library invitation to import; a failed rescan of a library that was read before leaves its wallpapers on show and reports in the banner. **Steam Workshop** (the Discover page): a header with its lists (**Wallpapers**, **Collections**, **Your subscriptions**; one menu in the narrowest column), Filter, sort and Refresh (it searches from the page's search bar, which an author's or a collection's list leaves out); then the grid and a footer with the result summary and the pager (Previous, an editable page number with the number of pages, Next). A Workshop page is one Steam page of 30 tiles, at most 1,000 pages. **pixiv**: see [pixiv](pixiv.md#browsing) |
 | Filters sidebar | A floating panel at the page's leading edge, opened from the page's **Filter** button on Installed, Discover and pixiv ([Filtering](#filtering)) |
 | Inspector | A column of the page along its trailing edge (not the system's inspector column, which gave the title bar a second shade): preview, title, facts, actions, tags, and the selected wallpaper's options and properties ([wallpaper properties](wallpaper-properties.md)). 300 points wide; dragging its leading edge resizes it from 260 to 420. It starts open in a window 960 points wide or more and closed in a narrower one, and follows the width once a resize has settled, until the person opens or closes it with **Wallpaper details**: that choice then holds whatever the width, also across a visit to Settings, which has none. Nothing is stored. The top of an installed wallpaper's inspector is washed with a blurred copy of its still (never the animation); the sections below are collapsible cards |
 | Now Playing | The bar along the bottom of the window, on every page: the target display's wallpaper, which opens its details, and the playback controls ([Now Playing](#now-playing)) |
@@ -417,6 +417,17 @@ Installed's update arrow. VoiceOver reads the marks with the tile.
 Selecting a tile only selects it: the inspector updates and nothing changes on
 screen. Activation is explicit.
 
+A right click on an Installed tile opens the actions for that tile without selecting it
+first: **Apply wallpaper**, **Add to favorites** or **Remove from favorites**, then what
+the inspector's **More actions** menu offers (Preview, **Show in Finder**, **Apply to all
+displays**, the display's list, **Reinstall from Workshop…** and **Move wallpaper to
+Trash**), under the same rules. The two menus are one list of items
+(`WallpaperActionItems`); sharing, the Steam subscription, the author's page and the
+problem report stay in the inspector's. The menu acts on the tile that was clicked, never
+on the ticked selection, whose tools are in the bar under the grid. With the keyboard,
+`Return` or `Space` on a focused tile selects it and `Command`-`Return` applies it, as a
+double click does.
+
 - **Apply wallpaper** activates the selected wallpaper on the current target
   display; for the wallpaper already active there it reads **Reapply wallpaper**.
   An Installed tile shows an **Applying** spinner while its apply runs and a quiet
@@ -722,19 +733,22 @@ folder removed outside the app, can keep its assignment: once the library has be
 scanned the renderer leaves that display empty rather than failing every apply,
 and reinstalling the wallpaper brings the assignment back.
 
-- Single: **Move wallpaper to Trash** in the inspector's **More actions** menu, or
-  `Delete` (either key) on a focused tile.
+- Single: **Move wallpaper to Trash** in the inspector's **More actions** menu or the
+  tile's right-click menu, or `Delete` (either key, with or without `Command`, as in the
+  Finder) on a focused tile.
 - Batch: **Select** in Installed's header row switches the grid into selection
   mode, where every tile shows a check and clicking a tile toggles it;
   `Shift`-click extends across the shown order and **Select all** in the footer
   ticks every tile the current search and filters show. Outside selection mode the
   check appears on hover and `Command`-click (or `Control`-click) toggles it. The
-  footer shows the count with **Select all**, **Clear**, **Add to playlist**,
-  **Move N to Trash** and **Add to collection…**. **Add to playlist** says
+  footer shows the count with **Select all**, **Clear**, **Add to playlist**, the
+  favorite tool, **Move N to Trash** and **Add to collection…**. **Add to playlist** says
   how many wallpapers it added to the target display's list, and when that display's
   playlist is off or plays something other than its list, says that too and links to
-  **Playlist settings** (Settings › Displays). A batch takes at most 4,096 wallpapers and
-  says so when more are ticked. `Delete` acts on the selection from
+  **Playlist settings** (Settings › Displays). The favorite tool reads **Add to
+  favorites** and makes every ticked wallpaper a favorite, or **Remove from favorites**
+  when they all are. A batch takes at most 4,096 wallpapers and says so when more are
+  ticked. `Delete` acts on the selection from
   the grid, and `Escape` or **Done** leaves selection mode and clears the selection.
   The selection survives a change of view, search or filter. One confirmation sheet
   covers the whole batch, every wallpaper is trashed independently, the library
@@ -957,7 +971,8 @@ Several tiles download at once and the toolbar's downloads button sums them (its
 ring and label carry the batch's progress and summary). The Downloads popover opens
 from that button, which appears while downloads exist, and from **Show in
 downloads** in the inspector; it always hangs from the toolbar button. The Import
-popover opens from **Import** in Installed's header row; imports copy source files
+popover opens from **Import** in Installed's header row, and **File › Import…**
+(`Command`-`O`) opens its file picker while the panel is open; imports copy source files
 into the library and leave the originals untouched, with a duplicate policy of
 **Skip duplicates**, **Keep both copies** or **Replace if changed**. Closing a
 popover, or the window,
@@ -983,7 +998,9 @@ long side exceeds 8,192 px. Its **Image fit** and **Background color** labels ar
 translated like pixiv's. A picture ImageIO cannot measure or scale is reported and
 not imported. A Workshop preset folder is imported as one self-contained wallpaper
 built on its base, found next to it (a Steam library) or already in the library; see
-[Workshop presets](workshop-downloads.md#workshop-presets). Files dropped on the
+[Workshop presets](workshop-downloads.md#workshop-presets). Files and folders dropped on
+the Installed page are imported with the popover's duplicate policy (the page shows an
+outline while they are over it, and refuses the drop while an import runs). Files dropped on the
 Dock icon, or opened with WallpaperMachine from Finder (`CFBundleDocumentTypes` in
 `Info.plist`, rank Alternate, so the app never becomes a default), are imported the
 same way with **Skip duplicates**, and the window opens on Installed with the

@@ -47,10 +47,43 @@ final class LibraryCollectionTests: PanelTestCase {
     return view.subviews.lazy.compactMap { self.grid(in: $0) }.first
   }
 
-  private func key(_ code: UInt16, window: NSWindow) -> NSEvent {
-    NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+  private func key(_ code: UInt16, command: Bool = false, window: NSWindow) -> NSEvent {
+    NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: command ? [.command] : [], timestamp: 0,
       windowNumber: window.windowNumber, context: nil, characters: "", charactersIgnoringModifiers: "",
       isARepeat: false, keyCode: code)!
+  }
+
+  /// Command-Delete asks to move the focused wallpaper to the Trash, as the Finder's shortcut
+  /// does, and Command-Return applies it. Return alone still only chooses it for the inspector,
+  /// and a Command key the grid has no use for is left to the menus.
+  func testCommandDeleteTrashesAndCommandReturnAppliesTheFocusedTile() async throws {
+    // A bridge that really applies: the primary display shows `a`, and `c` is on neither display.
+    try await withApplyingPanel { panel, bridge, _ in
+      panel.show()
+      let hosted = HostedPanel(panel, size: NSSize(width: 1240, height: 800))
+      defer { hosted.close() }
+      try await hosted.settle(0.3)
+      let coordinator = try XCTUnwrap(self.grid(in: hosted.hosting.view))
+      let controller = panel.controller
+      let id = try XCTUnwrap(coordinator.rows.first { $0.id == "c" }?.id)
+      coordinator.focus(id, byKeyboard: true)
+
+      XCTAssertFalse(
+        coordinator.keyDown(self.key(35, command: true, window: hosted.window)), "Command-P is not the grid's")
+      XCTAssertTrue(coordinator.keyDown(self.key(36, window: hosted.window)))
+      try await panel.waitUntil { controller.selectedWallpaperID == id }
+      XCTAssertEqual(bridge.assignments["primary"], "a", "Return alone chooses the wallpaper for the inspector")
+
+      XCTAssertTrue(coordinator.keyDown(self.key(36, command: true, window: hosted.window)))
+      try await panel.waitUntil { bridge.assignments["primary"] == id }
+
+      try await panel.waitUntil { controller.library.canTrash }
+      XCTAssertTrue(coordinator.keyDown(self.key(51, command: true, window: hosted.window)))
+      try await panel.waitUntil { !panel.dialogs.confirmations.isEmpty }
+      XCTAssertEqual(panel.dialogs.confirmations.count, 1, "the Trash still asks first")
+      try await panel.waitUntil { !controller.isBusy(PanelActionCoordinator.key("deleteMany")) }
+      XCTAssertFalse(hosted.window.isVisible)
+    }
   }
 
   func testLayoutQueriesOnlyIntersectingRowsAndKeepsSweepCoordinatesInSync() {

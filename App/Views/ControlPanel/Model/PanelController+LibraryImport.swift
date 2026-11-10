@@ -42,6 +42,24 @@ extension PanelController {
     }
   }
 
+  /// `importDropped`: starts the import with the files and folders dropped on the window, as a
+  /// drop on the app's Dock icon does (`AppDelegate.importOpenedFiles`). `duplicates` is the
+  /// Import popover's choice. Anything that is not a file is left out, and a drop of none starts
+  /// nothing. Refused while an import runs or the picker is open, like the picker itself.
+  func importDropped(
+    _ urls: [URL], duplicates: WallpaperImportService.DuplicatePolicy = .skip
+  ) async throws {
+    let files = urls.filter(\.isFileURL)
+    guard !files.isEmpty else { return }
+    try await run(.queued) {
+      guard !imports.isBusy, !importPicker.isPresenting else {
+        throw WallpaperActionError(message: L("An import is already running."))
+      }
+      guard !isStopped else { return }
+      try imports.start(files, duplicates: duplicates)
+    }
+  }
+
   /// `importCancel`: stops the running import, which then reports what it had done.
   func cancelImport() { imports.cancel() }
 }

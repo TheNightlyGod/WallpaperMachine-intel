@@ -123,7 +123,17 @@ extension LibraryCollectionCoordinator {
         model.selectAllVisible()
         return true
       }
-      return false
+      switch event.keyCode {
+      // Command-Delete, the Finder's Move to Trash: the same confirmed delete as the plain key.
+      case 51, 117: return model.deleteSelectionOrFocused()
+      // Command-Return applies the focused wallpaper, which a double click does with the pointer.
+      // Return alone still chooses it for the inspector.
+      case 36, 76:
+        guard let id = model.focusedID ?? lastFocusedID else { return false }
+        model.activate(id)
+        return true
+      default: return false
+      }
     }
     switch event.keyCode {
     case 51, 117: return model.deleteSelectionOrFocused()

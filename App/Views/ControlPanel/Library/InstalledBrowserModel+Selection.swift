@@ -169,6 +169,25 @@ extension InstalledBrowserModel {
     }
   }
 
+  /// Whether every ticked wallpaper is a favorite already, which makes the favorite tool the one
+  /// that takes them out.
+  var selectionIsAllFavorites: Bool {
+    let ids = selectedIDs
+    return !ids.isEmpty && ids.allSatisfy(controller.favoriteIDs.contains)
+  }
+
+  /// Makes the ticked wallpapers favorites, or, when they all are, none of them. The hearts on
+  /// the tiles show the result; the selection stays.
+  @discardableResult
+  func favoriteSelection() -> Task<Void, Never>? {
+    let ids = selectedIDs
+    guard !ids.isEmpty else { return nil }
+    let makesFavorites = !selectionIsAllFavorites
+    return controller.launch(PanelActionCoordinator.key("favoriteMany")) { [controller] in
+      try await controller.setFavorite(makesFavorites, ids: ids)
+    }
+  }
+
   /// Whether Move to Trash can run now: not while the renderer is busy applying something, and not
   /// twice at once.
   var canTrash: Bool {

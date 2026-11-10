@@ -9,6 +9,9 @@ import SwiftUI
 /// they were, and a reopened window restores them.
 struct InstalledPage: View {
   @Environment(PanelController.self) private var controller
+  @Environment(\.panelTheme) private var theme
+  /// Files are being dragged over the page.
+  @State private var isDropTargeted = false
 
   var body: some View {
     let model = controller.library
@@ -17,6 +20,24 @@ struct InstalledPage: View {
     // has beside an open inspector, and AppKit throws "needing another Update Constraints pass".
     GeometryReader { proxy in
       InstalledColumn().frame(width: proxy.size.width, height: proxy.size.height)
+    }
+    // Wallpaper files and folders dragged from the Finder import as the picker's would. The page
+    // only hands the URLs on: the import service reads them, off the main actor.
+    .dropDestination(for: URL.self) { urls, _ in
+      model.importDropped(urls) != nil
+    } isTargeted: { isDropTargeted = $0 }
+    .overlay {
+      if isDropTargeted {
+        RoundedRectangle(cornerRadius: 10, style: .continuous)
+          .strokeBorder(theme.accent.accent.color, lineWidth: 2)
+          .background(
+            theme.accent.accent.color.opacity(0.08),
+            in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+          )
+          .padding(6)
+          .allowsHitTesting(false)
+          .accessibilityHidden(true)
+      }
     }
     .onAppear {
       model.pruneSelection()

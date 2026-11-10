@@ -181,7 +181,9 @@ struct ImportPopover: View {
   private var notes: some View {
     VStack(alignment: .leading, spacing: 6) {
       note("doc.on.doc", Text("The library gets its own copy; your originals stay untouched."))
-      note("dock.rectangle", Text("You can also drop them on WallpaperMachine in the Dock."))
+      note(
+        "dock.rectangle",
+        Text("You can also drop them on the library, or on WallpaperMachine in the Dock."))
     }
     .padding(.top, 2)
   }

@@ -167,116 +167,16 @@ struct InspectorActionRow: View {
 }
 
 /// Preview, Show in Finder, Share, Apply to all displays, the playlist, Reinstall, the problem
-/// report and the Trash.
+/// report and the Trash: the items a right click on the wallpaper's tile offers too
+/// (`WallpaperActionItems`).
 struct InspectorMoreMenu: View {
   let row: LibraryRow
 
   @Environment(PanelController.self) private var controller
-  @Environment(\.panelTheme) private var theme
 
   var body: some View {
-    let target = controller.targetDisplay
-    let shared = controller.standaloneDisplayRows
-    let offersAll = InspectorPolicy.offersApplyToAll(row, sharedDisplayCount: shared.count)
-    let everywhere = InspectorPolicy.appliesEverywhereAlready(
-      row.id, sharedDisplayWallpapers: shared.map(\.wallpaperID))
-    let playlist = InspectorPolicy.playlistToggle(
-      row, target: target, listedIDs: target.map { controller.playlistState(for: $0.id).playlist.wallpaperIDs } ?? [])
-    let canReinstall = controller.canReinstall(row.id)
-    let issue = controller.inspectorIssueReportURL(for: row)
     Menu {
-      if InspectorPolicy.offersPreview(kind: row.kind, previewAvailable: controller.previewAvailable) {
-        Button {
-          controller.launch(PanelActionCoordinator.key("previewWallpaper", id: row.id)) {
-            try await controller.previewWithTypedText(row.id)
-          }
-        } label: {
-          Label("Preview wallpaper", systemImage: "eye")
-        }
-        .help(L("Open a live preview without changing your desktop"))
-      }
-      Button {
-        controller.launch(PanelActionCoordinator.key("reveal", id: row.id)) {
-          try await controller.reveal(row.id)
-        }
-      } label: {
-        Label("Show in Finder", systemImage: "folder")
-      }
-      // Only a Workshop wallpaper has a page to share.
-      if let share = controller.wallpaperShare(row.id) {
-        ShareLink(
-          item: share.url, subject: Text(verbatim: share.subject),
-          message: Text(verbatim: share.message)
-        ) {
-          Label("Share…", systemImage: "square.and.arrow.up")
-        }
-      }
-      if isWorkshop {
-        if controller.workshop.steamWebSession != nil { subscription }
-        Button {
-          controller.launch(PanelActionCoordinator.key("workshopCreator", id: row.id)) {
-            try await controller.openInstalledWorkshopAuthor(id: row.id)
-          }
-        } label: {
-          Label("More by this author", systemImage: "person.crop.rectangle.stack")
-        }
-      }
-      if offersAll {
-        Button {
-          controller.launch(PanelActionCoordinator.key("activateAll", id: row.id)) {
-            try await controller.activateAll(row.id)
-          }
-        } label: {
-          Label("Apply to all displays", systemImage: "display.2")
-        }
-        .disabled(everywhere)
-      }
-      switch playlist {
-      case .hidden: EmptyView()
-      case .enabled(let isListed), .disabled(let isListed):
-        let enabled = playlist == .enabled(isListed: isListed)
-        Button {
-          controller.launch(PanelActionCoordinator.key("playlist", id: row.id)) {
-            if isListed {
-              try await controller.removeFromPlaylist(row.id)
-            } else {
-              try await controller.addToPlaylist([row.id])
-            }
-          }
-        } label: {
-          if isListed {
-            Label("Remove from this display’s playlist", systemImage: "text.badge.minus")
-          } else {
-            Label("Add to this display’s playlist", systemImage: "text.badge.plus")
-          }
-        }
-        .disabled(!enabled)
-      }
-      if canReinstall {
-        Button {
-          controller.launch(PanelActionCoordinator.key("workshopReinstall", id: row.id)) {
-            try await controller.reinstallWorkshopItem(id: row.id)
-          }
-        } label: {
-          Label("Reinstall from Workshop…", systemImage: "arrow.triangle.2.circlepath")
-        }
-      }
-      Divider()
-      if let issue {
-        Button {
-          ExternalLink.open(issue)
-        } label: {
-          Label("Report this problem on GitHub", systemImage: "exclamationmark.bubble")
-        }
-      }
-      Button(role: .destructive) {
-        controller.launch(PanelActionCoordinator.key("delete", id: row.id)) {
-          try await controller.delete(row.id)
-        }
-      } label: {
-        Label("Move wallpaper to Trash", systemImage: "trash")
-      }
-      .disabled(!controller.canMoveToTrash(row.id))
+      WallpaperActionItems(row: row, placement: .inspector)
     } label: {
       Image(systemName: "ellipsis")
     }
@@ -290,27 +190,7 @@ struct InspectorMoreMenu: View {
     // The subscription item's label needs the account's subscriptions, as Discover's tiles do;
     // asked again for another wallpaper or sign-in, which also retries a read that failed.
     .task(id: "\(row.id) \(controller.workshop.steamWebSession?.steamID ?? "")") {
-      if isWorkshop { controller.workshopBrowser.readSubscriptionsOnce() }
+      if InspectorPolicy.isWorkshopID(row.id) { controller.workshopBrowser.readSubscriptionsOnce() }
     }
-  }
-
-  private var isWorkshop: Bool { InspectorPolicy.isWorkshopID(row.id) }
-
-  /// **Subscribe on Steam** or **Unsubscribe on Steam**, for the signed-in Steam Community account,
-  /// as in Discover's inspector.
-  private var subscription: some View {
-    let subscribed = controller.workshop.subscribedIDs.contains(row.id)
-    let key = PanelActionCoordinator.key("workshopSubscription", id: row.id)
-    return Button {
-      controller.launch(key) { try await controller.setInstalledWorkshopSubscribed(!subscribed, id: row.id) }
-    } label: {
-      if subscribed {
-        Label("Unsubscribe on Steam", systemImage: "bookmark.slash")
-      } else {
-        Label("Subscribe on Steam", systemImage: "bookmark")
-      }
-    }
-    // Until Steam has answered for this account, a missing mark may be a subscription after all.
-    .disabled(controller.isBusy(key) || !controller.workshop.subscriptionsKnown)
   }
 }

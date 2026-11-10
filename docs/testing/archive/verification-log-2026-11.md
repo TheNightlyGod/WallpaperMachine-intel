@@ -9,6 +9,18 @@ level.
 These are historical results about the trees they were taken on. They are not
 evidence about the current tree and must never be cited as such.
 
+## 2026-11-07 — Persistent, nonintrusive app updates
+
+Existing updater retained: three modes, conservative migration, per-version postponement, verified complete-package recovery, passive update surfaces and artifact-derived publish metadata.
+
+- python3 -m unittest scripts.tests.test_update_manifest scripts.tests.test_publish_release scripts.tests.test_dmg scripts.tests.test_package scripts.tests.test_localization_catalogs — passed, 76 tests; real synthetic signed DMG metadata round trip included.
+- python3 scripts/test.py --only AppUpdatePolicyTests --only AppUpdatePersistenceTests --only AppUpdateTests --only AppReleaseHistoryTests --only UpdateWindowTests --only UpdatePresentationTests --only AboutSettingsTests --only StatusPanelModelTests --only StatusPanelControllerTests --only StatusPanelRenderTests --only FirstRunModelTests --only WelcomeRenderTests --only SettingsSectionsLocalizationTests — passed, 199 tests at the targeted checkpoint; final additional coordinator coverage included in the full gate.
+- python3 scripts/test.py — passed once at completion: all 32 Python modules passed; native 4,642 passed, 0 failed, 66 skipped of 4,708. One runtime warning reported by the runner; skips are not passing evidence.
+- Cache and installer tests use isolated temporary paths/defaults and fake restart/open actions; they do not replace the installed app.
+- git diff --check and introduced documentation-link targets — passed. CLAUDE.md remains a relative symlink to AGENTS.md.
+- Not run: authorized desktop/UI session, live old-to-new release update, production signing/notarization/publishing, or a Release delivery build. No app launch/restart, release or push performed.
+- Rust/C++ renderer checks not applicable: no renderer changes. Task-owned transient test artifacts removed after recording the results.
+
 ## 2026-11-07 — Preserve saved sign-ins when keychain updates fail
 
 - pixiv and Steam Community now share generic-password storage; refused updates preserve the saved item and the original keychain status.

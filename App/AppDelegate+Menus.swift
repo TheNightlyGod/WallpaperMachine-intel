@@ -90,6 +90,15 @@ extension AppDelegate: NSMenuDelegate, NSMenuItemValidation {
 
         let fileItem = NSMenuItem()
         let fileMenu = NSMenu(title: String(localized: "File"))
+        // The library's own two commands, for whoever looks for them in the menu bar or reaches
+        // for the keys every Mac app gives them.
+        let importItem = menuItem("Import…", action: #selector(importWallpapers))
+        importItem.keyEquivalent = "o"
+        fileMenu.addItem(importItem)
+        let refresh = menuItem("Refresh Library", action: #selector(refreshLibrary))
+        refresh.keyEquivalent = "r"
+        fileMenu.addItem(refresh)
+        fileMenu.addItem(.separator())
         let close = NSMenuItem(title: String(localized: "Close"), action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         fileMenu.addItem(close)
         fileItem.submenu = fileMenu
@@ -192,6 +201,19 @@ extension AppDelegate: NSMenuDelegate, NSMenuItemValidation {
     @objc private func zoomTilesIn() { controlPanelNavigation.tileZoomTarget?.zoomTiles(.zoomIn) }
     @objc private func zoomTilesOut() { controlPanelNavigation.tileZoomTarget?.zoomTiles(.zoomOut) }
     @objc private func resetTileZoom() { controlPanelNavigation.tileZoomTarget?.zoomTiles(.actualSize) }
+
+    /// File › Import…: the library's file picker, on Installed. For an open panel, like the zoom
+    /// commands: the picker is a sheet on its window.
+    @objc private func importWallpapers() {
+        guard let panel = controlPanelNavigation.tileZoomTarget else { return }
+        showControlPanel(selection: .wallpaper)
+        panel.library.chooseImportFiles()
+    }
+
+    /// File › Refresh Library: the Installed page's Refresh, which says what it found.
+    @objc private func refreshLibrary() {
+        controlPanelNavigation.tileZoomTarget?.library.refreshLibrary()
+    }
 
     /// The website's guides, in Chinese for either Chinese and in English otherwise, the two
     /// languages they are written in.
@@ -449,6 +471,12 @@ extension AppDelegate: NSMenuDelegate, NSMenuItemValidation {
             default: nil
             }
         if let zoom { return controlPanelNavigation.tileZoomTarget?.canZoomTiles(zoom) ?? false }
+        // The library's commands need an open panel, and Refresh is not offered twice at once.
+        if item.action == #selector(importWallpapers) { return controlPanelNavigation.tileZoomTarget != nil }
+        if item.action == #selector(refreshLibrary) {
+            guard let panel = controlPanelNavigation.tileZoomTarget else { return false }
+            return !panel.isLibraryLoading && !panel.isBusy(PanelActionCoordinator.key("refresh"))
+        }
         return true
     }
 

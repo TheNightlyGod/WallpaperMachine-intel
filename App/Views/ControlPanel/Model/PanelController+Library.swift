@@ -190,6 +190,19 @@ extension PanelController {
     }
   }
 
+  /// `favoriteMany`: makes every installed wallpaper of `ids` a favorite, or takes them all out.
+  /// Direct, like `toggleFavorite`, and one write whatever the number.
+  func setFavorite(_ favorite: Bool, ids: [String]) async throws {
+    try await run(.direct) {
+      let ids = try installedWallpaperIDs(ids)
+      var updated = favoriteIDs
+      if favorite { updated.formUnion(ids) } else { updated.subtract(ids) }
+      guard updated != favoriteIDs else { return }
+      try PanelPreferences.saveFavorites(updated, in: defaults)
+      favoriteIDs = updated
+    }
+  }
+
   /// Drops deleted wallpapers from the favorites.
   func forgetFavorites(_ ids: [String]) throws {
     guard ids.contains(where: favoriteIDs.contains) else { return }

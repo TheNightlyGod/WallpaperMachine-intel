@@ -15,6 +15,7 @@ struct InstalledTile: View {
   @Environment(PanelController.self) private var controller
   @Environment(\.panelTheme) private var theme
   @Environment(\.libraryCollectionTile) private var collectionTile
+  @Environment(\.locale) private var locale
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
   @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
   @Environment(\.accessibilitySwitchControlEnabled) private var switchControlEnabled
@@ -82,6 +83,14 @@ struct InstalledTile: View {
     .scaleEffect(isArming ? 0.97 : 1)
     .animation(reduceMotion ? nil : .easeOut(duration: 0.35), value: isArming)
     .onTapGesture { click(model) }
+    // A right click offers what the inspector's More menu does, for this tile, without choosing
+    // it first. The items are one view, built when the menu opens: a tile that scrolls by pays
+    // for none of them.
+    .contextMenu {
+      WallpaperActionItems(row: row, placement: .tile)
+        .environment(controller)
+        .environment(\.locale, locale)
+    }
     .accessibilityValue(Text(verbatim: marks.names.joined(separator: ", ")))
     .accessibilityAddTraits(.isButton)
     .accessibilityAction { model.tileActivated(row.id) }

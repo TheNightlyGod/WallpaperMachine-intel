@@ -89,7 +89,7 @@ brew install --cask wallpapermachine
 | [**电池**](docs/features/performance.md#playback) | 使用电池时，继续运行、降到你选择的渲染比例和帧率、暂停，或者只在你使用其他应用时暂停。低电量模式、Mac 过热和电量低时，也可以同样降低画质而不是暂停。在你选定之前保持关闭。其余播放与画质选项在[性能](docs/features/performance.md)中。 |
 | [**能耗**](docs/features/performance.md#energy-use) | “设置 → 性能”会显示应用消耗的功率；在笔记本电脑上，还会显示它每小时消耗的电量占满电的比例。在那里更改设置，它会对比前后的差异。每张已安装的壁纸在测量后都会有自己的能耗评级。 |
 | [**原生体验**](docs/features/appearance.md) | 和 macOS 的其他部分一样，支持浅色、深色和你的强调色，界面提供 [English、简体中文、繁體中文、日本語、한국어和 Português](docs/features/control-panel.md#language)。 |
-| [**导入**](docs/features/control-panel.md#downloads-and-import) | 带入你已有的 Wallpaper Engine 文件夹，或你自己的视频和图片。把它们拖到程序坞图标上，或使用“导入”；应用会复制它们，原文件保持不动。 |
+| [**导入**](docs/features/control-panel.md#downloads-and-import) | 带入你已有的 Wallpaper Engine 文件夹，或你自己的视频和图片。把它们拖到壁纸库或程序坞图标上，或使用“导入”；应用会复制它们，原文件保持不动。 |
 | [**备份你的设置**](docs/features/backup-restore.md#local-backup-and-restore) | 导出设置和保留的文件，还可以包含整个壁纸库；在下次启动时执行可撤回的恢复之前，先预览冲突。登录信息和密码只留在这台 Mac 上。 |
 | [**外置硬盘**](docs/features/library-location.md) | 把壁纸库和下载放在外置硬盘或其他文件夹中，随时都能移回这台 Mac。设置和 Steam 登录信息仍留在这台 Mac 上。 |
 | [**图片摆放**](docs/features/wallpaper-properties.md#image-placement) | 在每台显示器上分别拖动、定位和缩放导入的图片和保存的 pixiv 页面，不改动原图。 |

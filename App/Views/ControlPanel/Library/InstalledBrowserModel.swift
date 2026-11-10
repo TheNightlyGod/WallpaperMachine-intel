@@ -665,4 +665,15 @@ final class InstalledBrowserModel {
       try await controller.beginImport(duplicates: duplicates)
     }
   }
+
+  /// Files and folders dropped on the page: the import the picker would start with them, with the
+  /// popover's choice for duplicates. Nil when the drop holds no file, so it is not taken.
+  @discardableResult
+  func importDropped(_ urls: [URL]) -> Task<Void, Never>? {
+    guard urls.contains(where: \.isFileURL) else { return nil }
+    let duplicates = importDuplicates
+    return controller.launch(PanelActionCoordinator.key("import")) { [controller] in
+      try await controller.importDropped(urls, duplicates: duplicates)
+    }
+  }
 }
