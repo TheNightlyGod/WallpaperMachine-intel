@@ -82,6 +82,32 @@ final class PlaybackPreferencesTests: XCTestCase {
         XCTAssertTrue(preferences.appRules.isEmpty)
     }
 
+    /// A rule with an action a newer build saved cannot be read here. The rule beside it still
+    /// loads, and changing that one leaves the unreadable rule in the saved list.
+    func testAnUnreadableAppRuleSurvivesAnEditOfAnother() throws {
+        let known = AppRule(
+            id: UUID(), bundleIdentifier: "com.example.Player", name: "Player", condition: .running, action: .pause)
+        let knownJSON = String(decoding: try JSONEncoder().encode(known), as: UTF8.self)
+        let future = #"{"id":"\#(UUID().uuidString)","bundleIdentifier":"com.example.Game","name":"Game","#
+            + #""condition":"running","action":"someFutureAction"}"#
+        defaults.set(Data("[\(knownJSON),\(future)]".utf8), forKey: "WallpaperMachine.appRules")
+
+        let preferences = PlaybackPreferences(defaults: defaults)
+        XCTAssertEqual(preferences.appRules, [known])
+        try preferences.updateRule(id: known.id, action: .mute)
+
+        let saved = try XCTUnwrap(defaults.data(forKey: "WallpaperMachine.appRules"))
+        let rules = try XCTUnwrap(JSONSerialization.jsonObject(with: saved) as? [[String: Any]])
+        XCTAssertEqual(rules.map { $0["action"] as? String }, ["mute", "someFutureAction"])
+        XCTAssertEqual(rules.last?["bundleIdentifier"] as? String, "com.example.Game")
+
+        // Reset All Settings removes every rule, the unreadable one too.
+        preferences.resetToDefaults()
+        preferences.addRule(bundleIdentifier: "com.example.Other", name: "Other")
+        let afterReset = try XCTUnwrap(defaults.data(forKey: "WallpaperMachine.appRules"))
+        XCTAssertEqual((try JSONSerialization.jsonObject(with: afterReset) as? [[String: Any]])?.count, 1)
+    }
+
     /// Pause on battery is stored like the other choices, pauses only on battery, and Reset all
     /// settings puts the row back on Keep running.
     func testPauseOnBatteryIsStoredPausesOnlyOnBatteryAndResets() {

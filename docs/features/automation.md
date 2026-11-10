@@ -92,6 +92,16 @@ merges by display. The handled-event and Focus recovery records are local runtim
 state, excluded from exports, cleared when restored settings replace their baseline,
 and retained if restore rolls back.
 
+Every display's rules are one saved value, read one display at a time. A display whose
+record this build cannot read (saved by a newer build that knows another mode, or damaged)
+is set aside as it was saved: the other displays' rules load, **Some automatic wallpaper
+settings could not be read** stays on show while it is set aside, and every save writes it
+back unchanged, so editing one display never erases another's and installing the newer
+build again finds its rules. Giving that display rules of its own replaces what could not
+be read. Focus recovery records, saved playlists, local collections and app rules are kept
+the same way (`PreservedJSON`). A value that is not the expected kind of JSON at all, is
+over 2 MiB, or holds more than 64 displays is still dropped whole.
+
 ## Commands
 
 | Command | What it does |

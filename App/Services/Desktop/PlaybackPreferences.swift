@@ -167,7 +167,9 @@ final class PlaybackPreferences {
 
     init(defaults: UserDefaults = ClientPreferences.defaults) {
         self.defaults = defaults
-        appRules = Self.loadRules(from: defaults)
+        let saved = Self.loadRules(from: defaults)
+        appRules = saved.values
+        unreadRules = saved.unread
     }
 
     var displaySleepAction: DisplaySleepAction {
@@ -301,6 +303,9 @@ final class PlaybackPreferences {
     }
 
     private(set) var appRules: [AppRule]
+    /// Saved rules this build could not read (a newer build's action, say), as they were saved.
+    /// They are written back with the others, so editing one rule never erases them.
+    private var unreadRules: [Data] = []
 
     @discardableResult
     func addRule(bundleIdentifier: String, name: String) -> AppRule {
@@ -349,6 +354,7 @@ final class PlaybackPreferences {
             defaults.removeObject(forKey: key)
         }
         appRules = []
+        unreadRules = []
         postChange()
     }
 
@@ -363,7 +369,7 @@ final class PlaybackPreferences {
     }
 
     private func persistRules() {
-        guard let data = try? JSONEncoder().encode(appRules) else { return }
+        guard let data = try? PreservedJSON.writeArray(appRules, keeping: unreadRules) else { return }
         defaults.set(data, forKey: Self.appRulesKey)
         postChange()
     }
@@ -372,9 +378,9 @@ final class PlaybackPreferences {
         NotificationCenter.default.post(name: Self.didChangeNotification, object: self)
     }
 
-    private static func loadRules(from defaults: UserDefaults) -> [AppRule] {
+    private static func loadRules(from defaults: UserDefaults) -> (values: [AppRule], unread: [Data]) {
         guard let data = defaults.data(forKey: appRulesKey),
-              let decoded = try? JSONDecoder().decode([AppRule].self, from: data) else { return [] }
-        return decoded
+              let saved = PreservedJSON.readArray(data, as: AppRule.self) else { return ([], []) }
+        return saved
     }
 }

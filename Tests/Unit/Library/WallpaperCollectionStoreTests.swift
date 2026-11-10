@@ -15,6 +15,23 @@ final class WallpaperCollectionStoreTests: XCTestCase {
         super.tearDown()
     }
 
+    /// One saved collection is not in a shape this build reads. The other still loads, and
+    /// changing it leaves the unreadable one in the saved list.
+    func testAnUnreadableCollectionSurvivesAnEditOfAnother() throws {
+        defaults.set(
+            Data(#"[{"id":"a","name":"Nature","wallpaperIDs":["x"]},{"id":"b","name":"Later","members":{"y":1}}]"#.utf8),
+            forKey: WallpaperCollectionStore.storageKey)
+
+        let store = WallpaperCollectionStore(defaults: defaults)
+        XCTAssertEqual(store.collections.map(\.id), ["a"])
+        try store.rename("a", name: "Forests")
+
+        let saved = try XCTUnwrap(defaults.data(forKey: WallpaperCollectionStore.storageKey))
+        let collections = try XCTUnwrap(JSONSerialization.jsonObject(with: saved) as? [[String: Any]])
+        XCTAssertEqual(collections.map { $0["name"] as? String }, ["Forests", "Later"])
+        XCTAssertEqual((collections.last?["members"] as? [String: Int])?["y"], 1)
+    }
+
     func testBatchMembershipAndStableIdentitySurviveReloadRenameAndDeletion() throws {
         let store = WallpaperCollectionStore(defaults: defaults)
         let first = try store.create(name: " Nature ", wallpaperIDs: ["a", "b", "a"])

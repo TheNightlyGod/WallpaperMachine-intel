@@ -21,6 +21,8 @@ final class PlaylistStore {
     private let defaults: UserDefaults
     private(set) var playlists: [String: DisplayPlaylist]
     private(set) var plans: [PlaylistPlan]
+    /// Saved plans this build could not read, as they were saved (`PreservedJSON`).
+    private var unreadPlans: [Data] = []
     /// When each display changes next. Kept across launches, so a relaunch neither restarts a
     /// long interval nor skips a change that fell due while the app was closed.
     private(set) var nextChange: [String: Date]
@@ -65,8 +67,10 @@ final class PlaylistStore {
         self.defaults = defaults
         playlists = (defaults.data(forKey: Self.playlistsKey))
             .flatMap { try? JSONDecoder().decode([String: DisplayPlaylist].self, from: $0) } ?? [:]
-        plans = defaults.data(forKey: Self.plansKey)
-            .flatMap { try? JSONDecoder().decode([PlaylistPlan].self, from: $0) } ?? []
+        // A plan this build cannot read stays as it was saved and is written back with the others.
+        let savedPlans = defaults.data(forKey: Self.plansKey).flatMap { PreservedJSON.readArray($0, as: PlaylistPlan.self) }
+        plans = savedPlans?.values ?? []
+        unreadPlans = savedPlans?.unread ?? []
         let stored = defaults.dictionary(forKey: Self.nextChangeKey) as? [String: Double] ?? [:]
         nextChange = stored.mapValues { Date(timeIntervalSince1970: $0) }
         let heldDisplays = defaults.dictionary(forKey: Self.holdsKey) as? [String: String] ?? [:]
@@ -271,7 +275,7 @@ final class PlaylistStore {
         playlist.planID = nil
         let plan = PlaylistPlan(id: UUID().uuidString, name: try WallpaperCollectionStore.validatedName(name), playlist: playlist)
         let updated = plans + [plan]
-        let data = try JSONEncoder().encode(updated)
+        let data = try PreservedJSON.writeArray(updated, keeping: unreadPlans)
         plans = updated
         defaults.set(data, forKey: Self.plansKey)
         persist()
@@ -284,7 +288,7 @@ final class PlaylistStore {
         guard plans[index].name != name else { return }
         var updated = plans
         updated[index].name = name
-        let data = try JSONEncoder().encode(updated)
+        let data = try PreservedJSON.writeArray(updated, keeping: unreadPlans)
         plans = updated
         defaults.set(data, forKey: Self.plansKey)
         persist()
@@ -294,7 +298,7 @@ final class PlaylistStore {
     func deletePlan(_ id: String) throws {
         guard plan(id: id) != nil else { throw LibraryOrganizationError.missingPlan }
         let updated = plans.filter { $0.id != id }
-        let data = try JSONEncoder().encode(updated)
+        let data = try PreservedJSON.writeArray(updated, keeping: unreadPlans)
         plans = updated
         defaults.set(data, forKey: Self.plansKey)
         for display in playlists.keys where playlists[display]?.planID == id {
@@ -356,7 +360,7 @@ final class PlaylistStore {
         if let data = try? JSONEncoder().encode(playlists) {
             defaults.set(data, forKey: Self.playlistsKey)
         }
-        if plansChanged, let data = try? JSONEncoder().encode(plans) {
+        if plansChanged, let data = try? PreservedJSON.writeArray(plans, keeping: unreadPlans) {
             defaults.set(data, forKey: Self.plansKey)
         }
         defaults.set(nextChange.mapValues(\.timeIntervalSince1970), forKey: Self.nextChangeKey)

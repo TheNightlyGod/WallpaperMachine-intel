@@ -48,6 +48,56 @@ final class WallpaperAutomationStoreTests: XCTestCase {
         XCTAssertTrue(corrupt.configurations.isEmpty)
     }
 
+    /// A newer build saved a mode this one does not know on one display. The other display's
+    /// rules still load, and editing them leaves the unreadable display's record as it was saved.
+    func testOneUnreadableDisplayKeepsItsRecordWhileAnotherIsEdited() throws {
+        let readable = #"{"mode":"appearance","rules":[],"revision":3,"light":{"kind":"wallpaper","id":"a"}}"#
+        let future = #"{"mode":"someFutureMode","rules":[],"revision":7,"extra":{"kept":true}}"#
+        defaults.set(Data(#"{"left":\#(readable),"right":\#(future)}"#.utf8),
+                     forKey: WallpaperAutomationStore.configurationsKey)
+
+        let store = WallpaperAutomationStore(defaults: defaults)
+        XCTAssertEqual(store.configuration(for: "left").light, .init(kind: .wallpaper, id: "a"))
+        XCTAssertNil(store.configurations["right"])
+        XCTAssertNotNil(store.loadError)
+
+        try store.update("left") { $0.dark = .init(kind: .wallpaper, id: "b") }
+
+        let saved = try XCTUnwrap(defaults.data(forKey: WallpaperAutomationStore.configurationsKey))
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: saved) as? [String: [String: Any]])
+        XCTAssertEqual(object["right"]?["mode"] as? String, "someFutureMode")
+        XCTAssertEqual(object["right"]?["revision"] as? Int, 7)
+        XCTAssertEqual((object["right"]?["extra"] as? [String: Bool])?["kept"], true)
+        XCTAssertEqual((object["left"]?["dark"] as? [String: String])?["id"], "b")
+        XCTAssertNotNil(store.loadError, "the warning stands while a display's rules are set aside")
+
+        // Giving that display rules of its own replaces what could not be read, and clears the warning.
+        try store.update("right") { $0.mode = .schedule }
+        let replaced = WallpaperAutomationStore(defaults: defaults)
+        XCTAssertEqual(replaced.configuration(for: "right").mode, .schedule)
+        XCTAssertEqual(replaced.configuration(for: "left").dark, .init(kind: .wallpaper, id: "b"))
+        XCTAssertNil(store.loadError)
+        XCTAssertNil(replaced.loadError)
+    }
+
+    func testAnUnreadableFocusRecordSurvivesAnotherDisplaysFocus() throws {
+        let playlist = String(decoding: try JSONEncoder().encode(DisplayPlaylist()), as: UTF8.self)
+        defaults.set(Data(#"{"right":{"key":42,"before":{"playlist":\#(playlist)}}}"#.utf8),
+                     forKey: WallpaperAutomationStore.focusRestoreKey)
+        let store = WallpaperAutomationStore(defaults: defaults)
+        XCTAssertNil(store.focusRestore["right"])
+
+        let record = FocusWallpaperRestore(
+            key: "focus", before: .init(playlist: .init(), wallpaperID: "a"), expectedPlaylist: .init())
+        try store.rememberFocus(record, on: "left")
+        try store.forgetFocus(on: "left")
+
+        let saved = try XCTUnwrap(defaults.data(forKey: WallpaperAutomationStore.focusRestoreKey))
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: saved) as? [String: [String: Any]])
+        XCTAssertEqual(object["right"]?["key"] as? Int, 42)
+        XCTAssertNil(object["left"])
+    }
+
     func testImportedConfigurationBoundsAndDeletedWallpaperPruning() throws {
         let store = WallpaperAutomationStore(defaults: defaults)
         try store.update("screen") {

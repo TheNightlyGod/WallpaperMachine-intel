@@ -295,6 +295,10 @@ nor skips a change that fell due while the app was closed. A display whose playl
 waiting after the user removed its wallpaper is kept in `WallpaperMachine.playlistHolds`,
 so a relaunch leaves it empty.
 
+A saved playlist (plan) this build cannot read, one saved by a newer build or damaged, does
+not take the others with it: the readable ones load, and saving, renaming or deleting a plan
+writes the unread one back as it was saved (`PreservedJSON`).
+
 Shuffle's round, the wallpapers a display has shown since the round began, is kept in
 `WallpaperMachine.playlistRounds` for each display that rotates in Shuffle order, so a
 relaunch neither repeats a wallpaper it just showed nor starts the round over. It is
