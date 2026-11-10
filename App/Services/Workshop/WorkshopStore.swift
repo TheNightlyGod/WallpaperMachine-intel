@@ -1004,12 +1004,15 @@ final class WorkshopStore {
   /// The ids of subscribed wallpapers not in `installed`, asking Steam for every page of
   /// subscriptions. Throws `SteamSignInRequired` when the session has ended.
   func missingSubscriptions(installed: Set<String>) async throws -> [WorkshopItem] {
+    var used: SteamWebSession?
     do {
       guard let session = try await currentSteamWebSession() else { throw SteamSignInRequired() }
+      used = session
       let ids = try await service.subscribedIDs(account: session).filter { !installed.contains($0) }
       return try await service.details(ids: ids).filter { $0.collectionSize == nil }
     } catch is SteamSignInRequired {
-      forgetSteamWebSession()
+      // Only the session Steam refused: a sign-in made while it answered stays.
+      forgetSteamWebSession(endedWith: used)
       throw SteamSignInRequired()
     }
   }

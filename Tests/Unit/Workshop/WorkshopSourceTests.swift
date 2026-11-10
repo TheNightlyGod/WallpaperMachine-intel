@@ -455,6 +455,29 @@ final class WorkshopSourceTests: XCTestCase {
     XCTAssertNotNil(store.steamWebSession, "the new sign-in stays")
   }
 
+  /// The same holds for the read behind "download the subscriptions not in the library": the
+  /// session it was sent with ending does not sign out, or erase from this Mac, a newer sign-in.
+  func testAnEndedSessionReadingMissingSubscriptionsKeepsTheSignInThatReplacedIt() async throws {
+    let store = fixture.store
+    fixture.subscriptionPages = [1: subscriptionsHTML(ids: ["1"], total: "1")]
+    try await store.signInToSteamWeb { WebSignInCookies(session: "\(Self.author)||0123456789abcdef0123") }
+    let gate = DispatchSemaphore(value: 0)
+    fixture.subscriptionsGate = gate
+    let read = Task { try await store.missingSubscriptions(installed: []) }
+    for _ in 0..<500 where fixture.subscriptionReads == 0 { try await Task.sleep(for: .milliseconds(10)) }
+    XCTAssertEqual(fixture.subscriptionReads, 1, "the read is held at Steam")
+    store.signOutOfSteamWeb()
+    try await store.signInToSteamWeb { WebSignInCookies(session: "\(Self.author)||fedcba9876543210fedc") }
+    fixture.subscriptionPages = [1: Data("<html><head><title>Sign In</title></head></html>".utf8)]
+    gate.signal()
+    do {
+      _ = try await read.value
+      XCTFail("Steam ended the session the read was sent with")
+    } catch is SteamSignInRequired {}
+    XCTAssertNotNil(store.steamWebSession, "the new sign-in stays")
+    XCTAssertNotNil(fixture.webSessions.session, "and so does its saved copy")
+  }
+
   func testSubscribingWithoutASignInChangesNothing() async throws {
     do {
       try await fixture.store.setSubscribed(true, itemID: "2")
