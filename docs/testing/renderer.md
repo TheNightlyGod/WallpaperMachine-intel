@@ -1130,9 +1130,15 @@ the layer. Shaders written for a test use the engine's dialect (`mul`, `texSampl
   Wallpaper Engine draws the real fragment with whatever those varyings hold.
 - Local scenes can emit MDLA, Rust `light_map` compile and shader-value alias
   errors that are independent of a given change; compare against a baseline run
-  and verify only that no *new* diagnostics appear. A
-  `ShaderValue: … not found in glsl` line is authored leftovers, not a binding
-  failure.
+  and verify only that no *new* diagnostics appear. A material constant that names no
+  uniform of its shader is an authored leftover, not a binding failure: Wallpaper Engine
+  keeps a constant in the material after its uniform is renamed, removed or compiled out by a
+  combo, and ignores it. A scene parse gathers them (`UnmatchedConstantTally`) and logs one
+  informational line, `material constants that name no uniform of their shader, ignored as
+  authored leftovers: Alpha x493, Color x493`, naming the first twelve keys with their counts
+  and counting the rest, where it used to log an error for every material (986 lines for one
+  scene of 493 models). A constant loaded outside a scene parse, as for a layer a script
+  creates, is still reported on its own as `ShaderValue: … not found in glsl`.
 - **A video opened under a running clock shows the head of its clip until a seek to the scene's
   clock has landed.** An open waits for no seek: one that did would hold the render thread for
   the seek, 0.3 to 1.1 s on 1080p and 4K clips with a keyframe every 250 frames and more than the

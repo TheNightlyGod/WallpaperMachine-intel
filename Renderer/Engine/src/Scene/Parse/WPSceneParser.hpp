@@ -2,9 +2,11 @@
 #include "Interface/ISceneParser.h"
 
 #include <cmath>
+#include <cstddef>
 #include <string>
 #include <string_view>
 #include <random>
+#include <utility>
 #include <vector>
 
 namespace wallpaper
@@ -56,6 +58,40 @@ void ApplySystemUserTextures(std::vector<std::string>& textures,
 std::string_view UserTexturePropertyName(const wpscene::WPUserTexture& user_texture);
 void LoadMaterialConstantShaderValues(SceneMaterial& material, const wpscene::WPMaterial& wpmat,
                                       const WPShaderInfo& info);
+
+/// Gathers, for the scope it lives in, the material constants that name no uniform of
+/// their shader, and says them once when the scope ends.
+///
+/// Such a key is an authored leftover, not a binding failure: Wallpaper Engine keeps a
+/// constant in the material after its uniform is renamed, removed or compiled out by a
+/// combo, and ignores it, as this parser does. A scene can hold the same leftover in
+/// every material (a model importer's `Alpha` and `Color` on five hundred models), so
+/// one line per material buried every real error of the load under a thousand of these.
+/// A scene parse holds one tally and logs one informational line naming each key and how
+/// often it came up; a constant loaded outside any tally is still reported on its own.
+///
+/// Tallies nest and belong to the thread that made them: the innermost one takes the
+/// keys, and another scene loading on another thread has its own.
+class UnmatchedConstantTally {
+public:
+    UnmatchedConstantTally();
+    ~UnmatchedConstantTally();
+    UnmatchedConstantTally(const UnmatchedConstantTally&)            = delete;
+    UnmatchedConstantTally& operator=(const UnmatchedConstantTally&) = delete;
+
+    /// Adds `key` to the innermost tally of this thread. False when there is none.
+    static bool Note(const std::string& key);
+    /// The line the tally logs: each key with its count, in key order, the first
+    /// `kNamed` of them by name and the rest as a number. Empty when nothing was noted.
+    std::string Summary() const;
+
+    /// How many keys the summary names before it counts the rest.
+    static constexpr std::size_t kNamed = 12;
+
+private:
+    std::vector<std::pair<std::string, std::size_t>> m_counts;
+    UnmatchedConstantTally*                          m_outer;
+};
 
 class WPSceneParser : public ISceneParser {
 public:

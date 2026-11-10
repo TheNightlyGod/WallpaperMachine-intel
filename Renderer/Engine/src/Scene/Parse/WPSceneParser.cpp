@@ -1293,7 +1293,11 @@ void LoadStaticMaterialConstants(SceneMaterial& material, const wpscene::WPMater
                                  MaterialConstantWrite write = MaterialConstantWrite::Replace) {
     std::vector<std::string> unmatched;
     const auto resolved = ResolveConstantUniforms(wpmat, info, report_unmatched ? &unmatched : nullptr);
-    for (const auto& key : unmatched) LOG_ERROR("ShaderValue: %s not found in glsl", key.c_str());
+    // A scene parse gathers these and says them once (`UnmatchedConstantTally`); one
+    // loaded on its own is reported here.
+    for (const auto& key : unmatched) {
+        if (! UnmatchedConstantTally::Note(key)) LOG_ERROR("ShaderValue: %s not found in glsl", key.c_str());
+    }
     for (const auto& entry : resolved) {
         if (entry.constant->value.empty()) continue;
         auto& value = material.customShader.constValues[entry.uniform];
@@ -2928,6 +2932,46 @@ void wallpaper::LoadMaterialConstantShaderValues(SceneMaterial& material,
                                                  const wpscene::WPMaterial& wpmat,
                                                  const WPShaderInfo& info) {
     LoadStaticMaterialConstants(material, wpmat, info);
+}
+
+namespace
+{
+// The innermost tally of the thread that is loading materials, if it has one.
+thread_local UnmatchedConstantTally* t_unmatched_constants = nullptr;
+} // namespace
+
+wallpaper::UnmatchedConstantTally::UnmatchedConstantTally(): m_outer(t_unmatched_constants) {
+    t_unmatched_constants = this;
+}
+
+wallpaper::UnmatchedConstantTally::~UnmatchedConstantTally() {
+    t_unmatched_constants = m_outer;
+    const auto summary = Summary();
+    if (summary.empty()) return;
+    LOG_INFO("material constants that name no uniform of their shader, ignored as authored leftovers: %s",
+             summary.c_str());
+}
+
+bool wallpaper::UnmatchedConstantTally::Note(const std::string& key) {
+    auto* const tally = t_unmatched_constants;
+    if (tally == nullptr) return false;
+    auto&      counts = tally->m_counts;
+    const auto found  = std::lower_bound(counts.begin(), counts.end(), key,
+                                         [](const auto& entry, const std::string& name) { return entry.first < name; });
+    if (found != counts.end() && found->first == key) ++found->second;
+    else counts.emplace(found, key, std::size_t { 1 });
+    return true;
+}
+
+std::string wallpaper::UnmatchedConstantTally::Summary() const {
+    std::string summary;
+    std::size_t named = 0;
+    for (; named < m_counts.size() && named < kNamed; ++named) {
+        if (named > 0) summary += ", ";
+        summary += m_counts[named].first + " x" + std::to_string(m_counts[named].second);
+    }
+    if (named < m_counts.size()) summary += ", and " + std::to_string(m_counts.size() - named) + " more";
+    return summary;
 }
 
 namespace
@@ -8293,6 +8337,9 @@ std::shared_ptr<Scene> ParseSceneDocument(const SceneParseRequest& request, cons
     }
     auto& objects = *objects_found;
     ParseSession session;
+    // The leftover constants of every material of this scene, said in one line when the
+    // parse ends, however it ends.
+    UnmatchedConstantTally unmatched_constants;
 
     wpscene::WPScene wp;
     wp.FromJson(json, request.pkg_version);
