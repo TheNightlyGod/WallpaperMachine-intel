@@ -2444,7 +2444,11 @@ An attempt that finds the surface drawing again, because a display change
 rebuilt it in the meantime, does nothing. The wallpaper window shows its placeholder
 for a moment while the surface is rebuilt, and the engine waits for the render thread
 meanwhile, up to the 10 s swapchain acquire timeout in the worst case, as it does for a
-display change.
+display change. Before giving up a Metal layer, both surface reconfiguration and
+renderer destruction drain queued GPU commands and presentation callbacks while the
+layer is still retained. Stopping the frame loop alone does not finish Metal's queued
+`presentDrawable` calls, whose Metal HUD tracking can still access that layer. The
+wait happens only at teardown or reconfiguration; steady frames do not wait.
 
 A failure before the first frame is not retried: the app is still inside its first-frame
 wait, which has its own timeout and rollback, and a retry of its own would race it. The

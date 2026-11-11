@@ -126,8 +126,8 @@ public:
     void destroy();
     [[nodiscard]] bool inited() const;
 
-    /// Releases presentation-scoped state: the layer and its drawable. The
-    /// device, queue, compiled pipelines and uploaded textures survive, so a
+    /// Drains pending GPU commands and presentation callbacks before releasing the layer.
+    /// The device, queue, compiled pipelines and uploaded textures survive, so a
     /// display reconfiguration does not reload the wallpaper.
     bool releaseSurface();
     bool resetSurface(const MetalRenderInitInfo& info);
@@ -260,6 +260,9 @@ public:
     bool ReadRenderTargetForTests(const std::string& key, std::vector<uint8_t>& rgba,
                                   uint32_t& width, uint32_t& height,
                                   std::vector<float>* radiance = nullptr);
+
+    /// The queue for submitting a controlled pending command in surface lifetime tests.
+    [[nodiscard]] void* CommandQueueForTests() const;
 
     /// How many times pixels have been written into a replaceable image since
     /// this graph was compiled.

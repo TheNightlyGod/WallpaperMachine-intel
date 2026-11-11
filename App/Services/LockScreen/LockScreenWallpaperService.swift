@@ -85,6 +85,9 @@ final class LockScreenWallpaperService {
   /// Exit watches on the extension processes that acknowledged the committed lock screen. macOS
   /// keeps a renderer whose process died as its wallpaper and shows nothing, never reloading it.
   @ObservationIgnored private var rendererWatches: [Int32: () -> Void] = [:]
+  /// A new publication reloads WallpaperAgent asynchronously. These processes may acknowledge
+  /// the new manifest before that reload ends them; only their replacements can confirm it.
+  @ObservationIgnored private var retiringRendererProcesses: Set<Int32> = []
   @ObservationIgnored private var rendererLosses: [ContinuousClock.Instant] = []
   @ObservationIgnored private var rendererReleases: [ContinuousClock.Instant] = []
   @ObservationIgnored private var rendererFailure: String?
@@ -521,10 +524,9 @@ final class LockScreenWallpaperService {
           try beforeActivation?()
           ownsDesktopProvider = true
         }
-        // Selecting a new revision reloads WallpaperAgent, which ends the processes that drew the
-        // old one. That is expected, not a renderer failing: stop watching them before it happens.
-        // `awaitReadiness` watches the processes that draw this revision.
-        cancelRendererWatches()
+        // Publishing notifies the old renderer before WallpaperAgent's reload ends it. Remember
+        // those processes before the notification can replace their readiness files.
+        retireRendererWatches()
         try publish(configuration)
         extensionPreparation = nil
         LockScreenAssetPublisher.collectGarbage(
@@ -570,7 +572,10 @@ final class LockScreenWallpaperService {
       forceRepublish = false
       transientFailures = 0
       retrySkipsRemaining = 0
-      if !configuration.lockScreenEnabled { cancelRendererWatches() }
+      if !configuration.lockScreenEnabled {
+        cancelRendererWatches()
+        retiringRendererProcesses.removeAll()
+      }
       if isEnabled { defaults.set(true, forKey: Self.preference) }
       if screenSaverEnabled { defaults.set(true, forKey: Self.screenSaverPreference) }
     } catch is CancellationError {
@@ -670,6 +675,7 @@ final class LockScreenWallpaperService {
       if let data = try? Data(contentsOf: file),
         let state = try? JSONDecoder().decode(LockScreenReadiness.self, from: data),
         state.revision == configuration.revision, state.displayID == scene.displayID,
+        !retiringRendererProcesses.contains(state.processID ?? 0),
         let error = state.error
       {
         throw LockScreenWallpaperFailure(message: error)
@@ -693,6 +699,7 @@ final class LockScreenWallpaperService {
   private func deactivate() throws {
     cancelExtensionPreparation()
     cancelRendererWatches()
+    retiringRendererProcesses.removeAll()
     forceRepublish = false
     isEnabled = false
     screenSaverEnabled = false
@@ -744,6 +751,16 @@ final class LockScreenWallpaperService {
     for pid in processes where rendererWatches[pid] == nil {
       rendererWatches[pid] = watchProcessExit(pid) { [weak self] in self?.rendererExited(pid) }
     }
+  }
+
+  private func retireRendererWatches() {
+    retiringRendererProcesses.formUnion(rendererWatches.keys)
+    if let published {
+      retiringRendererProcesses.formUnion(published.scenes.compactMap {
+        readiness(displayID: $0.displayID, revision: published.revision)?.processID
+      }.filter { $0 > 0 })
+    }
+    cancelRendererWatches()
   }
 
   private func cancelRendererWatches() {
@@ -827,6 +844,7 @@ final class LockScreenWallpaperService {
       try await awaitFrames(configuration, until: deadline)
       unconfirmed = nil
       armRendererWatches(configuration)
+      retiringRendererProcesses.removeAll()
       AppLog.info(
         "Native lock screen: first frame acknowledged after \(waited(until: deadline)) s "
           + "(waited from selection reload)")
@@ -855,7 +873,8 @@ final class LockScreenWallpaperService {
         let file = exchange.appendingPathComponent("ready-\(scene.displayID).json")
         guard let data = try? Data(contentsOf: file),
           let state = try? JSONDecoder().decode(LockScreenReadiness.self, from: data),
-          state.revision == configuration.revision, state.displayID == scene.displayID
+          state.revision == configuration.revision, state.displayID == scene.displayID,
+          !retiringRendererProcesses.contains(state.processID ?? 0)
         else {
           ready = false
           continue

@@ -2566,6 +2566,7 @@ struct MetalRender::Impl
     }
 
     void releaseGraph();
+    void drainQueue();
     void releasePresentation();
 
     bool buildPresentation();
@@ -2932,6 +2933,16 @@ void MetalRender::Impl::releaseGraph()
     uniform_ring_size = 0;
     graph_ready       = false;
     demand_reasons    = static_cast<uint32_t>(render::DynamicReason::UnknownInput);
+}
+
+void MetalRender::Impl::drainQueue()
+{
+    if (queue == nil) return;
+    // A stopped render loop can still have scheduled presents in Metal's completion thread.
+    // Keep the layer alive until those callbacks (including Metal HUD tracking) have run.
+    id<MTLCommandBuffer> drain = [queue commandBuffer];
+    [drain commit];
+    [drain waitUntilCompleted];
 }
 
 void MetalRender::Impl::releasePresentation()
@@ -7612,14 +7623,8 @@ void MetalRender::destroy()
 {
     if (pImpl == nullptr) return;
     @autoreleasepool {
-        // The only synchronous wait in this class. Destruction has to observe
-        // that no frame is still reading the textures about to be released, and
-        // there is no later point at which to notice.
-        if (pImpl->queue != nil && pImpl->inflight != nullptr && pImpl->inited) {
-            id<MTLCommandBuffer> drain = [pImpl->queue commandBuffer];
-            [drain commit];
-            [drain waitUntilCompleted];
-        }
+        // Also drain a partially initialized backend; releasing a surface clears `inited`.
+        pImpl->drainQueue();
         pImpl->releaseGraph();
         pImpl->video.closeHeld();
         pImpl->releasePresentation();
@@ -7641,6 +7646,7 @@ bool MetalRender::inited() const { return pImpl->inited; }
 bool MetalRender::releaseSurface()
 {
     @autoreleasepool {
+        pImpl->drainQueue();
         pImpl->releasePresentation();
         // The compiled graph survives a surface release, so the reuse table
         // would too. Its verdict is about pixels that were composed for the
@@ -9131,6 +9137,11 @@ bool MetalRender::ReadRenderTargetForTests(const std::string& key, std::vector<u
         }
         return true;
     }
+}
+
+void* MetalRender::CommandQueueForTests() const
+{
+    return (__bridge void*)pImpl->queue;
 }
 
 uint64_t MetalRender::RuntimeImageUploadsForTests() const

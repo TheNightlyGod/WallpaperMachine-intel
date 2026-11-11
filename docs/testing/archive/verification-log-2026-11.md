@@ -9,6 +9,33 @@ level.
 These are historical results about the trees they were taken on. They are not
 evidence about the current tree and must never be cited as such.
 
+## 2026-11-08 — Desktop web scheduling during window visibility changes
+
+Investigation of [issue #177](https://github.com/MMFoundation/WallpaperMachine/issues/177). The change repairs an independently reproduced window-visibility scheduling gap; its connection to the reporter's exact Stage Manager transition remains unconfirmed.
+
+- The attached video holds different last frames for roughly 0.6 s on repeated returns to the desktop. The attached logs show no matching host presentation suspension; the CPU sample was taken later with another wallpaper active.
+- WebKit checks window visibility separately from occlusion. An attached desktop page now remains schedulable until the host suspends it; no wallpaper identification, timer, polling loop or extra render pass was added.
+- Before the fix, `python3 scripts/test.py --only WebWallpaperSuspensionTests/testDesktopPageSchedulingFollowsHostSuspensionWithoutAnOrderedWindow` failed: zero animation frames while the host permitted playback.
+- After the fix, `python3 scripts/test.py --only WebWallpaperSuspensionTests --only WebWallpaperHostLifecycleTests --only WebWallpaperFramePacingTests` passed: 74 tests, no failures or skips. The regression also measures stopped frames during explicit suspension and resumed frames without reloading.
+- `python3 scripts/test.py` passed: all 32 Python suites, XcodeGen, and 4,659 native tests; zero failures, 66 skipped of 4,725. Skips: 62 opt-in video/media asset cases, one live Steam install, two Workshop cases and the opt-in web reference renderer.
+- One runtime warning came from `AppUpdateTests.testSignatureCheckRefusesAnUnsignedOrAlteredCopy()`: a method called on the main thread may cause UI unresponsiveness. No warning was attributed to the new scheduling regression.
+- Wallpaper Engine comparison **not done**. The Windows VM was available, but two muted `scripts/we_reference.py capture` attempts produced a black desktop with the Start menu, not Belle. The attempted native reference render also failed with `DecodingError.typeMismatch`; no valid before/after pixel metrics are claimed.
+- Authorized desktop probing of installed 1.9.3 on macOS 27.0.1 did not reproduce the reporter's repeatable macOS 27.2 stall. This is not confirmation of the changed app's visual behavior. The previous wallpaper and Stage Manager setting were restored, the temporary import was removed, and the VM was suspended again.
+- Updated the [web runtime description](../../features/web-wallpapers.md#runtime-shape) and [test coverage](../coverage.md#webwallpaper). No renderer/Rust changes or corresponding gates; no Release build, installation, commit or push.
+
+## 2026-11-07 — Mission Control composition and desktop poster refresh
+
+PR #175, including author updates 070caaa7 and 2ce3da8d, capture-cancellation fixes and native exported-web scheduling.
+
+- `python3 scripts/build.py --renderer-only` — exit 0; renderer built and Swift bindings regenerated. The later author commits leave Renderer sources unchanged.
+- `python3 scripts/test.py` — exit 0 on the final integrated tree: 687 Python tests passed; 4,648 native tests passed, 0 failed, 66 skipped (4,714 total).
+- Native skips cover opt-in live Steam, media/device integration and Wallpaper Engine web-reference jobs. One runtime warning remains: a method called on the main thread may cause UI unresponsiveness.
+- `python3 scripts/check_rust.py` — exit 0; 2,476 passing tests. Five desktop-window tests explicitly excluded; desktop/media/network opt-ins disabled.
+- `cmake --build artifacts/renderer/bin --parallel 6` — exit 0; completed the cold build separately after the renderer check hit its 600-second build limit.
+- `python3 scripts/check_renderer.py --skip-build` — exit 0; all 109 registered binaries succeeded, with seven local-asset-dependent cases skipped. All 12 generated scenes matched between pooled and isolated rendering; eight projects completed two reload cycles.
+- Regression coverage checks final-settle publication over a black startup picture, intermediate-frame retention, appearance refresh precedence, cancellation of replaced timers, and cache reuse. Native exported web layers retain the existing 10/20 FPS and pause/resume assertions.
+- Live Mission Control transitions, cancelled swipes and multiple displays were not exercised. No desktop automation or Release app build.
+
 ## 2026-11-07 — Update cache ownership — final follow-up
 
 Final updater inspection added a cache-directory symlink guard and an explicit byte-count bound while rehashing a recovered package. The routine gate had already passed and was not repeated.

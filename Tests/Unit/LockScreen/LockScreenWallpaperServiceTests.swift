@@ -134,14 +134,18 @@ final class LockScreenWallpaperServiceTests: XCTestCase {
   }
 
   /// Answers the extension's readiness files like the real lock-screen renderer, as process
-  /// `processID` when given.
-  private func readinessResponder(held: String? = nil, processID: Int32? = nil) -> Task<Void, Never> {
+  /// `processID` when given. A replacement started by a reload cannot acknowledge the revision
+  /// from before that reload; `afterRevision` keeps the fake from doing so while the app stages.
+  private func readinessResponder(
+    held: String? = nil, processID: Int32? = nil, afterRevision: String? = nil
+  ) -> Task<Void, Never> {
     let exchange = self.exchange
     return Task.detached {
       while !Task.isCancelled {
         let file = exchange.appendingPathComponent(LockScreenConfiguration.fileName)
         if let data = try? Data(contentsOf: file),
-          let configuration = try? JSONDecoder().decode(LockScreenConfiguration.self, from: data)
+          let configuration = try? JSONDecoder().decode(LockScreenConfiguration.self, from: data),
+          configuration.revision != afterRevision
         {
           for scene in configuration.scenes {
             let readiness = LockScreenReadiness(
@@ -744,7 +748,7 @@ final class LockScreenWallpaperServiceTests: XCTestCase {
     let exited = try XCTUnwrap(watches[999_901], "The process that drew the frame is watched")
 
     responder.cancel()
-    responder = readinessResponder(processID: 999_902)
+    responder = readinessResponder(processID: 999_902, afterRevision: first)
     exited()
     await waitFor("a new publication") {
       !service.isBusy && (try? self.publishedRevision()) != first && watches[999_902] != nil
@@ -783,7 +787,7 @@ final class LockScreenWallpaperServiceTests: XCTestCase {
       let exited = try XCTUnwrap(watches[pid])
       pid += 1
       responder.cancel()
-      responder = readinessResponder(processID: pid)
+      responder = readinessResponder(processID: pid, afterRevision: try publishedRevision())
       exited()
       await waitFor("recovery \(recovery)") { !service.isBusy && watches[pid] != nil }
       XCTAssertTrue(service.isEnabled)
@@ -833,7 +837,7 @@ final class LockScreenWallpaperServiceTests: XCTestCase {
       let previous = renderers.serving
       let first = try publishedRevision()
       responder.cancel()
-      responder = readinessResponder(processID: previous + 1)
+      responder = readinessResponder(processID: previous + 1, afterRevision: first)
       record.fps = 30 + UInt32(change)
       records = [record]
       service.refresh()
@@ -849,6 +853,81 @@ final class LockScreenWallpaperServiceTests: XCTestCase {
       XCTAssertNil(service.errorMessage, "change \(change)")
     }
     XCTAssertTrue(try storeOwnsDisplayOne())
+  }
+
+  /// The old process can draw the published revision before WallpaperAgent's asynchronous
+  /// reload ends it. Its acknowledgement must not re-arm the watch we just cancelled.
+  @MainActor
+  func testAcknowledgementFromRetiringRendererDoesNotCompleteWallpaperSwitch() async throws {
+    try await checkRetiringRendererAcknowledgement(interrupt: false)
+  }
+
+  @MainActor
+  func testRefreshDuringSwitchStillRejectsRetiringRendererAcknowledgement() async throws {
+    try await checkRetiringRendererAcknowledgement(interrupt: true)
+  }
+
+  @MainActor
+  private func checkRetiringRendererAcknowledgement(interrupt: Bool) async throws {
+    weak var updatingService: LockScreenWallpaperService?
+    var publications = 0
+    var record = scene()
+    record.displayId = 1
+    var pid: Int32 = 999_950
+    var watches: [Int32: @MainActor () -> Void] = [:]
+    var watched: [Int32] = []
+    var switching = false
+    var reloadFinished = false
+    func acknowledge() throws {
+      let data = try Data(contentsOf: exchange.appendingPathComponent(LockScreenConfiguration.fileName))
+      let configuration = try JSONDecoder().decode(LockScreenConfiguration.self, from: data)
+      let readiness = LockScreenReadiness(
+        revision: configuration.revision, displayID: 1, error: nil, processID: pid)
+      try JSONEncoder().encode(readiness).write(
+        to: exchange.appendingPathComponent("ready-1.json"), options: .atomic)
+    }
+    let service = LockScreenWallpaperService(
+      prepareExtension: {}, notifyConfigurationChanged: {
+        publications += 1
+        try! acknowledge()
+      }, scenes: { [record] },
+      selection: LockScreenWallpaperSelection(storeURL: store, journalURL: journal, reload: {
+        guard switching else { return }
+        switching = false
+        Task { @MainActor in
+          let ending = pid
+          if interrupt { updatingService?.refresh() }
+          pid += 1
+          try acknowledge()
+          watches[ending]?()
+          reloadFinished = true
+        }
+      }),
+      exchange: exchange, defaults: defaults, scheduleMonitor: scheduleMonitor,
+      displayUUID: { [1: "one"][$0] },
+      watchProcessExit: { process, exited in
+        watched.append(process)
+        watches[process] = exited
+        return { watches.removeValue(forKey: process) }
+      })
+    updatingService = service
+    try service.start()
+    service.setScreenSaverEnabled(true)
+    service.setEnabled(true)
+    await waitFor("initial frame") { !service.isBusy && service.isEnabled }
+    XCTAssertEqual(watched, [999_950])
+
+    switching = true
+    record.fps += 1
+    service.refresh()
+    await waitFor("replacement renderer") { reloadFinished && !service.isBusy && watches[pid] != nil }
+    XCTAssertEqual(watched, [999_950, 999_951], "A retiring process must never acknowledge the replacement")
+    XCTAssertEqual(publications, 2, "Our own reload must not trigger another recovery")
+    XCTAssertTrue(service.isEnabled)
+    XCTAssertTrue(service.screenSaverEnabled)
+    XCTAssertNil(service.errorMessage)
+    XCTAssertNil(service.screenSaverError)
+    try await service.shutdown()
   }
 
   /// While the Mac is unlocked macOS closes its connections to the renderer and then ends the
@@ -883,7 +962,7 @@ final class LockScreenWallpaperServiceTests: XCTestCase {
       let first = try publishedRevision()
       pid += 1
       responder.cancel()
-      responder = readinessResponder(processID: pid)
+      responder = readinessResponder(processID: pid, afterRevision: first)
       exited()
       await waitFor("ending \(ending)") {
         !service.isBusy && watches[pid] != nil && (try? self.publishedRevision()) != first

@@ -915,7 +915,7 @@ if(APPLE)
   add_executable(metal_scene_draw_smoke metal_scene_draw_smoke.mm camera_fade_gpu_test.mm
       scene_general_gpu_test.mm puppet_morph_gpu_test.mm scene_hierarchy_gpu_test.mm model_data_gpu_test.mm
       volumetrics_gpu_test.mm volumetrics_depth_gpu_test.mm spot_cookie_gpu_test.mm planar_reflection_gpu_test.mm transparent_sorting_gpu_test.mm transparent_sorting_lifetime_gpu_test.mm
-      static_reuse_inputs_gpu_test.mm)
+      static_reuse_inputs_gpu_test.mm metal_surface_lifetime_test.mm)
   target_link_libraries(metal_scene_draw_smoke PRIVATE
       ${PROJECT_NAME} wpMetalRender wpScene wpRGraph
       wpParticle wpAudio wpFs nlohmann_json::nlohmann_json GTest::gtest_main

@@ -14,6 +14,13 @@ Scene-content areas are in [scene-regressions.md](scene-regressions.md).
 All in `metal_scene_draw_smoke` unless noted; `metal_backend_test` needs no
 device.
 
+- **Surface release drains pending Metal work** —
+  `MetalSurfaceLifetime.ReleaseWaitsForPendingCommandsBeforeDroppingLayer` holds an
+  empty command buffer's scheduled callback, then releases an unhosted surface. The
+  release must return with the command completed, and the callback must still see its
+  layer. This covers the surface-reconfiguration path used before wallpaper replacement
+  and shutdown, including the lock-screen extension; stopping the render loop alone
+  does not finish queued presentation callbacks.
 - **Native backend admission** — `metal_backend_test`: every refused construct
   keeps its own distinct reason; a plain sheet, a sprite particle layer and a
   skinned mesh under a `g_Bones` shader are accepted; a skinning shader on a mesh

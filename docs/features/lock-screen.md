@@ -566,8 +566,11 @@ exits within ten minutes restore the system wallpaper with "The lock-screen rend
 stopped repeatedly" and **Retry**. An extension copy older than the field is not
 watched. Publishing a new revision (applying another wallpaper, or one of these
 recoveries) reloads WallpaperAgent, which ends the processes that drew the old one, so
-the app stops watching them before it publishes and watches the processes that draw the
-new revision once they acknowledge it: switching wallpapers never counts as an exit.
+the app stops watching them before it publishes. It also remembers their process IDs:
+an old process can draw and acknowledge the new manifest before the asynchronous reload
+ends it. That acknowledgement cannot confirm the replacement or re-arm the old process's
+exit watch, even when another refresh interrupts the readiness wait. Only a replacement
+process confirms the new revision, so our own reload does not start another recovery.
 
 While the Mac is unlocked, macOS also closes every connection to a renderer that is
 drawing nothing wrong and then ends its process, sometimes a few times within minutes.
