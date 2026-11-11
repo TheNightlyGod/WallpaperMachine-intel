@@ -7,6 +7,9 @@ enum DisplaySleepAction: String, Codable, CaseIterable, Sendable {
 
 enum OtherAudioAction: String, Codable, CaseIterable, Sendable {
     case keepRunning
+    /// Keep playing, each wallpaper at a share of its own volume
+    /// (`PlaybackPreferences.otherAudioVolume`). It never mutes or pauses anything by itself.
+    case reduceVolume
     case mute
     case pause
 }
@@ -125,7 +128,8 @@ struct AppRule: Codable, Equatable, Identifiable, Sendable {
     var action: AppRuleAction
 }
 
-/// UserDefaults-backed playback rules for display sleep, other-app audio, another app in front, a
+/// UserDefaults-backed playback rules for display sleep, other-app audio (and the volume wallpapers
+/// keep while it plays), another app in front, a
 /// covered desktop, Low Power Mode, a hot Mac, a low battery, an inactive Mac, playing only on the
 /// display in use and per-app pause, mute and stop, whether every wallpaper is muted, and whether
 /// the macOS desktop picture is written at all. Mutations post `didChangeNotification` once.
@@ -142,6 +146,7 @@ final class PlaybackPreferences {
 
     nonisolated static let displaySleepKey = "WallpaperMachine.displaySleepAction"
     nonisolated static let otherAudioKey = "WallpaperMachine.otherAudioAction"
+    nonisolated static let otherAudioVolumeKey = "WallpaperMachine.otherAudioVolume"
     nonisolated static let otherAppInFrontKey = "WallpaperMachine.otherAppInFrontAction"
     nonisolated static let desktopCoveredKey = "WallpaperMachine.desktopCoveredAction"
     nonisolated static let appRulesKey = "WallpaperMachine.appRules"
@@ -159,6 +164,9 @@ final class PlaybackPreferences {
     /// The charge levels the user can pick for the low-battery rule, in percent.
     nonisolated static let lowBatteryThresholds = [10, 20, 30]
     nonisolated static let defaultLowBatteryThreshold = 20
+    /// The share of its own volume a wallpaper can keep while another app plays sound, in percent.
+    nonisolated static let otherAudioVolumeRange = 0...100
+    nonisolated static let defaultOtherAudioVolume = 30
     /// The times without input the user can pick for the inactivity rule, in minutes.
     nonisolated static let inactivityMinuteChoices = [5, 10, 15, 30, 60]
     nonisolated static let defaultInactivityMinutes = 10
@@ -180,6 +188,27 @@ final class PlaybackPreferences {
     var otherAudioAction: OtherAudioAction {
         get { storedEnum(Self.otherAudioKey, default: .keepRunning) }
         set { store(newValue.rawValue, forKey: Self.otherAudioKey) }
+    }
+
+    /// The share of its own saved volume each wallpaper plays at, in percent, while another app
+    /// plays sound and `otherAudioAction` is Reduce volume. A whole number in
+    /// `otherAudioVolumeRange`: a stored value outside it, or one that is not a whole number,
+    /// which only a hand edit or a damaged file can leave, reads as the default; setting one is
+    /// ignored. It never rewrites a wallpaper's own volume.
+    var otherAudioVolume: Int {
+        get {
+            // A stored Boolean bridges to 0 or 1, which would read as a level nobody chose.
+            guard let number = defaults.object(forKey: Self.otherAudioVolumeKey) as? NSNumber,
+                  CFGetTypeID(number) != CFBooleanGetTypeID(),
+                  let stored = number as? Int, Self.otherAudioVolumeRange.contains(stored)
+            else { return Self.defaultOtherAudioVolume }
+            return stored
+        }
+        set {
+            guard Self.otherAudioVolumeRange.contains(newValue) else { return }
+            defaults.set(newValue, forKey: Self.otherAudioVolumeKey)
+            postChange()
+        }
     }
 
     /// Off until chosen: which app is in front alone never changes playback. Pause on battery
@@ -346,7 +375,7 @@ final class PlaybackPreferences {
     /// announced once.
     func resetToDefaults() {
         for key in [
-            Self.displaySleepKey, Self.otherAudioKey, Self.otherAppInFrontKey, Self.desktopCoveredKey, Self.appRulesKey,
+            Self.displaySleepKey, Self.otherAudioKey, Self.otherAudioVolumeKey, Self.otherAppInFrontKey, Self.desktopCoveredKey, Self.appRulesKey,
             Self.lowPowerModeKey, Self.thermalKey, Self.lowBatteryActionKey, Self.lowBatteryThresholdKey,
             Self.inactivityActionKey, Self.inactivityMinutesKey, Self.periodicDesktopPictureKey, Self.writeDesktopPictureKey, Self.playOnlyOnActiveDisplayKey,
             Self.wallpapersMutedKey,

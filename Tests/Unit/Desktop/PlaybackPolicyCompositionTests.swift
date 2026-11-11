@@ -10,6 +10,11 @@ private final class CompositionProbe {
     var rules: Set<AppRuleAction> = []
     var otherAudio = false
     var otherAudioAction = OtherAudioAction.keepRunning
+    /// The share of its own volume a wallpaper keeps under Reduce volume, and what the bridge was told.
+    var otherAudioVolume: Float = 0.3
+    var gains: [Float] = []
+    /// Failures the gain channel returns before it starts acknowledging.
+    var gainFailures = 0
     var userMuted = false
     /// What the conditions ask the quality channel for, and what it was told, in order.
     var reductions: Set<QualityReduction> = []
@@ -29,6 +34,7 @@ private struct DeliveryRefused: Error {}
 private enum Delivery: Equatable {
     case global(GlobalPresentation)
     case audio(suppressed: Bool)
+    case gain(Float)
     case quality(Set<QualityReduction>)
 }
 
@@ -59,6 +65,7 @@ final class PlaybackPolicyCompositionTests: XCTestCase {
             appRuleActions: { probe.rules.union(conditions?.actions ?? []) },
             otherAudioActive: { probe.otherAudio },
             otherAudioAction: { probe.otherAudioAction },
+            otherAudioVolume: { probe.otherAudioVolume },
             userMuted: { probe.userMuted },
             qualityReductions: { probe.reductions.union(conditions?.qualityReductions ?? []) },
             occlusionSettleDelay: .zero,
@@ -75,6 +82,16 @@ final class PlaybackPolicyCompositionTests: XCTestCase {
                 probe.audio.append(suppressed)
                 probe.order.append(.audio(suppressed: suppressed))
                 completion(.success(()))
+            },
+            applyAudioGain: { gain, completion in
+                probe.gains.append(gain)
+                probe.order.append(.gain(gain))
+                if probe.gainFailures > 0 {
+                    probe.gainFailures -= 1
+                    completion(.failure(DeliveryRefused()))
+                } else {
+                    completion(.success(()))
+                }
             },
             applyQuality: { reductions, completion in
                 probe.quality.append(reductions)
@@ -212,6 +229,139 @@ final class PlaybackPolicyCompositionTests: XCTestCase {
         XCTAssertTrue(probe.audio.isEmpty)
         XCTAssertEqual(policy.globalPresentation, .running)
         XCTAssertFalse(policy.isAudioSuppressed)
+    }
+
+    // MARK: Reduced volume
+
+    func testReduceVolumeTurnsWallpapersDownOnlyWhileAnotherAppPlaysSound() {
+        let probe = CompositionProbe()
+        probe.otherAudioAction = .reduceVolume
+        let policy = makePolicy(probe)
+        policy.start()
+        defer { policy.stop() }
+        XCTAssertTrue(probe.gains.isEmpty, "Nothing else is playing, so wallpapers keep their own volume")
+        XCTAssertEqual(policy.audioGain, 1)
+
+        probe.otherAudio = true
+        policy.evaluate()
+        XCTAssertEqual(probe.gains, [0.3])
+        XCTAssertEqual(policy.audioGain, 0.3)
+        XCTAssertTrue(probe.audio.isEmpty, "Turning down is not muting")
+        XCTAssertFalse(policy.isAudioSuppressed)
+        XCTAssertTrue(probe.presentations.isEmpty, "And it never pauses anything")
+        XCTAssertFalse(policy.isSuspended)
+
+        policy.evaluate()
+        XCTAssertEqual(probe.gains, [0.3], "Already turned down: no second delivery")
+
+        probe.otherAudio = false
+        policy.evaluate()
+        XCTAssertEqual(probe.gains, [0.3, 1], "The other sound ended, so each wallpaper is back at its own volume")
+    }
+
+    /// Dragging the slider while another app is already playing: the level is a number, so a new
+    /// one is a new decision even though the rule was holding all along.
+    func testANewLevelIsDeliveredWhileTheRuleAlreadyHolds() {
+        let probe = CompositionProbe()
+        probe.otherAudio = true
+        probe.otherAudioAction = .reduceVolume
+        let policy = makePolicy(probe)
+        policy.start()
+        defer { policy.stop() }
+        XCTAssertEqual(probe.gains, [0.3])
+
+        probe.otherAudioVolume = 0.65
+        policy.evaluate()
+        XCTAssertEqual(probe.gains, [0.3, 0.65])
+
+        // A level outside 0 to 1 never reaches the bridge as it is.
+        probe.otherAudioVolume = 1.8
+        policy.evaluate()
+        XCTAssertEqual(probe.gains.last, 1)
+        probe.otherAudioVolume = -0.2
+        policy.evaluate()
+        XCTAssertEqual(probe.gains.last, 0)
+    }
+
+    func testOnlyReduceVolumeChangesTheGainAndTheOtherChoicesLiftIt() {
+        let probe = CompositionProbe()
+        probe.otherAudio = true
+        probe.otherAudioAction = .reduceVolume
+        let policy = makePolicy(probe)
+        policy.start()
+        defer { policy.stop() }
+        XCTAssertEqual(probe.gains, [0.3])
+
+        probe.otherAudioAction = .mute
+        policy.evaluate()
+        XCTAssertEqual(probe.gains, [0.3, 1], "Mute silences through its own channel, at the saved volume")
+        XCTAssertEqual(probe.audio, [true])
+
+        probe.otherAudioAction = .pause
+        policy.evaluate()
+        XCTAssertEqual(probe.gains, [0.3, 1])
+        XCTAssertEqual(probe.presentations, [.suspended])
+
+        probe.otherAudioAction = .keepRunning
+        policy.evaluate()
+        XCTAssertEqual(probe.gains, [0.3, 1])
+        XCTAssertEqual(policy.audioGain, 1)
+    }
+
+    /// A mute from anywhere else still silences: the user's Mute All or a mute rule holds on its
+    /// own channel while the wallpapers are also turned down, and lifting it leaves them turned
+    /// down, not at full volume.
+    func testAMuteStillSilencesWallpapersThatAreTurnedDown() {
+        let probe = CompositionProbe()
+        probe.otherAudio = true
+        probe.otherAudioAction = .reduceVolume
+        probe.userMuted = true
+        let policy = makePolicy(probe)
+        policy.start()
+        defer { policy.stop() }
+        XCTAssertEqual(probe.audio, [true])
+        XCTAssertEqual(probe.gains, [0.3])
+        XCTAssertEqual(probe.order, [.audio(suppressed: true), .gain(0.3)], "Silence first, then the level")
+
+        probe.userMuted = false
+        probe.rules = [.mute]
+        policy.evaluate()
+        XCTAssertEqual(probe.audio, [true], "The rule still mutes")
+
+        probe.rules = []
+        policy.evaluate()
+        XCTAssertEqual(probe.audio, [true, false])
+        XCTAssertEqual(probe.gains, [0.3], "Unmuted into the reduced volume, which never left")
+        XCTAssertEqual(policy.audioGain, 0.3)
+    }
+
+    func testARefusedLevelIsSentAgainAtTheNextEvaluation() {
+        let probe = CompositionProbe()
+        probe.otherAudio = true
+        probe.otherAudioAction = .reduceVolume
+        probe.gainFailures = 1
+        let policy = makePolicy(probe)
+        policy.start()
+        defer { policy.stop() }
+        XCTAssertEqual(probe.gains, [0.3], "Refused once, and not retried in a loop")
+
+        policy.evaluate()
+        XCTAssertEqual(probe.gains, [0.3, 0.3], "The level the bridge never took is sent again")
+        policy.evaluate()
+        XCTAssertEqual(probe.gains, [0.3, 0.3], "Once taken it is not sent a third time")
+    }
+
+    func testTeardownRestoresEveryWallpapersOwnVolume() {
+        let probe = CompositionProbe()
+        probe.otherAudio = true
+        probe.otherAudioAction = .reduceVolume
+        let policy = makePolicy(probe)
+        policy.start()
+        XCTAssertEqual(probe.gains, [0.3])
+
+        policy.stop()
+        XCTAssertEqual(probe.gains.last, 1, "Teardown must never leave a surface turned down")
+        XCTAssertEqual(policy.audioGain, 1)
     }
 
     func testStopRestoresRunningAndUnmuted() {

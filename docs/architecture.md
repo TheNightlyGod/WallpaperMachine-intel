@@ -440,6 +440,11 @@ per-Space getter and setter through optional private CoreGraphics and HIServices
   suppressed separately (`setAudioSuppressed`) for a mute rule, other-app audio set to mute or the
   user's own mute of every wallpaper (`PlaybackPreferences.wallpapersMuted`). The bridge ORs that one
   flag with each wallpaper's saved mute, so the user's mute never rewrites a saved sound setting.
+  Other-app audio set to Reduce volume travels beside it on a channel of its own
+  (`setAudioGain`): a gain from 0 to 1 the bridge multiplies each wallpaper's saved volume by, live
+  for an open scene and in the descriptors of web pages and native video. It is never saved, is
+  compared as a number so a new level is delivered while the rule already holds, and goes back to 1
+  when the other sound ends and at teardown ([playback](features/performance.md#playback)).
   A scene renderer receives its pause, volume and mute inside its configuration
   (`owe_scene_wallpaper_apply_config`), not as settings sent after it: the scene can load the
   moment it is configured, and its sounds play once mounted, so a later mute would let the start of
@@ -506,7 +511,7 @@ per-Space getter and setter through optional private CoreGraphics and HIServices
   [display layouts](features/display-layouts.md#mirror-sets-airplay-and-a-closed-lid).
   The Space monitor rereads Spaces only when `DisplayConfiguration` moved, and the presentation
   policy re-evaluates only when a screen frame or working area moved. A refresh reopens a scene
-  only when its saved configuration changed: the frame-rate ceiling, transient mute, pause and
+  only when its saved configuration changed: the frame-rate ceiling, transient mute and gain, pause and
   system-audio gating are applied live and never count as a different wallpaper. Window-only
   updates compare the native geometry before writing it and commit without implicit layer
   animations, so moving a display or changing the primary does not redraw a window or reset an

@@ -235,6 +235,23 @@ async fn the_native_descriptor_carries_the_users_own_settings() {
 }
 
 #[tokio::test]
+async fn the_native_descriptor_is_turned_down_by_the_audio_gain_and_restored() {
+    let temp = tempfile::tempdir().unwrap();
+    let engine = FakeEngineFacade::default();
+    let bridge = video_bridge(&engine, &temp).await;
+    commit(&bridge, "300", "7").await;
+    bridge.set_volume("300".into(), 0.8).await.unwrap();
+
+    bridge.set_audio_gain(0.25).await.unwrap();
+    let native = bridge.native_video_wallpapers().await.unwrap();
+    assert_eq!(native[0].volume, 0.8 * 0.25);
+    assert!(!native[0].muted, "turning down is not muting");
+
+    bridge.set_audio_gain(1.0).await.unwrap();
+    assert_eq!(bridge.native_video_wallpapers().await.unwrap()[0].volume, 0.8);
+}
+
+#[tokio::test]
 async fn hiding_a_display_pauses_only_its_native_wallpaper() {
     let temp = tempfile::tempdir().unwrap();
     let engine = FakeEngineFacade::default();

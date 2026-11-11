@@ -53,7 +53,7 @@ use crate::{
             GetSystemMediaSceneHandles, SetFilter,
             SetFrameRateCap, SetGlobalPlayback, SetQualityThrottle,
             SetLaunchAtLogin, SetMediaIntegrationEnabled,
-            SetMuted, SetAudioSuppressed, SetBatteryMode, SetLabelLanguages, SetPowerSource,
+            SetMuted, SetAudioGain, SetAudioSuppressed, SetBatteryMode, SetLabelLanguages, SetPowerSource,
             SetPresentationSuspended, SetPresentationUnloaded, SetPropertyPath,
             SetMetalFxUpscalingEnabled, SetRenderScale,
             SetRendererCountersEnabled, SetScalingFactor, SetScalingMode,
@@ -80,7 +80,7 @@ use crate::{
     },
     display::{DisplaySelectorExt, DisplaySnapshotExt},
     engine::{
-        ActivationInputs, AudioCaptureDemand, EngineFacade, LoadJournal,
+        ActivationInputs, AudioCaptureDemand, AudioGain, EngineFacade, LoadJournal,
     },
     library::scan,
     login::LaunchAtLoginController,
@@ -1063,8 +1063,29 @@ impl<E: EngineFacade + Clone> BridgeActor<E> {
             project_models: &self.state.project_models,
             frame_rate_cap: self.active_target_fps_cap(),
             audio_suppressed: self.state.audio_suppressed,
+            audio_gain: self.state.audio_gain,
             held: &self.state.held_wallpapers,
         }
+    }
+
+    /// The configured scenes that are open now, each with its handle: where a
+    /// live change of the transient mute or gain is sent. `scene` carries the
+    /// saved volume and mute, without either transient on top.
+    fn open_configured_scenes(&self) -> Result<Vec<(SceneHandle, SceneDesc)>, BridgeError> {
+        let displays = self.engine.display_snapshot();
+        let scenes = self
+            .activation_inputs(&displays, self.playback_paused())
+            .build()?;
+        Ok(scenes
+            .into_iter()
+            .filter_map(|scene| {
+                let handle = displays
+                    .iter()
+                    .find(|entry| entry.desc.display_id == scene.display.display_id)
+                    .and_then(|entry| entry.handle)?;
+                Some((handle, scene))
+            })
+            .collect())
     }
 
     /// Committed plain-video wallpapers, played by the host's own player. Empty only while
@@ -1455,6 +1476,7 @@ impl<E: EngineFacade + Clone> BridgeActor<E> {
                 scene.clone(),
                 self.active_target_fps_cap(),
                 self.state.audio_suppressed,
+                self.state.audio_gain,
             );
             snapshot.iter().any(|entry| {
                 entry.handle.is_some()
@@ -1607,16 +1629,24 @@ fn capped_frame_rate(rate: u32, cap: Option<u32>) -> u32 {
 }
 
 /// `scene` as its renderer runs it: the saved rate under the frame-rate
-/// ceiling in force, and the saved mute with the transient mute on top.
+/// ceiling in force, the saved mute with the transient mute on top, and the
+/// saved volume under the transient gain.
 ///
-/// Both are applied live, and applying them rewrites the open scene's
+/// All three are applied live, and applying them rewrites the open scene's
 /// descriptor. The engine reopens any scene whose descriptor differs from the
 /// one it is handed, so every reconcile hands over, and every unchanged check
-/// compares against, this form. The saved values would reload each capped or
-/// muted scene on every Apply, display edit, backend switch or repair.
-fn live_scene(mut scene: SceneDesc, fps_cap: Option<u32>, audio_suppressed: bool) -> SceneDesc {
+/// compares against, this form. The saved values would reload each capped,
+/// muted or turned-down scene on every Apply, display edit, backend switch or
+/// repair.
+fn live_scene(
+    mut scene: SceneDesc,
+    fps_cap: Option<u32>,
+    audio_suppressed: bool,
+    audio_gain: AudioGain,
+) -> SceneDesc {
     scene.fps = capped_frame_rate(scene.fps, fps_cap);
     scene.audio_muted = scene.audio_muted || audio_suppressed;
+    scene.audio_volume = audio_gain.applied_to_volume(scene.audio_volume);
     scene
 }
 
@@ -2239,20 +2269,32 @@ impl<E: EngineFacade + Clone> Message<SetAudioSuppressed> for BridgeActor<E> {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         self.state.audio_suppressed = msg.suppressed;
-        let displays = self.engine.display_snapshot();
-        let scenes = self
-            .activation_inputs(&displays, self.playback_paused())
-            .build()?;
-        for scene in &scenes {
-            let Some(handle) = displays
-                .iter()
-                .find(|entry| entry.desc.display_id == scene.display.display_id)
-                .and_then(|entry| entry.handle)
-            else {
-                continue;
-            };
+        for (handle, scene) in self.open_configured_scenes()? {
             self.engine
                 .set_audio_muted(handle, scene.audio_muted || msg.suppressed)
+                .await
+                .map_err(|error| BridgeError::engine(error.to_string()))?;
+        }
+        self.invalidate_operations();
+        Ok(self.all_snapshots())
+    }
+}
+
+impl<E: EngineFacade + Clone> Message<SetAudioGain> for BridgeActor<E> {
+    type Reply = messages::SetAudioGainReply;
+
+    async fn handle(
+        &mut self,
+        msg: SetAudioGain,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let gain = AudioGain::new(msg.gain)?;
+        self.state.audio_gain = gain;
+        // Scenes take the new volume live. Web pages and native video take it
+        // from the descriptors in the snapshots this returns.
+        for (handle, scene) in self.open_configured_scenes()? {
+            self.engine
+                .set_audio_volume(handle, gain.applied_to_volume(scene.audio_volume))
                 .await
                 .map_err(|error| BridgeError::engine(error.to_string()))?;
         }
@@ -2453,7 +2495,7 @@ impl<E: EngineFacade + Clone> Message<messages::PreloadDesktopWallpaper> for Bri
         let inputs = || ActivationInputs { app_config: &config, paused: true, audio_suppressed: true,
             ..self.activation_inputs(&displays, true) };
         if let Some(scene) = inputs().build()?.into_iter().next() {
-            let scene = live_scene(scene, self.active_target_fps_cap(), true);
+            let scene = live_scene(scene, self.active_target_fps_cap(), true, self.state.audio_gain);
             self.engine.preload_scene(scene, f64::from(self.effective_render_scale())).await
                 .map_err(|error| BridgeError::engine(error.to_string()))?;
         }
@@ -3318,9 +3360,11 @@ impl<E: EngineFacade + Clone> Message<SetVolume> for BridgeActor<E> {
             .set_volume_immediate(volume)?;
         self.save_wallpaper(wallpaper_id.clone(), saved)?;
         // Mirrors follow their source, so only the scenes of their own are told.
+        // What is saved is `volume`; what plays is its share under the gain in force.
+        let live = self.state.audio_gain.applied_to_volume(level);
         for handle in self.wallpaper_handles(&wallpaper_id, false) {
             self.engine
-                .set_audio_volume(handle, level)
+                .set_audio_volume(handle, live)
                 .await
                 .map_err(engine_failed)?;
         }

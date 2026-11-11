@@ -298,7 +298,21 @@ picture shows between a window closing and the web page's window opening.
   follows it without depending on it. A real `SystemConditionMonitor` wired to the policy covers
   the chain for heat: serious reduces, critical also pauses without sending the reduction
   again, cooling to serious resumes and keeps it, and nominal releases it. The store call and
-  the app delegate's closure are thin forwarders and are not tested on their own. The user's
+  the app delegate's closure are thin forwarders and are not tested on their own. The reduced
+  volume for other-app audio is a further delivery, after the mute: sent only while another app
+  plays sound and Reduce volume is the choice, as a number (a new level is delivered while the
+  rule already holds, one outside 0 to 1 is held to the nearest end), lifted by the other choices
+  and when the sound ends, sent again after a refusal, restored at teardown, and independent of
+  the mute, which still silences a turned-down wallpaper; its level defaults to 30%, keeps only a
+  whole percentage from 0 to 100 and resets, and `WallpaperBackupTests` cover it in a backup.
+  `OtherAudioVolumeSettingsTests` cover the panel's side (Reduce volume listed beside Mute, the
+  level row only while it is the choice, a level outside the slider refused). The bridge's half is
+  in `wallpaper-bridge` (`performance_settings`, `web_audio_media`, `native_video_routing`,
+  `settings_intents`, `operation_contract_tests`): the gain scales an open scene's volume live and
+  restores the saved one, a volume or a mirror's volume changed meanwhile is saved whole and
+  played reduced, a wallpaper applied meanwhile starts reduced, web and native-video descriptors
+  carry the product, a display refresh does not reload a turned-down scene, and a gain outside 0
+  to 1 is refused. Whether the lower volume is heard is not covered. The user's
   mute of every wallpaper is one more source of the single audio-suppression flag: delivered at launch, silent without touching presentation, still held
   by a mute rule or other-app audio when lifted, and released at teardown; its preference
   defaults off, persists and announces one change. Its Settings switch (stored, reported and

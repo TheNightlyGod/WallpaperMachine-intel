@@ -772,6 +772,25 @@ final class WallpaperBackupTests: XCTestCase {
         }
     }
 
+    func testTheReducedVolumeForOtherAudioIsBackedUpAndOnlyAWholePercentageRestores() throws {
+        let preferences = try defaults()
+        let playback = PlaybackPreferences(defaults: preferences)
+        playback.otherAudioAction = .reduceVolume
+        playback.otherAudioVolume = 45
+        let export = try WallpaperBackupPreferences(defaults: preferences, domainName: domainName(for: preferences))
+        for (key, expected) in [(PlaybackPreferences.otherAudioKey, "reduceVolume"), (PlaybackPreferences.otherAudioVolumeKey, "45")] {
+            let stored = try WallpaperBackupPreferences.decode(XCTUnwrap(export.values[key], key))
+            try WallpaperBackupPreferences.validate(stored, forKey: key)
+            XCTAssertEqual("\(stored)", expected)
+        }
+        for level in [0, 1, 30, 99, 100] {
+            XCTAssertNoThrow(try WallpaperBackupPreferences.validate(NSNumber(value: level), forKey: PlaybackPreferences.otherAudioVolumeKey))
+        }
+        for level: Any in [101, -1, 30.5, "30", true, NSNumber(value: 1e30)] {
+            XCTAssertThrowsError(try WallpaperBackupPreferences.validate(level, forKey: PlaybackPreferences.otherAudioVolumeKey), "\(level)")
+        }
+    }
+
     func testWhatAClickOnTheMenuBarIconOpensIsBackedUpAndOnlyAChoiceRestores() throws {
         let preferences = try defaults()
         // A center of its own: the running app's status item must not follow the test's choice.

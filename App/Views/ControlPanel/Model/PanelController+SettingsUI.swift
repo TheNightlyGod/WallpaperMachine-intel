@@ -138,6 +138,7 @@ extension OtherAudioAction {
   @MainActor var title: String {
     switch self {
     case .keepRunning: L("Keep running")
+    case .reduceVolume: L("Reduce volume")
     case .mute: L("Mute")
     case .pause: L("Pause")
     }

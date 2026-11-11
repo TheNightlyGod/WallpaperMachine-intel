@@ -33,6 +33,11 @@ pub struct BridgeActorState {
     /// Transient mute applied on top of each wallpaper's saved mute. Never
     /// persisted. A user unmute while this is set stays muted until it clears.
     pub audio_suppressed: bool,
+    /// Transient gain applied on top of each wallpaper's saved volume, for a
+    /// host that wants wallpapers turned down without muting them. Never
+    /// persisted. A volume the user saves while it is set plays reduced until
+    /// it clears.
+    pub audio_gain: crate::engine::AudioGain,
     /// Why the host currently asks for the reduced-quality profile, beyond the
     /// battery mode the user saved. Empty by default and never persisted, like
     /// `audio_suppressed`: the host reports the conditions again at every
@@ -144,6 +149,7 @@ impl Default for BridgeActorState {
             presentation_suspended: false,
             presentation_unloaded: false,
             audio_suppressed: false,
+            audio_gain: crate::engine::AudioGain::UNITY,
             quality_throttle: BTreeSet::new(),
             label_locales: vec![FALLBACK_LOCALE.to_owned()],
             suspended_displays: BTreeSet::new(),

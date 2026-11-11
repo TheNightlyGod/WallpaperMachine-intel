@@ -286,6 +286,7 @@ mod tests {
                 project_models: &self.models,
                 frame_rate_cap: None,
                 audio_suppressed: false,
+                audio_gain: crate::engine::AudioGain::UNITY,
                 held: &self.held,
             }
         }

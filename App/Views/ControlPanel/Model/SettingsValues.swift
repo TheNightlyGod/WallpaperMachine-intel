@@ -161,6 +161,8 @@ struct PlaybackSettings: Equatable {
   var desktopCoveredAction: DesktopCoveredAction
   var playsOnlyOnActiveDisplay: Bool
   var otherAudioAction: OtherAudioAction
+  /// The share of its own volume, in percent, each wallpaper keeps under Reduce volume.
+  var otherAudioVolume: Int = PlaybackPreferences.defaultOtherAudioVolume
   var otherAppInFrontAction: OtherAppInFrontAction
   var displaySleepAction: DisplaySleepAction
   var batteryMode: BridgeBatteryMode
@@ -194,6 +196,8 @@ struct PlaybackSettings: Equatable {
   var showsLowBatteryRows: Bool { hasBattery }
   /// The low battery level is asked only once the rule does something.
   var showsLowBatteryLevel: Bool { hasBattery && lowBatteryAction != .keepRunning }
+  /// The reduced volume is asked only once other-app sound turns wallpapers down.
+  var showsOtherAudioVolume: Bool { otherAudioAction == .reduceVolume }
   /// So is the time without input after which the Mac counts as inactive.
   var showsInactivityTime: Bool { inactivityAction != .keepRunning }
   /// "Only play on the display I'm using" needs two displays, or is shown while on so it can be turned off.

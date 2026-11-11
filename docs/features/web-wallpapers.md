@@ -591,7 +591,10 @@ The official general-property payload remains `fps`, not an invented `volume`
 protocol.
 
 User mute and temporary app/Focus/other-audio mute compose in the existing bridge
-configuration; ending a rule does not clear user mute. Mirrored pages elect one
+configuration; ending a rule does not clear user mute. The gain other-app audio
+applies under **Reduce volume** ([Playback](performance.md#playback)) arrives as a
+lower Volume in the same descriptor, so it reaches media elements only: Web Audio
+keeps its level, and a level of 0% mutes the page as zero Volume does. Mirrored pages elect one
 presenting audible owner per actual source assignment (`MirrorAudioOwnership`, which native video
 follows too);
 independent assignments of the same project stay independent, and a hidden owner

@@ -217,6 +217,15 @@ extension PanelController {
     try await change { playback.otherAudioAction = action }
   }
 
+  /// `otherAudioVolume`: the share of its own volume, in whole percent from 0 to 100
+  /// (`PlaybackPreferences.otherAudioVolumeRange`), each wallpaper keeps under Reduce volume.
+  func setOtherAudioVolume(_ percent: Int) async throws {
+    guard PlaybackPreferences.otherAudioVolumeRange.contains(percent) else {
+      throw InvalidControlValue()
+    }
+    try await change { playback.otherAudioVolume = percent }
+  }
+
   /// `otherAppInFrontAction`. Choosing here answers the one-time battery question, since the row
   /// offers Pause on battery.
   func setOtherAppInFrontAction(_ action: OtherAppInFrontAction) async throws {

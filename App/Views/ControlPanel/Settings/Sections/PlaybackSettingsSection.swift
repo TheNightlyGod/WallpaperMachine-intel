@@ -32,6 +32,12 @@ struct PlaybackSettingsSection: View {
     note:
       "Mute silences scene and video wallpapers, and Web wallpapers when page-output mute is available. Pause applies to every wallpaper."
   )
+  static let otherAudioVolume = SettingsItem(
+    id: "playback.other-audio-volume", section: .playback, group: playback,
+    title: "Reduce volume to",
+    note:
+      "Each wallpaper plays at this share of its own volume while the other sound lasts; its saved volume is not changed. In Web wallpapers it reaches only the audio and video played through media elements."
+  )
   static let otherAppInFront = SettingsItem(
     id: "playback.other-app-in-front", section: .playback, group: playback,
     title: "When another app is in front",
@@ -112,14 +118,16 @@ struct PlaybackSettingsSection: View {
     title: "What these settings change")
 
   static let items = [
-    muteAll, desktopCovered, activeDisplayOnly, otherAudio, otherAppInFront, displaySleep, inactivity,
+    muteAll, desktopCovered, activeDisplayOnly, otherAudio, otherAudioVolume, otherAppInFront, displaySleep,
+    inactivity,
     inactivityTime, batteryMode, batteryScale,
     batteryFps, reducedQuality, lowBattery, lowBatteryLevel, lowPowerMode, thermal, focus, appRules,
     addAppRule, whatChanges,
   ]
 
   /// The rows this page leaves out now, by the rules its body draws them with: "Only play on the
-  /// display I'm using" needs two displays (or is on), the time without input needs an inactivity
+  /// display I'm using" needs two displays (or is on), the reduced volume needs Reduce volume to
+  /// be the choice for other-app sound, the time without input needs an inactivity
   /// rule that does something, the reduced profile needs a Reduced quality choice, and the
   /// low-battery rows need a battery (the level also a rule that does something).
   @MainActor
@@ -127,6 +135,7 @@ struct PlaybackSettingsSection: View {
     let playback = controller.playbackSettings
     var hidden: [SettingsItem] = []
     if !playback.showsActiveDisplayOnly { hidden.append(activeDisplayOnly) }
+    if !playback.showsOtherAudioVolume { hidden.append(otherAudioVolume) }
     if !playback.showsInactivityTime { hidden.append(inactivityTime) }
     if !controller.qualityReport.reducedQualityChosen {
       hidden += [batteryScale, batteryFps, reducedQuality]
@@ -161,6 +170,15 @@ struct PlaybackSettingsSection: View {
             "otherAudioAction", saved: playback.otherAudioAction,
             options: OtherAudioAction.allCases.map { ($0, $0.title) }
           ) { try await controller.setOtherAudioAction($0) }
+        }
+        if playback.showsOtherAudioVolume {
+          SettingsRow(Self.otherAudioVolume) {
+            // A percentage reads the same in every language.
+            SettingsSliderControl(
+              key: "otherAudioVolume", saved: playback.otherAudioVolume,
+              range: PlaybackPreferences.otherAudioVolumeRange, readout: { "\($0)%" }
+            ) { try await controller.setOtherAudioVolume($0) }
+          }
         }
         SettingsRow(Self.otherAppInFront, note: playback.otherAppInFrontNote) {
           menu(
@@ -301,7 +319,7 @@ struct PlaybackSettingsSection: View {
         "With two or more displays, Only play on the display I’m using pauses the others a few seconds after your pointer leaves them."
       )
       Text(
-        "When another app plays sound, Mute uses each wallpaper’s output mute channel. Web mute availability is shown in its details. Pause stops every wallpaper until that sound ends."
+        "When another app plays sound, Reduce volume plays each wallpaper at the share of its own volume you chose, and Mute uses each wallpaper’s output mute channel. Web mute availability is shown in its details. Pause stops every wallpaper until that sound ends."
       )
       Text(
         "When another app is in front, Mute or Pause lasts until you click the desktop or return to this app. Pause on battery does the same only while the Mac runs on battery, and plugging in ends it."

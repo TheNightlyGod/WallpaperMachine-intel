@@ -210,6 +210,20 @@ async fn a_display_refresh_does_not_reload_a_scene_muted_for_other_audio() {
 }
 
 #[tokio::test]
+async fn a_display_refresh_does_not_reload_a_scene_turned_down_for_other_audio() {
+    let engine = FakeEngineFacade::default();
+    let (bridge, _root) = running_scene_bridge(&engine).await;
+    bridge.set_volume("100".into(), 0.7).await.unwrap();
+    bridge.set_audio_gain(0.3).await.unwrap();
+    assert_eq!(
+        engine.audio_volume_calls().last(),
+        Some(&(SceneHandle::new(1), 0.7 * 0.3))
+    );
+
+    assert_refresh_keeps_the_scene(&bridge, &engine).await;
+}
+
+#[tokio::test]
 async fn a_display_refresh_does_not_reload_a_scene_paused_by_a_lock_or_a_covered_display() {
     let engine = FakeEngineFacade::default();
     let (bridge, _root) = running_scene_bridge(&engine).await;

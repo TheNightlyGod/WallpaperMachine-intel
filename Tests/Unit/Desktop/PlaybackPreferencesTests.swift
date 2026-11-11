@@ -218,6 +218,49 @@ final class PlaybackPreferencesTests: XCTestCase {
         XCTAssertEqual(preferences.inactivityMinutes, 10)
     }
 
+    func testReduceVolumeIsAChoiceForOtherAudioAndKeepsOnlyAWholePercentage() {
+        let preferences = PlaybackPreferences(defaults: defaults)
+        XCTAssertEqual(preferences.otherAudioVolume, 30, "A level nobody has set yet is quieter, not silent")
+        XCTAssertEqual(OtherAudioAction.allCases, [.keepRunning, .reduceVolume, .mute, .pause],
+                       "The menu lists the choices from the mildest to the strongest")
+
+        preferences.otherAudioAction = .reduceVolume
+        preferences.otherAudioVolume = 45
+        preferences.otherAudioVolume = 101
+        preferences.otherAudioVolume = -1
+        let reloaded = PlaybackPreferences(defaults: defaults)
+        XCTAssertEqual(reloaded.otherAudioAction, .reduceVolume)
+        XCTAssertEqual(reloaded.otherAudioVolume, 45, "A level outside 0 to 100 is ignored")
+        for edge in [0, 100] {
+            preferences.otherAudioVolume = edge
+            XCTAssertEqual(PlaybackPreferences(defaults: defaults).otherAudioVolume, edge)
+        }
+
+        for stored: Any in [101, -10, 45.5, "45", true, false] {
+            defaults.set(stored, forKey: PlaybackPreferences.otherAudioVolumeKey)
+            XCTAssertEqual(PlaybackPreferences(defaults: defaults).otherAudioVolume, 30, "\(stored)")
+        }
+
+        preferences.otherAudioVolume = 80
+        preferences.resetToDefaults()
+        XCTAssertEqual(preferences.otherAudioAction, .keepRunning)
+        XCTAssertEqual(preferences.otherAudioVolume, 30)
+    }
+
+    func testChangingTheReducedVolumePostsAChangeSoThePolicyTakesTheNewLevel() {
+        let preferences = PlaybackPreferences(defaults: defaults)
+        let posts = ChangeCount()
+        let token = NotificationCenter.default.addObserver(
+            forName: PlaybackPreferences.didChangeNotification, object: preferences, queue: .main
+        ) { _ in posts.value += 1 }
+        defer { NotificationCenter.default.removeObserver(token) }
+
+        preferences.otherAudioVolume = 60
+        XCTAssertEqual(posts.value, 1)
+        preferences.otherAudioVolume = 140
+        XCTAssertEqual(posts.value, 1, "A refused level changes nothing")
+    }
+
     func testWritingTheDesktopPictureIsOnUntilTurnedOff() {
         let preferences = PlaybackPreferences(defaults: defaults)
         XCTAssertTrue(preferences.writesDesktopPicture, "A fresh install keeps installing the Mission Control picture")

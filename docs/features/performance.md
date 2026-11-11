@@ -484,7 +484,7 @@ wins. There is no timer and no per-frame check (bridge `tests::playback_reconcil
 | --- | --- | --- |
 | Mute all wallpapers | On, Off | Off |
 | When windows cover the desktop | **Pause**, **Keep running** | Pause |
-| When another app plays sound | **Keep running**, **Mute**, **Pause** | Keep running |
+| When another app plays sound | **Keep running**, **Reduce volume**, **Mute**, **Pause**; Reduce volume plays wallpapers at **0%** to **100%** of their own volume | Keep running, 30% |
 | When another app is in front | **Keep running**, **Mute**, **Pause**, **Pause on battery** | Keep running |
 | When displays sleep | **Pause**, **Stop (free memory)** | Pause |
 | When the Mac is inactive | **Keep running**, **Pause**, **Stop (free memory)**; inactive after **5**, **10**, **15** or **30 minutes** or **1 hour** without input | Keep running, 10 minutes |
@@ -571,6 +571,29 @@ playing on a display the pointer is not on pauses too.
 output channel, Web wallpapers. Availability is shown in the wallpaper's details;
 see [Page sound](web-wallpapers.md#page-sound). **Pause** applies to every
 wallpaper and does not change the user's own Play/Pause.
+
+**Reduce volume** keeps wallpapers playing and turns them down while another app
+plays sound. Choosing it shows **Reduce volume to**, a slider from 0% to 100%
+(default 30%): each wallpaper plays at that share of its own saved volume, so one
+saved at 80% plays at 40% with the slider at 50%, and it returns to its own volume
+when the other sound ends. The level is a gain the bridge multiplies every saved
+volume by (`set_audio_gain`, from `PlaybackPreferences.otherAudioVolume`). It is
+kept for the run only and never rewrites a wallpaper's or a display's saved volume:
+a volume changed meanwhile is saved whole and plays reduced, a wallpaper applied
+meanwhile starts reduced, and a slider moved while the other app still plays
+applies its new level when it is let go. Scene and video wallpapers change live, without
+reloading. A Web wallpaper follows it as far as its own Volume reaches: the audio
+and video it plays through media elements, where WebKit exposes that control, and
+not Web Audio, which only **Mute** silences
+([Page sound](web-wallpapers.md#page-sound)); at 0% the page is muted, as it is at
+zero volume. It does not stand in for a mute: **Mute all wallpapers**, a mute app
+rule and a Focus filter still silence a wallpaper that is turned down, and when they
+end it is still turned down for as long as the other sound lasts. Only this row
+offers it; **When another app is in front** and the app rules mute or pause as
+before. A [backup](backup-restore.md) carries the choice and the level, and **Reset
+all settings** puts them back on **Keep running** and 30%. Whether the lower volume
+is heard as expected on a real output has not been checked by a test: the tests
+follow the gain to the engine's volume call and to the web and video descriptors.
 
 Another app counts as playing sound while Core Audio reports it running audio
 output (`kAudioProcessPropertyIsRunningOutput`). This app and the processes it is

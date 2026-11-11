@@ -415,6 +415,7 @@ impl BridgeActorState {
             project_models: &self.project_models,
             frame_rate_cap: self.active_target_fps_cap_for_app(candidate),
             audio_suppressed: self.audio_suppressed,
+            audio_gain: self.audio_gain,
             held: &self.held_wallpapers,
         }
         .render_backends();

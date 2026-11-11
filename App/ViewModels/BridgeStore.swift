@@ -1126,6 +1126,18 @@ final class BridgeStore {
         }
     }
 
+    /// Asks the bridge to play every wallpaper at `gain` times its own saved volume, from 0 to 1;
+    /// 1 restores the saved volumes. The bridge keeps it for this run only and never rewrites a
+    /// saved volume. Open scenes change live, and the snapshot this applies carries the reduced
+    /// volume to the web pages and native video. Like the mute it is an automatic change of the
+    /// environment, so it waits for an in-flight Apply instead of invalidating it.
+    func setAudioGainAsync(_ gain: Float) async throws {
+        try await updatePlaybackEnvironment {
+            let bundle = try await bridge.setAudioGain(gain: gain)
+            apply(bundle)
+        }
+    }
+
     /// Asks the bridge to run every wallpaper at the reduced-quality profile for as long as
     /// `reductions` is not empty, on top of the battery mode the user saved. The bridge keeps
     /// it for this run only and lowers frame rate and render scale live, without pausing or

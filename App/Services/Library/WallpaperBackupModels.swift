@@ -109,7 +109,7 @@ struct WallpaperBackupPreferences: Sendable {
         PanelPreferences.favoritesKey, AppThemeStore.defaultsKey,
         AppLanguageStore.defaultsKey, AppLanguageStore.appleLanguagesKey, HotKeyPreferences.bindingsKey,
         PlaybackPreferences.displaySleepKey, PlaybackPreferences.otherAudioKey,
-        PlaybackPreferences.otherAppInFrontKey,
+        PlaybackPreferences.otherAudioVolumeKey, PlaybackPreferences.otherAppInFrontKey,
         PlaybackPreferences.desktopCoveredKey, PlaybackPreferences.appRulesKey,
         PlaybackPreferences.lowPowerModeKey, PlaybackPreferences.thermalKey,
         PlaybackPreferences.lowBatteryActionKey, PlaybackPreferences.lowBatteryThresholdKey,
@@ -261,6 +261,9 @@ struct WallpaperBackupPreferences: Sendable {
         case AppLanguageStore.appleLanguagesKey: guard let values = value as? [String], values.count <= 32, values.allSatisfy({ !$0.isEmpty && !$0.contains("\0") && $0.count <= 128 }) else { throw invalid() }
         case PlaybackPreferences.displaySleepKey: guard let raw = value as? String, DisplaySleepAction(rawValue: raw) != nil else { throw invalid() }
         case PlaybackPreferences.otherAudioKey: guard let raw = value as? String, OtherAudioAction(rawValue: raw) != nil else { throw invalid() }
+        case PlaybackPreferences.otherAudioVolumeKey:
+            guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(), number.doubleValue == Double(number.intValue),
+                  PlaybackPreferences.otherAudioVolumeRange.contains(number.intValue) else { throw invalid() }
         case PlaybackPreferences.otherAppInFrontKey: guard let raw = value as? String, OtherAppInFrontAction(rawValue: raw) != nil else { throw invalid() }
         case PlaybackPreferences.desktopCoveredKey: guard let raw = value as? String, DesktopCoveredAction(rawValue: raw) != nil else { throw invalid() }
         case PlaybackPreferences.lowPowerModeKey, PlaybackPreferences.thermalKey, PlaybackPreferences.lowBatteryActionKey:

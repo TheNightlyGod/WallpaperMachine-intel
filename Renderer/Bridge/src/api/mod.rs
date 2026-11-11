@@ -95,7 +95,7 @@ use crate::{
             SetDisplayParkedWallpapers, SetDisplayPresentationSuspended,
             SetFilter, SetGlobalPlayback, SetLaunchAtLogin, SetMirrorMuted, SetMirrorScalingFactor,
             SetMirrorScalingMode, SetMirrorTarget, SetMirrorTargetFps, SetMirrorVolume, SetMuted,
-            SetAudioSuppressed, SetBatteryMode, SetBatteryQualityProfile,
+            SetAudioGain, SetAudioSuppressed, SetBatteryMode, SetBatteryQualityProfile,
             SetFrameRateCap, SetLabelLanguages, SetMediaIntegrationEnabled,
             SetMetalFxUpscalingEnabled, SetPresentationUnloaded, SetPresentationSuspended,
             SetPropertyPath,
@@ -1925,6 +1925,22 @@ impl WallpaperBridge {
         suppressed: bool,
     ) -> Result<BridgeSnapshotBundle, BridgeError> {
         self.actor.ask(SetAudioSuppressed { suppressed }).await
+    }
+
+    /// Plays every wallpaper at `gain` times its saved volume: 1 restores the
+    /// saved volumes and 0 silences them. For a host that wants wallpapers
+    /// turned down without muting them, such as while another app plays
+    /// sound. Not persisted, and it never rewrites a saved volume: one the
+    /// user changes while a gain below 1 is set is saved whole and plays
+    /// reduced until the gain is lifted. Open scenes change live; the web and
+    /// native-video descriptors in the returned snapshots carry the product.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `gain` is not a number from 0 to 1, or when a
+    /// running scene rejects the volume.
+    pub async fn set_audio_gain(&self, gain: f32) -> Result<BridgeSnapshotBundle, BridgeError> {
+        self.actor.ask(SetAudioGain { gain }).await
     }
 
     /// Names the languages a wallpaper's own translated labels are read in,

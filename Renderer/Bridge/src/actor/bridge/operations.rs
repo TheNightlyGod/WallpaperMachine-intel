@@ -60,6 +60,7 @@ struct ReconcileWork<E> {
     paused: bool,
     unloaded: bool,
     audio_suppressed: bool,
+    audio_gain: crate::engine::AudioGain,
     frame_rate_cap: Option<u32>,
     render_scale: f32,
     force_shader_refresh: bool,
@@ -82,6 +83,7 @@ impl<E: EngineFacade> ReconcileWork<E> {
             project_models: &self.models,
             frame_rate_cap: self.frame_rate_cap,
             audio_suppressed: self.audio_suppressed,
+            audio_gain: self.audio_gain,
             held: &self.held,
         }
     }
@@ -103,7 +105,12 @@ impl<E: EngineFacade> ReconcileWork<E> {
             .into_iter()
             .map(|(scene, owner)| {
                 (
-                    super::live_scene(scene, self.frame_rate_cap, self.audio_suppressed),
+                    super::live_scene(
+                        scene,
+                        self.frame_rate_cap,
+                        self.audio_suppressed,
+                        self.audio_gain,
+                    ),
                     owner,
                 )
             })
@@ -366,6 +373,7 @@ impl<E: EngineFacade + Clone> BridgeActor<E> {
             paused: self.playback_paused(),
             unloaded: self.operation_unloaded(),
             audio_suppressed: self.operation_audio_suppressed(),
+            audio_gain: self.operation_audio_gain(),
             frame_rate_cap: self.active_target_fps_cap(),
             render_scale: self.effective_render_scale(),
             force_shader_refresh,
@@ -1020,10 +1028,13 @@ impl<E: EngineFacade + Clone> BridgeActor<E> {
                     self.operation_engine().set_scaling_factor(handle, factor)
                 }
                 MirrorControl::TargetFps(_) => self.operation_engine().set_fps(handle, live_fps),
+                // The saved volume is `volume`; what plays is its share under the gain in force.
                 MirrorControl::Volume(volume) => self.operation_engine().set_audio_volume(
                     handle,
-                    wallpaper_core::media::audio::AudioVolume::try_from(volume)
-                        .map_err(|error| BridgeError::invalid_input(error.to_string()))?,
+                    self.operation_audio_gain().applied_to_volume(
+                        wallpaper_core::media::audio::AudioVolume::try_from(volume)
+                            .map_err(|error| BridgeError::invalid_input(error.to_string()))?,
+                    ),
                 ),
                 MirrorControl::Muted(muted) => self
                     .operation_engine()

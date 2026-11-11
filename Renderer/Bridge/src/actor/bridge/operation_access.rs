@@ -76,6 +76,10 @@ impl<E: EngineFacade> BridgeActor<E> {
         self.state.audio_suppressed
     }
 
+    pub(super) fn operation_audio_gain(&self) -> crate::engine::AudioGain {
+        self.state.audio_gain
+    }
+
     pub(super) fn operation_owner(&self) -> &operations::OperationState {
         &self.operation_state
     }

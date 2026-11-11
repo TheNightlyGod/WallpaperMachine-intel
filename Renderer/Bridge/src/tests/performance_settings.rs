@@ -756,3 +756,127 @@ async fn unmute_while_suppressed_stays_muted_live() {
         "clearing suppression then honours the unmute the user saved"
     );
 }
+
+#[tokio::test]
+async fn audio_gain_turns_open_scenes_down_live_and_restores_the_saved_volume() {
+    let temp = tempfile::tempdir().unwrap();
+    let engine = FakeEngineFacade::default();
+    engine.set_snapshot(vec![display(7, Some(1))]);
+    let bridge = bridge_with(&engine, &temp);
+    commit(
+        &bridge,
+        "100",
+        "Scene",
+        r#"{"type":"scene","title":"Scene","file":"scene.pkg","description":""}"#,
+        "7",
+    )
+    .await;
+    bridge.set_volume("100".into(), 0.8).await.unwrap();
+
+    bridge.set_audio_gain(0.5).await.unwrap();
+    assert_eq!(
+        engine.audio_volume_calls().last().map(|call| call.1),
+        Some(0.8 * 0.5),
+        "the scene plays at the gain's share of its own volume"
+    );
+    assert_eq!(
+        engine.audio_muted_calls().last().map(|call| call.1),
+        Some(false),
+        "turning down is not muting"
+    );
+
+    bridge.set_audio_gain(1.0).await.unwrap();
+    assert_eq!(
+        engine.audio_volume_calls().last().map(|call| call.1),
+        Some(0.8),
+        "lifting the gain restores the volume the user saved"
+    );
+}
+
+#[tokio::test]
+async fn a_volume_saved_while_the_gain_holds_is_kept_whole_and_played_turned_down() {
+    let temp = tempfile::tempdir().unwrap();
+    let engine = FakeEngineFacade::default();
+    engine.set_snapshot(vec![display(7, Some(1))]);
+    let bridge = bridge_with(&engine, &temp);
+    commit(
+        &bridge,
+        "100",
+        "Scene",
+        r#"{"type":"scene","title":"Scene","file":"scene.pkg","description":""}"#,
+        "7",
+    )
+    .await;
+    bridge.set_audio_gain(0.25).await.unwrap();
+
+    let saved = bridge.set_volume("100".into(), 0.6).await.unwrap();
+    assert_eq!(
+        saved.wallpaper_options.volume, 0.6,
+        "the slider keeps the value the user chose"
+    );
+    assert_eq!(
+        engine.audio_volume_calls().last().map(|call| call.1),
+        Some(0.6 * 0.25),
+        "a volume change while turned down must not play at full volume"
+    );
+
+    bridge.set_audio_gain(1.0).await.unwrap();
+    assert_eq!(
+        engine.audio_volume_calls().last().map(|call| call.1),
+        Some(0.6)
+    );
+}
+
+#[tokio::test]
+async fn a_wallpaper_applied_while_the_gain_holds_starts_turned_down() {
+    let temp = tempfile::tempdir().unwrap();
+    let engine = FakeEngineFacade::default();
+    engine.set_snapshot(vec![display(7, Some(1))]);
+    let bridge = bridge_with(&engine, &temp);
+    bridge.set_audio_gain(0.5).await.unwrap();
+
+    commit(
+        &bridge,
+        "100",
+        "Scene",
+        r#"{"type":"scene","title":"Scene","file":"scene.pkg","description":""}"#,
+        "7",
+    )
+    .await;
+
+    assert_eq!(
+        engine.audio_volume_calls().last().map(|call| call.1),
+        Some(0.5)
+    );
+}
+
+#[tokio::test]
+async fn an_audio_gain_outside_zero_to_one_is_refused_and_changes_nothing() {
+    let temp = tempfile::tempdir().unwrap();
+    let engine = FakeEngineFacade::default();
+    engine.set_snapshot(vec![display(7, Some(1))]);
+    let bridge = bridge_with(&engine, &temp);
+    commit(
+        &bridge,
+        "100",
+        "Scene",
+        r#"{"type":"scene","title":"Scene","file":"scene.pkg","description":""}"#,
+        "7",
+    )
+    .await;
+    bridge.set_audio_gain(0.5).await.unwrap();
+    let calls = engine.audio_volume_calls().len();
+
+    for gain in [f32::NAN, f32::INFINITY, -0.1, 1.1] {
+        let error = bridge.set_audio_gain(gain).await.unwrap_err();
+        assert_eq!(error.kind(), crate::BridgeErrorKind::InvalidInput);
+    }
+    assert_eq!(engine.audio_volume_calls().len(), calls);
+
+    bridge.set_volume("100".into(), 0.4).await.unwrap();
+    assert_eq!(
+        engine.audio_volume_calls().last().map(|call| call.1),
+        Some(0.4 * 0.5),
+        "the gain in force is still the last valid one"
+    );
+}

@@ -2874,6 +2874,7 @@ async fn predicted_activation_refusal_preserves_its_boundary_without_engine_or_s
         project_models: &models,
         frame_rate_cap: None,
         audio_suppressed: false,
+        audio_gain: crate::engine::AudioGain::UNITY,
         held: &held,
     }
     .build_owned()
@@ -4040,6 +4041,7 @@ async fn assigned_genuine_holds_are_sorted_and_predicted_activation_error_restor
         project_models: &models,
         frame_rate_cap: None,
         audio_suppressed: false,
+        audio_gain: crate::engine::AudioGain::UNITY,
         held: &held,
     }
     .build_owned()
@@ -4108,6 +4110,54 @@ async fn immediate_mirror_live_mute_ors_suppression_without_saving_suppression_a
             .live_scene_controls(SceneHandle::new(5604))
             .unwrap()
             .audio_muted
+    );
+    f.close().await;
+}
+
+#[tokio::test]
+async fn immediate_mirror_live_volume_is_scaled_by_the_gain_without_saving_the_gain() {
+    let f = Fixture::new(mirrored(), vec![empty_row(1, 60), empty_row(2, 144)]);
+    f.edit(A, 0.35);
+    f.successful_apply(A, &[(1, 5701), (2, 5702)]);
+    f.handle().blocking_ask(SetAudioGain { gain: 0.5 }).unwrap();
+    let volume = |handle: u64| {
+        f32::from(
+            f.engine
+                .live_scene_controls(SceneHandle::new(handle))
+                .unwrap()
+                .audio_volume,
+        )
+    };
+    let reply = f
+        .handle()
+        .blocking_ask::<_, BridgeDisplayMutationBundle>(SetMirrorVolume {
+            display_id: "2".into(),
+            volume: 0.8,
+        })
+        .unwrap();
+    assert_eq!(row(&reply.settings, &f.key(2)).volume, 0.8);
+    assert_eq!(volume(5702), 0.8 * 0.5);
+    f.edit(A, 0.36);
+    let consumed = f.successful_apply(A, &[(1, 5703), (2, 5704)]);
+    let mirror = consumed.iter().find(|scene| scene.display.display_id == 2).unwrap();
+    assert_eq!(
+        f32::from(mirror.audio_volume),
+        0.8 * 0.5,
+        "authoritative worker descriptors consume the live gain, not only saved volumes"
+    );
+    f.handle().blocking_ask(SetAudioGain { gain: 1.0 }).unwrap();
+    assert_eq!(volume(5704), 0.8);
+    assert_eq!(
+        f.store
+            .load()
+            .unwrap()
+            .config
+            .monitor_settings
+            .iter()
+            .find(|m| m.selector == connected(2))
+            .unwrap()
+            .volume,
+        0.8
     );
     f.close().await;
 }
@@ -4504,6 +4554,7 @@ async fn unloaded_apply_prediction_refusal_restores_hold_without_superseding_blo
         project_models: &models,
         frame_rate_cap: None,
         audio_suppressed: false,
+        audio_gain: crate::engine::AudioGain::UNITY,
         held: &held_for_prediction,
     }
     .build_owned()

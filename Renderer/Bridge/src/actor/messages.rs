@@ -278,6 +278,10 @@ pub struct SetAudioSuppressed {
     pub suppressed: bool,
 }
 
+pub struct SetAudioGain {
+    pub gain: f32,
+}
+
 pub struct SetLabelLanguages {
     pub locales: Vec<String>,
 }
@@ -498,6 +502,7 @@ pub type SetDisplayPresentationSuspendedReply = Result<(), BridgeError>;
 pub type SetDisplayParkedWallpapersReply = Result<(), BridgeError>;
 pub type SetPresentationUnloadedReply = AllSnapshotsReply;
 pub type SetAudioSuppressedReply = AllSnapshotsReply;
+pub type SetAudioGainReply = AllSnapshotsReply;
 pub type SetLabelLanguagesReply = Result<(), BridgeError>;
 pub type SetPowerSourceReply = AllSnapshotsReply;
 pub type InitialFrameReadyReply = AllSnapshotsReply;

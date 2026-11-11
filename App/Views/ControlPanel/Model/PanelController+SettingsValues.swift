@@ -51,7 +51,7 @@ extension PanelController {
       mutedWallpaperCount: Int(settings.mutedWallpaperCount),
       desktopCoveredAction: playback.desktopCoveredAction,
       playsOnlyOnActiveDisplay: playback.playsOnlyOnActiveDisplay,
-      otherAudioAction: playback.otherAudioAction,
+      otherAudioAction: playback.otherAudioAction, otherAudioVolume: playback.otherAudioVolume,
       otherAppInFrontAction: playback.otherAppInFrontAction, displaySleepAction: playback.displaySleepAction,
       batteryMode: settings.batteryMode, onBatteryPower: settings.onBatteryPower,
       batteryRenderScale: settings.batteryRenderScale,

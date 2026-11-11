@@ -50,7 +50,11 @@ enum GlobalPresentation: Comparable, Sendable {
 /// audio, without touching that choice. The user's own mute of every wallpaper silences them
 /// as well, whatever the rules say, and leaves each wallpaper's saved sound alone.
 ///
-/// A third channel, beside presentation and audio, carries the conditions that chose Reduced
+/// Other-app audio can instead turn wallpapers down: a gain (`audioGain`) every wallpaper's own
+/// volume is multiplied by while that sound lasts. It is a channel of its own beside the mute, so
+/// a mute from anywhere still silences, and no saved volume is rewritten.
+///
+/// A further channel, beside presentation and audio, carries the conditions that chose Reduced
 /// quality (`QualityReduction`): wallpapers keep presenting, only at a lower frame-rate ceiling
 /// and render scale. It is decided and acknowledged on its own, never changes
 /// `globalPresentation` or `suspendedDisplayIDs`, and is released on `stop()`.
@@ -67,6 +71,8 @@ final class WallpaperPresentationPolicy {
     private let appRuleActions: @MainActor () -> Set<AppRuleAction>
     private let otherAudioActive: @MainActor () -> Bool
     private let otherAudioAction: @MainActor () -> OtherAudioAction
+    /// The share of its own volume a wallpaper keeps under Reduce volume, from 0 to 1.
+    private let otherAudioVolume: @MainActor () -> Float
     private let userMuted: @MainActor () -> Bool
     private let desktopCoveredAction: @MainActor () -> DesktopCoveredAction
     private let keepsCoverageProbes: @MainActor () -> Bool
@@ -82,6 +88,7 @@ final class WallpaperPresentationPolicy {
     private let counters: RuntimeCounters
     private let applyGlobal: @MainActor (GlobalPresentation, @escaping ApplyCompletion) -> Void
     private let applyAudio: @MainActor (Bool, @escaping ApplyCompletion) -> Void
+    private let applyAudioGain: @MainActor (Float, @escaping ApplyCompletion) -> Void
     private let applyQuality: @MainActor (Set<QualityReduction>, @escaping ApplyCompletion) -> Void
     private let applyDisplay: @MainActor (UInt32, Bool, @escaping ApplyCompletion) -> Void
 
@@ -105,6 +112,9 @@ final class WallpaperPresentationPolicy {
     private var settle: Task<Void, Never>?
     private var appliedGlobal: GlobalPresentation? = .running
     private var appliedAudio: Bool? = false
+    /// The gain the bridge was last told; it starts at each wallpaper's own volume. Nil after a
+    /// failed delivery. Compared as a number, so a new level is sent while the rule already holds.
+    private var appliedAudioGain: Float? = 1
     /// What the bridge was last told to reduce for; it starts unthrottled. Nil after a failed delivery.
     private var appliedQuality: Set<QualityReduction>? = []
     /// Acknowledged state per display. A display with no entry has never been
@@ -121,6 +131,9 @@ final class WallpaperPresentationPolicy {
     private(set) var globalPresentation: GlobalPresentation = .running
     /// Wallpaper audio held down by the user's mute of every wallpaper, a mute rule or other-app audio.
     private(set) var isAudioSuppressed = false
+    /// What every wallpaper's own volume is multiplied by: 1 unless another app plays sound and
+    /// the user chose to turn wallpapers down for it.
+    private(set) var audioGain: Float = 1
     /// The conditions asking for the reduced-quality profile, whatever presentation does.
     private(set) var qualityReductions: Set<QualityReduction> = []
     /// Displays suspended on their own, by occlusion or a covered working area.
@@ -184,6 +197,7 @@ final class WallpaperPresentationPolicy {
         appRuleActions: (@MainActor () -> Set<AppRuleAction>)? = nil,
         otherAudioActive: (@MainActor () -> Bool)? = nil,
         otherAudioAction: (@MainActor () -> OtherAudioAction)? = nil,
+        otherAudioVolume: (@MainActor () -> Float)? = nil,
         userMuted: (@MainActor () -> Bool)? = nil,
         desktopCoveredAction: (@MainActor () -> DesktopCoveredAction)? = nil,
         keepsCoverageProbes: (@MainActor () -> Bool)? = nil,
@@ -196,6 +210,7 @@ final class WallpaperPresentationPolicy {
         counters: RuntimeCounters? = nil,
         applyGlobal: @escaping @MainActor (GlobalPresentation, @escaping ApplyCompletion) -> Void,
         applyAudio: (@MainActor (Bool, @escaping ApplyCompletion) -> Void)? = nil,
+        applyAudioGain: (@MainActor (Float, @escaping ApplyCompletion) -> Void)? = nil,
         applyQuality: (@MainActor (Set<QualityReduction>, @escaping ApplyCompletion) -> Void)? = nil,
         applyDisplay: @escaping @MainActor (UInt32, Bool, @escaping ApplyCompletion) -> Void
     ) {
@@ -208,6 +223,7 @@ final class WallpaperPresentationPolicy {
         self.appRuleActions = appRuleActions ?? { [] }
         self.otherAudioActive = otherAudioActive ?? { false }
         self.otherAudioAction = otherAudioAction ?? { .keepRunning }
+        self.otherAudioVolume = otherAudioVolume ?? { 1 }
         self.userMuted = userMuted ?? { false }
         self.desktopCoveredAction = desktopCoveredAction ?? { .keepRunning }
         self.keepsCoverageProbes = keepsCoverageProbes ?? { false }
@@ -230,6 +246,7 @@ final class WallpaperPresentationPolicy {
         self.counters = counters ?? .shared
         self.applyGlobal = applyGlobal
         self.applyAudio = applyAudio ?? { _, completion in completion(.success(())) }
+        self.applyAudioGain = applyAudioGain ?? { _, completion in completion(.success(())) }
         self.applyQuality = applyQuality ?? { _, completion in completion(.success(())) }
         self.applyDisplay = applyDisplay
     }
@@ -322,11 +339,12 @@ final class WallpaperPresentationPolicy {
         sessionOnConsole = true
         sessionLockStale = true
         evaluatedScreenLayout = nil
-        // Teardown must never leave a surface suspended or muted.
+        // Teardown must never leave a surface suspended, muted or turned down.
         pendingDisplays.formUnion(suspendedDisplayIDs)
         suspendedDisplayIDs.removeAll()
         globalPresentation = .running
         isAudioSuppressed = false
+        audioGain = 1
         qualityReductions = []
         deliverPending()
     }
@@ -460,6 +478,7 @@ final class WallpaperPresentationPolicy {
         }
         let presentation = resolvedPresentation()
         let audio = resolvedAudioSuppressed()
+        let gain = resolvedAudioGain()
         let quality = requestedQualityReductions()
         let current = currentSurfaces()
         let hidden = Set(current.filter { !$0.isVisible }.map(\.displayID))
@@ -494,6 +513,12 @@ final class WallpaperPresentationPolicy {
         if audio != isAudioSuppressed {
             isAudioSuppressed = audio
             AppLog.info("wallpaper audio \(audio ? "suppressed" : "restored")")
+        }
+        if gain != audioGain {
+            audioGain = gain
+            AppLog.info(gain < 1
+                ? "wallpaper volume reduced to \(Int((gain * 100).rounded()))%"
+                : "wallpaper volume restored")
         }
         adopt(quality: quality)
         // Resume once both visibility and the Space snapshot allow it. Delay suspension so a
@@ -552,6 +577,15 @@ final class WallpaperPresentationPolicy {
         return otherAudioActive() && otherAudioAction() == .mute
     }
 
+    /// Only other-app audio turns wallpapers down, and only when that is the choice made for it;
+    /// Mute and Pause act through their own channels at the volume each wallpaper saved. A level
+    /// outside 0 to 1 is held to the nearest end, so the bridge is never handed one it refuses.
+    private func resolvedAudioGain() -> Float {
+        guard otherAudioActive(), otherAudioAction() == .reduceVolume else { return 1 }
+        let level = otherAudioVolume()
+        return level.isFinite ? min(max(level, 0), 1) : 1
+    }
+
     /// Takes the conditions' current request as the decision, and says whether it changed.
     @discardableResult
     private func adopt(quality: Set<QualityReduction>) -> Bool {
@@ -576,8 +610,9 @@ final class WallpaperPresentationPolicy {
 
     private func deliverPending() {
         guard !deliveryInFlight else { return }
-        // The global condition is the coarser one, so it goes first. Audio
-        // and quality follow, then per-display occlusion, one acknowledgement at a time.
+        // The global condition is the coarser one, so it goes first. Audio (the mute,
+        // then the gain) and quality follow, then per-display occlusion, one
+        // acknowledgement at a time.
         if appliedGlobal != globalPresentation {
             let presentation = globalPresentation
             let resumes = isRunning && presentation == .running && appliedGlobal != .running
@@ -611,6 +646,21 @@ final class WallpaperPresentationPolicy {
                     return
                 }
                 appliedAudio = suppressed
+                deliverPending()
+            }
+            return
+        }
+        if appliedAudioGain != audioGain {
+            let gain = audioGain
+            deliveryInFlight = true
+            applyAudioGain(gain) { [self] result in
+                deliveryInFlight = false
+                guard case .success = result else {
+                    // Kept pending like the others: a later evaluation sends it again.
+                    appliedAudioGain = nil
+                    return
+                }
+                appliedAudioGain = gain
                 deliverPending()
             }
             return

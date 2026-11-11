@@ -779,6 +779,14 @@ closed lid has not been seen on a desktop
       muted: it starts silent. Add an app rule that mutes, turn **Mute all wallpapers** off
       while that app runs: the wallpapers stay silent until the rule ends. Quit and reopen
       while muted: the wallpapers start silent and the item is still ticked.
+- [ ] With the same three wallpapers, set **When another app plays sound** to **Reduce
+      volume**: **Reduce volume to** appears at 30%. Play music in another app: after about
+      half a second every wallpaper is quieter and keeps playing; drag the slider while the
+      music plays and the level follows on release; at 0% they are silent. Stop the music: about
+      two seconds later each wallpaper is back at its own volume, and its **Volume** slider never
+      moved. A Web wallpaper that makes its sound with Web Audio keeps its level, as it does
+      for its own Volume. Turn **Mute all wallpapers** on while turned down, then off: silent,
+      then turned down again, not at full volume.
 - [ ] Verify that the final disabled or removed scene stops capture.
 - [ ] Verify that denied permission surfaces an error.
 

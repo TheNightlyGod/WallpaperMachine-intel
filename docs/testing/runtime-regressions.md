@@ -941,6 +941,7 @@ engine to redo, and when.
   `::a_display_refresh_does_not_reload_a_scene_held_to_the_battery_frame_rate`,
   `::a_display_refresh_does_not_reload_a_scene_held_to_the_quality_throttle`,
   `::a_display_refresh_does_not_reload_a_scene_muted_for_other_audio`,
+  `::a_display_refresh_does_not_reload_a_scene_turned_down_for_other_audio`,
   `::a_display_refresh_does_not_reload_a_scene_paused_by_a_lock_or_a_covered_display`,
   and `DisplayRefreshCoalescerTests` in `Tests/Unit/Desktop/`. A value applied
   live on top of the saved configuration must never read as a different

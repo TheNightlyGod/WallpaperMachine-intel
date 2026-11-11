@@ -61,6 +61,7 @@ fn activation_plan_leaves_display_empty_when_assigned_wallpaper_left_the_library
         project_models: &BTreeMap::new(),
         frame_rate_cap: None,
         audio_suppressed: false,
+        audio_gain: crate::engine::AudioGain::UNITY,
     }
     .build()
     .unwrap();
@@ -131,6 +132,7 @@ fn a_plain_video_is_never_a_scene_and_is_always_a_native_descriptor_when_its_fil
         project_models: &project_models,
         frame_rate_cap: None,
         audio_suppressed: false,
+        audio_gain: crate::engine::AudioGain::UNITY,
         held: &NONE_HELD,
     };
     static NONE_HELD: BTreeSet<String> = BTreeSet::new();
@@ -238,6 +240,7 @@ impl HeldFixture {
             project_models: &self.models,
             frame_rate_cap: None,
             audio_suppressed: false,
+            audio_gain: crate::engine::AudioGain::UNITY,
             held,
         }
     }
@@ -313,6 +316,7 @@ fn build_owned_maps_each_display_to_its_wallpaper_including_mirrors() {
         project_models: &models,
         frame_rate_cap: None,
         audio_suppressed: false,
+        audio_gain: crate::engine::AudioGain::UNITY,
         held,
     };
 
@@ -420,6 +424,7 @@ fn a_saved_position_reaches_only_the_scene_built_for_its_display() {
         project_models: &BTreeMap::new(),
         frame_rate_cap: None,
         audio_suppressed: false,
+        audio_gain: crate::engine::AudioGain::UNITY,
     }
     .build()
     .unwrap();
@@ -482,6 +487,7 @@ fn a_saved_position_follows_the_display_across_the_ways_it_is_addressed() {
             project_models: &BTreeMap::new(),
             frame_rate_cap: None,
             audio_suppressed: false,
+            audio_gain: crate::engine::AudioGain::UNITY,
         }
         .build()
         .unwrap();
@@ -541,6 +547,7 @@ fn a_mirror_is_centred_even_when_its_source_is_positioned() {
         project_models: &BTreeMap::new(),
         frame_rate_cap: None,
         audio_suppressed: false,
+        audio_gain: crate::engine::AudioGain::UNITY,
     }
     .build()
     .unwrap();

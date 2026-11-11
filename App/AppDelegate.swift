@@ -477,6 +477,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 },
                 otherAudioActive: { otherAudio.isActive },
                 otherAudioAction: { preferences.otherAudioAction },
+                // Reduce volume: the share of its own volume each wallpaper keeps meanwhile.
+                otherAudioVolume: { Float(preferences.otherAudioVolume) / 100 },
                 // The user's own mute of every wallpaper, on top of the rules above and never
                 // written into any wallpaper's saved sound settings.
                 userMuted: { preferences.wallpapersMuted },
@@ -574,6 +576,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                             completion(.success(()))
                         } catch {
                             AppLog.error("audio suppress failed: \(error.localizedDescription)")
+                            completion(.failure(error))
+                        }
+                    }
+                },
+                applyAudioGain: { [weak self] gain, completion in
+                    guard let self, let store = self.store,
+                          !self.shutdownInProgress, !self.shutdownComplete else {
+                        completion(.failure(CancellationError()))
+                        return
+                    }
+                    // The snapshot this returns reaches the web pages and native video through
+                    // `onSnapshotApplied`, as a volume the user saves does.
+                    Task {
+                        do {
+                            try await store.setAudioGainAsync(gain)
+                            completion(.success(()))
+                        } catch {
+                            AppLog.error("audio gain failed: \(error.localizedDescription)")
                             completion(.failure(error))
                         }
                     }

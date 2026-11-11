@@ -11,7 +11,7 @@ mod render_settings;
 pub(crate) mod revalidate;
 pub mod scene_traits;
 
-pub use activation::{ActivationInputs, RenderBackendSurvey, VideoBackendRouting};
+pub use activation::{ActivationInputs, AudioGain, RenderBackendSurvey, VideoBackendRouting};
 pub use activation_remaining::WallpaperAssignmentExt;
 #[cfg(test)]
 pub use facade::FakeEngineFacade;
