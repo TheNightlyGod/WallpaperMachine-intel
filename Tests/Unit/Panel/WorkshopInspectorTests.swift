@@ -73,7 +73,7 @@ final class WorkshopInspectorTests: MediaPanelTestCase {
     let id = "222"
     let keys = [
       WorkshopInspectorButton.download, .downloadAgain, .downloadAndApply, .resume, .cancel,
-      .removeFromQueue, .openCollection,
+      .removeFromQueue, .openCollection, .moveToTrash,
     ].map { $0.actionKey(forItem: id) }
     XCTAssertTrue(keys.allSatisfy { $0 != nil })
     XCTAssertEqual(keys[0], keys[2], "Download and its apply variant are one request: either holds both")
@@ -108,6 +108,13 @@ final class WorkshopInspectorTests: MediaPanelTestCase {
     let installed = download(item(), installed: true)
     XCTAssertTrue(installed.isInstalled)
     XCTAssertFalse(installed.offersDownloadAndApply, "never for an installed wallpaper")
+    XCTAssertEqual(WorkshopInspectorButton.buttons(for: installed), [.moveToTrash])
+    XCTAssertEqual(
+      WorkshopInspectorButton.buttons(for: download(item(), installed: true, canApply: false)),
+      [.moveToTrash], "removal does not require a display that can apply the wallpaper")
+    XCTAssertEqual(
+      WorkshopInspectorButton.buttons(for: download(item(collection: 3), installed: true)),
+      [.openCollection], "a collection never offers to delete its wallpapers")
   }
 
   // MARK: Tiles

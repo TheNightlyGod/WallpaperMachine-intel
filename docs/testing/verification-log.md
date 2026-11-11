@@ -38,6 +38,16 @@ Adds Reduce volume beside Mute under When another app plays sound, with a Reduce
 - New native tests cover the level preference (default, range, corrupt values, reset, one change posted), its backup validation, the policy's gain channel (only while other sound plays and Reduce volume is chosen, a new level delivered while the rule holds, mute still silences, refused delivery retried, teardown restores) and the panel row (offered beside Mute, shown only while chosen, out-of-range refused).
 - Not checked: the lower volume was not heard on a real output, and the slider was not operated in the running app; no desktop automation and no Release build. A [manual smoke](manual-smoke.md#audio-responsiveness) item covers both.
 
+## 2026-11-11 — Workshop inspector removal (#183)
+
+- Added Move to Trash for installed Workshop items using the existing confirmed library removal action; collections remain open-only.
+- Reused the existing label and translations in all shipped app languages; documented removal in workshop-downloads.md.
+- python3 scripts/test.py --only WorkshopInspectorTests: 13 passed.
+- Initial full gate blocked by the pre-existing deleted CLAUDE.md documentation link; temporarily restored its relative symlink for validation.
+- Parallel full gate: 4722 passed, 5 timing/session failures, 66 skipped.
+- python3 scripts/test.py --serial: 4727 passed, 0 failed, 66 skipped; one runtime warning.
+- Opt-in media/network and desktop UI checks were not run; visual behavior was not manually checked.
+
 ## 2026-11-10 — Library tile menu, drop to import, keyboard and batch favorites; service fixes
 
 Installed gains a right-click menu on tiles (the inspector's More actions list, shared as WallpaperActionItems), files dropped on the page import, Command-Delete and Command-Return on the grid, File › Import… and Refresh Library, and a favorite tool for the ticked selection. The same change fixes six service defects (unreadable saved entries no longer erase their neighbours; an automatic command replacing a queued rule or Focus change no longer marks it handled; a day and night display keeps a manual choice across a relaunch; a shuffle round ends without a wallpaper that keeps failing; a stale Steam request no longer signs out a newer session; equal day and night start times are refused), adds feedback where actions were silent, and gathers the renderer's leftover material constants into one log line per scene.

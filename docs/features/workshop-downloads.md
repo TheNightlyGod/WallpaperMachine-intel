@@ -60,6 +60,15 @@ trending window. Steam's public browse page has no "most voted" sort and silentl
 treats unknown `browsesort` values as trending, so none is offered. Wallpaper Engine's
 "mobile compatible" box has no Steam tag behind it, so it is not offered either.
 
+### Removing a downloaded wallpaper
+
+An installed wallpaper's Steam Workshop inspector offers **Move to Trash**. It uses
+Installed's confirmation and removal action: after confirmation, the wallpaper stops
+playing, its library copy moves to the Trash, and its saved library metadata is
+removed. The Workshop page stays open and offers downloading again once the library
+refreshes. Removing the local copy does not unsubscribe from the item on Steam.
+Collections and wallpapers that are not installed do not offer removal.
+
 ### Opening an item from a link or id
 
 Pasting a Workshop item's page link (`steamcommunity.com/sharedfiles/filedetails/?id=…`

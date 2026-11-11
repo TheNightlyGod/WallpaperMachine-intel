@@ -1,8 +1,8 @@
 import SwiftUI
 
-/// The buttons the inspector offers for an item's download, in order. One request or job decides
-/// them (`WorkshopItemDownload.action`); this only names what each case draws.
+/// The buttons the inspector offers for an item's library copy or download.
 enum WorkshopInspectorButton: Equatable {
+  case moveToTrash
   case openCollection
   case resume
   case continueSetup
@@ -20,6 +20,7 @@ enum WorkshopInspectorButton: Equatable {
   /// dialog or the Downloads list.
   func actionKey(forItem id: String) -> String? {
     switch self {
+    case .moveToTrash: PanelActionCoordinator.key("delete", id: id)
     case .openCollection: PanelActionCoordinator.key("workshopCollection", id: id)
     case .resume: DownloadRowAction.resume.key(.steam, id: id)
     case .cancel, .removeFromQueue: DownloadRowAction.cancel.key(.steam, id: id)
@@ -29,9 +30,11 @@ enum WorkshopInspectorButton: Equatable {
     }
   }
 
-  /// The buttons for an item that is not installed.
+  /// Installed wallpapers can be removed; collections are always opened.
   static func buttons(for download: WorkshopItemDownload) -> [WorkshopInspectorButton] {
-    switch download.action {
+    if download.action == .openCollection { return [.openCollection] }
+    if download.isInstalled { return [.moveToTrash] }
+    return switch download.action {
     case .openCollection: [.openCollection]
     case .resume: [.resume]
     case .continueSetup: [.continueSetup]
@@ -56,7 +59,7 @@ struct WorkshopItemActions: View {
     let model = controller.workshopBrowser
     let downloads = controller.downloads
     VStack(spacing: 8) {
-      if !download.isInstalled { downloadActions(model: model, downloads: downloads) }
+      downloadActions(model: model, downloads: downloads)
       if download.isInstalled, controller.previewAvailable, item.canRunOnMac {
         Button {
           let id = item.id
@@ -126,6 +129,17 @@ struct WorkshopItemActions: View {
     _ button: WorkshopInspectorButton, model: WorkshopBrowserModel, downloads: DownloadsModel
   ) -> some View {
     switch button {
+    case .moveToTrash:
+      Button(role: .destructive) {
+        let id = item.id
+        controller.launch(PanelActionCoordinator.key("delete", id: id)) { [controller] in
+          try await controller.delete(id)
+        }
+      } label: {
+        Label("Move to Trash", systemImage: "trash")
+      }
+      .buttonStyle(.panelSecondary(size: .regular, expands: true))
+      .accessibilityIdentifier("workshop.moveToTrash")
     case .openCollection:
       primary(systemImage: "square.stack") { Text("Open collection") } action: {
         model.openCollection(item)
