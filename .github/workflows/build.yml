@@ -75,7 +75,8 @@ jobs:
 
   build:
     name: Build, sign and notarize (macOS 15)
-    # Not `needs: app-icon`: the icon is only needed once the app is compiled.
+    # Ensure app-icon completes first to avoid deadlocks on accounts with 1 concurrent macOS runner
+    needs: app-icon
     # The oldest runner that carries Xcode 26. Homebrew pours bottles built for the
     # runner's own release, and the app bundles those dylibs, so the runner's macOS
     # is the lowest release the published app can launch on (docs/build.md).
