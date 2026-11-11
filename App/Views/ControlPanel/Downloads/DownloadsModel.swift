@@ -132,6 +132,10 @@ final class DownloadsModel {
   func closeDialog() {
     dismissedAuth.formUnion(SteamAuthKey.askingNow(in: controller.steamDownloadRows))
     session = nil
+    // A QR code shown in the dialog must not stay live, and sign in, once the dialog is gone.
+    controller.launch(PanelActionCoordinator.key("cancelSteamQRSignIn")) { [controller] in
+      try await controller.cancelSteamQRSignIn()
+    }
     stage = nil
     handoffTarget = nil
     handoffTask?.cancel()

@@ -183,7 +183,7 @@ class DownloaderTestCase: XCTestCase {
     try Data(mode.utf8).write(to: root.appendingPathComponent("session-mode"))
   }
 
-  func authenticate(_ downloader: WorkshopDownloader, guardCode: Bool = true) async throws {
+  func authenticate(_ downloader: any WorkshopDownloadWorker, guardCode: Bool = true) async throws {
     do {
       try await waitUntil { downloader.prompt == .password || !downloader.isRunning }
       guard downloader.prompt == .password else {

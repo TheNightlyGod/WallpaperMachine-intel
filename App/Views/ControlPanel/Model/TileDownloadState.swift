@@ -57,7 +57,7 @@ struct TileDownloadState: Equatable {
   let action: Action
   /// The tooltip and the accessibility label.
   let label: String
-  /// A retry waits for SteamCMD to be set up.
+  /// A retry waits for SteamCMD to be set up, or for the QR sign-in.
   let isEnabled: Bool
 
   // MARK: Workshop

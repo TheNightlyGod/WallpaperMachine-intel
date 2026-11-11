@@ -491,7 +491,7 @@ final class DownloadQueueTests: DownloaderTestCase {
     }
     do {
       try await waitUntil { manager.download(for: "2")?.worker.prompt == .password }
-      XCTAssertTrue(manager.download(for: "1")?.worker.canRetryAuthentication == true)
+      XCTAssertTrue(manager.download(for: "1")?.steamCMD?.canRetryAuthentication == true)
       XCTAssertTrue(manager.download(for: "3")?.isQueued == true)
       await manager.shutdown()
       XCTAssertFalse(manager.isRunning)
@@ -631,10 +631,10 @@ final class DownloadQueueTests: DownloaderTestCase {
       try await authenticate(running.worker, guardCode: false)
       try await waitUntil { running.worker.phase == .transferring }
       XCTAssertTrue(waiting.isQueued)
-      XCTAssertNil(running.worker.resumedAt)
+      XCTAssertNil(running.steamCMD?.resumedAt)
       center.post(name: NSWorkspace.didWakeNotification, object: nil)
-      try await waitUntil { running.worker.resumedAt != nil }
-      XCTAssertNil(waiting.worker.resumedAt)
+      try await waitUntil { running.steamCMD?.resumedAt != nil }
+      XCTAssertNil(waiting.steamCMD?.resumedAt)
       XCTAssertTrue(waiting.isQueued)
       await manager.shutdown()
     } catch {

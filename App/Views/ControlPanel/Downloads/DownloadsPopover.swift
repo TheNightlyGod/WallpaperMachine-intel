@@ -294,7 +294,7 @@ struct DownloadsPopoverJobRow: View {
     let model = controller.downloads
     let running = row.isRunning
     let review = row.isUnresolved
-    let setupReady = controller.steamSetup.isReady
+    let setupReady = controller.steamDownloadsReady
     RowFrame(
       image: row.image, title: row.title, needsAttention: row.needsAuthentication || review
     ) {
@@ -352,7 +352,7 @@ struct DownloadsPopoverJobRow: View {
           Label("Try again", systemImage: "arrow.clockwise")
         }
         .buttonStyle(.panelPrimary(size: .compact))
-        // A Steam retry needs SteamCMD; pixiv's does not.
+        // A Steam retry needs SteamCMD or the QR sign-in; pixiv's needs neither.
         .disabled(row.source == .steam && !setupReady)
       }
       if row.canPause {

@@ -45,10 +45,35 @@ extension PanelController {
   /// SteamCMD's state: whether it is installed, being set up, or needs the user's approval.
   var steamSetup: SteamSetupState { SteamSetupState(workshop.steamCMDSetup) }
 
+  /// The QR-code sign-in. Signed in, downloads skip SteamCMD and its password prompts.
+  var steamQRSession: SteamNativeSession? { workshop.nativeSession }
+
+  /// Whether a Steam download can be tried again right now: SteamCMD is installed, or the QR
+  /// sign-in downloads without it.
+  var steamDownloadsReady: Bool { steamSetup.isReady || workshop.nativeSession?.isSignedIn == true }
+
+  /// The QR sign-in to offer for the dialog's request: never for the sign-in that SteamCMD runs
+  /// (the first-run guide's), which a QR sign-in would not complete.
+  func steamQRSession(for target: String?) -> SteamNativeSession? {
+    target == WorkshopStore.signInRequestID ? nil : workshop.nativeSession
+  }
+
+  /// Shows a Steam QR code to scan, replacing one already showing. The code keeps renewing until
+  /// it is approved, fails, or `cancelSteamQRSignIn` stops it.
+  func startSteamQRSignIn() async throws {
+    try await run(.immediate) { workshop.nativeSession?.beginQRSignIn() }
+  }
+
+  /// Stops waiting for a QR code: the surface that showed it closed or the person cancelled.
+  func cancelSteamQRSignIn() async throws {
+    try await run(.immediate) { workshop.nativeSession?.cancelQRSignIn() }
+  }
+
   /// The Steam account the next download would use and what the sign-in will remember.
   var steamAccount: SteamAccountState {
     SteamAccountState(
-      suggested: workshop.suggestedAccount, saved: workshop.downloader.savedAccount,
+      suggested: workshop.suggestedAccount,
+      saved: workshop.nativeSession?.accountName ?? workshop.downloader.savedAccount,
       remembersSession: workshop.downloader.rememberSessionWhileRunning ?? remembersSession,
       slotLimit: workshop.downloader.slotLimit,
       downloadsRunOneAtATimeAfterConflict: workshop.downloader.sessionConflictDetected)
@@ -297,7 +322,7 @@ extension PanelController {
 
   /// The downloads **Retry failed** would try again.
   var retryableDownloads: [DownloadRow] {
-    downloadQueue.unresolved.filter { $0.canRetry && ($0.source == .pixiv || steamSetup.isReady) }
+    downloadQueue.unresolved.filter { $0.canRetry && ($0.source == .pixiv || steamDownloadsReady) }
   }
 
   /// Answers the password or Steam Guard prompt of a running job.
@@ -328,7 +353,7 @@ extension PanelController {
   /// Not while a download is active or waiting, which the downloader says as this action's error.
   func logOutSteam() async throws {
     try await run(.queued) {
-      let account = workshop.downloader.savedAccount ?? ""
+      let account = workshop.nativeSession?.accountName ?? workshop.downloader.savedAccount ?? ""
       guard
         await dialogs.confirm(
           L("Log out of Steam?"),
@@ -339,6 +364,13 @@ extension PanelController {
       else { return }
       workshop.downloader.forgetSavedAccount()
       if let message = workshop.downloader.errorMessage { throw WallpaperActionError(message: message) }
+      // Only once nothing runs: a download using the QR sign-in needs it until it ends.
+      do {
+        try workshop.nativeSession?.signOut()
+      } catch {
+        // Still signed in, as Settings keeps showing: the keychain kept the token.
+        throw WallpaperActionError(message: L("Could not log out of Steam: \(error.localizedDescription)"))
+      }
     }
   }
 

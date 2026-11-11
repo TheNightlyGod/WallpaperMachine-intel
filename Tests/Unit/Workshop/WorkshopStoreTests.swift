@@ -1007,8 +1007,8 @@ final class WorkshopDownloadIntentTests: XCTestCase {
     XCTAssertTrue(job.isSignIn)
     XCTAssertNil(job.item)
     try await waitUntil { !job.isQueued }
-    XCTAssertTrue(job.worker.isSigningInOnly)
-    XCTAssertFalse(job.worker.isInstallingAssets)
+    XCTAssertTrue(job.steamCMD?.isSigningInOnly == true)
+    XCTAssertFalse(job.steamCMD?.isInstallingAssets ?? true)
 
     // A second request while one runs shows the running job instead of starting another.
     fixture.store.requestSignIn(account: "localtest", rememberSession: true, bridge: fixture.bridge)

@@ -155,7 +155,8 @@ class OptInVariables(unittest.TestCase):
     def test_the_opt_in_layers_and_the_web_reference_job_are_forwarded(self):
         self.assertEqual(
             set(runner.OPT_IN_VARIABLES),
-            {"WALLPAPER_MACHINE_MEDIA_TESTS", "WALLPAPER_MACHINE_NETWORK_TESTS", "WALLPAPER_MACHINE_WEB_REFERENCE"},
+            {"WALLPAPER_MACHINE_MEDIA_TESTS", "WALLPAPER_MACHINE_NETWORK_TESTS", "WALLPAPER_MACHINE_WEB_REFERENCE",
+             "WALLPAPER_MACHINE_STEAM_TOKEN_FILE"},
         )
 
     def test_a_set_layer_reaches_the_test_host_and_an_unset_one_does_not(self):

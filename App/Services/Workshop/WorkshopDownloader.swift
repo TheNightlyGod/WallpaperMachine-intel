@@ -1415,7 +1415,7 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
     /// download inside it. The claim is a held lock rather than a recorded process identifier, and
     /// SteamCMD inherits it, so it stays held for as long as anything can still write here —
     /// including a child that outlived the app that started it.
-    nonisolated private static func claimStaging(_ staging: URL) -> Int32 {
+    nonisolated static func claimStaging(_ staging: URL) -> Int32 {
         let descriptor = open(staging.appendingPathComponent(ownerName).path, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
         guard descriptor >= 0 else { return -1 }
         guard flock(descriptor, LOCK_EX | LOCK_NB) == 0 else { close(descriptor); return -1 }

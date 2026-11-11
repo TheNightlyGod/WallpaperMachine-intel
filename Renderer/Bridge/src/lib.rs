@@ -16,6 +16,7 @@ pub mod paths;
 mod power;
 pub mod project;
 pub mod state;
+pub mod steam_content;
 pub mod user_assets;
 
 #[doc(hidden)]

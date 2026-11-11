@@ -20,7 +20,7 @@ final class WorkshopDownload: Identifiable {
   let id: String
   let item: WorkshopItem?
   let account: String
-  let worker: WorkshopDownloader
+  let worker: any WorkshopDownloadWorker
   fileprivate(set) var isQueued = true
   fileprivate(set) var isPaused = false
   fileprivate(set) var hold = Hold.slot
@@ -59,20 +59,16 @@ final class WorkshopDownload: Identifiable {
 
   /// A job that only signs in and downloads nothing.
   var isSignIn: Bool { id == WorkshopDownloadManager.signInID }
+  /// The SteamCMD run behind this job; nil for one signed in with a QR code.
+  var steamCMD: WorkshopDownloader? { worker as? WorkshopDownloader }
 
-  fileprivate init(
-    id: String, item: WorkshopItem?, account: String, rememberSession: Bool,
-    sessionDirectory: URL, runtimeProvider: any SteamCMDRuntimeProviding, checkpointDirectory: URL? = nil,
-    networkMonitor: (any ProcessNetworkMonitoring)? = nil,
-    downloadRegion: @escaping @Sendable () -> SteamCMDDownloadRegion
-  ) {
+  fileprivate init(id: String, item: WorkshopItem?, account: String, rememberSession: Bool,
+                   worker: any WorkshopDownloadWorker) {
     self.id = id
     self.item = item
     self.account = account
     self.rememberSession = rememberSession
-    worker = WorkshopDownloader(
-      sessionDirectory: sessionDirectory, runtimeProvider: runtimeProvider,
-      networkMonitor: networkMonitor, checkpointDirectory: checkpointDirectory, downloadRegion: downloadRegion)
+    self.worker = worker
   }
 }
 
@@ -135,14 +131,21 @@ final class WorkshopDownloadManager: SteamCMDDownloadActivity {
     for record in saved where record.id != Self.signInID && seen.insert(record.id).inserted {
       guard record.id == "scene-assets" || (record.item?.id == record.id && record.id.allSatisfy(\.isNumber)),
         WorkshopDownloader.normalizedAccount(record.account) != nil else { continue }
+      // A restored job only shows as paused, whichever client ran it: resuming goes through
+      // `WorkshopStore.resolve`, which picks SteamCMD or the QR sign-in afresh.
       let job = WorkshopDownload(id: record.id, item: record.item, account: record.account,
-        rememberSession: record.rememberSession, sessionDirectory: sessionDirectory,
-        runtimeProvider: runtimeProvider, checkpointDirectory: checkpointDirectory(for: record.id),
-        networkMonitor: networkMonitorFactory?(), downloadRegion: downloadRegion)
+        rememberSession: record.rememberSession, worker: makeSteamCMDWorker(for: record.id))
       job.isQueued = false
       job.isPaused = true
       downloads.append(job)
     }
+  }
+
+  private func makeSteamCMDWorker(for id: String) -> WorkshopDownloader {
+    WorkshopDownloader(
+      sessionDirectory: sessionDirectory, runtimeProvider: runtimeProvider,
+      networkMonitor: networkMonitorFactory?(), checkpointDirectory: checkpointDirectory(for: id),
+      downloadRegion: downloadRegion)
   }
 
   private func checkpointDirectory(for id: String) -> URL? {
@@ -243,22 +246,58 @@ final class WorkshopDownloadManager: SteamCMDDownloadActivity {
     item: WorkshopItem, username: String, executable: URL, library: URL,
     rememberSession: Bool = true, onImported: @escaping @MainActor () async throws -> Void
   ) {
-    enqueue(id: item.id, item: item, username: username, rememberSession: rememberSession) { worker, account in
-      worker.start(
+    let worker = makeSteamCMDWorker(for: item.id)
+    enqueue(id: item.id, item: item, username: username, rememberSession: rememberSession, worker: worker) {
+      [weak worker] account in
+      worker?.start(
         item: item, username: account, executable: executable, library: library,
         rememberSession: rememberSession, onImported: onImported)
     }
+  }
+
+  /// Downloads with the app's own Steam client, signed in with a QR code: no SteamCMD and no prompt.
+  func startNative(
+    item: WorkshopItem, session: SteamNativeSession, library: URL,
+    onImported: @escaping @MainActor () async throws -> Void
+  ) {
+    guard let account = session.accountName else { return }
+    let worker = NativeWorkshopDownloader(session: session, supportDirectory: sessionDirectory.deletingLastPathComponent())
+    enqueue(id: item.id, item: item, username: account, rememberSession: true, worker: worker) { [weak worker] _ in
+      worker?.start(item: item, library: library, onImported: onImported)
+    }
+    removeCheckpoint(id: item.id, onceQueuedFor: worker)
   }
 
   func installAssets(
     username: String, executable: URL, destination: URL, rememberSession: Bool = true,
     onInstalled: @escaping @MainActor () throws -> Void
   ) {
-    enqueue(id: "scene-assets", item: nil, username: username, rememberSession: rememberSession) { worker, account in
-      worker.installAssets(
+    let worker = makeSteamCMDWorker(for: "scene-assets")
+    enqueue(id: "scene-assets", item: nil, username: username, rememberSession: rememberSession, worker: worker) {
+      [weak worker] account in
+      worker?.installAssets(
         username: account, executable: executable, destination: destination,
         rememberSession: rememberSession, onInstalled: onInstalled)
     }
+  }
+
+  func installAssetsNative(
+    session: SteamNativeSession, destination: URL, onInstalled: @escaping @MainActor () throws -> Void
+  ) {
+    guard let account = session.accountName else { return }
+    let worker = NativeWorkshopDownloader(session: session, supportDirectory: sessionDirectory.deletingLastPathComponent())
+    enqueue(id: "scene-assets", item: nil, username: account, rememberSession: true, worker: worker) { [weak worker] _ in
+      worker?.installAssets(destination: destination, onInstalled: onInstalled)
+    }
+    removeCheckpoint(id: "scene-assets", onceQueuedFor: worker)
+  }
+
+  /// A partial SteamCMD download is of no use to the native client, which starts over, so it
+  /// goes once the native job really took the id: a refused one leaves it for SteamCMD.
+  private func removeCheckpoint(id: String, onceQueuedFor worker: NativeWorkshopDownloader) {
+    guard downloads.first(where: { $0.id == id })?.worker === worker, let checkpoint = checkpointDirectory(for: id)
+    else { return }
+    try? WorkshopDownloadCheckpoint.remove(at: checkpoint)
   }
 
   /// Signs in without downloading anything. It takes a queue slot like any job, so a batch
@@ -267,8 +306,10 @@ final class WorkshopDownloadManager: SteamCMDDownloadActivity {
     username: String, executable: URL, root: URL, rememberSession: Bool = true,
     onSignedIn: @escaping @MainActor () -> Void = {}
   ) {
-    enqueue(id: Self.signInID, item: nil, username: username, rememberSession: rememberSession) { worker, account in
-      worker.signIn(
+    let worker = makeSteamCMDWorker(for: Self.signInID)
+    enqueue(id: Self.signInID, item: nil, username: username, rememberSession: rememberSession, worker: worker) {
+      [weak worker] account in
+      worker?.signIn(
         username: account, executable: executable, root: root,
         rememberSession: rememberSession, onSignedIn: onSignedIn)
     }
@@ -369,7 +410,7 @@ final class WorkshopDownloadManager: SteamCMDDownloadActivity {
 
   private func enqueue(
     id: String, item: WorkshopItem?, username: String, rememberSession: Bool,
-    begin: @escaping (WorkshopDownloader, String) -> Void
+    worker: any WorkshopDownloadWorker, begin: @escaping (String) -> Void
   ) {
     guard !isShuttingDown, downloads.first(where: { $0.id == id })?.isPending != true else { return }
     guard let account = WorkshopDownloader.normalizedAccount(username) else {
@@ -387,15 +428,8 @@ final class WorkshopDownloadManager: SteamCMDDownloadActivity {
       guard errorMessage == nil else { return }
     }
     errorMessage = nil
-    let job = WorkshopDownload(
-      id: id, item: item, account: account, rememberSession: rememberSession,
-      sessionDirectory: sessionDirectory, runtimeProvider: runtimeProvider,
-      checkpointDirectory: checkpointDirectory(for: id), networkMonitor: networkMonitorFactory?(),
-      downloadRegion: downloadRegion)
-    job.begin = { [weak job] in
-      guard let job else { return }
-      begin(job.worker, account)
-    }
+    let job = WorkshopDownload(id: id, item: item, account: account, rememberSession: rememberSession, worker: worker)
+    job.begin = { begin(account) }
     job.worker.onAuthenticated = { [weak self] in
       guard let self else { return }
       // The worker saved the accepted sign-in before calling; siblings can restore it now.

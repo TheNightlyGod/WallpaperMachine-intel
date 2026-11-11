@@ -71,7 +71,8 @@ App/                               WallpaperMachine application target sources o
     Pixiv/                         pixiv browsing, sign-in session, downloads and still-wallpaper packaging
     Playlist/                      per-display playlists: model, planner, store and the scheduler that switches wallpapers
     Preview/                       isolated live preview inputs, lifecycle, WebKit and scene/video surfaces
-    Steam/                         SteamCMD runtime discovery and setup state
+    Steam/                         SteamCMD runtime discovery and setup state; the app's own Steam client for
+                                   QR-code sign-ins (QR sign-in, connection manager, depot content)
     Support/                       the one-time prompts: support after a downloaded wallpaper is applied,
                                    the later star request, the performance data question, the
                                    subscriptions offer and the Discord invitation

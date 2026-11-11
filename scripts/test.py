@@ -15,7 +15,9 @@ runs it on Linux for every pull request into `main`.
 
 Opt-in layers are off by default and are requested through the environment:
 `WALLPAPER_MACHINE_MEDIA_TESTS=1` (real video decoding) and
-`WALLPAPER_MACHINE_NETWORK_TESTS=1` (live Steam pages and temporary native SteamCMD install).
+`WALLPAPER_MACHINE_NETWORK_TESTS=1` (live Steam pages and temporary native SteamCMD install;
+with `WALLPAPER_MACHINE_STEAM_TOKEN_FILE=<file>` holding a QR sign-in's refresh token, also a
+live download through the app's own Steam client).
 `WALLPAPER_MACHINE_WEB_REFERENCE=<job file>` is not a layer of checks but the web page
 renderer of `scripts/we_reference.py render`, which sets it.
 """
@@ -41,6 +43,7 @@ UI_TARGET = "WallpaperMachineUITests"
 # which is what makes these reach the tests that gate themselves on them.
 OPT_IN_VARIABLES = (
     "WALLPAPER_MACHINE_MEDIA_TESTS", "WALLPAPER_MACHINE_NETWORK_TESTS", "WALLPAPER_MACHINE_WEB_REFERENCE",
+    "WALLPAPER_MACHINE_STEAM_TOKEN_FILE",
 )
 
 # Xcode's thread performance checker runs inside the test host, and its report of a

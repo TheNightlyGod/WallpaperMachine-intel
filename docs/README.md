@@ -79,7 +79,7 @@ file; pass `rg -u` to search them deliberately.
 | [features/library-location.md](features/library-location.md) | Settings → Storage → Wallpaper library location: moving the library and downloads to another folder or an external drive and back, what moves, the copy now and the switch at the next launch, a drive that is not connected |
 | [features/backup-restore.md](features/backup-restore.md) | The Settings → Storage backup package (settings, allowlisted preferences, chosen user files) and restoring it |
 | [features/updates.md](features/updates.md) | In-app update checks, the update window, automatic updates, download and verification, and installing |
-| [features/workshop-downloads.md](features/workshop-downloads.md) | Discover, SteamCMD setup, download queue |
+| [features/workshop-downloads.md](features/workshop-downloads.md) | Discover, SteamCMD setup, QR-code sign-in, download queue |
 | [features/automation.md](features/automation.md) | Weekday/time/solar/appearance rules, temporary Focus choices, global shortcuts, Shortcuts actions for wallpapers/playlists/presets, and `wallpapermachine://` links |
 | [features/display-layouts.md](features/display-layouts.md) | Saved multi-display wallpaper arrangements, copy/swap, preflight and recovery, Shortcuts, backup, mirror sets, AirPlay and a closed lid, and the per-Space boundary |
 | [features/spaces.md](features/spaces.md) | A different wallpaper for each desktop: choices by desktop UUID, windows kept on their desktop, saved posters for the others, visit/manual/Focus semantics and verification limits |

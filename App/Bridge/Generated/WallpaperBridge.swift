@@ -12680,6 +12680,22 @@ fileprivate func uniffiFutureContinuationCallback(handle: UInt64, pollResult: In
     }
 }
 /**
+ * Unpacks one decrypted Steam content blob and checks its CRC-32 where the
+ * container carries one.
+ *
+ * # Errors
+ *
+ * Returns `InvalidInput` when the container is unknown, truncated, fails to
+ * decode, or unpacks to a size or CRC other than the one it declares.
+ */
+public func decompressSteamContent(data: Data)throws  -> Data {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeBridgeError.lift) {
+    uniffi_wallpaper_bridge_fn_func_decompress_steam_content(
+        FfiConverterData.lower(data),$0
+    )
+})
+}
+/**
  * Validates an imported configuration before any restore publication; no engine is initialized.
  */
 public func validateBackupRendererConfiguration(appConfig: String?, wallpaperConfigs: [String: String])throws  {try rustCallWithError(FfiConverterTypeBridgeError.lift) {
@@ -12704,6 +12720,9 @@ private var initializationResult: InitializationResult = {
     let scaffolding_contract_version = ffi_wallpaper_bridge_uniffi_contract_version()
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
+    }
+    if (uniffi_wallpaper_bridge_checksum_func_decompress_steam_content() != 54208) {
+        return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_wallpaper_bridge_checksum_func_validate_backup_renderer_configuration() != 23980) {
         return InitializationResult.apiChecksumMismatch

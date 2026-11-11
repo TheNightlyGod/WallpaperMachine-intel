@@ -28,7 +28,7 @@ extension PanelController {
         ? nil
         : TileDownloadState.workshop(
           title: item.title, request: downloadRequestRow(for: item.id),
-          job: steamDownloadRow(for: item.id), setupIsReady: steamSetup.isReady))
+          job: steamDownloadRow(for: item.id), setupIsReady: steamDownloadsReady))
   }
 
   /// What the Discover inspector offers for the item's download, and what it says about it.

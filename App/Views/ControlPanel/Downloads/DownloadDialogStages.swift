@@ -48,6 +48,10 @@ struct DownloadSetupStage: View {
   var body: some View {
     let setup = controller.steamSetup
     VStack(alignment: .leading, spacing: 12) {
+      if let qr = controller.steamQRSession(for: controller.downloads.session?.target) {
+        SteamQRSignInSection(session: qr) { controller.downloads.continueDownload(includeResources: false) }
+        Divider()
+      }
       Text(
         "SteamCMD is Valve’s download tool. Install it here, or point to a copy you already have. Installing it does not sign you in."
       )
@@ -167,8 +171,43 @@ struct DownloadAccountStage: View {
   var body: some View {
     let working = controller.isBusy(
       PanelActionCoordinator.key("continueDownload", id: session.target))
-    let trimmed = session.account.trimmingCharacters(in: .whitespacesAndNewlines)
+    if let qr = controller.steamQRSession(for: session.target), let account = qr.accountName {
+      signedInWithQRCode(account: account, working: working)
+    } else {
+      accountForm(working: working)
+    }
+  }
+
+  /// Signed in with a QR code, the download needs no account name: Continue hands the request
+  /// back to the queue, which refused it before.
+  private func signedInWithQRCode(account: String, working: Bool) -> some View {
     VStack(alignment: .leading, spacing: 12) {
+      Text("Signed in as \(account)")
+        .font(.system(size: 12, weight: .medium))
+      DialogActions {
+        EmptyView()
+      } trailing: {
+        Button("Not now") { controller.downloads.closeDialog() }
+          .keyboardShortcut(.cancelAction)
+        Button {
+          controller.downloads.continueDownload(includeResources: false)
+        } label: {
+          Label("Continue", systemImage: "chevron.right")
+        }
+        .buttonStyle(.panelPrimary)
+        .keyboardShortcut(.defaultAction)
+        .disabled(working)
+      }
+    }
+  }
+
+  private func accountForm(working: Bool) -> some View {
+    let trimmed = session.account.trimmingCharacters(in: .whitespacesAndNewlines)
+    return VStack(alignment: .leading, spacing: 12) {
+      if let qr = controller.steamQRSession(for: session.target) {
+        SteamQRSignInSection(session: qr) { controller.downloads.continueDownload(includeResources: false) }
+        Divider()
+      }
       VStack(alignment: .leading, spacing: 6) {
         Text("Steam account name")
           .font(.system(size: 12, weight: .medium))
@@ -394,9 +433,12 @@ struct DownloadAuthStage: View {
       .lineLimit(1)
       .truncationMode(.middle)
       Spacer(minLength: 8)
-      Button("Change account") { model.changeAccount(forJob: job.id) }
-        .buttonStyle(.panelLink)
-        .font(.system(size: 12))
+      // A QR-signed job has no account of its own to change: that is a Settings log-out.
+      if !job.signsInWithQRCode {
+        Button("Change account") { model.changeAccount(forJob: job.id) }
+          .buttonStyle(.panelLink)
+          .font(.system(size: 12))
+      }
     }
   }
 

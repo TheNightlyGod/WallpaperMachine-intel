@@ -231,6 +231,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func startShell() {
         pixivStore.restoreSession()
         workshopStore.restoreSteamWebSession()
+        workshopStore.restoreSteamQRSignIn()
         // Follows the Mac for Automatic sunrise and sunset. It asks for nothing here: access is
         // requested only from an explicit action in the panel.
         SolarLocationTracker.shared.start()

@@ -7,7 +7,8 @@ Steam Community ([subscriptions](#subscriptions)), the Workshop is browsed as th
 account, so the lists match what Steam shows it. The
 bundled Aurora Drift video wallpaper (`Resources/StarterWallpaper`) can be applied
 from Installed without any download. Credentials for a download are entered only
-in the app's own local prompts.
+in the app's own local prompts, or not at all with a [QR-code
+sign-in](#signing-in-with-a-qr-code), which downloads without SteamCMD.
 
 ## Discover
 
@@ -708,7 +709,10 @@ Singapore proxy exit got 35 and Valve's Singapore caches), so a Mac set to a Chi
 time zone abroad, or one whose proxy carries Steam's traffic, downloads exactly as
 before. Elsewhere the config is not touched. The implementation is
 `App/Services/Steam/SteamCMDDownloadRegion.swift`, called from
-`WorkshopDownloader.run`.
+`WorkshopDownloader.run`. Downloads on the [QR sign-in](#signing-in-with-a-qr-code)
+get the same hint without a config: `SteamCMConnection` lists connection servers for
+the mainland cell and puts it in the logon (`cell_id`), and the content servers then
+come from the cell Steam answers with, narrowed or, from abroad, replaced.
 
 Where a site is reachable only through a proxy, a request that goes direct usually
 fails before the site answers: the network resets or drops the TLS handshake, which
@@ -808,7 +812,9 @@ work.
   dialog seeds the account per request, so switching requests cannot submit
   another one's sign-in. A submitted secret is cleared from the field immediately
   and is not retained by the panel. **Change account** cancels that job and hands
-  the same intent back at the sign-in step.
+  the same intent back at the sign-in step. A job on the QR sign-in does not offer it
+  (`DownloadRow.signsInWithQRCode`): its account is the QR sign-in's, changed by
+  logging out in Settings.
 - **Dialog stages.** The account stage is just the **Steam account name** field,
   the keep-signed-in checkbox and a note that the password and Steam Guard come
   next; a password prompt is the same without the checkbox. Steam Guard stages are
@@ -988,6 +994,111 @@ sharing passwords, verification codes or recovery codes. Valve's
 describe the supported methods, and
 [email-code help](https://help.steampowered.com/en/wizard/HelpWithSteamGuardCode)
 covers delivery delays.
+
+## Signing in with a QR code
+
+Downloads can also run without SteamCMD and without a password. **Sign in with a QR
+code** (in the download dialog's SteamCMD and account stages, and in Settings →
+Library & Steam while no account is signed in) shows a code that the person scans
+with the Steam mobile app (Steam Guard → Scan a QR code) and approves there; the
+app never sees a password or a Steam Guard code. The sign-in uses Steam's own
+authentication service over HTTPS (`IAuthenticationService/BeginAuthSessionViaQR`
+and `PollAuthSessionStatus`, `SteamQRSignIn`), asking for a token issued for the
+Steam client (`platform_type` 1). Steam renews the code while it waits; the
+section shows the newest one, says when the phone has scanned it, and offers
+**Show a new code** once a code expires. Its buttons go through the panel's actions
+(`PanelController.startSteamQRSignIn`, `cancelSteamQRSignIn`), and closing the
+download dialog or the Settings popover stops a code that was not approved, so
+nothing signs in once no code is on screen: an approval already on its way back when
+the code closes is dropped, not saved. A failed code is kept as its reason (expired,
+Steam unreachable, failed) and worded when the section shows it, so the message
+follows the panel's language. The dialog does not offer it for the
+first-run guide's SteamCMD sign-in request, which a QR sign-in would not complete.
+With a SteamCMD sign-in already saved, Settings shows that account and **Log out…**
+instead of the QR button, and downloads keep using SteamCMD without reaching the
+dialog's account stage: switching to a QR sign-in starts with logging out.
+
+The approved refresh token is kept in the login keychain as one generic password
+(`KeychainSteamClientTokenStore`, service `app.wallpapermachine.steam-client`),
+beside the Steam Community sign-in and kept the same way; it is never logged or
+written anywhere else. A launch restores it off the main thread
+(`WorkshopStore.restoreSteamQRSignIn`), and an expired one is removed instead; a
+sign-out, a new sign-in or a QR code started while the keychain answers wins over
+what it read.
+Settings shows the account as signed in, and **Log out…** removes the token as
+well as any saved SteamCMD sign-in. The keychain refuses to delete an item another
+build saved but lets its data change, so such a token is emptied instead, which a
+launch restores as no sign-in; only when the keychain refuses that too does the action
+say it could not log out, with the account still signed in. A token Steam refused at
+logon is removed the same way. Steam lists the Mac (named
+"WallpaperMachine on <Mac name>") under the account's authorized devices, where it
+can be revoked from any other device.
+
+While the QR sign-in exists, every Workshop and shared-resources request skips the
+SteamCMD and account stages (`WorkshopStore.stage(for:)`) and runs through
+`NativeWorkshopDownloader` instead of SteamCMD; a SteamCMD sign-in request
+(`steam-sign-in`) still uses SteamCMD. The prerequisite observer tracks the QR
+sign-in, so a request waiting at those stages starts as soon as it completes, from
+the dialog or from Settings; a QR sign-in also clears the mark of a request the queue
+refused for the account it named (`WorkshopStore.steamQRSignInChanged`), which then
+goes again, and stays refused if the queue refuses it once more. A request refused
+while the QR sign-in exists shows the account stage as **Signed in as …** with
+**Continue** instead of SteamCMD's account form. A partial SteamCMD download kept for the item is
+discarded once the native worker has taken the item in the queue; a native job the
+queue refuses leaves it for SteamCMD. The native worker sits in the same queue,
+behind the same `WorkshopDownloadWorker` protocol, so tiles, rows, pausing,
+cancelling and **Download next** behave as for SteamCMD. It lays an item out
+exactly as SteamCMD does (`<staging>/steamapps/workshop/content/431960/<id>`, in a
+claimed `.WallpaperMachine-workshop-` staging folder on the library's volume), so
+the import, preset bases and update replacement are the same code. Without it,
+nothing changes: SteamCMD, the account form and the password prompts work as above.
+
+Every native job shares one logged-on connection (`SteamNativeSession`), so a batch
+signs in once and Steam's one-session-per-account limit never ends a sibling; the
+connection closes a minute after the last job, and one that dropped is closed before
+another opens. The app's client (`App/Services/Steam/`) logs on to a Steam
+connection manager over WebSocket with the token (`SteamCMConnection`); a listed
+server that does not answer a ping within ten seconds is passed over for the next
+one (up to three). A logon that fails in any way closes its socket, and a request
+that is paused or cancelled stops waiting at once instead of at its 30-second
+timeout. The logon runs in a task of its own that every waiting job shares, so a job
+paused or cancelled while it signs in stops waiting at once and the logon goes on for
+the others; one overtaken by a sign-out, a new sign-in or the idle disconnect closes
+its connection when it answers instead of adopting it. The client asks the
+connection manager for the item's details, then the depot key (first, so that an
+account without Wallpaper Engine learns it before anything is fetched) and the
+manifest request code, and fetches the manifest and chunks from Steam's
+content servers over HTTPS only: a server that lists no HTTPS support is skipped,
+and one that answers after another failed is tried first from then on
+(`SteamContentClient`). An item must belong to Wallpaper Engine (app 431960), since
+a preset's base comes from an author-written file. Before anything is written, the
+manifest's exact size must fit on the library's disk with the same allowance a
+SteamCMD download gets (`WorkshopDownloader.requiredFreeBytes`); otherwise the job
+fails with the same "Not enough free disk space" message. Chunks are fetched six at a time,
+decrypted (AES-256, `SteamDepotCrypto`), unpacked by the Rust bridge
+(`decompress_steam_content`: zstd, LZMA or zip, with their CRC checked) and checked
+against their SHA-1 before they are written; a file path from a manifest that would
+leave the download folder fails the download. The shared scene resources read the
+current public manifest of depot 431961 from the app's product info (PICS) and
+install its `assets` folder like SteamCMD's.
+
+A token Steam refuses at logon (invalid, expired or revoked) is removed from the
+keychain, and the job fails with "Steam no longer accepts this QR sign-in"; the next
+request falls back to SteamCMD unless the person scans a new code. Steam hands a
+depot key only to an account that owns Wallpaper Engine, so a key refused as
+AccessDenied, InsufficientPrivilege or Blocked reports the account as not owning it
+(`NativeWorkshopDownloader.meansNotOwned`); a plain Fail, or a reply without a
+result, proves nothing and reads as the content servers failing. Other failures read as one
+of a few phrases in the person's language: Steam unreachable (no answer at all),
+sign-ins limited (a logon refused for its rate), sign-in failed (any other logon
+refusal), session ended (Steam logged the session off, as when the account signs in
+elsewhere), item not offered (its details refused), content servers failed (a
+manifest code, the product info or another key refusal, or the servers themselves)
+and content did not match, with the technical detail in the log and the failure log
+(`NativeWorkshopDownloader.message(for:)`). Native jobs keep no partial download: a
+paused or interrupted one fetches the item again when it resumes. **Try again**,
+**Retry failed** and a tile's retry ring count the QR sign-in as ready, as they count
+an installed SteamCMD (`PanelController.steamDownloadsReady`).
 
 ## Prompt and retry handling
 
